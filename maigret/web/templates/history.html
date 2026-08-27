@@ -8,7 +8,7 @@
     <div>
         <p class="eyebrow">Investigation activity</p>
         <h1>Investigation history</h1>
-        <p class="page-description">Review investigations retained by the current application process.</p>
+        <p class="page-description">Review investigations retained securely on this OpenLedger server.</p>
     </div>
     <a href="{{ url_for('index') }}" class="btn btn-primary px-4">New investigation</a>
 </section>
@@ -18,7 +18,7 @@
     <div class="empty-state">
         <span class="empty-state-icon"><i data-lucide="clock-3"></i></span>
         <h2>No investigations yet</h2>
-        <p>Completed investigations will appear here until the application restarts.</p>
+        <p>Completed and failed investigations will appear here.</p>
         <a href="{{ url_for('index') }}" class="btn btn-primary">Start an investigation</a>
     </div>
     {% else %}

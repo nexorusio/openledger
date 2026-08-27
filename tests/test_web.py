@@ -49,12 +49,14 @@ def web_app(tmp_path):
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
     web_app_module.analysis_locks.clear()
+    web_app_module.live_jobs.clear()
 
     yield web_app_module
 
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
     web_app_module.analysis_locks.clear()
+    web_app_module.live_jobs.clear()
 
 
 @pytest.fixture
@@ -749,6 +751,86 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
     assert body.index('search_ts_completed') < body.index('bob')
 
 
+def test_completed_investigation_survives_process_restart(client, web_app):
+    result = {
+        'status': 'completed',
+        'session_folder': 'search_persisted',
+        'graph_file': 'search_persisted/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [],
+        'found_count': 4,
+        'started_at': '2026-08-27 12:34:56',
+    }
+    web_app.record_job_result('persisted', result)
+
+    metadata_path = web_app.get_session_metadata_path('search_persisted')
+    assert os.path.exists(metadata_path)
+    assert os.stat(metadata_path).st_mode & 0o777 == 0o600
+
+    # Simulate a fresh Gunicorn worker after the container is recreated.
+    web_app.job_results.clear()
+
+    history = client.get('/history')
+    assert history.status_code == 200
+    assert '2026-08-27 12:34:56' in history.get_data(as_text=True)
+    assert '/results/search_persisted' in history.get_data(as_text=True)
+
+    results = client.get('/results/search_persisted')
+    assert results.status_code == 200
+    assert 'soxoj' in results.get_data(as_text=True)
+
+
+def test_failed_investigation_survives_process_restart(client, web_app):
+    web_app.record_job_result(
+        'failed-persisted',
+        {
+            'status': 'failed',
+            'error': 'report generation failed',
+            'usernames': ['alice'],
+            'started_at': '2026-08-27 12:35:00',
+        },
+    )
+    web_app.job_results.clear()
+
+    history = client.get('/history')
+    body = history.get_data(as_text=True)
+    assert history.status_code == 200
+    assert 'alice' in body
+    assert 'Failed' in body
+
+    status = client.get('/status/failed-persisted')
+    assert status.status_code == 302
+    assert status.location.endswith('/history')
+
+
+def test_invalid_persisted_metadata_is_ignored(client, web_app, tmp_path):
+    session_directory = tmp_path / 'search_invalid'
+    session_directory.mkdir()
+    metadata_path = session_directory / web_app.SESSION_METADATA_FILENAME
+    metadata_path.write_text('{not valid json', encoding='utf-8')
+
+    assert web_app.refresh_job_results_from_disk() == 0
+    assert 'invalid' not in web_app.job_results
+    assert client.get('/history').status_code == 200
+
+
+def test_internal_session_metadata_cannot_be_downloaded(client, web_app):
+    web_app.record_job_result(
+        'private-index',
+        {
+            'status': 'failed',
+            'error': 'test',
+            'usernames': ['soxoj'],
+            'started_at': '2026-08-27 12:36:00',
+        },
+    )
+
+    response = client.get(
+        '/reports/search_private-index/' + web_app.SESSION_METADATA_FILENAME
+    )
+    assert response.status_code == 404
+
+
 def test_build_reports_computes_found_count(web_app, monkeypatch):
     """Regression guard: History reads `found_count` off the dict build_reports
     returns, so it must count claimed profiles across all usernames."""
@@ -788,8 +870,8 @@ def test_process_search_task_records_started_at_on_success(web_app, monkeypatch)
         'build_reports',
         lambda *a, **kw: {
             'status': 'completed',
-            'session_folder': 'x',
-            'graph_file': 'x',
+            'session_folder': 'search_ts_ok',
+            'graph_file': 'search_ts_ok/combined_graph.html',
             'usernames': [],
             'individual_reports': [],
             'found_count': 0,
@@ -801,6 +883,7 @@ def test_process_search_task_records_started_at_on_success(web_app, monkeypatch)
 
     assert web_app.job_results['ts_ok']['status'] == 'completed'
     assert web_app.job_results['ts_ok']['started_at']
+    assert os.path.exists(web_app.get_session_metadata_path('search_ts_ok'))
 
 
 def test_process_search_task_records_started_at_on_failure(web_app, monkeypatch):
@@ -814,6 +897,7 @@ def test_process_search_task_records_started_at_on_failure(web_app, monkeypatch)
 
     assert web_app.job_results['ts_fail']['status'] == 'failed'
     assert web_app.job_results['ts_fail']['started_at']
+    assert os.path.exists(web_app.get_session_metadata_path('search_ts_fail'))
 
 
 def test_load_settings_defaults_when_no_file(web_app):

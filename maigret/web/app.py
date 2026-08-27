@@ -43,11 +43,12 @@ app.config.update(
 background_jobs: Dict[str, Any] = {}
 job_results = {}
 analysis_locks: Dict[str, Any] = {}
+metadata_lock = Lock()
 
 # Live (streaming) scan jobs, keyed by job_id. Each entry:
 #   {'queue': Queue, 'cancelled': bool, 'loop': event loop, 'task': asyncio task}
-# ponytail: in-memory, single-process. Entries are dropped when their SSE stream
-# ends; a stream that's never consumed lingers — fine for a local tool.
+# Live progress remains in one supervised Gunicorn process and is intentionally
+# transient. Terminal results are persisted separately beside their reports.
 live_jobs: Dict[str, Any] = {}
 
 
@@ -163,6 +164,10 @@ DEFAULT_SETTINGS = {
 }
 
 OPENAI_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
+SESSION_KEY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
+SESSION_FOLDER_PATTERN = re.compile(r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
+SESSION_METADATA_FILENAME = 'openledger-session.json'
+SESSION_METADATA_SCHEMA_VERSION = 1
 
 
 def load_settings():
@@ -421,9 +426,159 @@ def sanitize_username_for_path(username: str) -> str:
     return sanitized or '_'
 
 
+def get_session_metadata_path(session_folder: str) -> str:
+    """Return a safe metadata path inside the mounted reports directory."""
+    if not isinstance(session_folder, str) or not SESSION_FOLDER_PATTERN.fullmatch(
+        session_folder
+    ):
+        raise ValueError('Invalid report session folder')
+
+    reports_root = os.path.realpath(app.config["REPORTS_FOLDER"])
+    session_root = os.path.realpath(os.path.join(reports_root, session_folder))
+    if os.path.commonpath([reports_root, session_root]) != reports_root:
+        raise ValueError('Invalid report session path')
+    return os.path.join(session_root, SESSION_METADATA_FILENAME)
+
+
+def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
+    """Validate and normalize the small JSON-safe result index we persist."""
+    if not isinstance(session_key, str) or not SESSION_KEY_PATTERN.fullmatch(
+        session_key
+    ):
+        raise ValueError('Invalid report session key')
+    if not isinstance(result, dict):
+        raise ValueError('Invalid report session metadata')
+
+    status = result.get('status')
+    if status not in {'completed', 'failed'}:
+        raise ValueError('Only terminal investigation results can be persisted')
+
+    expected_folder = f'search_{session_key}'
+    session_folder = result.get('session_folder') or expected_folder
+    if session_folder != expected_folder:
+        raise ValueError('Report session folder does not match its key')
+
+    usernames = result.get('usernames', [])
+    if not isinstance(usernames, list) or not all(
+        isinstance(username, str) for username in usernames
+    ):
+        raise ValueError('Invalid usernames in report session metadata')
+
+    normalized = dict(result)
+    normalized['session_folder'] = expected_folder
+    normalized['usernames'] = usernames
+    if status == 'completed':
+        if not isinstance(normalized.get('graph_file'), str) or not isinstance(
+            normalized.get('individual_reports'), list
+        ):
+            raise ValueError('Incomplete report session metadata')
+        found_count = normalized.get('found_count', 0)
+        if not isinstance(found_count, int) or found_count < 0:
+            raise ValueError('Invalid profile count in report session metadata')
+        normalized['found_count'] = found_count
+    else:
+        normalized['error'] = str(normalized.get('error', 'Unknown error occurred.'))
+    return normalized
+
+
+def persist_job_result(session_key: str, result: Dict[str, Any]):
+    """Atomically persist terminal job metadata alongside its report files."""
+    normalized = normalize_persisted_result(session_key, result)
+    metadata_path = get_session_metadata_path(normalized['session_folder'])
+    metadata_directory = os.path.dirname(metadata_path)
+    os.makedirs(metadata_directory, mode=0o700, exist_ok=True)
+
+    payload = {
+        'schema_version': SESSION_METADATA_SCHEMA_VERSION,
+        'session_key': session_key,
+        'result': normalized,
+    }
+    temporary_path = f"{metadata_path}.{uuid.uuid4().hex}.tmp"
+
+    with metadata_lock:
+        descriptor = os.open(
+            temporary_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as metadata_file:
+                json.dump(payload, metadata_file, indent=2)
+                metadata_file.write('\n')
+                metadata_file.flush()
+                os.fsync(metadata_file.fileno())
+            os.replace(temporary_path, metadata_path)
+            os.chmod(metadata_path, 0o600)
+        except Exception:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
+    return normalized
+
+
+def record_job_result(session_key: str, result: Dict[str, Any]):
+    """Publish a terminal result in memory and durably when storage is available."""
+    normalized = normalize_persisted_result(session_key, result)
+    job_results[session_key] = normalized
+    try:
+        persist_job_result(session_key, normalized)
+    except (OSError, TypeError, ValueError):
+        logging.exception('Failed to persist investigation metadata for %s', session_key)
+    return normalized
+
+
+def load_persisted_job_result(session_folder: str):
+    """Load and validate one persisted result without trusting its file contents."""
+    try:
+        metadata_path = get_session_metadata_path(session_folder)
+        with open(metadata_path, encoding='utf-8') as metadata_file:
+            payload = json.load(metadata_file)
+        if payload.get('schema_version') != SESSION_METADATA_SCHEMA_VERSION:
+            raise ValueError('Unsupported report session metadata version')
+        session_key = payload.get('session_key')
+        result = normalize_persisted_result(session_key, payload.get('result'))
+        if result['session_folder'] != session_folder:
+            raise ValueError('Report session metadata is in the wrong directory')
+        return session_key, result
+    except FileNotFoundError:
+        return None
+    except (AttributeError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+        logging.warning(
+            'Ignoring invalid investigation metadata in %s: %s', session_folder, exc
+        )
+        return None
+
+
+def refresh_job_results_from_disk():
+    """Rebuild terminal job state from the persistent reports mount."""
+    reports_root = app.config["REPORTS_FOLDER"]
+    try:
+        entries = list(os.scandir(reports_root))
+    except FileNotFoundError:
+        return 0
+    except OSError as exc:
+        logging.warning('Could not read persisted investigation history: %s', exc)
+        return 0
+
+    loaded_count = 0
+    for entry in entries:
+        if not entry.is_dir() or not SESSION_FOLDER_PATTERN.fullmatch(entry.name):
+            continue
+        loaded = load_persisted_job_result(entry.name)
+        if not loaded:
+            continue
+        session_key, result = loaded
+        if session_key not in job_results:
+            job_results[session_key] = result
+            loaded_count += 1
+    return loaded_count
+
+
 def find_result_by_session(session_id: str):
-    """Resolve a browser-provided session ID through trusted in-memory job data."""
-    return next(
+    """Resolve a session from memory, then recover it from persistent storage."""
+    result = next(
         (
             result
             for result in job_results.values()
@@ -432,6 +587,21 @@ def find_result_by_session(session_id: str):
         ),
         None,
     )
+    if result:
+        return result
+
+    loaded = load_persisted_job_result(session_id)
+    if not loaded:
+        return None
+    session_key, result = loaded
+    job_results[session_key] = result
+    return result if result.get('status') == 'completed' else None
+
+
+# Rebuild the terminal result index when Flask is imported by Gunicorn. Routes
+# also perform targeted lazy recovery so alternate report paths used in tests or
+# embedded deployments remain supported.
+refresh_job_results_from_disk()
 
 
 def build_ai_markdown(result_data: Dict[str, Any]) -> str:
@@ -566,6 +736,7 @@ def build_reports(general_results, usernames, session_key):
 
 def process_search_task(usernames, options, timestamp):
     started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    result = None
     try:
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -573,18 +744,26 @@ def process_search_task(usernames, options, timestamp):
         general_results = loop.run_until_complete(
             search_multiple_usernames(usernames, options)
         )
-        job_results[timestamp] = build_reports(general_results, usernames, timestamp)
+        result = build_reports(general_results, usernames, timestamp)
 
     except Exception as e:
         logging.error(f"Error in search task for timestamp {timestamp}: {str(e)}")
-        job_results[timestamp] = {
+        result = {
             'status': 'failed',
             'error': str(e),
             'usernames': usernames,
         }
     finally:
-        job_results[timestamp]['started_at'] = started_at
-        background_jobs[timestamp]['completed'] = True
+        if result is None:
+            result = {
+                'status': 'failed',
+                'error': 'The investigation ended without a result.',
+                'usernames': usernames,
+            }
+        result['started_at'] = started_at
+        record_job_result(timestamp, result)
+        if timestamp in background_jobs:
+            background_jobs[timestamp]['completed'] = True
 
 
 def parse_usernames(form):
@@ -663,11 +842,31 @@ def run_stream_job(job_id, usernames, options):
     done_event = {'type': 'done'}
     if general_results:
         try:
-            job_results[job_id] = build_reports(general_results, usernames, job_id)
-            job_results[job_id]['started_at'] = started_at
+            result = build_reports(general_results, usernames, job_id)
+            result['started_at'] = started_at
+            record_job_result(job_id, result)
             done_event['redirect'] = f"/results/search_{job_id}"
         except Exception as e:
             logging.error(f"Error building reports for live scan {job_id}: {str(e)}")
+            record_job_result(
+                job_id,
+                {
+                    'status': 'failed',
+                    'error': str(e),
+                    'usernames': usernames,
+                    'started_at': started_at,
+                },
+            )
+    else:
+        record_job_result(
+            job_id,
+            {
+                'status': 'failed',
+                'error': 'The investigation produced no reportable results.',
+                'usernames': usernames,
+                'started_at': started_at,
+            },
+        )
     job['queue'].put(done_event)
 
 
@@ -829,6 +1028,7 @@ def openai_settings_update():
 
 @app.route('/history')
 def history():
+    refresh_job_results_from_disk()
     entries = sorted(
         job_results.values(), key=lambda r: r.get('started_at', ''), reverse=True
     )
@@ -850,6 +1050,11 @@ def live_start():
 @app.route('/live/<job_id>')
 def live_results(job_id):
     result = job_results.get(job_id)
+    if not result:
+        loaded = load_persisted_job_result(f'search_{job_id}')
+        if loaded:
+            _, result = loaded
+            job_results[job_id] = result
     if job_id not in live_jobs and not result:
         flash('Unknown or expired scan session.', 'danger')
         return redirect(url_for('index'))
@@ -894,8 +1099,21 @@ def search():
 def status(timestamp):
     logging.info(f"Status check for timestamp: {timestamp}")
 
-    # Validate timestamp
+    # A completed job can be reopened after a process or container restart even
+    # though its transient background thread entry no longer exists.
     if timestamp not in background_jobs:
+        result = job_results.get(timestamp)
+        if not result:
+            loaded = load_persisted_job_result(f'search_{timestamp}')
+            if loaded:
+                _, result = loaded
+                job_results[timestamp] = result
+        if result and result.get('status') == 'completed':
+            return redirect(url_for('results', session_id=result['session_folder']))
+        if result and result.get('status') == 'failed':
+            error_msg = result.get('error', 'Unknown error occurred.')
+            flash(f'Search failed: {error_msg}', 'danger')
+            return redirect(url_for('history'))
         flash('Invalid search session.', 'danger')
         logging.error(f"Invalid search session: {timestamp}")
         return redirect(url_for('index'))
@@ -1003,6 +1221,8 @@ def analyze_session(session_id):
 def download_report(filename):
     reports_root = app.config["REPORTS_FOLDER"]
     os.makedirs(reports_root, exist_ok=True)
+    if os.path.basename(filename) == SESSION_METADATA_FILENAME:
+        return "File not found", 404
     try:
         return send_from_directory(reports_root, filename)
     except NotFound:

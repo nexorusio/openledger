@@ -5,11 +5,11 @@ Nexorus OpenLedger fork.
 
 It runs:
 
-- the Maigret web target as the private application container;
+- the OpenLedger Flask app behind a supervised Gunicorn WSGI server;
 - Caddy as the only public service on ports 80 and 443;
 - automatic HTTPS for the configured domain;
 - Caddy Basic Authentication for a small operator team;
-- persistent reports and web settings under ../runtime;
+- persistent reports, investigation history, and web settings under ../runtime;
 - optional server-side OpenAI analysis configured from the protected Settings page.
 
 ## Prerequisites
@@ -67,8 +67,11 @@ Never put the API key in GitHub, screenshots, or support messages.
 
 This setup is intended for one operator or a small fixed team. It uses one
 Caddy Basic Authentication account and keeps port 5000 private. Use
-application-level accounts, audit logs, and durable database-backed job state
-before exposing OpenLedger as a multi-user service.
+application-level accounts and audit logs before exposing OpenLedger as a
+multi-user service. Gunicorn intentionally runs one worker with multiple
+threads because live scan coordination is process-local; completed and failed
+investigation metadata is written atomically beside the mounted report files
+and is rebuilt when the application restarts.
 
 Use OpenLedger only for lawful, authorized investigations. AI summaries are
 analytical assistance and must be verified against the underlying profiles.
