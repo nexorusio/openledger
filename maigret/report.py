@@ -368,21 +368,21 @@ def _graph_to_cypher(G) -> str:
         return "'" + s + "'"
 
     lines = [
-        "// maigret Neo4j export. Import: cypher-shell -u neo4j -p <password> < <file>.cypher",
-        "CREATE CONSTRAINT maigret_node_name IF NOT EXISTS",
-        "FOR (n:MaigretNode) REQUIRE n.name IS UNIQUE;",
+        "// OpenLedger Neo4j export. Import: cypher-shell -u neo4j -p <password> < <file>.cypher",
+        "CREATE CONSTRAINT openledger_node_name IF NOT EXISTS",
+        "FOR (n:OpenLedgerNode) REQUIRE n.name IS UNIQUE;",
         "",
     ]
     for node in G.nodes():
         node_type, _, label = str(node).partition(':')
         lines.append(
-            "MERGE (n:MaigretNode {name: %s}) SET n.type = %s, n.label = %s;"
+            "MERGE (n:OpenLedgerNode {name: %s}) SET n.type = %s, n.label = %s;"
             % (cstr(node), cstr(node_type.strip()), cstr(label.strip()))
         )
     lines.append("")
     for node1, node2 in G.edges():
         lines.append(
-            "MATCH (a:MaigretNode {name: %s}), (b:MaigretNode {name: %s}) "
+            "MATCH (a:OpenLedgerNode {name: %s}), (b:OpenLedgerNode {name: %s}) "
             "MERGE (a)-[:LINKED_TO]->(b);" % (cstr(node1), cstr(node2))
         )
     lines.append("")
@@ -463,7 +463,7 @@ def generate_markdown_report(context: dict, run_info: dict = None) -> str:
     lines.append(f"# Report by searching on username \"{username}\"\n")
 
     # Generated line with run info
-    gen_line = f"Generated at {generated_at} by [Maigret](https://github.com/soxoj/maigret)"
+    gen_line = f"Generated at {generated_at} by OpenLedger"
     if run_info:
         parts = []
         if run_info.get("sites_count"):

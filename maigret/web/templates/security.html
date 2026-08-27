@@ -13,7 +13,7 @@
     <span class="badge-soft success"><i data-lucide="shield-check"></i> Application login enabled</span>
 </section>
 
-<div class="security-page-grid">
+<div>
     <form method="POST" action="{{ url_for('security_settings') }}" class="panel-card">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <header class="panel-header">
@@ -49,31 +49,5 @@
         </div>
     </form>
 
-    <aside class="panel-card">
-        <header class="panel-header">
-            <div>
-                <h2>Security controls</h2>
-                <p>Active protections for this deployment.</p>
-            </div>
-        </header>
-        <div class="panel-body security-control-list">
-            <div class="security-callout">
-                <i data-lucide="timer-reset"></i>
-                <span>Authenticated sessions expire after 12 hours and can be ended immediately with Sign out.</span>
-            </div>
-            <div class="security-callout">
-                <i data-lucide="shield-ban"></i>
-                <span>Repeated failed sign-ins are temporarily rate-limited without revealing which credential was incorrect.</span>
-            </div>
-            <div class="security-callout">
-                <i data-lucide="file-key-2"></i>
-                <span>The password is stored as a salted PBKDF2 hash in a protected runtime file with mode 600.</span>
-            </div>
-            <div class="security-callout">
-                <i data-lucide="server"></i>
-                <span>The application service remains private on port 5000; Caddy exposes only HTTPS traffic.</span>
-            </div>
-        </div>
-    </aside>
 </div>
 {% endblock %}

@@ -20,7 +20,6 @@
         <a href="#investigation" class="active"><i data-lucide="sliders-horizontal"></i> Investigation</a>
         <a href="#filters"><i data-lucide="list-filter"></i> Sources & filters</a>
         <a href="#connections"><i data-lucide="plug-zap"></i> AI connections</a>
-        <a href="#security"><i data-lucide="shield"></i> Security</a>
     </nav>
 
     <div class="settings-stack">
@@ -49,7 +48,7 @@
                 </div>
 
                 <h3 class="settings-section-title">Search behavior</h3>
-                <p class="form-text mb-3">These controls are passed directly to every new Maigret search. Detail extraction and linked-identifier discovery improve evidence quality but may take longer.</p>
+                <p class="form-text mb-3">These controls are passed directly to every new OpenLedger search. Detail extraction and linked-identifier discovery improve evidence quality but may take longer.</p>
                 <div class="settings-grid">
                     <div class="form-check form-switch">
                         <input type="checkbox" class="form-check-input" id="settings-with-domains" name="with_domains"
@@ -61,7 +60,7 @@
                         <input type="checkbox" class="form-check-input" id="settings-recursive" name="disable_recursive_search"
                             {{ 'checked' if web_settings.disable_recursive_search }}>
                         <label class="form-check-label" for="settings-recursive">Disable linked-identifier discovery</label>
-                        <div class="form-text">Stops Maigret from following usernames or identifiers extracted from profiles.</div>
+                        <div class="form-text">Stops OpenLedger from following usernames or identifiers extracted from profiles.</div>
                     </div>
                     <div class="form-check form-switch">
                         <input type="checkbox" class="form-check-input" id="settings-extracting" name="disable_extracting"
@@ -223,34 +222,6 @@
             </div>
         </section>
 
-        <section class="panel-card" id="security">
-            <header class="panel-header">
-                <div>
-                    <h2>Security boundary</h2>
-                    <p>How this single-operator deployment protects configuration and reports.</p>
-                </div>
-            </header>
-            <div class="panel-body">
-                <div class="settings-grid">
-                    <div class="security-callout">
-                        <i data-lucide="key-round"></i>
-                        <span>OpenLedger application login protects every workspace, report, settings, and analysis route.</span>
-                    </div>
-                    <div class="security-callout">
-                        <i data-lucide="server"></i>
-                        <span>The Maigret service remains private on port 5000; only Caddy publishes ports 80 and 443.</span>
-                    </div>
-                    <div class="security-callout">
-                        <i data-lucide="file-lock-2"></i>
-                        <span>Reports, UI settings, and API secrets persist only in the Droplet runtime directory.</span>
-                    </div>
-                    <div class="security-callout">
-                        <i data-lucide="user-check"></i>
-                        <span>This configuration uses one operator account. Change its password from Password & security.</span>
-                    </div>
-                </div>
-            </div>
-        </section>
     </div>
 </div>
 {% endblock %}

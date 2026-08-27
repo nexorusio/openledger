@@ -703,9 +703,16 @@ textarea.form-control {
 
 .btn {
     min-height: 40px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
     border-radius: 9px;
     font-size: 0.8rem;
     font-weight: 600;
+    line-height: 1.2;
+    text-align: center;
+    vertical-align: middle;
 }
 
 .btn-primary {
@@ -1574,6 +1581,43 @@ textarea.form-control {
     margin: 0;
     border-radius: 11px;
     font-size: 0.76rem;
+}
+
+/* A restrained radius system keeps the analytical workspace compact and
+   avoids the soft, consumer-app appearance of deeply rounded frames. */
+.brand-mark-wrap,
+.sidebar-link,
+.sidebar-status,
+.account-avatar,
+.icon-button,
+.topbar-avatar,
+.topbar-logout,
+.metric-card,
+.metric-icon,
+.panel-card,
+.form-control,
+.form-select,
+.btn,
+.mode-option label,
+.guidance-number,
+.legal-note,
+.badge-soft,
+.settings-nav a,
+.connection-logo,
+.secret-toggle,
+.security-callout,
+.tag,
+.selected-site,
+.login-brand-mark,
+.login-mobile-mark,
+.empty-state-icon,
+.live-stat,
+#graph,
+.report-container,
+.tag-badge,
+.ai-analysis-output,
+.flash-stack .alert {
+    border-radius: 5px;
 }
 
 @media (max-width: 1199px) {

@@ -10,12 +10,12 @@ def test_responses_analysis_preserves_deduplicated_safe_citations():
                 'content': [
                     {
                         'type': 'output_text',
-                        'text': 'The evidence supports the identified subject.',
+                        'text': 'Maigret evidence supports the identified subject.',
                         'annotations': [
                             {
                                 'type': 'url_citation',
                                 'url': 'https://example.com/profile',
-                                'title': 'Official profile',
+                                'title': 'Official Maigret profile',
                             },
                             {
                                 'type': 'url_citation',
@@ -36,7 +36,7 @@ def test_responses_analysis_preserves_deduplicated_safe_citations():
 
     result = _parse_responses_analysis(payload)
 
-    assert result['analysis'].startswith('The evidence supports')
+    assert result['analysis'].startswith('OpenLedger evidence supports')
     assert result['sources'] == [
-        {'title': 'Official profile', 'url': 'https://example.com/profile'}
+        {'title': 'Official OpenLedger profile', 'url': 'https://example.com/profile'}
     ]

@@ -219,7 +219,7 @@ SESSION_KEY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_FOLDER_PATTERN = re.compile(r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
-AI_ANALYSIS_SCHEMA_VERSION = 2
+AI_ANALYSIS_SCHEMA_VERSION = 3
 AUTH_SCHEMA_VERSION = 1
 PASSWORD_HASH_NAME = 'sha256'
 PASSWORD_HASH_ITERATIONS = 600_000
@@ -952,7 +952,7 @@ def build_ai_markdown(result_data: Dict[str, Any]) -> str:
     lines = [
         '# OpenLedger username investigation',
         '',
-        'Maigret evidence and public-web evidence are different source classes.',
+        'OpenLedger scan evidence and public-web evidence are different source classes.',
         'Treat username matches as leads until identity attributes corroborate them.',
         'Never let a weak collision override repeated real-name, bio, location, '
         'or link evidence.',
@@ -1463,7 +1463,32 @@ def scan_stop(job_id):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    refresh_job_results_from_disk()
+    entries = list(job_results.values())
+    completed = sum(1 for entry in entries if entry.get('status') == 'completed')
+    failed = sum(1 for entry in entries if entry.get('status') == 'failed')
+    profiles_found = sum(
+        entry.get('found_count', 0)
+        for entry in entries
+        if isinstance(entry.get('found_count', 0), int)
+    )
+    ai_assessments = 0
+    for entry in entries:
+        try:
+            if os.path.exists(get_analysis_path(entry)):
+                ai_assessments += 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    return render_template(
+        'index.html',
+        dashboard_metrics={
+            'investigations': len(entries),
+            'completed': completed,
+            'failed': failed,
+            'profiles_found': profiles_found,
+            'ai_assessments': ai_assessments,
+        },
+    )
 
 
 @app.route('/healthz')

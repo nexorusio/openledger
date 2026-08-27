@@ -6,11 +6,17 @@ Provides AI-powered analysis of search results using OpenAI-compatible APIs.
 import asyncio
 import json
 import os
+import re
 import sys
 import threading
 from urllib.parse import urlsplit
 
 import aiohttp
+
+
+def _openledger_label(text: str) -> str:
+    """Prevent the internal engine name from leaking into branded output."""
+    return re.sub(r'\bmaigret\b', 'OpenLedger', text, flags=re.IGNORECASE)
 
 
 def load_ai_prompt() -> str:
@@ -223,7 +229,7 @@ def _parse_responses_analysis(response_data):
                 continue
             text = content.get("text")
             if isinstance(text, str) and text.strip():
-                text_parts.append(text.strip())
+                text_parts.append(_openledger_label(text.strip()))
             for annotation in content.get("annotations", []):
                 if (
                     not isinstance(annotation, dict)
@@ -245,7 +251,7 @@ def _parse_responses_analysis(response_data):
                 sources.append(
                     {
                         "title": (
-                            title.strip()
+                            _openledger_label(title.strip())
                             if isinstance(title, str) and title.strip()
                             else parsed.netloc
                         ),
