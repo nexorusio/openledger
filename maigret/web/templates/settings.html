@@ -20,7 +20,6 @@
         <a href="#investigation" class="active"><i data-lucide="sliders-horizontal"></i> Investigation</a>
         <a href="#filters"><i data-lucide="list-filter"></i> Sources & filters</a>
         <a href="#connections"><i data-lucide="plug-zap"></i> AI connections</a>
-        <a href="#security"><i data-lucide="shield"></i> Security</a>
     </nav>
 
     <div class="settings-stack">
@@ -223,34 +222,6 @@
             </div>
         </section>
 
-        <section class="panel-card" id="security">
-            <header class="panel-header">
-                <div>
-                    <h2>Security boundary</h2>
-                    <p>How this single-operator deployment protects configuration and reports.</p>
-                </div>
-            </header>
-            <div class="panel-body">
-                <div class="settings-grid">
-                    <div class="security-callout">
-                        <i data-lucide="key-round"></i>
-                        <span>OpenLedger application login protects every workspace, report, settings, and analysis route.</span>
-                    </div>
-                    <div class="security-callout">
-                        <i data-lucide="server"></i>
-                        <span>The OpenLedger application remains private on port 5000; only Caddy publishes ports 80 and 443.</span>
-                    </div>
-                    <div class="security-callout">
-                        <i data-lucide="file-lock-2"></i>
-                        <span>Reports, UI settings, and API secrets persist only in the Droplet runtime directory.</span>
-                    </div>
-                    <div class="security-callout">
-                        <i data-lucide="user-check"></i>
-                        <span>This configuration uses one operator account. Change its password from Password & security.</span>
-                    </div>
-                </div>
-            </div>
-        </section>
     </div>
 </div>
 {% endblock %}

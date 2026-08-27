@@ -77,6 +77,36 @@ def test_index_renders(client):
     assert '<form' in body
 
 
+def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
+    assessed_folder = tmp_path / 'search_assessed'
+    assessed_folder.mkdir()
+    (assessed_folder / 'ai_analysis.md').write_text('assessment', encoding='utf-8')
+    web_app.job_results.update(
+        {
+            'assessed': {
+                'status': 'completed',
+                'session_folder': 'search_assessed',
+                'found_count': 7,
+            },
+            'failed': {
+                'status': 'failed',
+                'session_folder': 'search_failed',
+                'found_count': 0,
+            },
+        }
+    )
+
+    body = client.get('/').get_data(as_text=True)
+
+    assert 'Saved investigations' in body
+    assert '1 completed · 1 failed' in body
+    assert 'Profiles discovered' in body
+    assert '>7</strong>' in body
+    assert 'AI assessments' in body
+    assert '>1</strong>' in body
+    assert 'Investigation flow' not in body
+
+
 def test_username_input_strips_platform_at_prefix(web_app):
     assert web_app.parse_usernames({'usernames': '@mastercorbuzier, soxoj'}) == [
         'mastercorbuzier',
@@ -1290,6 +1320,11 @@ def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     assert 'value="gpt-5.6-terra"' in body
     assert 'value="gpt-5.6-luna"' in body
     assert 'Username permutations' not in body
+    assert 'Security boundary' not in body
+
+    security_body = client.get('/security').get_data(as_text=True)
+    assert 'Change password' in security_body
+    assert 'Security controls' not in security_body
 
     font_response = client.get('/static/alliance-no2-regular.otf')
     assert font_response.status_code == 200

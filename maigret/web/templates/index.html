@@ -22,40 +22,34 @@
 <div class="alert alert-danger">{{ error }}</div>
 {% endif %}
 
-<section class="metric-grid" aria-label="Workspace status">
+<section class="metric-grid" aria-label="Investigation KPIs">
     <article class="metric-card">
-        <span class="metric-icon"><i data-lucide="database"></i></span>
+        <span class="metric-icon"><i data-lucide="folder-search-2"></i></span>
         <div class="metric-copy">
-            <span class="metric-label">Fast-check coverage</span>
-            <strong class="metric-value">{{ web_settings.top_sites }} sites</strong>
-            <small class="metric-detail">Ranked sources from the active database</small>
+            <span class="metric-label">Saved investigations</span>
+            <strong class="metric-value">{{ dashboard_metrics.investigations }}</strong>
+            <small class="metric-detail">{{ dashboard_metrics.completed }} completed · {{ dashboard_metrics.failed }} failed</small>
         </div>
     </article>
     <article class="metric-card">
-        <span class="metric-icon"><i data-lucide="workflow"></i></span>
+        <span class="metric-icon"><i data-lucide="badge-check"></i></span>
         <div class="metric-copy">
-            <span class="metric-label">Investigation mode</span>
-            <strong class="metric-value">Live discovery</strong>
-            <small class="metric-detail">Progress and findings stream as they arrive</small>
+            <span class="metric-label">Profiles discovered</span>
+            <strong class="metric-value">{{ dashboard_metrics.profiles_found }}</strong>
+            <small class="metric-detail">Claimed matches across saved investigations</small>
         </div>
     </article>
     <article class="metric-card">
-        <span class="metric-icon"><i data-lucide="sparkles"></i></span>
+        <span class="metric-icon"><i data-lucide="file-search-2"></i></span>
         <div class="metric-copy">
-            <span class="metric-label">AI analysis</span>
-            <strong class="metric-value">{{ 'Connected' if openai_connected else 'Not configured' }}</strong>
-            <small class="metric-detail">
-                {% if openai_connected %}
-                Server-side connection is available
-                {% else %}
-                Configure OpenAI in Settings
-                {% endif %}
-            </small>
+            <span class="metric-label">AI assessments</span>
+            <strong class="metric-value">{{ dashboard_metrics.ai_assessments }}</strong>
+            <small class="metric-detail">Saved assessments available for review</small>
         </div>
     </article>
 </section>
 
-<section class="dashboard-grid">
+<section>
     <article class="panel-card">
         <header class="panel-header">
             <div>
@@ -101,42 +95,5 @@
         </div>
     </article>
 
-    <aside class="panel-card">
-        <header class="panel-header">
-            <div>
-                <h2>Investigation flow</h2>
-                <p>A controlled path from discovery to assessment.</p>
-            </div>
-        </header>
-        <div class="panel-body">
-            <ol class="guidance-list">
-                <li class="guidance-item">
-                    <span class="guidance-number">01</span>
-                    <div>
-                        <strong>Discover public profiles</strong>
-                        <p>OpenLedger checks the selected sources and streams claimed matches.</p>
-                    </div>
-                </li>
-                <li class="guidance-item">
-                    <span class="guidance-number">02</span>
-                    <div>
-                        <strong>Review supporting reports</strong>
-                        <p>Inspect the graph and downloadable report formats before drawing conclusions.</p>
-                    </div>
-                </li>
-                <li class="guidance-item">
-                    <span class="guidance-number">03</span>
-                    <div>
-                        <strong>Generate an AI assessment</strong>
-                        <p>When connected, OpenAI summarizes the collected leads from the server.</p>
-                    </div>
-                </li>
-            </ol>
-            <div class="legal-note">
-                <i data-lucide="scale"></i>
-                <span>Use OpenLedger only for lawful, authorized investigations. Matches are leads and require independent verification.</span>
-            </div>
-        </div>
-    </aside>
 </section>
 {% endblock %}

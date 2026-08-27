@@ -1583,6 +1583,43 @@ textarea.form-control {
     font-size: 0.76rem;
 }
 
+/* A restrained radius system keeps the analytical workspace compact and
+   avoids the soft, consumer-app appearance of deeply rounded frames. */
+.brand-mark-wrap,
+.sidebar-link,
+.sidebar-status,
+.account-avatar,
+.icon-button,
+.topbar-avatar,
+.topbar-logout,
+.metric-card,
+.metric-icon,
+.panel-card,
+.form-control,
+.form-select,
+.btn,
+.mode-option label,
+.guidance-number,
+.legal-note,
+.badge-soft,
+.settings-nav a,
+.connection-logo,
+.secret-toggle,
+.security-callout,
+.tag,
+.selected-site,
+.login-brand-mark,
+.login-mobile-mark,
+.empty-state-icon,
+.live-stat,
+#graph,
+.report-container,
+.tag-badge,
+.ai-analysis-output,
+.flash-stack .alert {
+    border-radius: 5px;
+}
+
 @media (max-width: 1199px) {
     .dashboard-grid {
         grid-template-columns: minmax(0, 1.4fr) minmax(250px, 0.7fr);

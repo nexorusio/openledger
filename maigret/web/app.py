@@ -1463,7 +1463,32 @@ def scan_stop(job_id):
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    refresh_job_results_from_disk()
+    entries = list(job_results.values())
+    completed = sum(1 for entry in entries if entry.get('status') == 'completed')
+    failed = sum(1 for entry in entries if entry.get('status') == 'failed')
+    profiles_found = sum(
+        entry.get('found_count', 0)
+        for entry in entries
+        if isinstance(entry.get('found_count', 0), int)
+    )
+    ai_assessments = 0
+    for entry in entries:
+        try:
+            if os.path.exists(get_analysis_path(entry)):
+                ai_assessments += 1
+        except (KeyError, TypeError, ValueError):
+            continue
+    return render_template(
+        'index.html',
+        dashboard_metrics={
+            'investigations': len(entries),
+            'completed': completed,
+            'failed': failed,
+            'profiles_found': profiles_found,
+            'ai_assessments': ai_assessments,
+        },
+    )
 
 
 @app.route('/healthz')
