@@ -9,10 +9,8 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEPLOY_DIR="${REPO_ROOT}/deploy"
 ENV_FILE="${DEPLOY_DIR}/.env"
 COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
+AUTH_FILE="${REPO_ROOT}/runtime/secrets/auth.json"
 DEFAULT_DOMAIN="openledger.nexorus.io"
-
-AUTH_PASSWORD=""
-trap 'unset AUTH_PASSWORD' EXIT
 
 install_docker() {
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -26,7 +24,7 @@ install_docker() {
     fi
 
     apt-get update
-    apt-get install -y ca-certificates curl gnupg openssl
+    apt-get install -y ca-certificates curl gnupg openssl python3
     install -m 0755 -d /etc/apt/keyrings
     curl -fsSL "https://download.docker.com/linux/${ID}/gpg" -o /etc/apt/keyrings/docker.asc
     chmod a+r /etc/apt/keyrings/docker.asc
@@ -63,27 +61,6 @@ if ! validate_domain "${DOMAIN}"; then
     exit 1
 fi
 
-read -r -p "Browser login username [admin]: " AUTH_USER
-AUTH_USER="${AUTH_USER:-admin}"
-if [[ ! "${AUTH_USER}" =~ ^[A-Za-z0-9_.-]+$ ]]; then
-    echo "The login username may contain letters, numbers, dots, underscores, and hyphens."
-    exit 1
-fi
-
-read -r -s -p "Browser login password (minimum 12 characters): " AUTH_PASSWORD
-echo
-if [[ ${#AUTH_PASSWORD} -lt 12 ]]; then
-    echo "The browser password must contain at least 12 characters."
-    exit 1
-fi
-read -r -s -p "Confirm browser login password: " AUTH_PASSWORD_CONFIRM
-echo
-if [[ "${AUTH_PASSWORD}" != "${AUTH_PASSWORD_CONFIRM}" ]]; then
-    echo "The passwords do not match."
-    exit 1
-fi
-unset AUTH_PASSWORD_CONFIRM
-
 read -r -p "OpenAI model [gpt-5.4]: " OPENAI_MODEL
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.4}"
 if [[ ! "${OPENAI_MODEL}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
@@ -93,6 +70,10 @@ fi
 
 echo "Installing Docker if needed..."
 install_docker
+if ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
+    apt-get update
+    apt-get install -y openssl python3
+fi
 
 echo "Preparing persistent runtime directories..."
 install -d -m 0750 "${REPO_ROOT}/runtime/reports"
@@ -106,21 +87,18 @@ if [[ ! -f "${REPO_ROOT}/runtime/secrets/openai_api_key" ]]; then
 fi
 
 echo "Generating protected credentials..."
-AUTH_PASSWORD_HASH="$(docker run --rm caddy:2-alpine caddy hash-password --plaintext "${AUTH_PASSWORD}")"
+bash "${DEPLOY_DIR}/configure-auth.sh" "${AUTH_FILE}"
 FLASK_SECRET_KEY="$(openssl rand -hex 32)"
-unset AUTH_PASSWORD
 
 umask 077
 {
     printf "DOMAIN='%s'\n" "${DOMAIN}"
-    printf "AUTH_USER='%s'\n" "${AUTH_USER}"
-    printf "AUTH_PASSWORD_HASH='%s'\n" "${AUTH_PASSWORD_HASH}"
     printf "FLASK_SECRET_KEY='%s'\n" "${FLASK_SECRET_KEY}"
     printf "OPENAI_MODEL='%s'\n" "${OPENAI_MODEL}"
     printf "OPENAI_API_BASE_URL='https://api.openai.com/v1'\n"
 } > "${ENV_FILE}"
 chmod 0600 "${ENV_FILE}"
-unset AUTH_PASSWORD_HASH FLASK_SECRET_KEY
+unset FLASK_SECRET_KEY
 
 echo "Validating the Compose configuration..."
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" config --quiet
@@ -150,5 +128,5 @@ fi
 echo
 echo "OpenLedger is running."
 echo "Open https://${DOMAIN} after DNS resolves and ports 80/443 are reachable."
-echo "The login username is ${AUTH_USER}. The password was not written to terminal output."
+echo "Use the application username and password configured during installation."
 echo "Connect OpenAI from Settings after signing in."

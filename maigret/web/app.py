@@ -10,33 +10,44 @@ from flask import (
     url_for,
 )
 from werkzeug.exceptions import NotFound
+from werkzeug.middleware.proxy_fix import ProxyFix
+import base64
 import logging
 import os
 import asyncio
+import hashlib
+import hmac
 import json
 import queue
 import re
 import secrets
+import shutil
+import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from threading import Lock, Thread
 from typing import Any, Dict
+from urllib.parse import urlsplit
 import maigret
 import maigret.settings
-from maigret.ai import get_ai_analysis_text, validate_openai_connection
+from maigret.ai import get_enriched_ai_analysis, validate_openai_connection
 from maigret.checking import build_cloudflare_bypass_config
 from maigret.result import MaigretCheckStatus
 from maigret.sites import MaigretDatabase
 from maigret.report import generate_report_context
+from maigret.utils import is_country_tag
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 # Use environment variable for secret key, generate random one if not set
 app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24).hex())
 app.config.update(
+    SESSION_COOKIE_NAME='openledger_session',
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE='Strict',
     SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE', 'false').lower()
     in ('true', '1', 'yes'),
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
 )
 
 # add background job tracking
@@ -44,6 +55,9 @@ background_jobs: Dict[str, Any] = {}
 job_results = {}
 analysis_locks: Dict[str, Any] = {}
 metadata_lock = Lock()
+auth_lock = Lock()
+login_attempts_lock = Lock()
+login_attempts: Dict[str, Any] = {}
 
 # Live (streaming) scan jobs, keyed by job_id. Each entry:
 #   {'queue': Queue, 'cancelled': bool, 'loop': event loop, 'task': asyncio task}
@@ -144,6 +158,15 @@ app.config["OPENAI_API_KEY_FILE"] = os.getenv(
     "OPENAI_API_KEY_FILE",
     os.path.join("runtime", "secrets", "openai_api_key"),
 )
+app.config["AUTH_FILE"] = os.getenv(
+    "AUTH_FILE",
+    os.path.join("runtime", "secrets", "auth.json"),
+)
+app.config["AUTH_REQUIRED"] = os.getenv("AUTH_REQUIRED", "false").lower() in (
+    "true",
+    "1",
+    "yes",
+)
 
 # Search-wide defaults, editable from the Settings workspace. Persisted
 # to app.config["SETTINGS_FILE"] so they survive a process restart.
@@ -161,13 +184,22 @@ DEFAULT_SETTINGS = {
     'disable_extracting': False,
     'with_domains': False,
     'openai_model': 'gpt-5.4',
+    'ai_web_enrichment': True,
 }
 
 OPENAI_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
+AUTH_USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
 SESSION_KEY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_FOLDER_PATTERN = re.compile(r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
+AI_ANALYSIS_SCHEMA_VERSION = 2
+AUTH_SCHEMA_VERSION = 1
+PASSWORD_HASH_NAME = 'sha256'
+PASSWORD_HASH_ITERATIONS = 600_000
+PASSWORD_MIN_LENGTH = 12
+LOGIN_ATTEMPT_LIMIT = 8
+LOGIN_ATTEMPT_WINDOW_SECONDS = 15 * 60
 
 
 def load_settings():
@@ -185,6 +217,161 @@ def load_settings():
 def save_settings(settings):
     with open(app.config["SETTINGS_FILE"], 'w', encoding='utf-8') as f:
         json.dump(settings, f, indent=2)
+
+
+def build_password_record(password: str) -> Dict[str, Any]:
+    """Create a versioned PBKDF2 password record using only stdlib crypto."""
+    if len(password) < PASSWORD_MIN_LENGTH:
+        raise ValueError(
+            f'Password must contain at least {PASSWORD_MIN_LENGTH} characters.'
+        )
+    salt = secrets.token_bytes(32)
+    digest = hashlib.pbkdf2_hmac(
+        PASSWORD_HASH_NAME,
+        password.encode('utf-8'),
+        salt,
+        PASSWORD_HASH_ITERATIONS,
+    )
+    return {
+        'algorithm': f'pbkdf2_{PASSWORD_HASH_NAME}',
+        'iterations': PASSWORD_HASH_ITERATIONS,
+        'salt': base64.b64encode(salt).decode('ascii'),
+        'digest': base64.b64encode(digest).decode('ascii'),
+    }
+
+
+def verify_password(password: str, password_record: Dict[str, Any]) -> bool:
+    """Verify a password while treating malformed credential files as invalid."""
+    try:
+        if password_record.get('algorithm') != f'pbkdf2_{PASSWORD_HASH_NAME}':
+            return False
+        iterations = int(password_record['iterations'])
+        if iterations < 100_000 or iterations > 5_000_000:
+            return False
+        salt = base64.b64decode(password_record['salt'], validate=True)
+        expected = base64.b64decode(password_record['digest'], validate=True)
+        actual = hashlib.pbkdf2_hmac(
+            PASSWORD_HASH_NAME,
+            password.encode('utf-8'),
+            salt,
+            iterations,
+        )
+        return hmac.compare_digest(actual, expected)
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+def normalize_auth_credentials(payload: Dict[str, Any]) -> Dict[str, Any]:
+    if (
+        not isinstance(payload, dict)
+        or payload.get('schema_version') != AUTH_SCHEMA_VERSION
+    ):
+        raise ValueError('Unsupported authentication file')
+    username = payload.get('username')
+    password_record = payload.get('password')
+    revision = payload.get('revision')
+    if not isinstance(username, str) or not AUTH_USERNAME_PATTERN.fullmatch(username):
+        raise ValueError('Invalid authentication username')
+    if not isinstance(password_record, dict):
+        raise ValueError('Invalid authentication password record')
+    if not isinstance(revision, str) or len(revision) < 16:
+        raise ValueError('Invalid authentication revision')
+    return {
+        'schema_version': AUTH_SCHEMA_VERSION,
+        'username': username,
+        'revision': revision,
+        'password': password_record,
+    }
+
+
+def load_auth_credentials():
+    try:
+        with open(app.config['AUTH_FILE'], encoding='utf-8') as auth_file:
+            return normalize_auth_credentials(json.load(auth_file))
+    except FileNotFoundError:
+        return None
+    except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+        logging.error('Failed to load the authentication file: %s', exc)
+        return None
+
+
+def save_auth_credentials(username: str, password: str):
+    """Atomically persist application credentials with mode 600."""
+    if not AUTH_USERNAME_PATTERN.fullmatch(username):
+        raise ValueError('Invalid authentication username')
+    payload = {
+        'schema_version': AUTH_SCHEMA_VERSION,
+        'username': username,
+        'revision': secrets.token_urlsafe(24),
+        'password': build_password_record(password),
+    }
+    auth_path = os.path.abspath(app.config['AUTH_FILE'])
+    auth_directory = os.path.dirname(auth_path)
+    os.makedirs(auth_directory, mode=0o700, exist_ok=True)
+    os.chmod(auth_directory, 0o700)
+    temporary_path = f'{auth_path}.{uuid.uuid4().hex}.tmp'
+
+    with auth_lock:
+        descriptor = os.open(
+            temporary_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        try:
+            with os.fdopen(descriptor, 'w', encoding='utf-8') as auth_file:
+                json.dump(payload, auth_file, indent=2)
+                auth_file.write('\n')
+                auth_file.flush()
+                os.fsync(auth_file.fileno())
+            os.replace(temporary_path, auth_path)
+            os.chmod(auth_path, 0o600)
+        except Exception:
+            try:
+                os.unlink(temporary_path)
+            except FileNotFoundError:
+                pass
+            raise
+    return payload
+
+
+def login_attempt_key() -> str:
+    return request.remote_addr or 'unknown'
+
+
+def login_is_rate_limited(key: str) -> bool:
+    cutoff = time.monotonic() - LOGIN_ATTEMPT_WINDOW_SECONDS
+    with login_attempts_lock:
+        recent = [stamp for stamp in login_attempts.get(key, []) if stamp >= cutoff]
+        if recent:
+            login_attempts[key] = recent
+        else:
+            login_attempts.pop(key, None)
+        return len(recent) >= LOGIN_ATTEMPT_LIMIT
+
+
+def record_login_failure(key: str):
+    cutoff = time.monotonic() - LOGIN_ATTEMPT_WINDOW_SECONDS
+    with login_attempts_lock:
+        recent = [stamp for stamp in login_attempts.get(key, []) if stamp >= cutoff]
+        recent.append(time.monotonic())
+        login_attempts[key] = recent
+
+
+def clear_login_failures(key: str):
+    with login_attempts_lock:
+        login_attempts.pop(key, None)
+
+
+def safe_next_path(candidate: str) -> str:
+    """Allow only same-origin absolute paths after login."""
+    if not candidate:
+        return url_for('index')
+    parsed = urlsplit(candidate)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith('/'):
+        return url_for('index')
+    if parsed.path.startswith('//'):
+        return url_for('index')
+    return parsed.path + (f'?{parsed.query}' if parsed.query else '')
 
 
 def get_openai_api_key():
@@ -295,6 +482,7 @@ def parse_settings_form(form):
         'disable_extracting': 'disable_extracting' in form,
         'with_domains': 'with_domains' in form,
         'openai_model': current_settings.get('openai_model', 'gpt-5.4'),
+        'ai_web_enrichment': 'ai_web_enrichment' in form,
     }
 
 
@@ -304,6 +492,7 @@ def inject_settings():
         'web_settings': load_settings(),
         'openai_connected': bool(get_openai_api_key()),
         'csrf_token': get_csrf_token(),
+        'current_user': session.get('username'),
     }
 
 
@@ -337,6 +526,39 @@ def setup_logger(log_level, name):
     return logger
 
 
+def select_sites_for_search(
+    db, *, top_sites, all_sites, tags, excluded_tags, site_list
+):
+    """Select sources while treating country codes as coverage preferences."""
+    country_tags = {
+        tag.lower() for tag in tags if is_country_tag(tag) and tag != 'global'
+    }
+    category_tags = [tag for tag in tags if not is_country_tag(tag)]
+    ranking_limit = 999999999 if country_tags or all_sites else top_sites
+    ranked_sites = db.ranked_sites_dict(
+        top=ranking_limit,
+        tags=category_tags,
+        excluded_tags=excluded_tags,
+        names=site_list,
+        disabled=False,
+        id_type='username',
+    )
+    if country_tags:
+        allowed_coverage = {'global', *country_tags}
+        filtered_sites = {}
+        for name, site in ranked_sites.items():
+            site_tags = {tag.lower() for tag in (site.tags or [])}
+            site_countries = {tag for tag in site_tags if is_country_tag(tag)}
+            # Sources without a country tag are broadly available. A country
+            # preference excludes only sources explicitly assigned elsewhere.
+            if not site_countries or allowed_coverage.intersection(site_countries):
+                filtered_sites[name] = site
+        ranked_sites = filtered_sites
+    if not all_sites:
+        ranked_sites = dict(list(ranked_sites.items())[:top_sites])
+    return ranked_sites
+
+
 async def maigret_search(username, options, query_notify=None):
     logger = setup_logger(logging.WARNING, 'maigret')
     try:
@@ -364,13 +586,13 @@ async def maigret_search(username, options, query_notify=None):
         site_list = options.get('site_list', [])
         logger.info(f"Filtering sites by tags: {tags}, excluded: {excluded_tags}")
 
-        sites = db.ranked_sites_dict(
-            top=top_sites,
+        sites = select_sites_for_search(
+            db,
+            top_sites=top_sites,
+            all_sites=bool(options.get('all_sites')),
             tags=tags,
             excluded_tags=excluded_tags,
-            names=site_list,
-            disabled=False,
-            id_type='username',
+            site_list=site_list,
         )
 
         logger.info(f"Found {len(sites)} sites matching the tag criteria")
@@ -424,6 +646,70 @@ def sanitize_username_for_path(username: str) -> str:
     sanitized = sanitized.strip('.')
     # If empty after sanitization, use a fallback
     return sanitized or '_'
+
+
+MAJOR_PLATFORM_NAMES = {
+    'facebook',
+    'instagram',
+    'linkedin',
+    'telegram',
+    'tiktok',
+    'twitter',
+    'youtube',
+}
+STRONG_IDENTITY_FIELDS = {
+    'bio',
+    'description',
+    'fullname',
+    'location',
+    'name',
+    'website',
+}
+
+
+def normalize_evidence_value(value, depth=0):
+    """Make extracted profile evidence small, JSON-safe, and prompt-safe."""
+    if depth > 2:
+        return None
+    if isinstance(value, (str, int, float, bool)):
+        text = str(value).strip()
+        return text[:2000] if text else None
+    if isinstance(value, (list, tuple, set)):
+        values = [
+            normalize_evidence_value(item, depth + 1)
+            for item in list(value)[:20]
+        ]
+        return [item for item in values if item is not None]
+    if isinstance(value, dict):
+        result = {}
+        for key, item in list(value.items())[:40]:
+            normalized = normalize_evidence_value(item, depth + 1)
+            if normalized is not None:
+                result[str(key)[:100]] = normalized
+        return result
+    return None
+
+
+def profile_confidence(ids_data, check_type):
+    """Classify account evidence without pretending username equality is identity."""
+    keys = {str(key).lower() for key in ids_data}
+    if keys.intersection(STRONG_IDENTITY_FIELDS):
+        return 'strong'
+    useful_keys = {key for key in keys if key not in {'_extractor', 'extractor'}}
+    if len(useful_keys) >= 2:
+        return 'moderate'
+    if check_type in {'status_code', 'message'} and not useful_keys:
+        return 'weak'
+    return 'unverified'
+
+
+def result_status_details(site_data):
+    status = site_data.get('status')
+    if not status:
+        return 'unknown', 'No status returned'
+    state = status.status.value.lower()
+    reason = status.context or (str(status.error) if status.error else '')
+    return state, str(reason)[:500]
 
 
 def get_session_metadata_path(session_folder: str) -> str:
@@ -598,6 +884,35 @@ def find_result_by_session(session_id: str):
     return result if result.get('status') == 'completed' else None
 
 
+def delete_persisted_investigation(session_folder: str) -> bool:
+    """Delete one terminal investigation and all report artifacts safely."""
+    if not isinstance(session_folder, str) or not SESSION_FOLDER_PATTERN.fullmatch(
+        session_folder
+    ):
+        raise ValueError('Invalid report session folder')
+
+    loaded = load_persisted_job_result(session_folder)
+    if not loaded:
+        return False
+    session_key, result = loaded
+    if result.get('status') not in {'completed', 'failed'}:
+        raise ValueError('Only completed or failed investigations can be deleted')
+
+    reports_root = os.path.realpath(app.config['REPORTS_FOLDER'])
+    session_path = os.path.realpath(os.path.join(reports_root, session_folder))
+    if os.path.commonpath([reports_root, session_path]) != reports_root:
+        raise ValueError('Invalid report session path')
+    if session_path == reports_root:
+        raise ValueError('Refusing to delete the reports root')
+
+    with metadata_lock:
+        shutil.rmtree(session_path)
+        job_results.pop(session_key, None)
+        background_jobs.pop(session_key, None)
+        analysis_locks.pop(session_folder, None)
+    return True
+
+
 # Rebuild the terminal result index when Flask is imported by Gunicorn. Routes
 # also perform targeted lazy recovery so alternate report paths used in tests or
 # embedded deployments remain supported.
@@ -605,25 +920,51 @@ refresh_job_results_from_disk()
 
 
 def build_ai_markdown(result_data: Dict[str, Any]) -> str:
-    """Create a bounded, normalized AI input from completed claimed profiles."""
+    """Create bounded evidence input with provenance and diagnostic context."""
     lines = [
         '# OpenLedger username investigation',
         '',
-        'Treat matches as investigative leads, not verified identity evidence.',
+        'Maigret evidence and public-web evidence are different source classes.',
+        'Treat username matches as leads until identity attributes corroborate them.',
+        'Never let a weak collision override repeated real-name, bio, location, '
+        'or link evidence.',
         '',
     ]
     for report in result_data.get('individual_reports', []):
         lines.extend([f"## Username: {report.get('username', 'unknown')}", ''])
         profiles = report.get('claimed_profiles', [])
+        diagnostics = report.get('diagnostics', {})
+        if diagnostics:
+            lines.append(
+                'Scan diagnostics: '
+                + ', '.join(f'{key}={value}' for key, value in diagnostics.items())
+            )
+        major_platforms = report.get('major_platforms', [])
+        if major_platforms:
+            lines.extend(['', '### Major-platform diagnostics'])
+            for platform in major_platforms:
+                detail = f" - {platform.get('reason')}" if platform.get('reason') else ''
+                lines.append(
+                    f"- {platform.get('site_name')}: {platform.get('status')}{detail}"
+                )
         if not profiles:
             lines.extend(['No claimed profiles were found.', ''])
             continue
+        lines.extend(['', '### Claimed profile evidence'])
         for profile in profiles:
             tags = ', '.join(profile.get('tags') or []) or 'none'
             lines.append(
                 f"- {profile.get('site_name', 'Unknown site')}: "
-                f"{profile.get('url', '')} (tags: {tags})"
+                f"{profile.get('url', '')} (tags: {tags}; "
+                f"local confidence: {profile.get('confidence', 'unverified')}; "
+                f"check: {profile.get('check_type', 'unknown')})"
             )
+            evidence = profile.get('evidence') or {}
+            if evidence:
+                lines.append(
+                    '  Extracted evidence: '
+                    + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+                )
         lines.append('')
 
     # Bound cost and prevent an unexpectedly large model request.
@@ -638,6 +979,147 @@ def get_csrf_token() -> str:
     return token
 
 
+@app.before_request
+def require_application_login():
+    if not app.config.get('AUTH_REQUIRED'):
+        return None
+    if request.endpoint in {'login', 'healthz', 'static'}:
+        return None
+    if session.get('authenticated') is True:
+        credentials = load_auth_credentials()
+        if credentials and hmac.compare_digest(
+            session.get('auth_revision', ''), credentials['revision']
+        ):
+            return None
+        session.clear()
+    if request.path.startswith('/api/'):
+        return {'error': 'Authentication required.'}, 401
+    next_path = request.full_path if request.method == 'GET' else url_for('index')
+    return redirect(url_for('login', next=safe_next_path(next_path)))
+
+
+@app.after_request
+def protect_sensitive_responses(response):
+    if request.endpoint != 'static' and (
+        app.config.get('AUTH_REQUIRED') or session.get('authenticated')
+    ):
+        response.headers['Cache-Control'] = 'no-store'
+        response.headers['Pragma'] = 'no-cache'
+    return response
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if not app.config.get('AUTH_REQUIRED'):
+        return redirect(url_for('index'))
+    if session.get('authenticated') is True:
+        return redirect(safe_next_path(request.args.get('next', '')))
+
+    next_path = safe_next_path(
+        request.form.get('next', '') or request.args.get('next', '')
+    )
+    credentials = load_auth_credentials()
+    if request.method == 'GET':
+        return render_template(
+            'login.html',
+            next_path=next_path,
+            auth_configured=credentials is not None,
+        )
+
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your login session expired. Please try again.', 'danger')
+        return redirect(url_for('login', next=next_path))
+
+    attempt_key = login_attempt_key()
+    if login_is_rate_limited(attempt_key):
+        flash(
+            'Too many unsuccessful attempts. Wait 15 minutes before trying again.',
+            'danger',
+        )
+        return redirect(url_for('login', next=next_path))
+
+    submitted_username = request.form.get('username', '').strip()
+    submitted_password = request.form.get('password', '')
+    if credentials:
+        username_matches = hmac.compare_digest(
+            submitted_username, credentials['username']
+        )
+        password_matches = verify_password(
+            submitted_password, credentials['password']
+        )
+        valid = username_matches and password_matches
+    else:
+        valid = False
+    if not valid:
+        record_login_failure(attempt_key)
+        logging.warning('Rejected OpenLedger login from %s', attempt_key)
+        flash('Invalid username or password.', 'danger')
+        return redirect(url_for('login', next=next_path))
+
+    clear_login_failures(attempt_key)
+    session.clear()
+    session.permanent = True
+    session['authenticated'] = True
+    session['username'] = credentials['username']
+    session['auth_revision'] = credentials['revision']
+    session['csrf_token'] = secrets.token_urlsafe(32)
+    return redirect(next_path)
+
+
+@app.route('/logout', methods=['POST'])
+def logout():
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your session expired. Please sign in again.', 'warning')
+    session.clear()
+    return redirect(url_for('login'))
+
+
+@app.route('/security', methods=['GET', 'POST'])
+def security_settings():
+    credentials = load_auth_credentials()
+    if request.method == 'GET':
+        return render_template(
+            'security.html',
+            auth_configured=credentials is not None,
+            auth_username=(credentials or {}).get('username', ''),
+        )
+
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your security session expired. Please try again.', 'danger')
+        return redirect(url_for('security_settings'))
+    if not credentials:
+        flash('Authentication is not configured on this server.', 'danger')
+        return redirect(url_for('security_settings'))
+
+    current_password = request.form.get('current_password', '')
+    new_password = request.form.get('new_password', '')
+    confirm_password = request.form.get('confirm_password', '')
+    if not verify_password(current_password, credentials['password']):
+        flash('The current password is incorrect.', 'danger')
+        return redirect(url_for('security_settings'))
+    if len(new_password) < PASSWORD_MIN_LENGTH:
+        flash(
+            'The new password must contain at least '
+            f'{PASSWORD_MIN_LENGTH} characters.',
+            'danger',
+        )
+        return redirect(url_for('security_settings'))
+    if new_password != confirm_password:
+        flash('The new passwords do not match.', 'danger')
+        return redirect(url_for('security_settings'))
+    if verify_password(new_password, credentials['password']):
+        flash('Choose a password different from the current password.', 'danger')
+        return redirect(url_for('security_settings'))
+
+    updated_credentials = save_auth_credentials(
+        credentials['username'], new_password
+    )
+    session['auth_revision'] = updated_credentials['revision']
+    session['csrf_token'] = secrets.token_urlsafe(32)
+    flash('Password changed successfully.', 'success')
+    return redirect(url_for('security_settings'))
+
+
 def get_analysis_path(result_data: Dict[str, Any]) -> str:
     reports_root = os.path.realpath(app.config["REPORTS_FOLDER"])
     session_folder = result_data['session_folder']
@@ -645,6 +1127,12 @@ def get_analysis_path(result_data: Dict[str, Any]) -> str:
     if os.path.commonpath([reports_root, session_root]) != reports_root:
         raise ValueError('Invalid report session path')
     return os.path.join(session_root, 'ai_analysis.md')
+
+
+def get_analysis_metadata_path(result_data: Dict[str, Any]) -> str:
+    return os.path.join(
+        os.path.dirname(get_analysis_path(result_data)), 'ai_analysis.json'
+    )
 
 
 def build_reports(general_results, usernames, session_key):
@@ -687,20 +1175,33 @@ def build_reports(general_results, usernames, session_key):
         maigret.report.save_html_report(html_path, context)
 
         claimed_profiles = []
+        diagnostics = {'claimed': 0, 'available': 0, 'unknown': 0, 'illegal': 0}
+        major_platforms = []
         for site_name, site_data in results.items():
-            if (
-                site_data.get('status')
-                and site_data['status'].status == MaigretCheckStatus.CLAIMED
-            ):
+            state, reason = result_status_details(site_data)
+            diagnostics[state] = diagnostics.get(state, 0) + 1
+            site = site_data.get('site')
+            check_type = getattr(site, 'check_type', '') or ''
+            status = site_data.get('status')
+            if site_name.lower() in MAJOR_PLATFORM_NAMES:
+                major_platforms.append(
+                    {
+                        'site_name': site_name,
+                        'status': state,
+                        'reason': reason,
+                        'url': site_data.get('url_user', ''),
+                    }
+                )
+            if status and status.status == MaigretCheckStatus.CLAIMED:
+                evidence = normalize_evidence_value(status.ids_data or {}) or {}
                 claimed_profiles.append(
                     {
                         'site_name': site_name,
                         'url': site_data.get('url_user', ''),
-                        'tags': (
-                            site_data.get('status').tags
-                            if site_data.get('status')
-                            else []
-                        ),
+                        'tags': status.tags or [],
+                        'evidence': evidence,
+                        'confidence': profile_confidence(evidence, check_type),
+                        'check_type': check_type or 'unknown',
                     }
                 )
 
@@ -721,6 +1222,8 @@ def build_reports(general_results, usernames, session_key):
                     f"search_{session_key}", f"report_{safe_username}.html"
                 ),
                 'claimed_profiles': claimed_profiles,
+                'diagnostics': diagnostics,
+                'major_platforms': major_platforms,
             }
         )
 
@@ -768,7 +1271,12 @@ def process_search_task(usernames, options, timestamp):
 
 def parse_usernames(form):
     usernames_input = form.get('usernames', '').strip()
-    return [u.strip() for u in usernames_input.replace(',', ' ').split() if u.strip()]
+    normalized = []
+    for raw_value in usernames_input.replace(',', ' ').split():
+        username = raw_value.strip().lstrip('@').strip()
+        if username and username not in normalized:
+            normalized.append(username)
+    return normalized
 
 
 def parse_search_options(form):
@@ -1021,6 +1529,7 @@ def openai_settings_update():
         save_openai_api_key(submitted_key)
     settings = load_settings()
     settings['openai_model'] = confirmed_model
+    settings['ai_web_enrichment'] = 'ai_web_enrichment' in request.form
     save_settings(settings)
     flash('OpenAI connected and verified.', 'success')
     return redirect(url_for('settings_update', section='connections'))
@@ -1033,6 +1542,28 @@ def history():
         job_results.values(), key=lambda r: r.get('started_at', ''), reverse=True
     )
     return render_template('history.html', entries=entries)
+
+
+@app.route('/history/<session_folder>/delete', methods=['POST'])
+def delete_history_entry(session_folder):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your history session expired. Please try again.', 'danger')
+        return redirect(url_for('history'))
+    try:
+        deleted = delete_persisted_investigation(session_folder)
+    except (OSError, ValueError):
+        logging.exception('Failed to delete investigation %s', session_folder)
+        flash('The investigation could not be deleted.', 'danger')
+        return redirect(url_for('history'))
+
+    if deleted:
+        flash(
+            'Investigation and its report files were permanently deleted.',
+            'success',
+        )
+    else:
+        flash('That investigation no longer exists.', 'info')
+    return redirect(url_for('history'))
 
 
 @app.route('/live', methods=['POST'])
@@ -1182,24 +1713,49 @@ def analyze_session(session_id):
     try:
         analysis_path = get_analysis_path(result_data)
         if os.path.exists(analysis_path):
-            with open(analysis_path, encoding='utf-8') as analysis_file:
-                return {'analysis': analysis_file.read(), 'cached': True}
+            metadata_path = get_analysis_metadata_path(result_data)
+            try:
+                with open(metadata_path, encoding='utf-8') as metadata_file:
+                    metadata = json.load(metadata_file)
+                if (
+                    metadata.get('schema_version') == AI_ANALYSIS_SCHEMA_VERSION
+                    and isinstance(metadata.get('sources'), list)
+                ):
+                    with open(analysis_path, encoding='utf-8') as analysis_file:
+                        return {
+                            'analysis': analysis_file.read(),
+                            'sources': metadata['sources'],
+                            'cached': True,
+                        }
+            except (
+                FileNotFoundError,
+                json.JSONDecodeError,
+                OSError,
+                AttributeError,
+            ):
+                pass
 
         markdown_report = build_ai_markdown(result_data)
-        model = load_settings().get(
+        ai_settings = load_settings()
+        model = ai_settings.get(
             'openai_model', os.getenv('OPENAI_MODEL', 'gpt-5.4')
         )
         api_base_url = os.getenv(
             'OPENAI_API_BASE_URL', 'https://api.openai.com/v1'
         )
-        analysis = asyncio.run(
-            get_ai_analysis_text(
+        enriched = asyncio.run(
+            get_enriched_ai_analysis(
                 api_key=api_key,
-                markdown_report=markdown_report,
+                investigation_evidence=markdown_report,
                 model=model,
                 api_base_url=api_base_url,
+                web_search_enabled=bool(
+                    ai_settings.get('ai_web_enrichment', True)
+                ),
             )
         )
+        analysis = enriched['analysis']
+        sources = enriched.get('sources', [])
 
         os.makedirs(os.path.dirname(analysis_path), exist_ok=True)
         temporary_path = f"{analysis_path}.{uuid.uuid4().hex}.tmp"
@@ -1207,7 +1763,20 @@ def analyze_session(session_id):
             analysis_file.write(analysis)
             analysis_file.write('\n')
         os.replace(temporary_path, analysis_path)
-        return {'analysis': analysis, 'cached': False}
+        metadata_path = get_analysis_metadata_path(result_data)
+        metadata_temporary_path = f"{metadata_path}.{uuid.uuid4().hex}.tmp"
+        with open(metadata_temporary_path, 'w', encoding='utf-8') as metadata_file:
+            json.dump(
+                {
+                    'schema_version': AI_ANALYSIS_SCHEMA_VERSION,
+                    'sources': sources,
+                },
+                metadata_file,
+                indent=2,
+            )
+            metadata_file.write('\n')
+        os.replace(metadata_temporary_path, metadata_path)
+        return {'analysis': analysis, 'sources': sources, 'cached': False}
     except Exception:
         logging.exception('AI analysis failed for session %s', session_id)
         return {

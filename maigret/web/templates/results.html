@@ -79,6 +79,10 @@
                 <span class="form-text" id="aiAnalysisStatus" role="status"></span>
             </div>
             <pre class="ai-analysis-output d-none" id="aiAnalysisOutput"></pre>
+            <div class="ai-sources d-none" id="aiAnalysisSources">
+                <h3>Public sources</h3>
+                <ul id="aiAnalysisSourceList"></ul>
+            </div>
             <a class="btn btn-sm btn-outline-secondary mt-3 d-none"
                id="downloadAiAnalysis"
                href="{{ url_for('download_report', filename=session_id ~ '/ai_analysis.md') }}"
@@ -120,6 +124,17 @@
                             <a href="{{ url_for('download_report', filename=report.pdf_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">PDF Report</a>
                             <a href="{{ url_for('download_report', filename=report.html_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">HTML Report</a>
                         </div>
+                        {% if report.major_platforms %}
+                        <p class="form-label mb-2">Major-platform coverage</p>
+                        <div class="d-flex flex-wrap gap-2 mb-3">
+                            {% for platform in report.major_platforms %}
+                            <span class="badge-soft {{ 'success' if platform.status == 'claimed' else 'warning' if platform.status == 'unknown' else '' }}"
+                                title="{{ platform.reason or 'No additional diagnostic detail' }}">
+                                {{ platform.site_name }}: {{ platform.status | title }}
+                            </span>
+                            {% endfor %}
+                        </div>
+                        {% endif %}
                         {% if report.claimed_profiles %}
                         <p class="form-label mb-0">Claimed profiles</p>
                         <ul class="profile-list">
@@ -135,6 +150,9 @@
                                     {% for tag in profile.tags %}<span class="tag-badge">{{ tag }}</span>{% endfor %}
                                 </div>
                                 {% endif %}
+                                <span class="badge-soft {{ 'success' if profile.confidence == 'strong' else 'warning' }}">
+                                    {{ profile.confidence | default('unverified') | title }} evidence
+                                </span>
                             </li>
                             {% endfor %}
                         </ul>
@@ -172,6 +190,8 @@ if (aiButton) {
         const status = document.getElementById('aiAnalysisStatus');
         const output = document.getElementById('aiAnalysisOutput');
         const download = document.getElementById('downloadAiAnalysis');
+        const sources = document.getElementById('aiAnalysisSources');
+        const sourceList = document.getElementById('aiAnalysisSourceList');
         aiButton.disabled = true;
         status.textContent = 'Generating assessment…';
 
@@ -187,6 +207,18 @@ if (aiButton) {
             if (!response.ok) throw new Error(payload.error || 'Analysis request failed.');
             output.textContent = payload.analysis;
             output.classList.remove('d-none');
+            sourceList.replaceChildren();
+            for (const source of (payload.sources || [])) {
+                const item = document.createElement('li');
+                const link = document.createElement('a');
+                link.href = source.url;
+                link.textContent = source.title || source.url;
+                link.target = '_blank';
+                link.rel = 'noopener noreferrer';
+                item.appendChild(link);
+                sourceList.appendChild(item);
+            }
+            sources.classList.toggle('d-none', sourceList.children.length === 0);
             download.classList.remove('d-none');
             status.textContent = payload.cached
                 ? 'Loaded the saved assessment.'

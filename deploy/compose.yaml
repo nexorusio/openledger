@@ -6,7 +6,9 @@ services:
       context: ..
       dockerfile: Dockerfile
       target: web
-    image: openledger-maigret:local
+    # A distinct tag prevents a failed authentication migration from falling
+    # back to the older image that had no application-level login.
+    image: openledger-maigret:application-auth
     restart: unless-stopped
     init: true
     environment:
@@ -15,6 +17,8 @@ services:
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?FLASK_SECRET_KEY is required}
       SESSION_COOKIE_SECURE: "true"
       WEB_SETTINGS_FILE: /app/web_settings.json
+      AUTH_REQUIRED: "true"
+      AUTH_FILE: /app/runtime/secrets/auth.json
       OPENAI_API_KEY_FILE: /app/runtime/secrets/openai_api_key
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
@@ -47,8 +51,6 @@ services:
         condition: service_healthy
     environment:
       DOMAIN: ${DOMAIN:?DOMAIN is required}
-      AUTH_USER: ${AUTH_USER:?AUTH_USER is required}
-      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}
     ports:
       - "80:80"
       - "443:443"

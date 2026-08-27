@@ -55,7 +55,32 @@
                     <i data-lucide="settings-2"></i>
                     <span>Settings</span>
                 </a>
+                <a href="{{ url_for('security_settings') }}"
+                   class="sidebar-link {{ 'active' if request.endpoint == 'security_settings' }}"
+                   {{ 'aria-current=page' if request.endpoint == 'security_settings' }}>
+                    <i data-lucide="key-round"></i>
+                    <span>Password & security</span>
+                </a>
             </nav>
+
+            {% if current_user %}
+            <div class="sidebar-account">
+                <div class="account-identity">
+                    <span class="account-avatar"><i data-lucide="user-round"></i></span>
+                    <div>
+                        <small>Signed in as</small>
+                        <strong>{{ current_user }}</strong>
+                    </div>
+                </div>
+                <form method="POST" action="{{ url_for('logout') }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="sidebar-logout">
+                        <i data-lucide="log-out"></i>
+                        <span>Sign out</span>
+                    </button>
+                </form>
+            </div>
+            {% endif %}
 
             <div class="sidebar-status">
                 <div class="connection-indicator {{ 'connected' if openai_connected else '' }}">

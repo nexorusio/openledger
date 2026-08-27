@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en" data-bs-theme="light">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sign in | OpenLedger</title>
+    <meta name="description" content="Sign in to the private OpenLedger investigation workspace">
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='openledger-mark.svg') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="{{ url_for('static', filename='openledger.css') }}" rel="stylesheet">
+</head>
+
+<body class="login-body">
+    <main class="login-shell">
+        <section class="login-brand-panel" aria-label="OpenLedger introduction">
+            <div class="login-brand">
+                <span class="login-brand-mark">
+                    <img src="{{ url_for('static', filename='openledger-mark.svg') }}" alt="">
+                </span>
+                <div>
+                    <strong>OpenLedger</strong>
+                    <small>by Nexorus</small>
+                </div>
+            </div>
+            <div class="login-brand-copy">
+                <p class="login-eyebrow">Private intelligence workspace</p>
+                <h1>Trace public identity signals with evidence in view.</h1>
+                <p>
+                    Search authorized usernames, review supporting profiles, and create
+                    controlled AI-assisted assessments from one protected workspace.
+                </p>
+            </div>
+            <div class="login-trust-line">
+                <i data-lucide="shield-check"></i>
+                <span>Encrypted transport · protected runtime secrets · private reports</span>
+            </div>
+        </section>
+
+        <section class="login-form-panel">
+            <button type="button" class="icon-button login-theme-toggle" id="themeToggle"
+                    aria-label="Use dark theme" title="Toggle theme">
+                <i data-lucide="moon" class="theme-icon-dark"></i>
+                <i data-lucide="sun" class="theme-icon-light"></i>
+            </button>
+
+            <div class="login-form-wrap">
+                <div class="login-heading">
+                    <span class="login-mobile-mark">
+                        <img src="{{ url_for('static', filename='openledger-mark.svg') }}" alt="">
+                    </span>
+                    <p class="eyebrow">Authorized access only</p>
+                    <h2>Sign in to OpenLedger</h2>
+                    <p>Use the operator credentials configured for this server.</p>
+                </div>
+
+                {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                <div class="flash-stack" aria-live="polite">
+                    {% for category, message in messages %}
+                    <div class="alert alert-{{ category if category in ('success', 'danger', 'warning', 'info') else 'info' }}" role="alert">
+                        {{ message }}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% endwith %}
+
+                {% if not auth_configured %}
+                <div class="security-callout login-configuration-error">
+                    <i data-lucide="triangle-alert"></i>
+                    <span>Server authentication has not been initialized. Use the password-reset command from the Droplet console.</span>
+                </div>
+                {% endif %}
+
+                <form method="POST" action="{{ url_for('login') }}" class="login-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="next" value="{{ next_path }}">
+
+                    <div>
+                        <label for="login-username" class="form-label">Username</label>
+                        <input type="text" class="form-control" id="login-username" name="username"
+                               autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus>
+                    </div>
+
+                    <div>
+                        <label for="login-password" class="form-label">Password</label>
+                        <div class="secret-field">
+                            <input type="password" class="form-control" id="login-password" name="password"
+                                   autocomplete="current-password" required>
+                            <button type="button" class="secret-toggle" id="loginSecretToggle" aria-label="Show password">
+                                <i data-lucide="eye"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <button type="submit" class="btn btn-primary login-submit" {% if not auth_configured %}disabled{% endif %}>
+                        Sign in securely
+                        <i data-lucide="arrow-right"></i>
+                    </button>
+                </form>
+
+                <p class="login-legal">
+                    Access is restricted to authorized operators. Activity may contain sensitive investigative material.
+                </p>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script src="{{ url_for('static', filename='openledger.js') }}"></script>
+    <script>
+    document.addEventListener('DOMContentLoaded', function () {
+        const toggle = document.getElementById('loginSecretToggle');
+        const input = document.getElementById('login-password');
+        if (!toggle || !input) return;
+        toggle.addEventListener('click', function () {
+            const revealing = input.type === 'password';
+            input.type = revealing ? 'text' : 'password';
+            toggle.setAttribute('aria-label', revealing ? 'Hide password' : 'Show password');
+        });
+    });
+    </script>
+</body>
+
+</html>

@@ -82,8 +82,11 @@
                 <datalist id="settingsSiteOptions"></datalist>
                 <div class="selected-sites" id="settingsSelectedSites"></div>
 
-                <h3 class="settings-section-title">Tag filters</h3>
-                <p class="form-text mb-2">Select once to include, twice to exclude, and a third time to clear.</p>
+                <h3 class="settings-section-title">Source coverage filters</h3>
+                <p class="form-text mb-2">
+                    Select once to include, twice to exclude, and a third time to clear. Country codes describe a source's audience;
+                    they do not filter a person's location. Global platforms remain included with a selected country.
+                </p>
                 <div class="tag-cloud" id="settingsTagCloud">
                     {% for group, label in [('category', 'Categories'), ('country', 'Countries')] %}
                     <p class="tag-group-label">{{ label }}</p>
@@ -178,6 +181,15 @@
                             <div class="form-text">The connection test verifies access to this model without generating content.</div>
                         </div>
 
+                        <div class="form-check form-switch mt-3">
+                            <input type="checkbox" class="form-check-input" id="ai-web-enrichment"
+                                name="ai_web_enrichment" {{ 'checked' if web_settings.ai_web_enrichment }}>
+                            <label class="form-check-label" for="ai-web-enrichment">Enrich assessments with cited public-web research</label>
+                            <div class="form-text">
+                                Uses OpenAI web search to corroborate extracted identity evidence. Public sources are shown with the assessment.
+                            </div>
+                        </div>
+
                         <div class="connection-actions">
                             <button type="submit" class="btn btn-primary px-4">
                                 {{ 'Verify and save' if openai_connected else 'Connect and verify' }}
@@ -218,7 +230,7 @@
                 <div class="settings-grid">
                     <div class="security-callout">
                         <i data-lucide="key-round"></i>
-                        <span>Caddy Basic Authentication protects every browser route before traffic reaches OpenLedger.</span>
+                        <span>OpenLedger application login protects every workspace, report, settings, and analysis route.</span>
                     </div>
                     <div class="security-callout">
                         <i data-lucide="server"></i>
@@ -230,7 +242,7 @@
                     </div>
                     <div class="security-callout">
                         <i data-lucide="user-check"></i>
-                        <span>This configuration is intended for one operator or a small trusted team, not public multi-user access.</span>
+                        <span>This configuration uses one operator account. Change its password from Password & security.</span>
                     </div>
                 </div>
             </div>
