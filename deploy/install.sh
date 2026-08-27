@@ -61,8 +61,8 @@ if ! validate_domain "${DOMAIN}"; then
     exit 1
 fi
 
-read -r -p "OpenAI model [gpt-5.4]: " OPENAI_MODEL
-OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.4}"
+read -r -p "OpenAI model [gpt-5.6-terra]: " OPENAI_MODEL
+OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.6-terra}"
 if [[ ! "${OPENAI_MODEL}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
     echo "The model name contains unsupported characters."
     exit 1

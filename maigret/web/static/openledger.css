@@ -49,7 +49,7 @@ body {
     margin: 0;
     background: var(--ol-canvas);
     color: var(--ol-text);
-    font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-family: "Alliance No. 2", "Alliance No2", Arial, system-ui, sans-serif;
     font-size: 0.925rem;
 }
 
@@ -106,8 +106,9 @@ a {
 }
 
 .brand-mark {
-    width: 25px;
+    width: 32px;
     height: 25px;
+    object-fit: contain;
 }
 
 .brand-copy {
@@ -335,7 +336,7 @@ a {
 .topbar-left,
 .topbar-actions,
 .breadcrumb-line,
-.secure-label {
+.topbar-profile {
     display: flex;
     align-items: center;
 }
@@ -405,17 +406,50 @@ a {
     color: #fff;
 }
 
-.secure-label {
-    gap: 7px;
-    color: var(--ol-muted);
-    font-size: 0.75rem;
-    font-weight: 500;
+.topbar-profile {
+    gap: 8px;
+    color: var(--ol-text);
+    font-size: 0.76rem;
 }
 
-.secure-label svg {
+.topbar-avatar {
+    width: 34px;
+    height: 34px;
+    display: inline-grid;
+    place-items: center;
+    border: 1px solid color-mix(in srgb, var(--ol-accent) 36%, var(--ol-border));
+    border-radius: 10px;
+    background: var(--ol-accent-soft);
+    color: var(--ol-accent-strong);
+}
+
+.topbar-avatar svg,
+.topbar-logout svg {
     width: 16px;
     height: 16px;
-    color: var(--ol-success);
+}
+
+.topbar-logout-form {
+    margin: 0;
+}
+
+.topbar-logout {
+    min-height: 38px;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 12px;
+    border: 1px solid var(--ol-border);
+    border-radius: 10px;
+    background: var(--ol-surface);
+    color: var(--ol-muted);
+    font-size: 0.75rem;
+    font-weight: 600;
+}
+
+.topbar-logout:hover {
+    border-color: color-mix(in srgb, var(--ol-danger) 45%, var(--ol-border));
+    color: var(--ol-danger);
 }
 
 [data-bs-theme="light"] .theme-icon-light,
@@ -1515,7 +1549,7 @@ textarea.form-control {
     border-radius: 10px;
     background: var(--ol-surface-muted);
     color: var(--ol-text);
-    font-family: "Inter", sans-serif;
+    font-family: "Alliance No. 2", "Alliance No2", Arial, system-ui, sans-serif;
     font-size: 0.75rem;
     line-height: 1.65;
     overflow-wrap: anywhere;
@@ -1632,6 +1666,17 @@ textarea.form-control {
 
     .app-content {
         padding: 26px 18px 36px;
+    }
+
+    .topbar-profile strong,
+    .topbar-logout span {
+        display: none;
+    }
+
+    .topbar-logout {
+        width: 38px;
+        justify-content: center;
+        padding: 0;
     }
 
     .page-heading {

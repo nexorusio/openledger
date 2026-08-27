@@ -1149,7 +1149,7 @@ def test_load_settings_defaults_when_no_file(web_app):
     assert settings['top_sites'] == 500
     assert settings['tags'] == []
     assert settings['proxy'] == ''
-    assert settings['permute'] is False
+    assert settings['openai_model'] == 'gpt-5.6-terra'
 
 
 def test_save_settings_persists_to_file_and_reloads(web_app):
@@ -1176,7 +1176,6 @@ def test_settings_update_saves_and_redirects_to_settings(client, web_app):
             'excluded_tags': ['porn'],
             'site': 'GitHub, Reddit',
             'proxy': '127.0.0.1:1080',
-            'permute': 'on',
             'with_domains': 'on',
         },
     )
@@ -1190,7 +1189,6 @@ def test_settings_update_saves_and_redirects_to_settings(client, web_app):
     assert settings['excluded_tags'] == ['porn']
     assert settings['site_list'] == ['GitHub', 'Reddit']
     assert settings['proxy'] == '127.0.0.1:1080'
-    assert settings['permute'] is True
     assert settings['with_domains'] is True
     assert settings['disable_recursive_search'] is False
 
@@ -1249,11 +1247,19 @@ def test_api_sites_returns_site_list(client, web_app):
 
 
 def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
+    with client.session_transaction() as browser_session:
+        browser_session['username'] = 'operator'
     resp = client.get('/')
     body = resp.get_data(as_text=True)
     assert 'id="appSidebar"' in body
     assert 'href="/settings"' in body
     assert 'New investigation' in body
+    assert 'nexorus-mark.png' in body
+    assert 'Private workspace' not in body
+    assert 'OpenLedger by Nexorus' not in body
+    assert 'sidebar-status' not in body
+    assert 'class="topbar-profile"' in body
+    assert '>Logout<' in body
 
     resp = client.get('/settings')
     assert resp.status_code == 200
@@ -1261,6 +1267,31 @@ def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     assert 'name="timeout"' in body
     assert 'id="connections"' in body
     assert 'name="openai_api_key"' in body
+    assert '<select class="form-select" id="openai-model"' in body
+    assert 'value="gpt-5.6-sol"' in body
+    assert 'value="gpt-5.6-terra"' in body
+    assert 'value="gpt-5.6-luna"' in body
+    assert 'Username permutations' not in body
+
+
+def test_openai_settings_rejects_unlisted_model(client, web_app, monkeypatch):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'connection-csrf'
+
+    resp = client.post(
+        '/settings/openai',
+        data={
+            'csrf_token': 'connection-csrf',
+            'action': 'connect',
+            'openai_api_key': 'sk-must-not-be-stored',
+            'openai_model': 'arbitrary-model',
+        },
+        follow_redirects=True,
+    )
+
+    assert 'Select a supported OpenAI analysis model.' in resp.get_data(as_text=True)
+    assert not os.path.exists(web_app.app.config['OPENAI_API_KEY_FILE'])
 
 
 def test_settings_update_requires_csrf(client, web_app):

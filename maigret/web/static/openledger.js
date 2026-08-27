@@ -37,7 +37,7 @@
     }
 
     const storedTheme = localStorage.getItem('openledger-theme');
-    setTheme(storedTheme || 'light');
+    setTheme(storedTheme || 'dark');
 
     if (
         shell &&

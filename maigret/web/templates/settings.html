@@ -49,26 +49,25 @@
                 </div>
 
                 <h3 class="settings-section-title">Search behavior</h3>
+                <p class="form-text mb-3">These controls are passed directly to every new Maigret search. Detail extraction and linked-identifier discovery improve evidence quality but may take longer.</p>
                 <div class="settings-grid">
-                    <div class="form-check form-switch">
-                        <input type="checkbox" class="form-check-input" id="settings-permute" name="permute"
-                            {{ 'checked' if web_settings.permute }}>
-                        <label class="form-check-label" for="settings-permute">Username permutations</label>
-                    </div>
                     <div class="form-check form-switch">
                         <input type="checkbox" class="form-check-input" id="settings-with-domains" name="with_domains"
                             {{ 'checked' if web_settings.with_domains }}>
-                        <label class="form-check-label" for="settings-with-domains">Domain checks</label>
+                        <label class="form-check-label" for="settings-with-domains">Check related domains</label>
+                        <div class="form-text">Adds domain-name checks derived from the query.</div>
                     </div>
                     <div class="form-check form-switch">
                         <input type="checkbox" class="form-check-input" id="settings-recursive" name="disable_recursive_search"
                             {{ 'checked' if web_settings.disable_recursive_search }}>
-                        <label class="form-check-label" for="settings-recursive">Disable recursive search</label>
+                        <label class="form-check-label" for="settings-recursive">Disable linked-identifier discovery</label>
+                        <div class="form-text">Stops Maigret from following usernames or identifiers extracted from profiles.</div>
                     </div>
                     <div class="form-check form-switch">
                         <input type="checkbox" class="form-check-input" id="settings-extracting" name="disable_extracting"
                             {{ 'checked' if web_settings.disable_extracting }}>
-                        <label class="form-check-label" for="settings-extracting">Disable information extraction</label>
+                        <label class="form-check-label" for="settings-extracting">Disable profile-detail extraction</label>
+                        <div class="form-text">Not recommended for AI analysis; names, locations, biographies, and other evidence will be reduced.</div>
                     </div>
                 </div>
             </div>
@@ -176,9 +175,14 @@
 
                         <div>
                             <label for="openai-model" class="form-label">Analysis model</label>
-                            <input type="text" class="form-control" id="openai-model" name="openai_model"
-                                value="{{ web_settings.openai_model }}" maxlength="128" required>
-                            <div class="form-text">The connection test verifies access to this model without generating content.</div>
+                            <select class="form-select" id="openai-model" name="openai_model" required>
+                                {% for model in openai_analysis_models %}
+                                <option value="{{ model.id }}" {{ 'selected' if web_settings.openai_model == model.id }}>
+                                    {{ model.label }}
+                                </option>
+                                {% endfor %}
+                            </select>
+                            <div class="form-text">The connection test verifies account access without generating content. Availability depends on the OpenAI project and usage tier.</div>
                         </div>
 
                         <div class="form-check form-switch mt-3">

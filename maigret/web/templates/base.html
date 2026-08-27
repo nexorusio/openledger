@@ -1,15 +1,12 @@
 <!DOCTYPE html>
-<html lang="en" data-bs-theme="light">
+<html lang="en" data-bs-theme="dark">
 
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}OpenLedger | Username Intelligence{% endblock %}</title>
     <meta name="description" content="OpenLedger username intelligence workspace by Nexorus">
-    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='openledger-mark.svg') }}">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="icon" type="image/png" href="{{ url_for('static', filename='nexorus-favicon.png') }}">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="{{ url_for('static', filename='openledger.css') }}" rel="stylesheet">
     {% block head %}{% endblock %}
@@ -21,7 +18,7 @@
             <div class="sidebar-brand">
                 <a href="{{ url_for('index') }}" class="brand-link" aria-label="OpenLedger home">
                     <span class="brand-mark-wrap">
-                        <img src="{{ url_for('static', filename='openledger-mark.svg') }}" alt="" class="brand-mark">
+                        <img src="{{ url_for('static', filename='nexorus-mark.png') }}" alt="" class="brand-mark">
                     </span>
                     <span class="brand-copy">
                         <strong>OpenLedger</strong>
@@ -63,38 +60,6 @@
                 </a>
             </nav>
 
-            {% if current_user %}
-            <div class="sidebar-account">
-                <div class="account-identity">
-                    <span class="account-avatar"><i data-lucide="user-round"></i></span>
-                    <div>
-                        <small>Signed in as</small>
-                        <strong>{{ current_user }}</strong>
-                    </div>
-                </div>
-                <form method="POST" action="{{ url_for('logout') }}">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                    <button type="submit" class="sidebar-logout">
-                        <i data-lucide="log-out"></i>
-                        <span>Sign out</span>
-                    </button>
-                </form>
-            </div>
-            {% endif %}
-
-            <div class="sidebar-status">
-                <div class="connection-indicator {{ 'connected' if openai_connected else '' }}">
-                    <span class="status-dot"></span>
-                    <div class="connection-copy">
-                        <small>AI analysis</small>
-                        <strong>{{ 'Connected' if openai_connected else 'Not configured' }}</strong>
-                    </div>
-                </div>
-                <a href="{{ url_for('settings_update', section='connections') }}" class="sidebar-status-link">
-                    {{ 'Manage connection' if openai_connected else 'Connect OpenAI' }}
-                    <i data-lucide="arrow-up-right"></i>
-                </a>
-            </div>
         </aside>
 
         <button type="button" class="sidebar-backdrop" id="sidebarBackdrop" aria-label="Close navigation"></button>
@@ -112,14 +77,23 @@
                     </nav>
                 </div>
                 <div class="topbar-actions">
-                    <span class="secure-label d-none d-sm-flex">
-                        <i data-lucide="shield-check"></i>
-                        Private workspace
-                    </span>
                     <button type="button" class="icon-button" id="themeToggle" aria-label="Use dark theme" title="Toggle theme">
                         <i data-lucide="moon" class="theme-icon-dark"></i>
                         <i data-lucide="sun" class="theme-icon-light"></i>
                     </button>
+                    {% if current_user %}
+                    <span class="topbar-profile" aria-label="Signed in as {{ current_user }}">
+                        <span class="topbar-avatar"><i data-lucide="user-round"></i></span>
+                        <strong>{{ current_user }}</strong>
+                    </span>
+                    <form method="POST" action="{{ url_for('logout') }}" class="topbar-logout-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="topbar-logout" title="Sign out">
+                            <i data-lucide="log-out"></i>
+                            <span>Logout</span>
+                        </button>
+                    </form>
+                    {% endif %}
                 </div>
             </header>
 
@@ -139,13 +113,6 @@
                 {% block content %}{% endblock %}
             </main>
 
-            <footer class="app-footer">
-                <span>OpenLedger by Nexorus</span>
-                <span class="footer-separator">&middot;</span>
-                <span>Powered by <a href="https://github.com/soxoj/maigret" target="_blank" rel="noopener">Maigret</a></span>
-                <span class="footer-separator">&middot;</span>
-                <a href="https://github.com/soxoj/maigret/blob/main/LICENSE" target="_blank" rel="noopener">MIT License</a>
-            </footer>
         </div>
     </div>
 

@@ -179,15 +179,41 @@ DEFAULT_SETTINGS = {
     'proxy': '',
     'tor_proxy': '',
     'i2p_proxy': '',
-    'permute': False,
     'disable_recursive_search': False,
     'disable_extracting': False,
     'with_domains': False,
-    'openai_model': 'gpt-5.4',
+    'openai_model': 'gpt-5.6-terra',
     'ai_web_enrichment': True,
 }
 
-OPENAI_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
+OPENAI_ANALYSIS_MODELS = (
+    {
+        'id': 'gpt-5.6-sol',
+        'label': 'GPT-5.6 Sol — highest quality',
+        'description': 'Flagship model for complex professional analysis.',
+    },
+    {
+        'id': 'gpt-5.6-terra',
+        'label': 'GPT-5.6 Terra — balanced (recommended)',
+        'description': 'Balances intelligence and cost for routine assessments.',
+    },
+    {
+        'id': 'gpt-5.6-luna',
+        'label': 'GPT-5.6 Luna — lowest cost',
+        'description': 'Optimized for cost-sensitive, high-volume workloads.',
+    },
+    {
+        'id': 'gpt-5.5',
+        'label': 'GPT-5.5 — compatibility',
+        'description': 'Keeps existing deployments on the prior frontier family.',
+    },
+    {
+        'id': 'gpt-5.4',
+        'label': 'GPT-5.4 — compatibility',
+        'description': 'Keeps the previously configured OpenLedger model available.',
+    },
+)
+OPENAI_ANALYSIS_MODEL_IDS = {model['id'] for model in OPENAI_ANALYSIS_MODELS}
 AUTH_USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
 SESSION_KEY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_FOLDER_PATTERN = re.compile(r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
@@ -477,11 +503,12 @@ def parse_settings_form(form):
         'proxy': form.get('proxy', '').strip(),
         'tor_proxy': form.get('tor_proxy', '').strip(),
         'i2p_proxy': form.get('i2p_proxy', '').strip(),
-        'permute': 'permute' in form,
         'disable_recursive_search': 'disable_recursive_search' in form,
         'disable_extracting': 'disable_extracting' in form,
         'with_domains': 'with_domains' in form,
-        'openai_model': current_settings.get('openai_model', 'gpt-5.4'),
+        'openai_model': current_settings.get(
+            'openai_model', DEFAULT_SETTINGS['openai_model']
+        ),
         'ai_web_enrichment': 'ai_web_enrichment' in form,
     }
 
@@ -493,6 +520,7 @@ def inject_settings():
         'openai_connected': bool(get_openai_api_key()),
         'csrf_token': get_csrf_token(),
         'current_user': session.get('username'),
+        'openai_analysis_models': OPENAI_ANALYSIS_MODELS,
     }
 
 
@@ -1292,7 +1320,6 @@ def parse_search_options(form):
         'proxy': settings['proxy'] or None,
         'tor_proxy': settings['tor_proxy'] or None,
         'i2p_proxy': settings['i2p_proxy'] or None,
-        'permute': settings['permute'],
         'tags': settings['tags'],
         'excluded_tags': settings['excluded_tags'],
         'site_list': settings['site_list'],
@@ -1496,8 +1523,8 @@ def openai_settings_update():
         return redirect(url_for('settings_update', section='connections'))
 
     model = request.form.get('openai_model', '').strip()
-    if not OPENAI_MODEL_PATTERN.fullmatch(model):
-        flash('Enter a valid OpenAI model ID.', 'danger')
+    if model not in OPENAI_ANALYSIS_MODEL_IDS:
+        flash('Select a supported OpenAI analysis model.', 'danger')
         return redirect(url_for('settings_update', section='connections'))
 
     submitted_key = request.form.get('openai_api_key', '').strip()
@@ -1738,7 +1765,8 @@ def analyze_session(session_id):
         markdown_report = build_ai_markdown(result_data)
         ai_settings = load_settings()
         model = ai_settings.get(
-            'openai_model', os.getenv('OPENAI_MODEL', 'gpt-5.4')
+            'openai_model',
+            os.getenv('OPENAI_MODEL', DEFAULT_SETTINGS['openai_model']),
         )
         api_base_url = os.getenv(
             'OPENAI_API_BASE_URL', 'https://api.openai.com/v1'
