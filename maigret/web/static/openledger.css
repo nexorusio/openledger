@@ -1,3 +1,11 @@
+@font-face {
+    font-family: "Alliance No. 2";
+    src: url("alliance-no2-regular.otf") format("opentype");
+    font-style: normal;
+    font-weight: 400;
+    font-display: swap;
+}
+
 :root {
     --ol-accent: #0f8b8d;
     --ol-accent-strong: #087274;

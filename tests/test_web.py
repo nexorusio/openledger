@@ -1273,6 +1273,10 @@ def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     assert 'value="gpt-5.6-luna"' in body
     assert 'Username permutations' not in body
 
+    font_response = client.get('/static/alliance-no2-regular.otf')
+    assert font_response.status_code == 200
+    assert font_response.data.startswith(b'OTTO')
+
 
 def test_openai_settings_rejects_unlisted_model(client, web_app, monkeypatch):
     monkeypatch.delenv('OPENAI_API_KEY', raising=False)
