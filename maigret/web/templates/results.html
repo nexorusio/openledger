@@ -1,229 +1,202 @@
 {% extends "base.html" %}
+
+{% block title %}Investigation Results | OpenLedger{% endblock %}
+{% block breadcrumb %}Investigation results{% endblock %}
+
 {% block content %}
-<style>
-    .tag-badge {
-       background-color: #214e7b;
-       padding: 2px 8px;
-       border-radius: 12px;
-       font-size: 14px;
-       display: inline-flex;
-       align-items: center;
-       gap: 5px;
-       margin: 2px;
-       color: white;
-    }
-    
-    .profile-list {
-       list-style: none;
-       padding: 0;
-    }
-    
-    .profile-item {
-       margin-bottom: 10px;
-       padding: 10px;
-       display: flex;
-       justify-content: space-between;
-       align-items: center;
-       border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    
-    .profile-link {
-       display: flex;
-       align-items: center;
-       gap: 8px;
-    }
-    
-    .favicon {
-       width: 16px;
-       height: 16px;
-    }
-    
-    .tag-container {
-       display: flex;
-       flex-wrap: wrap;
-       gap: 5px;
-       justify-content: flex-end;
-    }
-    
-    .report-container {
-       margin-bottom: 1rem;
-    }
-    
-    .report-header {
-       cursor: pointer;
-       padding: 1rem;
-       background: rgba(255, 255, 255, 0.05);
-       border-radius: 4px;
-       margin-bottom: 0.5rem;
-    }
-    
-    .report-content {
-       display: none;
-    }
-    
-    .report-content.show {
-       display: block;
-    }
-    
-    .chevron::after {
-       content: '▼';
-       margin-left: 8px;
-       transition: transform 0.2s;
-    }
-    
-    .chevron.collapsed::after {
-       transform: rotate(-90deg);
-    }
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Completed investigation</p>
+        <h1>Investigation results</h1>
+        <p class="page-description">Review the relationship graph, claimed profiles, reports, and optional AI assessment.</p>
+    </div>
+    <a href="{{ url_for('index') }}" class="btn btn-primary px-4">New investigation</a>
+</section>
 
-    .ai-analysis-card {
-       border: 1px solid rgba(47, 128, 237, 0.45);
-       background: rgba(47, 128, 237, 0.08);
-       border-radius: 8px;
-       padding: 1.25rem;
-       margin: 1.5rem 0;
-    }
+<section class="metric-grid" aria-label="Investigation summary">
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="users"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Usernames investigated</span>
+            <strong class="metric-value">{{ usernames | length }}</strong>
+            <small class="metric-detail">{{ usernames | join(', ') }}</small>
+        </div>
+    </article>
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="circle-check-big"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Claimed profiles</span>
+            <strong class="metric-value">{{ found_count }}</strong>
+            <small class="metric-detail">Leads requiring independent verification</small>
+        </div>
+    </article>
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="sparkles"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">AI assessment</span>
+            <strong class="metric-value">{{ 'Available' if ai_enabled else 'Not configured' }}</strong>
+            <small class="metric-detail">Generated only when requested</small>
+        </div>
+    </article>
+</section>
 
-    .ai-analysis-output {
-       white-space: pre-wrap;
-       overflow-wrap: anywhere;
-       max-height: 640px;
-       overflow-y: auto;
-       background: rgba(0, 0, 0, 0.18);
-       border-radius: 6px;
-       padding: 1rem;
-       margin-top: 1rem;
-    }
-    </style>
+<div class="results-grid">
+    {% if graph_file %}
+    <section class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Relationship graph</h2>
+                <p>Combined links between investigated usernames and discovered public profiles.</p>
+            </div>
+            <span class="badge-soft"><i data-lucide="network"></i> Interactive</span>
+        </header>
+        <div class="panel-body p-0">
+            <iframe src="{{ url_for('download_report', filename=graph_file) }}"
+                title="OpenLedger combined relationship graph"
+                style="width:100%; height:620px; border:0;"></iframe>
+        </div>
+    </section>
+    {% endif %}
 
-    <div class="form-container">
-        <h1 class="mb-4">Search Results</h1>
-
-        <p>The search has completed. <a href="{{ url_for('index')}}">Back to start.</a></p>
-     
-        {% if graph_file %}
-        <h3>Combined Graph</h3>
-        <iframe src="{{ url_for('download_report', filename=graph_file) }}" style="width:100%; height:600px; border:none;"></iframe>
-        {% endif %}
-
-        <section class="ai-analysis-card" aria-labelledby="ai-analysis-heading">
-            <h3 id="ai-analysis-heading">AI Investigation Analysis</h3>
-            <p class="text-muted">
-                Generate a server-side analytical summary of the claimed profiles.
+    <section class="panel-card ai-analysis-card" aria-labelledby="ai-analysis-heading">
+        <header class="panel-header">
+            <div>
+                <h2 id="ai-analysis-heading">AI investigation assessment</h2>
+                <p>Generate a server-side analytical summary of the claimed profiles.</p>
+            </div>
+            <span class="badge-soft {{ 'success' if ai_enabled else 'warning' }}">
+                {{ 'Connected' if ai_enabled else 'Connection required' }}
+            </span>
+        </header>
+        <div class="panel-body">
+            <p class="page-description mt-0">
                 Treat the output as investigative assistance, not verified identity evidence.
+                OpenLedger sends only the normalized report data when you request analysis.
             </p>
             {% if ai_enabled %}
-            <button type="button" class="btn btn-primary" id="generateAiAnalysis">
-                Analyze with AI
-            </button>
-            <span class="ms-2 text-muted" id="aiAnalysisStatus" role="status"></span>
+            <div class="d-flex align-items-center flex-wrap gap-2 mt-3">
+                <button type="button" class="btn btn-primary" id="generateAiAnalysis">Analyze with AI</button>
+                <span class="form-text" id="aiAnalysisStatus" role="status"></span>
+            </div>
             <pre class="ai-analysis-output d-none" id="aiAnalysisOutput"></pre>
             <a class="btn btn-sm btn-outline-secondary mt-3 d-none"
                id="downloadAiAnalysis"
                href="{{ url_for('download_report', filename=session_id ~ '/ai_analysis.md') }}"
-               target="_blank"
-               rel="noopener">Download AI analysis</a>
+               target="_blank" rel="noopener">Download AI assessment</a>
             {% else %}
-            <div class="alert alert-warning mb-0">
-                AI analysis is not configured. Add OPENAI_API_KEY to the protected
-                server environment and recreate the application container.
+            <div class="security-callout mt-3">
+                <i data-lucide="plug-zap"></i>
+                <span>
+                    OpenAI is not connected. Configure the protected server connection in
+                    <a href="{{ url_for('settings_update', section='connections') }}">Settings</a>.
+                </span>
             </div>
             {% endif %}
-        </section>
-     
-        <hr>
-     
-        {% if individual_reports %}
-        <h3>Individual Reports</h3>
-        <div class="reports-list">
-            {% for report in individual_reports %}
-            <div class="report-container">
-                <div class="report-header" onclick="toggleReport(this)" data-target="report-{{ loop.index }}">
-                    <h5 class="mb-0 d-flex align-items-center">
-                        <span>{{ report.username }}</span>
-                        <span class="chevron"></span>
-                    </h5>
-                </div>
-                <div id="report-{{ loop.index }}" class="report-content">
-                    <p>
-                        <a href="{{ url_for('download_report', filename=report.csv_file) }}" target="_blank" rel="noopener">CSV Report</a> |
-                        <a href="{{ url_for('download_report', filename=report.json_file) }}" target="_blank" rel="noopener">JSON Report</a> |
-                        <a href="{{ url_for('download_report', filename=report.pdf_file) }}" target="_blank" rel="noopener">PDF Report</a> |
-                        <a href="{{ url_for('download_report', filename=report.html_file) }}" target="_blank" rel="noopener">HTML Report</a>
-                    </p>
-                    {% if report.claimed_profiles %}
-                    <strong>Claimed Profiles:</strong>
-                    <ul class="profile-list">
-                        {% for profile in report.claimed_profiles %}
-                        <li class="profile-item">
-                            <div class="profile-link">
-                                <img class="favicon" src="https://www.google.com/s2/favicons?domain={{ profile.url }}" onerror="this.style.display='none'" alt="">
-                                <a href="{{ profile.url }}" target="_blank">{{ profile.site_name }}</a>
-                            </div>
-                            {% if profile.tags %}
-                            <div class="tag-container">
-                                {% for tag in profile.tags %}
-                                <span class="tag-badge">{{ tag }}</span>
-                                {% endfor %}
-                            </div>
-                            {% endif %}
-                        </li>
-                        {% endfor %}
-                    </ul>
-                    {% else %}
-                    <p>No claimed profiles found.</p>
-                    {% endif %}
-                </div>
-            </div>
-            {% endfor %}
         </div>
-        {% else %}
-        <p>No individual reports available.</p>
-        {% endif %}
-     </div>
-     
-     <script>
-     function toggleReport(header) {
-        const reportId = header.getAttribute('data-target');
-        const content = document.getElementById(reportId);
-        content.classList.toggle('show');
-        header.querySelector('.chevron').classList.toggle('collapsed');
-     }
+    </section>
 
-     const aiButton = document.getElementById('generateAiAnalysis');
-     if (aiButton) {
-        aiButton.addEventListener('click', async function () {
-            const status = document.getElementById('aiAnalysisStatus');
-            const output = document.getElementById('aiAnalysisOutput');
-            const download = document.getElementById('downloadAiAnalysis');
-            aiButton.disabled = true;
-            status.textContent = 'Generating analysis…';
+    <section class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Individual reports</h2>
+                <p>Open a username to review claimed profiles and download its report files.</p>
+            </div>
+            <span class="badge-soft">{{ individual_reports | length }} report{{ '' if individual_reports | length == 1 else 's' }}</span>
+        </header>
+        <div class="panel-body">
+            {% if individual_reports %}
+            <div class="reports-list">
+                {% for report in individual_reports %}
+                <article class="report-container">
+                    <button type="button" class="report-header w-100 border-0 text-start"
+                        onclick="toggleReport(this)" data-target="report-{{ loop.index }}" aria-expanded="false">
+                        <strong>{{ report.username }}</strong>
+                        <span class="chevron collapsed" aria-hidden="true"></span>
+                    </button>
+                    <div id="report-{{ loop.index }}" class="report-content">
+                        <div class="d-flex flex-wrap gap-2 mb-3">
+                            <a href="{{ url_for('download_report', filename=report.csv_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">CSV Report</a>
+                            <a href="{{ url_for('download_report', filename=report.json_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">JSON Report</a>
+                            <a href="{{ url_for('download_report', filename=report.pdf_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">PDF Report</a>
+                            <a href="{{ url_for('download_report', filename=report.html_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">HTML Report</a>
+                        </div>
+                        {% if report.claimed_profiles %}
+                        <p class="form-label mb-0">Claimed profiles</p>
+                        <ul class="profile-list">
+                            {% for profile in report.claimed_profiles %}
+                            <li class="profile-item">
+                                <div class="profile-link">
+                                    <img class="favicon" src="https://www.google.com/s2/favicons?domain={{ profile.url }}"
+                                        onerror="this.style.display='none'" alt="">
+                                    <a href="{{ profile.url }}" target="_blank" rel="noopener">{{ profile.site_name }}</a>
+                                </div>
+                                {% if profile.tags %}
+                                <div class="tag-container">
+                                    {% for tag in profile.tags %}<span class="tag-badge">{{ tag }}</span>{% endfor %}
+                                </div>
+                                {% endif %}
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% else %}
+                        <p class="form-text mb-0">No claimed profiles found for this username.</p>
+                        {% endif %}
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <div class="empty-state py-4">
+                <h2>No individual reports available</h2>
+            </div>
+            {% endif %}
+        </div>
+    </section>
+</div>
+{% endblock %}
 
-            try {
-                const response = await fetch(
-                    {{ url_for('analyze_session', session_id=session_id) | tojson }},
-                    {
-                        method: 'POST',
-                        headers: {
-                            'X-OpenLedger-CSRF': {{ csrf_token | tojson }}
-                        }
-                    }
-                );
-                const payload = await response.json();
-                if (!response.ok) {
-                    throw new Error(payload.error || 'Analysis request failed.');
+{% block scripts %}
+<script>
+function toggleReport(header) {
+    const reportId = header.getAttribute('data-target');
+    const content = document.getElementById(reportId);
+    const opening = !content.classList.contains('show');
+    content.classList.toggle('show', opening);
+    header.querySelector('.chevron').classList.toggle('collapsed', !opening);
+    header.setAttribute('aria-expanded', String(opening));
+}
+
+const aiButton = document.getElementById('generateAiAnalysis');
+if (aiButton) {
+    aiButton.addEventListener('click', async function () {
+        const status = document.getElementById('aiAnalysisStatus');
+        const output = document.getElementById('aiAnalysisOutput');
+        const download = document.getElementById('downloadAiAnalysis');
+        aiButton.disabled = true;
+        status.textContent = 'Generating assessment…';
+
+        try {
+            const response = await fetch(
+                {{ url_for('analyze_session', session_id=session_id) | tojson }},
+                {
+                    method: 'POST',
+                    headers: { 'X-OpenLedger-CSRF': {{ csrf_token | tojson }} }
                 }
-                output.textContent = payload.analysis;
-                output.classList.remove('d-none');
-                download.classList.remove('d-none');
-                status.textContent = payload.cached
-                    ? 'Loaded saved analysis.'
-                    : 'Analysis completed and saved.';
-            } catch (error) {
-                status.textContent = error.message;
-            } finally {
-                aiButton.disabled = false;
-            }
-        });
-     }
-     </script>
+            );
+            const payload = await response.json();
+            if (!response.ok) throw new Error(payload.error || 'Analysis request failed.');
+            output.textContent = payload.analysis;
+            output.classList.remove('d-none');
+            download.classList.remove('d-none');
+            status.textContent = payload.cached
+                ? 'Loaded the saved assessment.'
+                : 'Assessment completed and saved.';
+        } catch (error) {
+            status.textContent = error.message;
+        } finally {
+            aiButton.disabled = false;
+        }
+    });
+}
+</script>
 {% endblock %}

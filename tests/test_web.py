@@ -42,6 +42,9 @@ def web_app(tmp_path):
     web_app_module.app.config['REPORTS_FOLDER'] = str(tmp_path)
     web_app_module.app.config['MAIGRET_DB_FILE'] = TEST_DB
     web_app_module.app.config['SETTINGS_FILE'] = str(tmp_path / 'web_settings.json')
+    web_app_module.app.config['OPENAI_API_KEY_FILE'] = str(
+        tmp_path / 'secrets' / 'openai_api_key'
+    )
 
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
@@ -492,7 +495,7 @@ def test_live_start_empty_username_redirects_to_index(client, web_app):
 def test_live_start_redirects_to_dedicated_live_page(client, web_app, monkeypatch):
     """POST /live starts a job on a NEW page (/live/<job_id>), not inline on
     the index page. That page must show the graph + a Stop button, and must
-    NOT unconditionally redirect away on completion (only via the Analyze
+    NOT unconditionally redirect away on completion (only via the Open reports
     button — see test_live_scan_done_event_offers_redirect_not_auto_navigation)."""
 
     async def fake_search(*args, **kwargs):
@@ -512,7 +515,8 @@ def test_live_start_redirects_to_dedicated_live_page(client, web_app, monkeypatc
     body = page.get_data(as_text=True)
     assert 'id="graph"' in body
     assert 'id="stopBtn"' in body
-    assert 'id="analyzeBtn"' in body
+    assert 'id="reportsBtn"' in body
+    assert 'Open reports' in body
     assert job_id in body
     # No unconditional navigation on completion anymore.
     assert 'window.location.href = ev.redirect' not in body
@@ -528,9 +532,9 @@ def test_live_results_unknown_job_redirects_to_index(client, web_app):
     assert resp.location.endswith('/')
 
 
-def test_live_results_for_finished_job_skips_sse_and_shows_analyze(client, web_app):
+def test_live_results_for_finished_job_skips_sse_and_shows_reports(client, web_app):
     """If the job already finished (e.g. the user reloaded the Live Results
-    page), the page must offer the Analyze redirect immediately instead of
+    page), the page must offer the Open reports redirect immediately instead of
     trying to reopen a dead SSE stream."""
     web_app.job_results['finishedjob'] = {
         'status': 'completed',
@@ -551,7 +555,7 @@ def test_live_scan_done_event_offers_redirect_not_auto_navigation(
     client, web_app, monkeypatch
 ):
     """The SSE 'done' payload still carries the redirect URL (consumed by the
-    Analyze button), but nothing server- or client-side forces navigation."""
+    Open reports button), but nothing server- or client-side forces navigation."""
 
     async def fake_search(*args, **kwargs):
         notify = kwargs['query_notify']
@@ -694,7 +698,7 @@ def test_real_report_generation_does_not_crash(client, web_app, monkeypatch):
 def test_history_empty_state(client, web_app):
     resp = client.get('/history')
     assert resp.status_code == 200
-    assert 'No searches have been run yet.' in resp.get_data(as_text=True)
+    assert 'No investigations yet' in resp.get_data(as_text=True)
 
 
 def test_history_link_present_on_every_page(client, web_app):
@@ -703,10 +707,10 @@ def test_history_link_present_on_every_page(client, web_app):
     assert 'href="/history"' in body
 
 
-def test_new_search_link_present_on_every_page(client, web_app):
+def test_new_investigation_link_present_on_every_page(client, web_app):
     resp = client.get('/history')
     body = resp.get_data(as_text=True)
-    assert 'New Search' in body
+    assert 'New investigation' in body
     assert 'href="/"' in body
 
 
@@ -739,7 +743,7 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
 
     assert '2026-07-28 09:00:00' in body
     assert 'bob' in body
-    assert 'failed' in body
+    assert 'Failed' in body
 
     # Newest run listed first.
     assert body.index('search_ts_completed') < body.index('bob')
@@ -832,10 +836,13 @@ def test_save_settings_persists_to_file_and_reloads(web_app):
     assert reloaded['proxy'] == '127.0.0.1:9999'
 
 
-def test_settings_update_saves_and_redirects_back(client, web_app):
+def test_settings_update_saves_and_redirects_to_settings(client, web_app):
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'settings-csrf'
     resp = client.post(
         '/settings',
         data={
+            'csrf_token': 'settings-csrf',
             'timeout': '15',
             'top_sites': '250',
             'tags': ['coding', 'tech'],
@@ -845,10 +852,9 @@ def test_settings_update_saves_and_redirects_back(client, web_app):
             'permute': 'on',
             'with_domains': 'on',
         },
-        headers={'Referer': '/history'},
     )
     assert resp.status_code == 302
-    assert resp.headers['Location'] == '/history'
+    assert resp.headers['Location'] == '/settings'
 
     settings = web_app.load_settings()
     assert settings['timeout'] == 15
@@ -863,7 +869,16 @@ def test_settings_update_saves_and_redirects_back(client, web_app):
 
 
 def test_settings_update_invalid_timeout_falls_back_to_default(client, web_app):
-    client.post('/settings', data={'timeout': 'not-a-number', 'top_sites': 'nope'})
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'settings-csrf'
+    client.post(
+        '/settings',
+        data={
+            'csrf_token': 'settings-csrf',
+            'timeout': 'not-a-number',
+            'top_sites': 'nope',
+        },
+    )
     settings = web_app.load_settings()
     assert settings['timeout'] == web_app.DEFAULT_SETTINGS['timeout']
     assert settings['top_sites'] == web_app.DEFAULT_SETTINGS['top_sites']
@@ -906,12 +921,110 @@ def test_api_sites_returns_site_list(client, web_app):
     assert isinstance(data['sites'], list)
 
 
-def test_settings_modal_present_on_every_page(client, web_app):
+def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     resp = client.get('/')
     body = resp.get_data(as_text=True)
-    assert 'id="settingsModal"' in body
-    assert 'name="timeout"' in body
+    assert 'id="appSidebar"' in body
+    assert 'href="/settings"' in body
+    assert 'New investigation' in body
 
-    resp = client.get('/history')
+    resp = client.get('/settings')
+    assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'id="settingsModal"' in body
+    assert 'name="timeout"' in body
+    assert 'id="connections"' in body
+    assert 'name="openai_api_key"' in body
+
+
+def test_settings_update_requires_csrf(client, web_app):
+    resp = client.post(
+        '/settings',
+        data={'timeout': '99', 'top_sites': '100'},
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers['Location'] == '/settings'
+    assert web_app.load_settings()['timeout'] == web_app.DEFAULT_SETTINGS['timeout']
+
+
+def test_openai_connection_is_verified_and_saved_server_side(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    captured = {}
+
+    async def fake_validation(**kwargs):
+        captured.update(kwargs)
+        return kwargs['model']
+
+    monkeypatch.setattr(web_app, 'validate_openai_connection', fake_validation)
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'connection-csrf'
+
+    api_key = 'sk-proj-browser-submitted-secret'
+    resp = client.post(
+        '/settings/openai',
+        data={
+            'csrf_token': 'connection-csrf',
+            'action': 'connect',
+            'openai_api_key': api_key,
+            'openai_model': 'gpt-5.4',
+        },
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert 'OpenAI connected and verified.' in resp.get_data(as_text=True)
+    key_path = web_app.app.config['OPENAI_API_KEY_FILE']
+    with open(key_path, encoding='utf-8') as key_file:
+        assert key_file.read().strip() == api_key
+    assert os.stat(key_path).st_mode & 0o777 == 0o600
+    assert api_key not in resp.get_data(as_text=True)
+    assert web_app.load_settings()['openai_model'] == 'gpt-5.4'
+    assert captured['api_base_url'] == 'https://api.openai.com/v1'
+
+
+def test_failed_openai_verification_does_not_store_key(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+
+    async def fake_validation(**kwargs):
+        raise RuntimeError('invalid key')
+
+    monkeypatch.setattr(web_app, 'validate_openai_connection', fake_validation)
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'connection-csrf'
+
+    resp = client.post(
+        '/settings/openai',
+        data={
+            'csrf_token': 'connection-csrf',
+            'action': 'connect',
+            'openai_api_key': 'sk-invalid',
+            'openai_model': 'gpt-5.4',
+        },
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert 'OpenAI verification failed.' in resp.get_data(as_text=True)
+    assert not os.path.exists(web_app.app.config['OPENAI_API_KEY_FILE'])
+
+def test_browser_managed_openai_connection_can_be_removed(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    web_app.save_openai_api_key('sk-proj-existing')
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'connection-csrf'
+
+    resp = client.post(
+        '/settings/openai',
+        data={'csrf_token': 'connection-csrf', 'action': 'disconnect'},
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert 'OpenAI connection removed.' in resp.get_data(as_text=True)
+    assert not os.path.exists(web_app.app.config['OPENAI_API_KEY_FILE'])

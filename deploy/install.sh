@@ -12,8 +12,7 @@ COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
 DEFAULT_DOMAIN="openledger.nexorus.io"
 
 AUTH_PASSWORD=""
-OPENAI_API_KEY_INPUT=""
-trap 'unset AUTH_PASSWORD OPENAI_API_KEY_INPUT' EXIT
+trap 'unset AUTH_PASSWORD' EXIT
 
 install_docker() {
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -85,12 +84,6 @@ if [[ "${AUTH_PASSWORD}" != "${AUTH_PASSWORD_CONFIRM}" ]]; then
 fi
 unset AUTH_PASSWORD_CONFIRM
 
-read -r -s -p "OpenAI API key (leave empty to configure later): " OPENAI_API_KEY_INPUT
-echo
-if [[ "${OPENAI_API_KEY_INPUT}" == *"'"* ]]; then
-    echo "The API key contains an unsupported quote character."
-    exit 1
-fi
 read -r -p "OpenAI model [gpt-5.4]: " OPENAI_MODEL
 OPENAI_MODEL="${OPENAI_MODEL:-gpt-5.4}"
 if [[ ! "${OPENAI_MODEL}" =~ ^[A-Za-z0-9._:-]+$ ]]; then
@@ -103,9 +96,13 @@ install_docker
 
 echo "Preparing persistent runtime directories..."
 install -d -m 0750 "${REPO_ROOT}/runtime/reports"
+install -d -m 0700 "${REPO_ROOT}/runtime/secrets"
 if [[ ! -f "${REPO_ROOT}/runtime/web_settings.json" ]]; then
     install -m 0600 /dev/null "${REPO_ROOT}/runtime/web_settings.json"
     printf '{}\n' > "${REPO_ROOT}/runtime/web_settings.json"
+fi
+if [[ ! -f "${REPO_ROOT}/runtime/secrets/openai_api_key" ]]; then
+    install -m 0600 /dev/null "${REPO_ROOT}/runtime/secrets/openai_api_key"
 fi
 
 echo "Generating protected credentials..."
@@ -119,12 +116,11 @@ umask 077
     printf "AUTH_USER='%s'\n" "${AUTH_USER}"
     printf "AUTH_PASSWORD_HASH='%s'\n" "${AUTH_PASSWORD_HASH}"
     printf "FLASK_SECRET_KEY='%s'\n" "${FLASK_SECRET_KEY}"
-    printf "OPENAI_API_KEY='%s'\n" "${OPENAI_API_KEY_INPUT}"
     printf "OPENAI_MODEL='%s'\n" "${OPENAI_MODEL}"
     printf "OPENAI_API_BASE_URL='https://api.openai.com/v1'\n"
 } > "${ENV_FILE}"
 chmod 0600 "${ENV_FILE}"
-unset OPENAI_API_KEY_INPUT AUTH_PASSWORD_HASH FLASK_SECRET_KEY
+unset AUTH_PASSWORD_HASH FLASK_SECRET_KEY
 
 echo "Validating the Compose configuration..."
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" config --quiet
@@ -155,3 +151,4 @@ echo
 echo "OpenLedger is running."
 echo "Open https://${DOMAIN} after DNS resolves and ports 80/443 are reachable."
 echo "The login username is ${AUTH_USER}. The password was not written to terminal output."
+echo "Connect OpenAI from Settings after signing in."

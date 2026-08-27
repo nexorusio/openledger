@@ -1,56 +1,142 @@
 {% extends "base.html" %}
 
+{% block breadcrumb %}New investigation{% endblock %}
+
 {% block content %}
-<style>
-    .main-search-section {
-        background: rgba(255, 255, 255, 0.03);
-        padding: 2rem;
-        border-radius: 8px;
-        margin-bottom: 2rem;
-    }
-
-    .search-button {
-        width: 100%;
-        padding: 1rem;
-        font-size: 1.2rem;
-        margin-top: 2rem;
-    }
-</style>
-
-<div class="form-container">
-    {% if error %}
-    <div class="alert alert-danger">{{ error }}</div>
-    {% endif %}
-
-    <div class="alert alert-secondary">
-        Use OpenLedger only for lawful, authorized investigations. Profile matches
-        are leads that require independent verification.
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Username intelligence</p>
+        <h1>Investigation workspace</h1>
+        <p class="page-description">
+            Discover a username's public footprint across the Maigret source network,
+            review claimed profiles, and generate a controlled AI-assisted assessment.
+        </p>
     </div>
+    <span class="badge-soft">
+        <i data-lucide="activity"></i>
+        Ready for investigation
+    </span>
+</section>
 
-    <form method="POST" action="{{ url_for('live_start') }}" class="mb-4">
-        <div class="main-search-section">
-            <div class="mb-4">
-                <label for="usernames" class="form-label h5">Usernames to investigate</label>
-                <textarea class="form-control" id="usernames" name="usernames" rows="3" required
-                    placeholder="Enter one or more usernames (separated by spaces or commas)..."></textarea>
+{% if error %}
+<div class="alert alert-danger">{{ error }}</div>
+{% endif %}
+
+<section class="metric-grid" aria-label="Workspace status">
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="database"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Fast-check coverage</span>
+            <strong class="metric-value">{{ web_settings.top_sites }} sites</strong>
+            <small class="metric-detail">Ranked sources from the active database</small>
+        </div>
+    </article>
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="workflow"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Investigation mode</span>
+            <strong class="metric-value">Live discovery</strong>
+            <small class="metric-detail">Progress and findings stream as they arrive</small>
+        </div>
+    </article>
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="sparkles"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">AI analysis</span>
+            <strong class="metric-value">{{ 'Connected' if openai_connected else 'Not configured' }}</strong>
+            <small class="metric-detail">
+                {% if openai_connected %}
+                Server-side connection is available
+                {% else %}
+                Configure OpenAI in Settings
+                {% endif %}
+            </small>
+        </div>
+    </article>
+</section>
+
+<section class="dashboard-grid">
+    <article class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Start a new investigation</h2>
+                <p>Enter one or more usernames and choose the source coverage.</p>
             </div>
+            <span class="badge-soft">Live</span>
+        </header>
+        <div class="panel-body">
+            <form method="POST" action="{{ url_for('live_start') }}">
+                <div class="mb-4">
+                    <label for="usernames" class="form-label">Usernames to investigate</label>
+                    <textarea class="form-control" id="usernames" name="usernames" rows="4" required
+                        autocomplete="off" spellcheck="false"
+                        placeholder="Enter usernames separated by spaces or commas"></textarea>
+                    <div class="form-text">Each username is processed independently. Do not enter passwords or private credentials.</div>
+                </div>
 
-            <div class="btn-group" role="group" aria-label="Search mode">
-                <input type="radio" class="btn-check" name="mode" id="mode-fast" value="fast" checked>
-                <label class="btn btn-outline-secondary" for="mode-fast">Fast check ({{ web_settings.top_sites }} sites)</label>
-                <input type="radio" class="btn-check" name="mode" id="mode-full" value="full">
-                <label class="btn btn-outline-secondary" for="mode-full">Full check</label>
+                <fieldset>
+                    <legend class="form-label mb-2">Source coverage</legend>
+                    <div class="mode-selector">
+                        <div class="mode-option">
+                            <input type="radio" name="mode" id="mode-fast" value="fast" checked>
+                            <label for="mode-fast">
+                                <strong>Fast check</strong>
+                                <small>Scan the top {{ web_settings.top_sites }} ranked sites</small>
+                            </label>
+                        </div>
+                        <div class="mode-option">
+                            <input type="radio" name="mode" id="mode-full" value="full">
+                            <label for="mode-full">
+                                <strong>Full check</strong>
+                                <small>Scan every enabled site; takes considerably longer</small>
+                            </label>
+                        </div>
+                    </div>
+                </fieldset>
+
+                <button type="submit" id="startBtn" class="btn btn-primary investigation-submit">
+                    Start investigation
+                </button>
+            </form>
+        </div>
+    </article>
+
+    <aside class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Investigation flow</h2>
+                <p>A controlled path from discovery to assessment.</p>
+            </div>
+        </header>
+        <div class="panel-body">
+            <ol class="guidance-list">
+                <li class="guidance-item">
+                    <span class="guidance-number">01</span>
+                    <div>
+                        <strong>Discover public profiles</strong>
+                        <p>OpenLedger checks the selected Maigret sources and streams claimed matches.</p>
+                    </div>
+                </li>
+                <li class="guidance-item">
+                    <span class="guidance-number">02</span>
+                    <div>
+                        <strong>Review supporting reports</strong>
+                        <p>Inspect the graph and downloadable report formats before drawing conclusions.</p>
+                    </div>
+                </li>
+                <li class="guidance-item">
+                    <span class="guidance-number">03</span>
+                    <div>
+                        <strong>Generate an AI assessment</strong>
+                        <p>When connected, OpenAI summarizes the collected leads from the server.</p>
+                    </div>
+                </li>
+            </ol>
+            <div class="legal-note">
+                <i data-lucide="scale"></i>
+                <span>Use OpenLedger only for lawful, authorized investigations. Matches are leads and require independent verification.</span>
             </div>
         </div>
-
-        <p class="text-muted">
-            Filters, proxies and advanced options now live in
-            <a href="#" data-bs-toggle="modal" data-bs-target="#settingsModal">Settings</a> (&#9881; top right).
-        </p>
-
-        <button type="submit" id="startBtn" class="btn btn-primary search-button">
-            Start Investigation
-        </button>
-    </form>
-</div>
+    </aside>
+</section>
 {% endblock %}

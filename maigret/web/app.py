@@ -15,6 +15,7 @@ import os
 import asyncio
 import json
 import queue
+import re
 import secrets
 import uuid
 from datetime import datetime
@@ -22,7 +23,7 @@ from threading import Lock, Thread
 from typing import Any, Dict
 import maigret
 import maigret.settings
-from maigret.ai import get_ai_analysis_text
+from maigret.ai import get_ai_analysis_text, validate_openai_connection
 from maigret.checking import build_cloudflare_bypass_config
 from maigret.result import MaigretCheckStatus
 from maigret.sites import MaigretDatabase
@@ -138,8 +139,12 @@ app.config["COOKIES_FILE"] = "cookies.txt"
 app.config["UPLOAD_FOLDER"] = 'uploads'
 app.config["REPORTS_FOLDER"] = os.path.abspath('/tmp/maigret_reports')
 app.config["SETTINGS_FILE"] = os.getenv("WEB_SETTINGS_FILE", "web_settings.json")
+app.config["OPENAI_API_KEY_FILE"] = os.getenv(
+    "OPENAI_API_KEY_FILE",
+    os.path.join("runtime", "secrets", "openai_api_key"),
+)
 
-# Search-wide defaults, editable from the Settings modal (base.html). Persisted
+# Search-wide defaults, editable from the Settings workspace. Persisted
 # to app.config["SETTINGS_FILE"] so they survive a process restart.
 DEFAULT_SETTINGS = {
     'timeout': 10,
@@ -154,7 +159,10 @@ DEFAULT_SETTINGS = {
     'disable_recursive_search': False,
     'disable_extracting': False,
     'with_domains': False,
+    'openai_model': 'gpt-5.4',
 }
+
+OPENAI_MODEL_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$')
 
 
 def load_settings():
@@ -174,7 +182,90 @@ def save_settings(settings):
         json.dump(settings, f, indent=2)
 
 
+def get_openai_api_key():
+    """Read the API key without exposing it through templates or settings JSON."""
+    key_path = app.config.get("OPENAI_API_KEY_FILE")
+    if key_path:
+        try:
+            with open(key_path, encoding='utf-8') as key_file:
+                key = key_file.read().strip()
+                if key:
+                    return key
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            logging.error("Failed to read the OpenAI key file: %s", exc)
+    return os.getenv('OPENAI_API_KEY', '').strip()
+
+
+def get_openai_key_source():
+    key_path = app.config.get("OPENAI_API_KEY_FILE")
+    if key_path:
+        try:
+            with open(key_path, encoding='utf-8') as key_file:
+                if key_file.read().strip():
+                    return 'protected file'
+        except (FileNotFoundError, OSError):
+            pass
+    if os.getenv('OPENAI_API_KEY', '').strip():
+        return 'environment'
+    return None
+
+
+def save_openai_api_key(api_key):
+    """Atomically store a key in the protected runtime mount with mode 600."""
+    key_path = app.config.get("OPENAI_API_KEY_FILE")
+    if not key_path:
+        raise RuntimeError('Server-side API key storage is not configured.')
+
+    key_path = os.path.abspath(key_path)
+    key_directory = os.path.dirname(key_path)
+    os.makedirs(key_directory, mode=0o700, exist_ok=True)
+    os.chmod(key_directory, 0o700)
+    temporary_path = f"{key_path}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as key_file:
+            key_file.write(api_key)
+            key_file.write('\n')
+            key_file.flush()
+            os.fsync(key_file.fileno())
+        os.replace(temporary_path, key_path)
+        os.chmod(key_path, 0o600)
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def remove_openai_api_key():
+    key_path = app.config.get("OPENAI_API_KEY_FILE")
+    if not key_path:
+        return False
+    try:
+        os.remove(key_path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def is_valid_csrf(provided_token):
+    expected_token = session.get('csrf_token')
+    return bool(
+        expected_token
+        and provided_token
+        and secrets.compare_digest(expected_token, provided_token)
+    )
+
+
 def parse_settings_form(form):
+    current_settings = load_settings()
     try:
         timeout = int(form.get('timeout'))
     except (TypeError, ValueError):
@@ -198,12 +289,41 @@ def parse_settings_form(form):
         'disable_recursive_search': 'disable_recursive_search' in form,
         'disable_extracting': 'disable_extracting' in form,
         'with_domains': 'with_domains' in form,
+        'openai_model': current_settings.get('openai_model', 'gpt-5.4'),
     }
 
 
 @app.context_processor
 def inject_settings():
-    return {'web_settings': load_settings()}
+    return {
+        'web_settings': load_settings(),
+        'openai_connected': bool(get_openai_api_key()),
+        'csrf_token': get_csrf_token(),
+    }
+
+
+def get_available_tags():
+    """Load current tags from Maigret's database for the Settings workspace."""
+    db = MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"])
+    values = {
+        tag
+        for site in db.sites
+        for tag in (getattr(site, 'tags', None) or [])
+        if tag
+    }
+    country_values = {'eu', 'global', 'uk'}
+    return [
+        {
+            'value': tag,
+            'label': tag.upper() if len(tag) == 2 else tag.replace('_', ' ').title(),
+            'group': (
+                'country'
+                if len(tag) == 2 or tag in country_values
+                else 'category'
+            ),
+        }
+        for tag in sorted(values)
+    ]
 
 
 def setup_logger(log_level, name):
@@ -620,7 +740,7 @@ def healthz():
 @app.route('/api/sites')
 def api_sites():
     """Site names/URLs for the Filters site-picker datalist, fetched lazily
-    from the Settings modal instead of loading the DB on every page render."""
+    from Settings instead of loading the DB on every page render."""
     db = MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"])
     site_options = []
     for site in db.sites:
@@ -630,11 +750,81 @@ def api_sites():
     return {'sites': sorted(set(site_options))}
 
 
-@app.route('/settings', methods=['POST'])
+@app.route('/settings', methods=['GET', 'POST'])
 def settings_update():
+    if request.method == 'GET':
+        return render_template(
+            'settings.html',
+            available_tags=get_available_tags(),
+            openai_key_source=get_openai_key_source(),
+        )
+
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your settings session expired. Please try again.', 'danger')
+        return redirect(url_for('settings_update'))
+
     save_settings(parse_settings_form(request.form))
     flash('Settings saved.', 'success')
-    return redirect(request.referrer or url_for('index'))
+    return redirect(url_for('settings_update'))
+
+
+@app.route('/settings/openai', methods=['POST'])
+def openai_settings_update():
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your settings session expired. Please try again.', 'danger')
+        return redirect(url_for('settings_update', section='connections'))
+
+    action = request.form.get('action', 'connect')
+    if action == 'disconnect':
+        if get_openai_key_source() == 'environment':
+            flash(
+                'This key is managed by the server environment and cannot be '
+                'removed from the browser.',
+                'warning',
+            )
+        elif remove_openai_api_key():
+            flash('OpenAI connection removed.', 'success')
+        else:
+            flash('No browser-managed OpenAI connection was configured.', 'info')
+        return redirect(url_for('settings_update', section='connections'))
+
+    model = request.form.get('openai_model', '').strip()
+    if not OPENAI_MODEL_PATTERN.fullmatch(model):
+        flash('Enter a valid OpenAI model ID.', 'danger')
+        return redirect(url_for('settings_update', section='connections'))
+
+    submitted_key = request.form.get('openai_api_key', '').strip()
+    candidate_key = submitted_key or get_openai_api_key()
+    if not candidate_key:
+        flash('Enter an OpenAI API key to connect.', 'danger')
+        return redirect(url_for('settings_update', section='connections'))
+
+    try:
+        confirmed_model = asyncio.run(
+            validate_openai_connection(
+                api_key=candidate_key,
+                model=model,
+                api_base_url=os.getenv(
+                    'OPENAI_API_BASE_URL', 'https://api.openai.com/v1'
+                ),
+            )
+        )
+    except Exception:
+        logging.exception('OpenAI connection verification failed')
+        flash(
+            'OpenAI verification failed. Check the API key, model access, and '
+            'server logs.',
+            'danger',
+        )
+        return redirect(url_for('settings_update', section='connections'))
+
+    if submitted_key:
+        save_openai_api_key(submitted_key)
+    settings = load_settings()
+    settings['openai_model'] = confirmed_model
+    save_settings(settings)
+    flash('OpenAI connected and verified.', 'success')
+    return redirect(url_for('settings_update', section='connections'))
 
 
 @app.route('/history')
@@ -745,25 +935,21 @@ def results(session_id):
         usernames=result_data['usernames'],
         graph_file=result_data['graph_file'],
         individual_reports=result_data['individual_reports'],
+        found_count=result_data.get('found_count', 0),
         timestamp=session_id.replace('search_', ''),
         session_id=session_id,
-        ai_enabled=bool(os.getenv('OPENAI_API_KEY')),
+        ai_enabled=bool(get_openai_api_key()),
         csrf_token=get_csrf_token(),
     )
 
 
 @app.route('/api/analysis/<session_id>', methods=['POST'])
 def analyze_session(session_id):
-    expected_token = session.get('csrf_token')
     provided_token = request.headers.get('X-OpenLedger-CSRF', '')
-    if (
-        not expected_token
-        or not provided_token
-        or not secrets.compare_digest(expected_token, provided_token)
-    ):
+    if not is_valid_csrf(provided_token):
         return {'error': 'Invalid request token. Refresh the results page.'}, 403
 
-    api_key = os.getenv('OPENAI_API_KEY')
+    api_key = get_openai_api_key()
     if not api_key:
         return {'error': 'AI analysis is not configured on the server.'}, 503
 
@@ -782,7 +968,9 @@ def analyze_session(session_id):
                 return {'analysis': analysis_file.read(), 'cached': True}
 
         markdown_report = build_ai_markdown(result_data)
-        model = os.getenv('OPENAI_MODEL', 'gpt-5.4')
+        model = load_settings().get(
+            'openai_model', os.getenv('OPENAI_MODEL', 'gpt-5.4')
+        )
         api_base_url = os.getenv(
             'OPENAI_API_BASE_URL', 'https://api.openai.com/v1'
         )

@@ -207,3 +207,29 @@ async def get_ai_analysis_text(
     if not isinstance(analysis, str) or not analysis.strip():
         raise RuntimeError("OpenAI API returned an empty analysis")
     return analysis.strip()
+
+async def validate_openai_connection(
+    api_key: str,
+    model: str,
+    api_base_url: str = "https://api.openai.com/v1",
+    timeout_seconds: int = 20,
+) -> str:
+    """Verify a server-side OpenAI key and model without generating content."""
+    url = f"{api_base_url.rstrip('/')}/models/{model}"
+    headers = {"Authorization": f"Bearer {api_key}"}
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.get(url, headers=headers) as resp:
+            await _check_response(resp)
+            try:
+                response_data = await resp.json()
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "OpenAI API returned an invalid model response"
+                ) from exc
+
+    model_id = response_data.get("id")
+    if not isinstance(model_id, str) or not model_id:
+        raise RuntimeError("OpenAI API did not confirm the requested model")
+    return model_id

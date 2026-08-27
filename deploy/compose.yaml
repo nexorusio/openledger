@@ -15,12 +15,13 @@ services:
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?FLASK_SECRET_KEY is required}
       SESSION_COOKIE_SECURE: "true"
       WEB_SETTINGS_FILE: /app/web_settings.json
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_API_KEY_FILE: /app/runtime/secrets/openai_api_key
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
     volumes:
       - ../runtime/reports:/tmp/maigret_reports
       - ../runtime/web_settings.json:/app/web_settings.json
+      - ../runtime/secrets:/app/runtime/secrets
     expose:
       - "5000"
     healthcheck:
