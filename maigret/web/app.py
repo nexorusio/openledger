@@ -6,6 +6,7 @@ from flask import (
     Response,
     flash,
     redirect,
+    session,
     url_for,
 )
 from werkzeug.exceptions import NotFound
@@ -14,12 +15,14 @@ import os
 import asyncio
 import json
 import queue
+import secrets
 import uuid
 from datetime import datetime
-from threading import Thread
+from threading import Lock, Thread
 from typing import Any, Dict
 import maigret
 import maigret.settings
+from maigret.ai import get_ai_analysis_text
 from maigret.checking import build_cloudflare_bypass_config
 from maigret.result import MaigretCheckStatus
 from maigret.sites import MaigretDatabase
@@ -28,10 +31,17 @@ from maigret.report import generate_report_context
 app = Flask(__name__)
 # Use environment variable for secret key, generate random one if not set
 app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24).hex())
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Strict',
+    SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE', 'false').lower()
+    in ('true', '1', 'yes'),
+)
 
 # add background job tracking
 background_jobs: Dict[str, Any] = {}
 job_results = {}
+analysis_locks: Dict[str, Any] = {}
 
 # Live (streaming) scan jobs, keyed by job_id. Each entry:
 #   {'queue': Queue, 'cancelled': bool, 'loop': event loop, 'task': asyncio task}
@@ -127,7 +137,7 @@ app.config["MAIGRET_DB_FILE"] = os.path.join(
 app.config["COOKIES_FILE"] = "cookies.txt"
 app.config["UPLOAD_FOLDER"] = 'uploads'
 app.config["REPORTS_FOLDER"] = os.path.abspath('/tmp/maigret_reports')
-app.config["SETTINGS_FILE"] = "web_settings.json"
+app.config["SETTINGS_FILE"] = os.getenv("WEB_SETTINGS_FILE", "web_settings.json")
 
 # Search-wide defaults, editable from the Settings modal (base.html). Persisted
 # to app.config["SETTINGS_FILE"] so they survive a process restart.
@@ -289,6 +299,62 @@ def sanitize_username_for_path(username: str) -> str:
     sanitized = sanitized.strip('.')
     # If empty after sanitization, use a fallback
     return sanitized or '_'
+
+
+def find_result_by_session(session_id: str):
+    """Resolve a browser-provided session ID through trusted in-memory job data."""
+    return next(
+        (
+            result
+            for result in job_results.values()
+            if result.get('status') == 'completed'
+            and result.get('session_folder') == session_id
+        ),
+        None,
+    )
+
+
+def build_ai_markdown(result_data: Dict[str, Any]) -> str:
+    """Create a bounded, normalized AI input from completed claimed profiles."""
+    lines = [
+        '# OpenLedger username investigation',
+        '',
+        'Treat matches as investigative leads, not verified identity evidence.',
+        '',
+    ]
+    for report in result_data.get('individual_reports', []):
+        lines.extend([f"## Username: {report.get('username', 'unknown')}", ''])
+        profiles = report.get('claimed_profiles', [])
+        if not profiles:
+            lines.extend(['No claimed profiles were found.', ''])
+            continue
+        for profile in profiles:
+            tags = ', '.join(profile.get('tags') or []) or 'none'
+            lines.append(
+                f"- {profile.get('site_name', 'Unknown site')}: "
+                f"{profile.get('url', '')} (tags: {tags})"
+            )
+        lines.append('')
+
+    # Bound cost and prevent an unexpectedly large model request.
+    return '\n'.join(lines)[:100_000]
+
+
+def get_csrf_token() -> str:
+    token = session.get('csrf_token')
+    if not token:
+        token = secrets.token_urlsafe(32)
+        session['csrf_token'] = token
+    return token
+
+
+def get_analysis_path(result_data: Dict[str, Any]) -> str:
+    reports_root = os.path.realpath(app.config["REPORTS_FOLDER"])
+    session_folder = result_data['session_folder']
+    session_root = os.path.realpath(os.path.join(reports_root, session_folder))
+    if os.path.commonpath([reports_root, session_root]) != reports_root:
+        raise ValueError('Invalid report session path')
+    return os.path.join(session_root, 'ai_analysis.md')
 
 
 def build_reports(general_results, usernames, session_key):
@@ -546,6 +612,11 @@ def index():
     return render_template('index.html')
 
 
+@app.route('/healthz')
+def healthz():
+    return {'status': 'ok'}
+
+
 @app.route('/api/sites')
 def api_sites():
     """Site names/URLs for the Filters site-picker datalist, fetched lazily
@@ -662,15 +733,7 @@ def status(timestamp):
 
 @app.route('/results/<session_id>')
 def results(session_id):
-    # Find completed results that match this session_folder
-    result_data = next(
-        (
-            r
-            for r in job_results.values()
-            if r.get('status') == 'completed' and r['session_folder'] == session_id
-        ),
-        None,
-    )
+    result_data = find_result_by_session(session_id)
 
     if not result_data:
         flash('No results found for this session ID.', 'danger')
@@ -683,7 +746,69 @@ def results(session_id):
         graph_file=result_data['graph_file'],
         individual_reports=result_data['individual_reports'],
         timestamp=session_id.replace('search_', ''),
+        session_id=session_id,
+        ai_enabled=bool(os.getenv('OPENAI_API_KEY')),
+        csrf_token=get_csrf_token(),
     )
+
+
+@app.route('/api/analysis/<session_id>', methods=['POST'])
+def analyze_session(session_id):
+    expected_token = session.get('csrf_token')
+    provided_token = request.headers.get('X-OpenLedger-CSRF', '')
+    if (
+        not expected_token
+        or not provided_token
+        or not secrets.compare_digest(expected_token, provided_token)
+    ):
+        return {'error': 'Invalid request token. Refresh the results page.'}, 403
+
+    api_key = os.getenv('OPENAI_API_KEY')
+    if not api_key:
+        return {'error': 'AI analysis is not configured on the server.'}, 503
+
+    result_data = find_result_by_session(session_id)
+    if not result_data:
+        return {'error': 'Unknown or expired scan session.'}, 404
+
+    lock = analysis_locks.setdefault(session_id, Lock())
+    if not lock.acquire(blocking=False):
+        return {'error': 'Analysis is already running for this session.'}, 409
+
+    try:
+        analysis_path = get_analysis_path(result_data)
+        if os.path.exists(analysis_path):
+            with open(analysis_path, encoding='utf-8') as analysis_file:
+                return {'analysis': analysis_file.read(), 'cached': True}
+
+        markdown_report = build_ai_markdown(result_data)
+        model = os.getenv('OPENAI_MODEL', 'gpt-5.4')
+        api_base_url = os.getenv(
+            'OPENAI_API_BASE_URL', 'https://api.openai.com/v1'
+        )
+        analysis = asyncio.run(
+            get_ai_analysis_text(
+                api_key=api_key,
+                markdown_report=markdown_report,
+                model=model,
+                api_base_url=api_base_url,
+            )
+        )
+
+        os.makedirs(os.path.dirname(analysis_path), exist_ok=True)
+        temporary_path = f"{analysis_path}.{uuid.uuid4().hex}.tmp"
+        with open(temporary_path, 'w', encoding='utf-8') as analysis_file:
+            analysis_file.write(analysis)
+            analysis_file.write('\n')
+        os.replace(temporary_path, analysis_path)
+        return {'analysis': analysis, 'cached': False}
+    except Exception:
+        logging.exception('AI analysis failed for session %s', session_id)
+        return {
+            'error': 'AI analysis failed. Check the OpenLedger server logs.'
+        }, 502
+    finally:
+        lock.release()
 
 
 @app.route('/reports/<path:filename>')

@@ -22,10 +22,15 @@
     <div class="alert alert-danger">{{ error }}</div>
     {% endif %}
 
+    <div class="alert alert-secondary">
+        Use OpenLedger only for lawful, authorized investigations. Profile matches
+        are leads that require independent verification.
+    </div>
+
     <form method="POST" action="{{ url_for('live_start') }}" class="mb-4">
         <div class="main-search-section">
             <div class="mb-4">
-                <label for="usernames" class="form-label h5">Usernames to Search</label>
+                <label for="usernames" class="form-label h5">Usernames to investigate</label>
                 <textarea class="form-control" id="usernames" name="usernames" rows="3" required
                     placeholder="Enter one or more usernames (separated by spaces or commas)..."></textarea>
             </div>
@@ -43,8 +48,8 @@
             <a href="#" data-bs-toggle="modal" data-bs-target="#settingsModal">Settings</a> (&#9881; top right).
         </p>
 
-        <button type="submit" id="startBtn" class="btn search-button" style="background-color: rgb(249, 207, 0); color: black;">
-            Start Search
+        <button type="submit" id="startBtn" class="btn btn-primary search-button">
+            Start Investigation
         </button>
     </form>
 </div>

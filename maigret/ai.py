@@ -160,3 +160,50 @@ async def get_ai_analysis(
 
     print()
     return analysis
+
+
+async def get_ai_analysis_text(
+    api_key: str,
+    markdown_report: str,
+    model: str = "gpt-4o",
+    api_base_url: str = "https://api.openai.com/v1",
+    timeout_seconds: int = 180,
+) -> str:
+    """Return an AI analysis without writing model output to server logs.
+
+    This is the web-safe counterpart to get_ai_analysis. The CLI function
+    intentionally streams tokens to stdout; a web request must not do that
+    because investigation results may contain sensitive personal data.
+    """
+    system_prompt = load_ai_prompt()
+    url = f"{api_base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": markdown_report},
+        ],
+    }
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            await _check_response(resp)
+            try:
+                response_data = await resp.json()
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("OpenAI API returned an invalid JSON response") from exc
+
+    try:
+        analysis = response_data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise RuntimeError("OpenAI API response did not contain an analysis") from exc
+
+    if not isinstance(analysis, str) or not analysis.strip():
+        raise RuntimeError("OpenAI API returned an empty analysis")
+    return analysis.strip()

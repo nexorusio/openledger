@@ -45,11 +45,13 @@ def web_app(tmp_path):
 
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
+    web_app_module.analysis_locks.clear()
 
     yield web_app_module
 
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
+    web_app_module.analysis_locks.clear()
 
 
 @pytest.fixture
@@ -63,6 +65,12 @@ def test_index_renders(client):
     body = resp.get_data(as_text=True)
     assert 'name="usernames"' in body
     assert '<form' in body
+
+
+def test_healthz(client):
+    resp = client.get('/healthz')
+    assert resp.status_code == 200
+    assert resp.get_json() == {'status': 'ok'}
 
 
 def test_search_empty_input_redirects_to_index(client):
@@ -169,6 +177,94 @@ def test_results_report_links_open_in_new_tab(client, web_app, monkeypatch):
         tag_start = body.rindex('<a ', 0, idx)
         tag = body[tag_start : idx + len(label)]
         assert 'target="_blank"' in tag, f'{label} link missing target="_blank"'
+
+
+def test_ai_analysis_requires_csrf_token(client, web_app, monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    web_app.job_results['session1'] = {
+        'status': 'completed',
+        'session_folder': 'search_session1',
+        'graph_file': 'search_session1/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [],
+    }
+
+    resp = client.post('/api/analysis/search_session1')
+
+    assert resp.status_code == 403
+
+
+def test_ai_analysis_requires_server_key(client, web_app, monkeypatch):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    web_app.job_results['session1'] = {
+        'status': 'completed',
+        'session_folder': 'search_session1',
+        'graph_file': 'search_session1/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [],
+    }
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    resp = client.post(
+        '/api/analysis/search_session1',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+
+    assert resp.status_code == 503
+    assert 'not configured' in resp.get_json()['error']
+
+
+def test_ai_analysis_is_generated_once_and_cached(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    calls = []
+
+    async def fake_analysis(**kwargs):
+        calls.append(kwargs)
+        return '# Assessment\n\nOne claimed profile requires verification.'
+
+    monkeypatch.setattr(web_app, 'get_ai_analysis_text', fake_analysis)
+    web_app.job_results['session1'] = {
+        'status': 'completed',
+        'session_folder': 'search_session1',
+        'graph_file': 'search_session1/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [
+            {
+                'username': 'soxoj',
+                'claimed_profiles': [
+                    {
+                        'site_name': 'GitHub',
+                        'url': 'https://github.com/soxoj',
+                        'tags': ['coding'],
+                    }
+                ],
+            }
+        ],
+    }
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    first = client.post(
+        '/api/analysis/search_session1',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+    second = client.post(
+        '/api/analysis/search_session1',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+
+    assert first.status_code == 200
+    assert first.get_json()['cached'] is False
+    assert second.status_code == 200
+    assert second.get_json()['cached'] is True
+    assert len(calls) == 1
+    assert 'GitHub' in calls[0]['markdown_report']
+    saved = tmp_path / 'search_session1' / 'ai_analysis.md'
+    assert saved.exists()
+    assert 'requires verification' in saved.read_text(encoding='utf-8')
 
 
 def test_failed_task_redirects_to_index(client, web_app, monkeypatch):
