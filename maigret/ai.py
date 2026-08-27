@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import threading
+from urllib.parse import urlsplit
 
 import aiohttp
 
@@ -207,6 +208,92 @@ async def get_ai_analysis_text(
     if not isinstance(analysis, str) or not analysis.strip():
         raise RuntimeError("OpenAI API returned an empty analysis")
     return analysis.strip()
+
+
+def _parse_responses_analysis(response_data):
+    """Extract assistant text and deduplicated web citations from Responses."""
+    text_parts = []
+    sources = []
+    seen_urls = set()
+    for item in response_data.get("output", []):
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if not isinstance(content, dict) or content.get("type") != "output_text":
+                continue
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(text.strip())
+            for annotation in content.get("annotations", []):
+                if (
+                    not isinstance(annotation, dict)
+                    or annotation.get("type") != "url_citation"
+                ):
+                    continue
+                url = annotation.get("url", "")
+                parsed = urlsplit(url) if isinstance(url, str) else None
+                if (
+                    not parsed
+                    or parsed.scheme not in {"http", "https"}
+                    or not parsed.netloc
+                ):
+                    continue
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                title = annotation.get("title")
+                sources.append(
+                    {
+                        "title": (
+                            title.strip()
+                            if isinstance(title, str) and title.strip()
+                            else parsed.netloc
+                        ),
+                        "url": url,
+                    }
+                )
+    analysis = "\n\n".join(text_parts).strip()
+    if not analysis:
+        raise RuntimeError("OpenAI API response did not contain an analysis")
+    return {"analysis": analysis, "sources": sources}
+
+
+async def get_enriched_ai_analysis(
+    api_key: str,
+    investigation_evidence: str,
+    model: str = "gpt-5.4",
+    api_base_url: str = "https://api.openai.com/v1",
+    timeout_seconds: int = 240,
+    web_search_enabled: bool = True,
+):
+    """Analyze extracted evidence, optionally enriching it with cited web search.
+
+    The Responses API is used so web-derived claims retain source annotations.
+    No investigation content or model output is written to server logs here.
+    """
+    url = f"{api_base_url.rstrip('/')}/responses"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "instructions": load_ai_prompt(),
+        "input": investigation_evidence,
+    }
+    if web_search_enabled:
+        payload["tools"] = [{"type": "web_search"}]
+
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            await _check_response(resp)
+            try:
+                response_data = await resp.json()
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("OpenAI API returned an invalid JSON response") from exc
+    return _parse_responses_analysis(response_data)
+
 
 async def validate_openai_connection(
     api_key: str,

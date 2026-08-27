@@ -46,10 +46,20 @@
                         <span class="badge-soft warning" title="{{ result.error }}">Failed</span>
                         {% endif %}
                     </td>
-                    <td class="text-end">
+                    <td class="text-end history-actions">
                         {% if result.status == 'completed' %}
                         <a href="{{ url_for('results', session_id=result.session_folder) }}" class="btn btn-sm btn-outline-secondary">Open reports</a>
                         {% endif %}
+                        <form method="POST"
+                              action="{{ url_for('delete_history_entry', session_folder=result.session_folder) }}"
+                              class="d-inline"
+                              onsubmit="return confirm('Permanently delete this investigation and all of its reports? This cannot be undone.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger">
+                                <i data-lucide="trash-2"></i>
+                                Delete
+                            </button>
+                        </form>
                     </td>
                 </tr>
                 {% endfor %}

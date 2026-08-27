@@ -10,18 +10,22 @@
     function setTheme(theme) {
         html.setAttribute('data-bs-theme', theme);
         localStorage.setItem('openledger-theme', theme);
-        themeToggle.setAttribute(
-            'aria-label',
-            theme === 'dark' ? 'Use light theme' : 'Use dark theme'
-        );
+        if (themeToggle) {
+            themeToggle.setAttribute(
+                'aria-label',
+                theme === 'dark' ? 'Use light theme' : 'Use dark theme'
+            );
+        }
     }
 
     function closeMobileSidebar() {
+        if (!shell || !sidebarToggle) return;
         shell.classList.remove('sidebar-open');
         sidebarToggle.setAttribute('aria-expanded', 'false');
     }
 
     function toggleSidebar() {
+        if (!shell || !sidebarToggle) return;
         if (desktopQuery.matches) {
             const collapsed = shell.classList.toggle('sidebar-collapsed');
             localStorage.setItem('openledger-sidebar-collapsed', String(collapsed));
@@ -33,25 +37,31 @@
     }
 
     const storedTheme = localStorage.getItem('openledger-theme');
-    setTheme(storedTheme || 'light');
+    setTheme(storedTheme || 'dark');
 
     if (
+        shell &&
+        sidebarToggle &&
         desktopQuery.matches &&
         localStorage.getItem('openledger-sidebar-collapsed') === 'true'
     ) {
         shell.classList.add('sidebar-collapsed');
         sidebarToggle.setAttribute('aria-expanded', 'false');
-    } else if (desktopQuery.matches) {
+    } else if (sidebarToggle && desktopQuery.matches) {
         sidebarToggle.setAttribute('aria-expanded', 'true');
     }
 
-    sidebarToggle.addEventListener('click', toggleSidebar);
-    sidebarClose.addEventListener('click', closeMobileSidebar);
-    sidebarBackdrop.addEventListener('click', closeMobileSidebar);
-    themeToggle.addEventListener('click', function () {
-        setTheme(html.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark');
-    });
-    desktopQuery.addEventListener('change', closeMobileSidebar);
+    if (sidebarToggle) sidebarToggle.addEventListener('click', toggleSidebar);
+    if (sidebarClose) sidebarClose.addEventListener('click', closeMobileSidebar);
+    if (sidebarBackdrop) {
+        sidebarBackdrop.addEventListener('click', closeMobileSidebar);
+    }
+    if (themeToggle) {
+        themeToggle.addEventListener('click', function () {
+            setTheme(html.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark');
+        });
+    }
+    if (shell) desktopQuery.addEventListener('change', closeMobileSidebar);
 
     document.addEventListener('keydown', function (event) {
         if (event.key === 'Escape') closeMobileSidebar();

@@ -45,11 +45,14 @@ def web_app(tmp_path):
     web_app_module.app.config['OPENAI_API_KEY_FILE'] = str(
         tmp_path / 'secrets' / 'openai_api_key'
     )
+    web_app_module.app.config['AUTH_FILE'] = str(tmp_path / 'secrets' / 'auth.json')
+    web_app_module.app.config['AUTH_REQUIRED'] = False
 
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
     web_app_module.analysis_locks.clear()
     web_app_module.live_jobs.clear()
+    web_app_module.login_attempts.clear()
 
     yield web_app_module
 
@@ -57,6 +60,8 @@ def web_app(tmp_path):
     web_app_module.job_results.clear()
     web_app_module.analysis_locks.clear()
     web_app_module.live_jobs.clear()
+    web_app_module.login_attempts.clear()
+    web_app_module.app.config['AUTH_REQUIRED'] = False
 
 
 @pytest.fixture
@@ -72,10 +77,166 @@ def test_index_renders(client):
     assert '<form' in body
 
 
+def test_username_input_strips_platform_at_prefix(web_app):
+    assert web_app.parse_usernames({'usernames': '@mastercorbuzier, soxoj'}) == [
+        'mastercorbuzier',
+        'soxoj',
+    ]
+
+
+def test_country_filter_keeps_country_and_global_sources(web_app):
+    sites = {
+        'Indonesia Local': types.SimpleNamespace(tags=['id', 'social']),
+        'Global Platform': types.SimpleNamespace(tags=['global', 'social']),
+        'Unscoped Major Platform': types.SimpleNamespace(tags=['social']),
+        'US Local': types.SimpleNamespace(tags=['us', 'social']),
+    }
+
+    class FakeDatabase:
+        def ranked_sites_dict(self, **kwargs):
+            assert kwargs['tags'] == ['social']
+            return sites
+
+    selected = web_app.select_sites_for_search(
+        FakeDatabase(),
+        top_sites=500,
+        all_sites=False,
+        tags=['social', 'id'],
+        excluded_tags=[],
+        site_list=[],
+    )
+
+    assert list(selected) == [
+        'Indonesia Local',
+        'Global Platform',
+        'Unscoped Major Platform',
+    ]
+
+
 def test_healthz(client):
     resp = client.get('/healthz')
     assert resp.status_code == 200
     assert resp.get_json() == {'status': 'ok'}
+
+
+def _csrf_token(client):
+    with client.session_transaction() as browser_session:
+        return browser_session['csrf_token']
+
+
+def test_application_login_replaces_browser_authentication(client, web_app):
+    web_app.app.config['AUTH_REQUIRED'] = True
+    web_app.save_auth_credentials('operator', 'correct-horse-battery-staple')
+
+    protected = client.get('/history')
+    assert protected.status_code == 302
+    assert '/login?next=/history' in protected.location
+    assert 'WWW-Authenticate' not in protected.headers
+    assert client.get('/healthz').status_code == 200
+    assert client.post('/api/analysis/unknown').status_code == 401
+
+    login_page = client.get('/login?next=/history')
+    assert login_page.status_code == 200
+    body = login_page.get_data(as_text=True)
+    assert 'Sign in to OpenLedger' in body
+    assert 'name="username"' in body
+    assert 'name="password"' in body
+
+    response = client.post(
+        '/login',
+        data={
+            'csrf_token': _csrf_token(client),
+            'next': '/history',
+            'username': 'operator',
+            'password': 'correct-horse-battery-staple',
+        },
+    )
+    assert response.status_code == 302
+    assert response.location.endswith('/history')
+    assert client.get('/history').status_code == 200
+
+
+def test_login_rejects_external_redirects_and_invalid_credentials(client, web_app):
+    web_app.app.config['AUTH_REQUIRED'] = True
+    web_app.save_auth_credentials('operator', 'correct-horse-battery-staple')
+    client.get('/login?next=https://evil.example/steal')
+
+    response = client.post(
+        '/login',
+        data={
+            'csrf_token': _csrf_token(client),
+            'next': 'https://evil.example/steal',
+            'username': 'operator',
+            'password': 'incorrect-password',
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert 'Invalid username or password.' in response.get_data(as_text=True)
+    assert response.request.path == '/login'
+
+
+def test_password_change_is_protected_and_invalidates_other_sessions(web_app):
+    web_app.app.config['AUTH_REQUIRED'] = True
+    web_app.save_auth_credentials('operator', 'correct-horse-battery-staple')
+    first_client = web_app.app.test_client()
+    second_client = web_app.app.test_client()
+
+    for browser in (first_client, second_client):
+        browser.get('/login')
+        response = browser.post(
+            '/login',
+            data={
+                'csrf_token': _csrf_token(browser),
+                'username': 'operator',
+                'password': 'correct-horse-battery-staple',
+            },
+        )
+        assert response.status_code == 302
+
+    response = first_client.post(
+        '/security',
+        data={
+            'csrf_token': _csrf_token(first_client),
+            'current_password': 'correct-horse-battery-staple',
+            'new_password': 'a-new-long-operator-password',
+            'confirm_password': 'a-new-long-operator-password',
+        },
+        follow_redirects=True,
+    )
+    assert response.status_code == 200
+    assert 'Password changed successfully.' in response.get_data(as_text=True)
+    assert first_client.get('/security').status_code == 200
+    assert second_client.get('/history').location.startswith('/login')
+
+    auth_path = web_app.app.config['AUTH_FILE']
+    assert os.stat(auth_path).st_mode & 0o777 == 0o600
+    credentials = web_app.load_auth_credentials()
+    assert web_app.verify_password(
+        'a-new-long-operator-password', credentials['password']
+    )
+    assert not web_app.verify_password(
+        'correct-horse-battery-staple', credentials['password']
+    )
+
+
+def test_logout_requires_csrf_and_ends_session(client, web_app):
+    web_app.app.config['AUTH_REQUIRED'] = True
+    web_app.save_auth_credentials('operator', 'correct-horse-battery-staple')
+    client.get('/login')
+    client.post(
+        '/login',
+        data={
+            'csrf_token': _csrf_token(client),
+            'username': 'operator',
+            'password': 'correct-horse-battery-staple',
+        },
+    )
+
+    response = client.post('/logout', data={'csrf_token': _csrf_token(client)})
+    assert response.status_code == 302
+    assert response.location.endswith('/login')
+    assert client.get('/history').location.startswith('/login')
 
 
 def test_search_empty_input_redirects_to_index(client):
@@ -228,9 +389,14 @@ def test_ai_analysis_is_generated_once_and_cached(
 
     async def fake_analysis(**kwargs):
         calls.append(kwargs)
-        return '# Assessment\n\nOne claimed profile requires verification.'
+        return {
+            'analysis': '# Assessment\n\nOne claimed profile requires verification.',
+            'sources': [
+                {'title': 'Official profile', 'url': 'https://example.com/profile'}
+            ],
+        }
 
-    monkeypatch.setattr(web_app, 'get_ai_analysis_text', fake_analysis)
+    monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
     web_app.job_results['session1'] = {
         'status': 'completed',
         'session_folder': 'search_session1',
@@ -252,6 +418,12 @@ def test_ai_analysis_is_generated_once_and_cached(
     with client.session_transaction() as browser_session:
         browser_session['csrf_token'] = 'test-csrf'
 
+    legacy_directory = tmp_path / 'search_session1'
+    legacy_directory.mkdir()
+    (legacy_directory / 'ai_analysis.md').write_text(
+        '# Legacy assessment\n\nUnknown subject.', encoding='utf-8'
+    )
+
     first = client.post(
         '/api/analysis/search_session1',
         headers={'X-OpenLedger-CSRF': 'test-csrf'},
@@ -266,7 +438,9 @@ def test_ai_analysis_is_generated_once_and_cached(
     assert second.status_code == 200
     assert second.get_json()['cached'] is True
     assert len(calls) == 1
-    assert 'GitHub' in calls[0]['markdown_report']
+    assert 'GitHub' in calls[0]['investigation_evidence']
+    assert calls[0]['web_search_enabled'] is True
+    assert first.get_json()['sources'][0]['title'] == 'Official profile'
     saved = tmp_path / 'search_session1' / 'ai_analysis.md'
     assert saved.exists()
     assert 'requires verification' in saved.read_text(encoding='utf-8')
@@ -751,6 +925,64 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
     assert body.index('search_ts_completed') < body.index('bob')
 
 
+def test_history_can_permanently_delete_one_investigation(client, web_app):
+    result = {
+        'status': 'completed',
+        'session_folder': 'search_delete-me',
+        'graph_file': 'search_delete-me/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [],
+        'found_count': 2,
+        'started_at': '2026-08-27 13:00:00',
+    }
+    web_app.record_job_result('delete-me', result)
+    session_directory = os.path.join(
+        web_app.app.config['REPORTS_FOLDER'], 'search_delete-me'
+    )
+    report_path = os.path.join(session_directory, 'report_soxoj.json')
+    with open(report_path, 'w', encoding='utf-8') as report_file:
+        report_file.write('{}')
+
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'delete-csrf'
+    response = client.post(
+        '/history/search_delete-me/delete',
+        data={'csrf_token': 'delete-csrf'},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert 'permanently deleted' in response.get_data(as_text=True)
+    assert not os.path.exists(session_directory)
+    assert 'delete-me' not in web_app.job_results
+    assert client.get('/results/search_delete-me').status_code == 302
+
+
+def test_history_deletion_requires_csrf(client, web_app):
+    web_app.record_job_result(
+        'keep-me',
+        {
+            'status': 'failed',
+            'session_folder': 'search_keep-me',
+            'error': 'test failure',
+            'usernames': ['alice'],
+            'started_at': '2026-08-27 13:01:00',
+        },
+    )
+    session_directory = os.path.join(
+        web_app.app.config['REPORTS_FOLDER'], 'search_keep-me'
+    )
+
+    response = client.post(
+        '/history/search_keep-me/delete',
+        data={'csrf_token': 'invalid'},
+    )
+
+    assert response.status_code == 302
+    assert os.path.isdir(session_directory)
+    assert 'keep-me' in web_app.job_results
+
+
 def test_completed_investigation_survives_process_restart(client, web_app):
     result = {
         'status': 'completed',
@@ -845,6 +1077,11 @@ def test_build_reports_computes_found_count(web_app, monkeypatch):
         site_name='GitHub',
         site_url_user='https://github.com/soxoj',
         status=MaigretCheckStatus.CLAIMED,
+        ids_data={
+            'fullname': 'Deddy Corbuzier',
+            'description': 'Indonesian mentalist and media figure',
+            'location': 'Indonesia',
+        },
     )
     general_results = [
         (
@@ -857,7 +1094,13 @@ def test_build_reports_computes_found_count(web_app, monkeypatch):
     report = web_app.build_reports(general_results, ['soxoj'], 'testkey')
 
     assert report['found_count'] == 1
-    assert report['individual_reports'][0]['claimed_profiles'][0]['site_name'] == 'GitHub'
+    profile = report['individual_reports'][0]['claimed_profiles'][0]
+    assert profile['site_name'] == 'GitHub'
+    assert profile['confidence'] == 'strong'
+    assert profile['evidence']['fullname'] == 'Deddy Corbuzier'
+    ai_input = web_app.build_ai_markdown(report)
+    assert 'Deddy Corbuzier' in ai_input
+    assert 'Indonesian mentalist' in ai_input
 
 
 def test_process_search_task_records_started_at_on_success(web_app, monkeypatch):
@@ -906,7 +1149,7 @@ def test_load_settings_defaults_when_no_file(web_app):
     assert settings['top_sites'] == 500
     assert settings['tags'] == []
     assert settings['proxy'] == ''
-    assert settings['permute'] is False
+    assert settings['openai_model'] == 'gpt-5.6-terra'
 
 
 def test_save_settings_persists_to_file_and_reloads(web_app):
@@ -933,7 +1176,6 @@ def test_settings_update_saves_and_redirects_to_settings(client, web_app):
             'excluded_tags': ['porn'],
             'site': 'GitHub, Reddit',
             'proxy': '127.0.0.1:1080',
-            'permute': 'on',
             'with_domains': 'on',
         },
     )
@@ -947,7 +1189,6 @@ def test_settings_update_saves_and_redirects_to_settings(client, web_app):
     assert settings['excluded_tags'] == ['porn']
     assert settings['site_list'] == ['GitHub', 'Reddit']
     assert settings['proxy'] == '127.0.0.1:1080'
-    assert settings['permute'] is True
     assert settings['with_domains'] is True
     assert settings['disable_recursive_search'] is False
 
@@ -1006,11 +1247,19 @@ def test_api_sites_returns_site_list(client, web_app):
 
 
 def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
+    with client.session_transaction() as browser_session:
+        browser_session['username'] = 'operator'
     resp = client.get('/')
     body = resp.get_data(as_text=True)
     assert 'id="appSidebar"' in body
     assert 'href="/settings"' in body
     assert 'New investigation' in body
+    assert 'nexorus-mark.png' in body
+    assert 'Private workspace' not in body
+    assert 'OpenLedger by Nexorus' not in body
+    assert 'sidebar-status' not in body
+    assert 'class="topbar-profile"' in body
+    assert '>Logout<' in body
 
     resp = client.get('/settings')
     assert resp.status_code == 200
@@ -1018,6 +1267,35 @@ def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     assert 'name="timeout"' in body
     assert 'id="connections"' in body
     assert 'name="openai_api_key"' in body
+    assert '<select class="form-select" id="openai-model"' in body
+    assert 'value="gpt-5.6-sol"' in body
+    assert 'value="gpt-5.6-terra"' in body
+    assert 'value="gpt-5.6-luna"' in body
+    assert 'Username permutations' not in body
+
+    font_response = client.get('/static/alliance-no2-regular.otf')
+    assert font_response.status_code == 200
+    assert font_response.data.startswith(b'OTTO')
+
+
+def test_openai_settings_rejects_unlisted_model(client, web_app, monkeypatch):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'connection-csrf'
+
+    resp = client.post(
+        '/settings/openai',
+        data={
+            'csrf_token': 'connection-csrf',
+            'action': 'connect',
+            'openai_api_key': 'sk-must-not-be-stored',
+            'openai_model': 'arbitrary-model',
+        },
+        follow_redirects=True,
+    )
+
+    assert 'Select a supported OpenAI analysis model.' in resp.get_data(as_text=True)
+    assert not os.path.exists(web_app.app.config['OPENAI_API_KEY_FILE'])
 
 
 def test_settings_update_requires_csrf(client, web_app):
@@ -1053,6 +1331,7 @@ def test_openai_connection_is_verified_and_saved_server_side(
             'action': 'connect',
             'openai_api_key': api_key,
             'openai_model': 'gpt-5.4',
+            'ai_web_enrichment': 'on',
         },
         follow_redirects=True,
     )
@@ -1065,6 +1344,7 @@ def test_openai_connection_is_verified_and_saved_server_side(
     assert os.stat(key_path).st_mode & 0o777 == 0o600
     assert api_key not in resp.get_data(as_text=True)
     assert web_app.load_settings()['openai_model'] == 'gpt-5.4'
+    assert web_app.load_settings()['ai_web_enrichment'] is True
     assert captured['api_base_url'] == 'https://api.openai.com/v1'
 
 

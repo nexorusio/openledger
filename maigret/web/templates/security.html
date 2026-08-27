@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+
+{% block title %}Password & Security | OpenLedger{% endblock %}
+{% block breadcrumb %}Password & security{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Account protection</p>
+        <h1>Password & security</h1>
+        <p class="page-description">Manage the operator password protecting this OpenLedger workspace.</p>
+    </div>
+    <span class="badge-soft success"><i data-lucide="shield-check"></i> Application login enabled</span>
+</section>
+
+<div class="security-page-grid">
+    <form method="POST" action="{{ url_for('security_settings') }}" class="panel-card">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <header class="panel-header">
+            <div>
+                <h2>Change password</h2>
+                <p>The new password takes effect for the next login immediately.</p>
+            </div>
+            <i data-lucide="key-round"></i>
+        </header>
+        <div class="panel-body security-form">
+            <div>
+                <label for="security-username" class="form-label">Operator username</label>
+                <input type="text" class="form-control" id="security-username"
+                       value="{{ auth_username }}" autocomplete="username" readonly>
+            </div>
+            <div>
+                <label for="current-password" class="form-label">Current password</label>
+                <input type="password" class="form-control" id="current-password" name="current_password"
+                       autocomplete="current-password" required>
+            </div>
+            <div>
+                <label for="new-password" class="form-label">New password</label>
+                <input type="password" class="form-control" id="new-password" name="new_password"
+                       autocomplete="new-password" minlength="12" required>
+                <div class="form-text">Use at least 12 characters. A long, unique passphrase is recommended.</div>
+            </div>
+            <div>
+                <label for="confirm-password" class="form-label">Confirm new password</label>
+                <input type="password" class="form-control" id="confirm-password" name="confirm_password"
+                       autocomplete="new-password" minlength="12" required>
+            </div>
+            <button type="submit" class="btn btn-primary px-4">Update password</button>
+        </div>
+    </form>
+
+    <aside class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Security controls</h2>
+                <p>Active protections for this deployment.</p>
+            </div>
+        </header>
+        <div class="panel-body security-control-list">
+            <div class="security-callout">
+                <i data-lucide="timer-reset"></i>
+                <span>Authenticated sessions expire after 12 hours and can be ended immediately with Sign out.</span>
+            </div>
+            <div class="security-callout">
+                <i data-lucide="shield-ban"></i>
+                <span>Repeated failed sign-ins are temporarily rate-limited without revealing which credential was incorrect.</span>
+            </div>
+            <div class="security-callout">
+                <i data-lucide="file-key-2"></i>
+                <span>The password is stored as a salted PBKDF2 hash in a protected runtime file with mode 600.</span>
+            </div>
+            <div class="security-callout">
+                <i data-lucide="server"></i>
+                <span>The application service remains private on port 5000; Caddy exposes only HTTPS traffic.</span>
+            </div>
+        </div>
+    </aside>
+</div>
+{% endblock %}
