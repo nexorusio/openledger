@@ -1,0 +1,24 @@
+{$DOMAIN} {
+    encode zstd gzip
+
+    basic_auth {
+        {$AUTH_USER} {$AUTH_PASSWORD_HASH}
+    }
+
+    reverse_proxy app:5000 {
+        flush_interval -1
+    }
+
+    header {
+        -Server
+        X-Content-Type-Options nosniff
+        X-Frame-Options SAMEORIGIN
+        Referrer-Policy no-referrer
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+    }
+
+    log {
+        output stdout
+        format console
+    }
+}

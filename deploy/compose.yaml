@@ -1,0 +1,71 @@
+name: openledger
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: web
+    image: openledger-maigret:local
+    restart: unless-stopped
+    init: true
+    environment:
+      FLASK_HOST: 0.0.0.0
+      PORT: 5000
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?FLASK_SECRET_KEY is required}
+      SESSION_COOKIE_SECURE: "true"
+      WEB_SETTINGS_FILE: /app/web_settings.json
+      OPENAI_API_KEY_FILE: /app/runtime/secrets/openai_api_key
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.4}
+      OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+    volumes:
+      - ../runtime/reports:/tmp/maigret_reports
+      - ../runtime/web_settings.json:/app/web_settings.json
+      - ../runtime/secrets:/app/runtime/secrets
+    expose:
+      - "5000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - openledger
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      DOMAIN: ${DOMAIN:?DOMAIN is required}
+      AUTH_USER: ${AUTH_USER:?AUTH_USER is required}
+      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH:?AUTH_PASSWORD_HASH is required}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - openledger
+
+networks:
+  openledger:
+    driver: bridge
+
+volumes:
+  caddy_data:
+  caddy_config:

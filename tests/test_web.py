@@ -42,14 +42,21 @@ def web_app(tmp_path):
     web_app_module.app.config['REPORTS_FOLDER'] = str(tmp_path)
     web_app_module.app.config['MAIGRET_DB_FILE'] = TEST_DB
     web_app_module.app.config['SETTINGS_FILE'] = str(tmp_path / 'web_settings.json')
+    web_app_module.app.config['OPENAI_API_KEY_FILE'] = str(
+        tmp_path / 'secrets' / 'openai_api_key'
+    )
 
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
+    web_app_module.analysis_locks.clear()
+    web_app_module.live_jobs.clear()
 
     yield web_app_module
 
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
+    web_app_module.analysis_locks.clear()
+    web_app_module.live_jobs.clear()
 
 
 @pytest.fixture
@@ -63,6 +70,12 @@ def test_index_renders(client):
     body = resp.get_data(as_text=True)
     assert 'name="usernames"' in body
     assert '<form' in body
+
+
+def test_healthz(client):
+    resp = client.get('/healthz')
+    assert resp.status_code == 200
+    assert resp.get_json() == {'status': 'ok'}
 
 
 def test_search_empty_input_redirects_to_index(client):
@@ -169,6 +182,94 @@ def test_results_report_links_open_in_new_tab(client, web_app, monkeypatch):
         tag_start = body.rindex('<a ', 0, idx)
         tag = body[tag_start : idx + len(label)]
         assert 'target="_blank"' in tag, f'{label} link missing target="_blank"'
+
+
+def test_ai_analysis_requires_csrf_token(client, web_app, monkeypatch):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    web_app.job_results['session1'] = {
+        'status': 'completed',
+        'session_folder': 'search_session1',
+        'graph_file': 'search_session1/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [],
+    }
+
+    resp = client.post('/api/analysis/search_session1')
+
+    assert resp.status_code == 403
+
+
+def test_ai_analysis_requires_server_key(client, web_app, monkeypatch):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    web_app.job_results['session1'] = {
+        'status': 'completed',
+        'session_folder': 'search_session1',
+        'graph_file': 'search_session1/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [],
+    }
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    resp = client.post(
+        '/api/analysis/search_session1',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+
+    assert resp.status_code == 503
+    assert 'not configured' in resp.get_json()['error']
+
+
+def test_ai_analysis_is_generated_once_and_cached(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    calls = []
+
+    async def fake_analysis(**kwargs):
+        calls.append(kwargs)
+        return '# Assessment\n\nOne claimed profile requires verification.'
+
+    monkeypatch.setattr(web_app, 'get_ai_analysis_text', fake_analysis)
+    web_app.job_results['session1'] = {
+        'status': 'completed',
+        'session_folder': 'search_session1',
+        'graph_file': 'search_session1/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [
+            {
+                'username': 'soxoj',
+                'claimed_profiles': [
+                    {
+                        'site_name': 'GitHub',
+                        'url': 'https://github.com/soxoj',
+                        'tags': ['coding'],
+                    }
+                ],
+            }
+        ],
+    }
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    first = client.post(
+        '/api/analysis/search_session1',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+    second = client.post(
+        '/api/analysis/search_session1',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+
+    assert first.status_code == 200
+    assert first.get_json()['cached'] is False
+    assert second.status_code == 200
+    assert second.get_json()['cached'] is True
+    assert len(calls) == 1
+    assert 'GitHub' in calls[0]['markdown_report']
+    saved = tmp_path / 'search_session1' / 'ai_analysis.md'
+    assert saved.exists()
+    assert 'requires verification' in saved.read_text(encoding='utf-8')
 
 
 def test_failed_task_redirects_to_index(client, web_app, monkeypatch):
@@ -396,7 +497,7 @@ def test_live_start_empty_username_redirects_to_index(client, web_app):
 def test_live_start_redirects_to_dedicated_live_page(client, web_app, monkeypatch):
     """POST /live starts a job on a NEW page (/live/<job_id>), not inline on
     the index page. That page must show the graph + a Stop button, and must
-    NOT unconditionally redirect away on completion (only via the Analyze
+    NOT unconditionally redirect away on completion (only via the Open reports
     button — see test_live_scan_done_event_offers_redirect_not_auto_navigation)."""
 
     async def fake_search(*args, **kwargs):
@@ -416,7 +517,8 @@ def test_live_start_redirects_to_dedicated_live_page(client, web_app, monkeypatc
     body = page.get_data(as_text=True)
     assert 'id="graph"' in body
     assert 'id="stopBtn"' in body
-    assert 'id="analyzeBtn"' in body
+    assert 'id="reportsBtn"' in body
+    assert 'Open reports' in body
     assert job_id in body
     # No unconditional navigation on completion anymore.
     assert 'window.location.href = ev.redirect' not in body
@@ -432,9 +534,9 @@ def test_live_results_unknown_job_redirects_to_index(client, web_app):
     assert resp.location.endswith('/')
 
 
-def test_live_results_for_finished_job_skips_sse_and_shows_analyze(client, web_app):
+def test_live_results_for_finished_job_skips_sse_and_shows_reports(client, web_app):
     """If the job already finished (e.g. the user reloaded the Live Results
-    page), the page must offer the Analyze redirect immediately instead of
+    page), the page must offer the Open reports redirect immediately instead of
     trying to reopen a dead SSE stream."""
     web_app.job_results['finishedjob'] = {
         'status': 'completed',
@@ -455,7 +557,7 @@ def test_live_scan_done_event_offers_redirect_not_auto_navigation(
     client, web_app, monkeypatch
 ):
     """The SSE 'done' payload still carries the redirect URL (consumed by the
-    Analyze button), but nothing server- or client-side forces navigation."""
+    Open reports button), but nothing server- or client-side forces navigation."""
 
     async def fake_search(*args, **kwargs):
         notify = kwargs['query_notify']
@@ -598,7 +700,7 @@ def test_real_report_generation_does_not_crash(client, web_app, monkeypatch):
 def test_history_empty_state(client, web_app):
     resp = client.get('/history')
     assert resp.status_code == 200
-    assert 'No searches have been run yet.' in resp.get_data(as_text=True)
+    assert 'No investigations yet' in resp.get_data(as_text=True)
 
 
 def test_history_link_present_on_every_page(client, web_app):
@@ -607,10 +709,10 @@ def test_history_link_present_on_every_page(client, web_app):
     assert 'href="/history"' in body
 
 
-def test_new_search_link_present_on_every_page(client, web_app):
+def test_new_investigation_link_present_on_every_page(client, web_app):
     resp = client.get('/history')
     body = resp.get_data(as_text=True)
-    assert 'New Search' in body
+    assert 'New investigation' in body
     assert 'href="/"' in body
 
 
@@ -643,10 +745,90 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
 
     assert '2026-07-28 09:00:00' in body
     assert 'bob' in body
-    assert 'failed' in body
+    assert 'Failed' in body
 
     # Newest run listed first.
     assert body.index('search_ts_completed') < body.index('bob')
+
+
+def test_completed_investigation_survives_process_restart(client, web_app):
+    result = {
+        'status': 'completed',
+        'session_folder': 'search_persisted',
+        'graph_file': 'search_persisted/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [],
+        'found_count': 4,
+        'started_at': '2026-08-27 12:34:56',
+    }
+    web_app.record_job_result('persisted', result)
+
+    metadata_path = web_app.get_session_metadata_path('search_persisted')
+    assert os.path.exists(metadata_path)
+    assert os.stat(metadata_path).st_mode & 0o777 == 0o600
+
+    # Simulate a fresh Gunicorn worker after the container is recreated.
+    web_app.job_results.clear()
+
+    history = client.get('/history')
+    assert history.status_code == 200
+    assert '2026-08-27 12:34:56' in history.get_data(as_text=True)
+    assert '/results/search_persisted' in history.get_data(as_text=True)
+
+    results = client.get('/results/search_persisted')
+    assert results.status_code == 200
+    assert 'soxoj' in results.get_data(as_text=True)
+
+
+def test_failed_investigation_survives_process_restart(client, web_app):
+    web_app.record_job_result(
+        'failed-persisted',
+        {
+            'status': 'failed',
+            'error': 'report generation failed',
+            'usernames': ['alice'],
+            'started_at': '2026-08-27 12:35:00',
+        },
+    )
+    web_app.job_results.clear()
+
+    history = client.get('/history')
+    body = history.get_data(as_text=True)
+    assert history.status_code == 200
+    assert 'alice' in body
+    assert 'Failed' in body
+
+    status = client.get('/status/failed-persisted')
+    assert status.status_code == 302
+    assert status.location.endswith('/history')
+
+
+def test_invalid_persisted_metadata_is_ignored(client, web_app, tmp_path):
+    session_directory = tmp_path / 'search_invalid'
+    session_directory.mkdir()
+    metadata_path = session_directory / web_app.SESSION_METADATA_FILENAME
+    metadata_path.write_text('{not valid json', encoding='utf-8')
+
+    assert web_app.refresh_job_results_from_disk() == 0
+    assert 'invalid' not in web_app.job_results
+    assert client.get('/history').status_code == 200
+
+
+def test_internal_session_metadata_cannot_be_downloaded(client, web_app):
+    web_app.record_job_result(
+        'private-index',
+        {
+            'status': 'failed',
+            'error': 'test',
+            'usernames': ['soxoj'],
+            'started_at': '2026-08-27 12:36:00',
+        },
+    )
+
+    response = client.get(
+        '/reports/search_private-index/' + web_app.SESSION_METADATA_FILENAME
+    )
+    assert response.status_code == 404
 
 
 def test_build_reports_computes_found_count(web_app, monkeypatch):
@@ -688,8 +870,8 @@ def test_process_search_task_records_started_at_on_success(web_app, monkeypatch)
         'build_reports',
         lambda *a, **kw: {
             'status': 'completed',
-            'session_folder': 'x',
-            'graph_file': 'x',
+            'session_folder': 'search_ts_ok',
+            'graph_file': 'search_ts_ok/combined_graph.html',
             'usernames': [],
             'individual_reports': [],
             'found_count': 0,
@@ -701,6 +883,7 @@ def test_process_search_task_records_started_at_on_success(web_app, monkeypatch)
 
     assert web_app.job_results['ts_ok']['status'] == 'completed'
     assert web_app.job_results['ts_ok']['started_at']
+    assert os.path.exists(web_app.get_session_metadata_path('search_ts_ok'))
 
 
 def test_process_search_task_records_started_at_on_failure(web_app, monkeypatch):
@@ -714,6 +897,7 @@ def test_process_search_task_records_started_at_on_failure(web_app, monkeypatch)
 
     assert web_app.job_results['ts_fail']['status'] == 'failed'
     assert web_app.job_results['ts_fail']['started_at']
+    assert os.path.exists(web_app.get_session_metadata_path('search_ts_fail'))
 
 
 def test_load_settings_defaults_when_no_file(web_app):
@@ -736,10 +920,13 @@ def test_save_settings_persists_to_file_and_reloads(web_app):
     assert reloaded['proxy'] == '127.0.0.1:9999'
 
 
-def test_settings_update_saves_and_redirects_back(client, web_app):
+def test_settings_update_saves_and_redirects_to_settings(client, web_app):
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'settings-csrf'
     resp = client.post(
         '/settings',
         data={
+            'csrf_token': 'settings-csrf',
             'timeout': '15',
             'top_sites': '250',
             'tags': ['coding', 'tech'],
@@ -749,10 +936,9 @@ def test_settings_update_saves_and_redirects_back(client, web_app):
             'permute': 'on',
             'with_domains': 'on',
         },
-        headers={'Referer': '/history'},
     )
     assert resp.status_code == 302
-    assert resp.headers['Location'] == '/history'
+    assert resp.headers['Location'] == '/settings'
 
     settings = web_app.load_settings()
     assert settings['timeout'] == 15
@@ -767,7 +953,16 @@ def test_settings_update_saves_and_redirects_back(client, web_app):
 
 
 def test_settings_update_invalid_timeout_falls_back_to_default(client, web_app):
-    client.post('/settings', data={'timeout': 'not-a-number', 'top_sites': 'nope'})
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'settings-csrf'
+    client.post(
+        '/settings',
+        data={
+            'csrf_token': 'settings-csrf',
+            'timeout': 'not-a-number',
+            'top_sites': 'nope',
+        },
+    )
     settings = web_app.load_settings()
     assert settings['timeout'] == web_app.DEFAULT_SETTINGS['timeout']
     assert settings['top_sites'] == web_app.DEFAULT_SETTINGS['top_sites']
@@ -810,12 +1005,110 @@ def test_api_sites_returns_site_list(client, web_app):
     assert isinstance(data['sites'], list)
 
 
-def test_settings_modal_present_on_every_page(client, web_app):
+def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     resp = client.get('/')
     body = resp.get_data(as_text=True)
-    assert 'id="settingsModal"' in body
-    assert 'name="timeout"' in body
+    assert 'id="appSidebar"' in body
+    assert 'href="/settings"' in body
+    assert 'New investigation' in body
 
-    resp = client.get('/history')
+    resp = client.get('/settings')
+    assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'id="settingsModal"' in body
+    assert 'name="timeout"' in body
+    assert 'id="connections"' in body
+    assert 'name="openai_api_key"' in body
+
+
+def test_settings_update_requires_csrf(client, web_app):
+    resp = client.post(
+        '/settings',
+        data={'timeout': '99', 'top_sites': '100'},
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers['Location'] == '/settings'
+    assert web_app.load_settings()['timeout'] == web_app.DEFAULT_SETTINGS['timeout']
+
+
+def test_openai_connection_is_verified_and_saved_server_side(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    captured = {}
+
+    async def fake_validation(**kwargs):
+        captured.update(kwargs)
+        return kwargs['model']
+
+    monkeypatch.setattr(web_app, 'validate_openai_connection', fake_validation)
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'connection-csrf'
+
+    api_key = 'sk-proj-browser-submitted-secret'
+    resp = client.post(
+        '/settings/openai',
+        data={
+            'csrf_token': 'connection-csrf',
+            'action': 'connect',
+            'openai_api_key': api_key,
+            'openai_model': 'gpt-5.4',
+        },
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert 'OpenAI connected and verified.' in resp.get_data(as_text=True)
+    key_path = web_app.app.config['OPENAI_API_KEY_FILE']
+    with open(key_path, encoding='utf-8') as key_file:
+        assert key_file.read().strip() == api_key
+    assert os.stat(key_path).st_mode & 0o777 == 0o600
+    assert api_key not in resp.get_data(as_text=True)
+    assert web_app.load_settings()['openai_model'] == 'gpt-5.4'
+    assert captured['api_base_url'] == 'https://api.openai.com/v1'
+
+
+def test_failed_openai_verification_does_not_store_key(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+
+    async def fake_validation(**kwargs):
+        raise RuntimeError('invalid key')
+
+    monkeypatch.setattr(web_app, 'validate_openai_connection', fake_validation)
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'connection-csrf'
+
+    resp = client.post(
+        '/settings/openai',
+        data={
+            'csrf_token': 'connection-csrf',
+            'action': 'connect',
+            'openai_api_key': 'sk-invalid',
+            'openai_model': 'gpt-5.4',
+        },
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert 'OpenAI verification failed.' in resp.get_data(as_text=True)
+    assert not os.path.exists(web_app.app.config['OPENAI_API_KEY_FILE'])
+
+def test_browser_managed_openai_connection_can_be_removed(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('OPENAI_API_KEY', raising=False)
+    web_app.save_openai_api_key('sk-proj-existing')
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'connection-csrf'
+
+    resp = client.post(
+        '/settings/openai',
+        data={'csrf_token': 'connection-csrf', 'action': 'disconnect'},
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert 'OpenAI connection removed.' in resp.get_data(as_text=True)
+    assert not os.path.exists(web_app.app.config['OPENAI_API_KEY_FILE'])

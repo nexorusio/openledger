@@ -1,41 +1,40 @@
 {% extends "base.html" %}
+{% block title %}Live Investigation | OpenLedger{% endblock %}
+{% block breadcrumb %}Live investigation{% endblock %}
 {% block content %}
-<style>
-    #graph {
-        height: 600px;
-        border: 1px solid var(--bs-border-color);
-        border-radius: 8px;
-        background: rgba(255, 255, 255, 0.02);
-    }
-
-    .live-stats {
-        display: flex;
-        gap: 1.5rem;
-        flex-wrap: wrap;
-        align-items: center;
-        margin-bottom: 0.75rem;
-    }
-</style>
-
-<div class="form-container">
-    <div class="d-flex justify-content-between align-items-center mb-2">
-        <h1 class="mb-0">Live Results</h1>
-        <div>
-            <a id="analyzeBtn" href="#" class="btn btn-warning" style="display:none;">Analyze</a>
-            <button type="button" id="stopBtn" class="btn btn-danger">Stop</button>
-        </div>
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Active investigation</p>
+        <h1>Live discovery graph</h1>
+        <p class="page-description">Claimed profiles and extracted identifiers appear as Maigret checks each source.</p>
     </div>
+    <div class="d-flex gap-2">
+        <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">Open reports</a>
+        <button type="button" id="stopBtn" class="btn btn-outline-danger">Stop investigation</button>
+    </div>
+</section>
+
+<section class="panel-card">
+    <header class="panel-header">
+        <div>
+            <h2>Source discovery</h2>
+            <p id="live-status" role="status">Starting…</p>
+        </div>
+        <span class="badge-soft"><i data-lucide="radio"></i> Live</span>
+    </header>
+    <div class="panel-body">
     <div class="live-stats">
-        <span id="live-status" class="text-muted">Starting…</span>
-        <span>Checked: <strong id="stat-checked">0</strong> / <span id="stat-total">?</span></span>
-        <span>Found: <strong id="stat-found">0</strong></span>
+        <div class="live-stat"><span>Sources checked</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
+        <div class="live-stat"><span>Profiles found</span><strong id="stat-found">0</strong></div>
+        <div class="live-stat"><span>Graph status</span><strong>Streaming</strong></div>
     </div>
     <div class="progress mb-3" style="height: 8px;">
         <div id="live-progress" class="progress-bar" role="progressbar" style="width: 0%;"></div>
     </div>
     <div id="graph"></div>
-    <p class="text-muted mt-2" style="font-size: 0.85rem;">Double-click a site node to open the profile.</p>
-</div>
+    <p class="form-text mt-2 mb-0">Double-click a site node to open the public profile in a new tab.</p>
+    </div>
+</section>
 
 <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 
@@ -48,20 +47,23 @@
 
     function ensureGraph() {
         if (network) return;
+        const styles = getComputedStyle(document.documentElement);
+        const textColor = styles.getPropertyValue('--ol-text').trim();
+        const borderColor = styles.getPropertyValue('--ol-border').trim();
         nodes = new vis.DataSet();
         edges = new vis.DataSet();
         network = new vis.Network(document.getElementById('graph'), { nodes, edges }, {
-            nodes: { shape: 'dot', size: 14, font: { color: '#dee2e6' } },
-            edges: { color: { color: '#555' }, smooth: false },
+            nodes: { shape: 'dot', size: 14, font: { color: textColor } },
+            edges: { color: { color: borderColor }, smooth: false },
             physics: {
                 solver: 'forceAtlas2Based',
                 forceAtlas2Based: { gravitationalConstant: -60, springLength: 110 },
                 stabilization: { iterations: 150 },
             },
             groups: {
-                username: { color: '#f9cf00', shape: 'star', size: 22 },
-                site: { color: '#28a745' },
-                data: { color: '#214e7b', shape: 'box' },
+                username: { color: '#d89524', shape: 'star', size: 22 },
+                site: { color: '#1f9d68' },
+                data: { color: '#0f8b8d', shape: 'box' },
             },
         });
         network.on('doubleClick', function (params) {
@@ -110,7 +112,7 @@
         document.getElementById('live-progress').style.width = '100%';
         document.getElementById('stopBtn').disabled = true;
         if (redirect) {
-            const btn = document.getElementById('analyzeBtn');
+            const btn = document.getElementById('reportsBtn');
             btn.href = redirect;
             btn.style.display = 'inline-block';
         }

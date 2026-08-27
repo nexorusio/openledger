@@ -1,0 +1,362 @@
+{% extends "base.html" %}
+
+{% block title %}Settings | OpenLedger{% endblock %}
+{% block breadcrumb %}Settings{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Workspace configuration</p>
+        <h1>Settings</h1>
+        <p class="page-description">
+            Configure investigation defaults, source filters, network routing, and protected AI connections.
+        </p>
+    </div>
+    <span class="badge-soft success"><i data-lucide="shield-check"></i> Server protected</span>
+</section>
+
+<div class="settings-layout">
+    <nav class="panel-card settings-nav" aria-label="Settings sections">
+        <a href="#investigation" class="active"><i data-lucide="sliders-horizontal"></i> Investigation</a>
+        <a href="#filters"><i data-lucide="list-filter"></i> Sources & filters</a>
+        <a href="#connections"><i data-lucide="plug-zap"></i> AI connections</a>
+        <a href="#security"><i data-lucide="shield"></i> Security</a>
+    </nav>
+
+    <div class="settings-stack">
+        <form method="POST" action="{{ url_for('settings_update') }}" class="panel-card" id="investigation">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <header class="panel-header">
+                <div>
+                    <h2>Investigation defaults</h2>
+                    <p>These settings apply to every new investigation.</p>
+                </div>
+            </header>
+            <div class="panel-body">
+                <div class="settings-grid">
+                    <div>
+                        <label for="settings-timeout" class="form-label">Site timeout</label>
+                        <input type="number" class="form-control" id="settings-timeout" name="timeout" min="1" max="120"
+                            value="{{ web_settings.timeout }}" required>
+                        <div class="form-text">Maximum seconds allowed for each site check.</div>
+                    </div>
+                    <div>
+                        <label for="settings-top-sites" class="form-label">Fast-check site count</label>
+                        <input type="number" class="form-control" id="settings-top-sites" name="top_sites" min="1" max="10000"
+                            value="{{ web_settings.top_sites }}" required>
+                        <div class="form-text">Number of ranked sources used by Fast check.</div>
+                    </div>
+                </div>
+
+                <h3 class="settings-section-title">Search behavior</h3>
+                <div class="settings-grid">
+                    <div class="form-check form-switch">
+                        <input type="checkbox" class="form-check-input" id="settings-permute" name="permute"
+                            {{ 'checked' if web_settings.permute }}>
+                        <label class="form-check-label" for="settings-permute">Username permutations</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input type="checkbox" class="form-check-input" id="settings-with-domains" name="with_domains"
+                            {{ 'checked' if web_settings.with_domains }}>
+                        <label class="form-check-label" for="settings-with-domains">Domain checks</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input type="checkbox" class="form-check-input" id="settings-recursive" name="disable_recursive_search"
+                            {{ 'checked' if web_settings.disable_recursive_search }}>
+                        <label class="form-check-label" for="settings-recursive">Disable recursive search</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input type="checkbox" class="form-check-input" id="settings-extracting" name="disable_extracting"
+                            {{ 'checked' if web_settings.disable_extracting }}>
+                        <label class="form-check-label" for="settings-extracting">Disable information extraction</label>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-body" id="filters">
+                <h3 class="settings-section-title">Specific sites</h3>
+                <label for="settingsSiteInput" class="form-label">Restrict investigations to selected sites</label>
+                <input type="text" class="form-control" id="settingsSiteInput"
+                    placeholder="Type a site name or URL and press Enter" list="settingsSiteOptions" autocomplete="off">
+                <input type="hidden" id="settings-site" name="site" value="{{ web_settings.site_list | join(',') }}">
+                <datalist id="settingsSiteOptions"></datalist>
+                <div class="selected-sites" id="settingsSelectedSites"></div>
+
+                <h3 class="settings-section-title">Tag filters</h3>
+                <p class="form-text mb-2">Select once to include, twice to exclude, and a third time to clear.</p>
+                <div class="tag-cloud" id="settingsTagCloud">
+                    {% for group, label in [('category', 'Categories'), ('country', 'Countries')] %}
+                    <p class="tag-group-label">{{ label }}</p>
+                    {% for tag in available_tags if tag.group == group %}
+                    <button type="button" class="tag {{ 'selected' if tag.value in web_settings.tags }} {{ 'excluded' if tag.value in web_settings.excluded_tags }}"
+                        data-value="{{ tag.value }}">{{ tag.label }}</button>
+                    {% endfor %}
+                    {% endfor %}
+                </div>
+                <select multiple class="hidden-select" id="settingsTags" name="tags" aria-hidden="true">
+                    {% for tag in available_tags %}
+                    <option value="{{ tag.value }}" {{ 'selected' if tag.value in web_settings.tags }}>{{ tag.label }}</option>
+                    {% endfor %}
+                </select>
+                <select multiple class="hidden-select" id="settingsExcludedTags" name="excluded_tags" aria-hidden="true">
+                    {% for tag in available_tags %}
+                    <option value="{{ tag.value }}" {{ 'selected' if tag.value in web_settings.excluded_tags }}>{{ tag.label }}</option>
+                    {% endfor %}
+                </select>
+
+                <h3 class="settings-section-title">Proxy routing</h3>
+                <div class="settings-grid">
+                    <div>
+                        <label for="settings-proxy" class="form-label">Proxy URL</label>
+                        <input type="text" class="form-control" id="settings-proxy" name="proxy"
+                            placeholder="127.0.0.1:1080" value="{{ web_settings.proxy }}">
+                    </div>
+                    <div>
+                        <label for="settings-tor-proxy" class="form-label">Tor proxy URL</label>
+                        <input type="text" class="form-control" id="settings-tor-proxy" name="tor_proxy"
+                            placeholder="127.0.0.1:9050" value="{{ web_settings.tor_proxy }}">
+                    </div>
+                    <div>
+                        <label for="settings-i2p-proxy" class="form-label">I2P proxy URL</label>
+                        <input type="text" class="form-control" id="settings-i2p-proxy" name="i2p_proxy"
+                            placeholder="127.0.0.1:4444" value="{{ web_settings.i2p_proxy }}">
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel-body d-flex justify-content-end">
+                <button type="submit" class="btn btn-primary px-4">Save investigation settings</button>
+            </div>
+        </form>
+
+        <section class="panel-card" id="connections">
+            <header class="panel-header">
+                <div>
+                    <h2>AI connections</h2>
+                    <p>Connect OpenAI for server-side analysis of completed investigation reports.</p>
+                </div>
+                <span class="badge-soft {{ 'success' if openai_connected else 'warning' }}">
+                    {{ 'Connected' if openai_connected else 'Not configured' }}
+                </span>
+            </header>
+            <div class="panel-body">
+                <div class="connection-card">
+                    <form method="POST" action="{{ url_for('openai_settings_update') }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="hidden" name="action" value="connect">
+                        <div class="connection-brand">
+                            <span class="connection-logo"><i data-lucide="sparkles"></i></span>
+                            <div>
+                                <h3>OpenAI API</h3>
+                                <p>
+                                    {% if openai_key_source %}
+                                    Active key source: {{ openai_key_source }}
+                                    {% else %}
+                                    No key has been stored on this server.
+                                    {% endif %}
+                                </p>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="openai-api-key" class="form-label">API key</label>
+                            <div class="secret-field">
+                                <input type="password" class="form-control" id="openai-api-key" name="openai_api_key"
+                                    autocomplete="new-password"
+                                    placeholder="{{ 'Leave blank to keep the current key' if openai_connected else 'Paste an OpenAI project API key' }}">
+                                <button type="button" class="secret-toggle" id="secretToggle" aria-label="Show API key">
+                                    <i data-lucide="eye"></i>
+                                </button>
+                            </div>
+                            <div class="form-text">The key is submitted over HTTPS and is never displayed again.</div>
+                        </div>
+
+                        <div>
+                            <label for="openai-model" class="form-label">Analysis model</label>
+                            <input type="text" class="form-control" id="openai-model" name="openai_model"
+                                value="{{ web_settings.openai_model }}" maxlength="128" required>
+                            <div class="form-text">The connection test verifies access to this model without generating content.</div>
+                        </div>
+
+                        <div class="connection-actions">
+                            <button type="submit" class="btn btn-primary px-4">
+                                {{ 'Verify and save' if openai_connected else 'Connect and verify' }}
+                            </button>
+                            <a href="https://developers.openai.com/api/docs/models" target="_blank" rel="noopener" class="btn btn-outline-secondary">
+                                View model IDs
+                            </a>
+                        </div>
+                    </form>
+
+                    <div class="security-callout">
+                        <i data-lucide="lock-keyhole"></i>
+                        <span>
+                            Stored only in the protected runtime secret file with mode 600.
+                            It is excluded from Git, ordinary settings, page HTML, and API responses.
+                        </span>
+                    </div>
+                </div>
+
+                {% if openai_connected and openai_key_source != 'environment' %}
+                <form method="POST" action="{{ url_for('openai_settings_update') }}" class="connection-actions">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="action" value="disconnect">
+                    <button type="submit" class="btn btn-outline-danger">Disconnect OpenAI</button>
+                </form>
+                {% endif %}
+            </div>
+        </section>
+
+        <section class="panel-card" id="security">
+            <header class="panel-header">
+                <div>
+                    <h2>Security boundary</h2>
+                    <p>How this single-operator deployment protects configuration and reports.</p>
+                </div>
+            </header>
+            <div class="panel-body">
+                <div class="settings-grid">
+                    <div class="security-callout">
+                        <i data-lucide="key-round"></i>
+                        <span>Caddy Basic Authentication protects every browser route before traffic reaches OpenLedger.</span>
+                    </div>
+                    <div class="security-callout">
+                        <i data-lucide="server"></i>
+                        <span>The Maigret service remains private on port 5000; only Caddy publishes ports 80 and 443.</span>
+                    </div>
+                    <div class="security-callout">
+                        <i data-lucide="file-lock-2"></i>
+                        <span>Reports, UI settings, and API secrets persist only in the Droplet runtime directory.</span>
+                    </div>
+                    <div class="security-callout">
+                        <i data-lucide="user-check"></i>
+                        <span>This configuration is intended for one operator or a small trusted team, not public multi-user access.</span>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    const tags = Array.from(document.querySelectorAll('#settingsTagCloud .tag'));
+    const includedSelect = document.getElementById('settingsTags');
+    const excludedSelect = document.getElementById('settingsExcludedTags');
+
+    function updateTagSelects() {
+        Array.from(includedSelect.options).forEach(option => { option.selected = false; });
+        Array.from(excludedSelect.options).forEach(option => { option.selected = false; });
+        tags.forEach(tag => {
+            const selector = 'option[value="' + CSS.escape(tag.dataset.value) + '"]';
+            if (tag.classList.contains('selected')) {
+                const option = includedSelect.querySelector(selector);
+                if (option) option.selected = true;
+            } else if (tag.classList.contains('excluded')) {
+                const option = excludedSelect.querySelector(selector);
+                if (option) option.selected = true;
+            }
+        });
+    }
+
+    tags.forEach(tag => {
+        tag.addEventListener('click', function () {
+            if (tag.classList.contains('selected')) {
+                tag.classList.remove('selected');
+                tag.classList.add('excluded');
+            } else if (tag.classList.contains('excluded')) {
+                tag.classList.remove('excluded');
+            } else {
+                tag.classList.add('selected');
+            }
+            updateTagSelects();
+        });
+    });
+
+    const siteInput = document.getElementById('settingsSiteInput');
+    const siteHidden = document.getElementById('settings-site');
+    const siteContainer = document.getElementById('settingsSelectedSites');
+    const siteOptions = document.getElementById('settingsSiteOptions');
+    const selectedSites = new Set({{ web_settings.site_list | tojson }});
+    let sitesLoaded = false;
+
+    function syncSites() {
+        siteHidden.value = Array.from(selectedSites).join(',');
+    }
+
+    function renderSites() {
+        siteContainer.replaceChildren();
+        selectedSites.forEach(site => {
+            const chip = document.createElement('span');
+            chip.className = 'selected-site';
+            chip.appendChild(document.createTextNode(site));
+            const remove = document.createElement('button');
+            remove.type = 'button';
+            remove.className = 'remove-site';
+            remove.dataset.site = site;
+            remove.setAttribute('aria-label', 'Remove ' + site);
+            remove.textContent = '×';
+            chip.appendChild(remove);
+            siteContainer.appendChild(chip);
+        });
+        syncSites();
+    }
+
+    function addSites(rawValue) {
+        rawValue.split(',').map(value => value.trim()).filter(Boolean).forEach(value => selectedSites.add(value));
+        siteInput.value = '';
+        renderSites();
+    }
+
+    async function loadSites() {
+        if (sitesLoaded) return;
+        sitesLoaded = true;
+        try {
+            const response = await fetch({{ url_for('api_sites') | tojson }});
+            const payload = await response.json();
+            (payload.sites || []).forEach(site => {
+                const option = document.createElement('option');
+                option.value = site;
+                siteOptions.appendChild(option);
+            });
+        } catch (error) {
+            sitesLoaded = false;
+        }
+    }
+
+    siteInput.addEventListener('focus', loadSites);
+    siteInput.addEventListener('change', function () {
+        if (siteInput.value.trim()) addSites(siteInput.value);
+    });
+    siteInput.addEventListener('keydown', function (event) {
+        if (event.key === 'Enter' && siteInput.value.trim()) {
+            event.preventDefault();
+            addSites(siteInput.value);
+        }
+    });
+    siteContainer.addEventListener('click', function (event) {
+        const remove = event.target.closest('.remove-site');
+        if (!remove) return;
+        selectedSites.delete(remove.dataset.site);
+        renderSites();
+    });
+    renderSites();
+
+    const secretToggle = document.getElementById('secretToggle');
+    const secretInput = document.getElementById('openai-api-key');
+    secretToggle.addEventListener('click', function () {
+        const showing = secretInput.type === 'text';
+        secretInput.type = showing ? 'password' : 'text';
+        secretToggle.setAttribute('aria-label', showing ? 'Show API key' : 'Hide API key');
+    });
+
+    const section = new URLSearchParams(window.location.search).get('section');
+    if (section) {
+        const target = document.getElementById(section);
+        if (target) requestAnimationFrame(() => target.scrollIntoView({ behavior: 'smooth', block: 'start' }));
+    }
+});
+</script>
+{% endblock %}

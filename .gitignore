@@ -53,3 +53,7 @@ docs/source/locale/**/*.mo
 
 # Secrets
 .env
+/deploy/.env
+
+# Production runtime state
+/runtime/
