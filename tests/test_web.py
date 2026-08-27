@@ -1101,6 +1101,24 @@ def test_build_reports_computes_found_count(web_app, monkeypatch):
     ai_input = web_app.build_ai_markdown(report)
     assert 'Deddy Corbuzier' in ai_input
     assert 'Indonesian mentalist' in ai_input
+    assert 'Maigret' not in ai_input
+
+
+@pytest.mark.parametrize(
+    'relative_path',
+    [
+        '../maigret/web/templates/index.html',
+        '../maigret/web/templates/live.html',
+        '../maigret/web/templates/settings.html',
+        '../maigret/resources/ai_prompt.txt',
+        '../maigret/resources/simple_report.tpl',
+        '../maigret/resources/simple_report_pdf.tpl',
+    ],
+)
+def test_user_facing_copy_is_openledger_branded(relative_path):
+    path = os.path.join(CUR_PATH, relative_path)
+    with open(path, encoding='utf-8') as branded_file:
+        assert 'maigret' not in branded_file.read().lower()
 
 
 def test_process_search_task_records_started_at_on_success(web_app, monkeypatch):

@@ -363,8 +363,8 @@ def test_generate_neo4j_report():
 
     cypher = _graph_to_cypher(G)
 
-    assert "CREATE CONSTRAINT maigret_node_name IF NOT EXISTS" in cypher
-    assert cypher.count("MERGE (n:MaigretNode {name: ") == 3
+    assert "CREATE CONSTRAINT openledger_node_name IF NOT EXISTS" in cypher
+    assert cypher.count("MERGE (n:OpenLedgerNode {name: ") == 3
     assert cypher.count("-[:LINKED_TO]->") == 1
     assert "SET n.type = 'username', n.label = 'alice'" in cypher
 

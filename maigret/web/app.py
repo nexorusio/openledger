@@ -219,7 +219,7 @@ SESSION_KEY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_FOLDER_PATTERN = re.compile(r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
-AI_ANALYSIS_SCHEMA_VERSION = 2
+AI_ANALYSIS_SCHEMA_VERSION = 3
 AUTH_SCHEMA_VERSION = 1
 PASSWORD_HASH_NAME = 'sha256'
 PASSWORD_HASH_ITERATIONS = 600_000
@@ -952,7 +952,7 @@ def build_ai_markdown(result_data: Dict[str, Any]) -> str:
     lines = [
         '# OpenLedger username investigation',
         '',
-        'Maigret evidence and public-web evidence are different source classes.',
+        'OpenLedger scan evidence and public-web evidence are different source classes.',
         'Treat username matches as leads until identity attributes corroborate them.',
         'Never let a weak collision override repeated real-name, bio, location, '
         'or link evidence.',
