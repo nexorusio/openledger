@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}{{ persona.display_name }} | OpenLedger{% endblock %}
+{% block breadcrumb %}Persona workspace{% endblock %}
+
+{% block content %}
+<section class="page-heading persona-heading">
+    <div class="persona-heading-copy">
+        <span class="persona-avatar"><i data-lucide="user-round-search"></i></span>
+        <div>
+            <p class="eyebrow">Evidence profile</p>
+            <h1>{{ persona.display_name }}</h1>
+            <p class="page-description">Claims are investigative leads until an analyst reviews their supporting evidence.</p>
+        </div>
+    </div>
+    <div class="heading-actions">
+        <a href="{{ url_for('case_workspace', case_id=persona.case_id) }}" class="btn btn-outline-secondary">Open case</a>
+        <form method="POST" action="{{ url_for('refresh_persona', persona_id=persona.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-primary"><i data-lucide="refresh-cw"></i> Run investigation again</button>
+        </form>
+    </div>
+</section>
+
+<section class="persona-notice" aria-label="Evidence policy">
+    <i data-lucide="shield-check"></i>
+    <div>
+        <strong>Evidence-first record</strong>
+        <span>Confidence measures support for each claim, not the probability that every matching account belongs to this person. Empty fields are intentionally not inferred.</span>
+    </div>
+</section>
+
+<div class="persona-layout">
+    <div class="persona-fields">
+        {% for group in claim_groups %}
+        <section class="panel-card persona-group" id="group-{{ group.key }}">
+            <header class="panel-header">
+                <div><h2>{{ group.title }}</h2></div>
+            </header>
+            <div class="panel-body persona-form">
+                {% for field in group.fields %}
+                <div class="persona-field">
+                    <div class="persona-field-label">{{ field.label }}</div>
+                    <div class="persona-field-content">
+                        {% if field.claims %}
+                            {% for claim in field.claims %}
+                            <article class="claim-record review-{{ claim.review_status }}">
+                                <div class="claim-main">
+                                    <div class="claim-value">
+                                        {% if claim.field_name == 'social_account' and claim.value is mapping %}
+                                        <strong>{{ claim.value.platform }}</strong>
+                                        <a href="{{ claim.value.url }}" target="_blank" rel="noopener noreferrer">{{ claim.value.url }}</a>
+                                        {% elif claim.field_name in ('website', 'photograph') %}
+                                        <a href="{{ claim.display_value }}" target="_blank" rel="noopener noreferrer">{{ claim.display_value }}</a>
+                                        {% else %}
+                                        <span>{{ claim.display_value }}</span>
+                                        {% endif %}
+                                    </div>
+                                    <div class="claim-badges">
+                                        <span class="confidence-badge" title="Evidence confidence">
+                                            {{ claim.confidence }}% confidence
+                                        </span>
+                                        <span class="review-badge {{ claim.review_status }}">{{ claim.review_status | title }}</span>
+                                    </div>
+                                </div>
+                                <details class="claim-evidence">
+                                    <summary>{{ claim.evidence | length }} supporting source{{ '' if claim.evidence | length == 1 else 's' }}</summary>
+                                    <ul>
+                                        {% for evidence in claim.evidence %}
+                                        <li>
+                                            {% if evidence.source_url %}<a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">{{ evidence.source_name }}</a>{% else %}{{ evidence.source_name }}{% endif %}
+                                            <span>{{ evidence.evidence_type | replace('_', ' ') }}</span>
+                                        </li>
+                                        {% endfor %}
+                                    </ul>
+                                </details>
+                                <form method="POST" action="{{ url_for('review_persona_claim', claim_id=claim.id) }}" class="claim-review-form">
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <input type="hidden" name="persona_id" value="{{ persona.id }}">
+                                    <label class="visually-hidden" for="note-{{ claim.id }}">Review note</label>
+                                    <input id="note-{{ claim.id }}" type="text" name="note" maxlength="2000" placeholder="Optional analyst note">
+                                    <div class="review-actions" role="group" aria-label="Review this record">
+                                        <button name="decision" value="approved" class="btn btn-sm btn-review approve" type="submit"><i data-lucide="check"></i> Approve</button>
+                                        <button name="decision" value="uncertain" class="btn btn-sm btn-review uncertain" type="submit"><i data-lucide="circle-help"></i> Uncertain</button>
+                                        <button name="decision" value="rejected" class="btn btn-sm btn-review reject" type="submit"><i data-lucide="x"></i> Reject</button>
+                                    </div>
+                                </form>
+                                {% if claim.reviewed_by %}<small class="review-meta">Last reviewed by {{ claim.reviewed_by }} · {{ claim.reviewed_at }}</small>{% endif %}
+                            </article>
+                            {% endfor %}
+                        {% else %}
+                        <div class="empty-field">No evidence extracted.</div>
+                        {% endif %}
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+        {% endfor %}
+    </div>
+
+    <aside class="persona-side">
+        <section class="panel-card graph-card">
+            <header class="panel-header">
+                <div>
+                    <h2>Digital relationships</h2>
+                    <p>Highest-confidence evidence paths; rejected records are excluded.</p>
+                </div>
+                <span class="badge-soft">{{ graph.nodes | length }} nodes</span>
+            </header>
+            <div class="panel-body p-0">
+                <svg id="personaGraph" class="persona-graph" viewBox="0 0 720 520" role="img" aria-label="Evidence relationship graph"></svg>
+                {% if graph.nodes | length == 1 %}<p class="graph-empty">No supported relationships are available.</p>{% endif %}
+            </div>
+        </section>
+    </aside>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const graph = {{ graph | tojson }};
+    const svg = document.getElementById('personaGraph');
+    if (!svg || graph.nodes.length === 0) return;
+    const ns = 'http://www.w3.org/2000/svg';
+    const width = 720;
+    const height = 520;
+    const center = {x: width / 2, y: height / 2};
+    const claims = graph.nodes.filter(node => node.kind !== 'persona' && node.kind !== 'source');
+    const sources = graph.nodes.filter(node => node.kind === 'source');
+    const positions = new Map([[graph.nodes[0].id, center]]);
+    const placeRing = (nodes, radius, offset = 0) => nodes.forEach((node, index) => {
+        const angle = (Math.PI * 2 * index / Math.max(nodes.length, 1)) - Math.PI / 2 + offset;
+        positions.set(node.id, {x: center.x + Math.cos(angle) * radius, y: center.y + Math.sin(angle) * radius});
+    });
+    placeRing(claims, 145);
+    placeRing(sources, 225, Math.PI / Math.max(sources.length, 2));
+    for (const edge of graph.edges) {
+        const start = positions.get(edge.source);
+        const end = positions.get(edge.target);
+        if (!start || !end) continue;
+        const line = document.createElementNS(ns, 'line');
+        line.setAttribute('x1', start.x); line.setAttribute('y1', start.y);
+        line.setAttribute('x2', end.x); line.setAttribute('y2', end.y);
+        line.setAttribute('class', 'graph-edge');
+        svg.appendChild(line);
+    }
+    for (const node of graph.nodes) {
+        const point = positions.get(node.id);
+        if (!point) continue;
+        const group = document.createElementNS(ns, 'g');
+        group.setAttribute('class', `graph-node graph-${node.kind}`);
+        const circle = document.createElementNS(ns, 'circle');
+        circle.setAttribute('cx', point.x); circle.setAttribute('cy', point.y);
+        circle.setAttribute('r', node.kind === 'persona' ? 34 : node.kind === 'source' ? 17 : 23);
+        const title = document.createElementNS(ns, 'title');
+        title.textContent = node.label;
+        circle.appendChild(title);
+        const label = document.createElementNS(ns, 'text');
+        label.setAttribute('x', point.x); label.setAttribute('y', point.y + (node.kind === 'persona' ? 52 : 35));
+        label.setAttribute('text-anchor', 'middle');
+        label.textContent = node.label.length > 22 ? `${node.label.slice(0, 20)}…` : node.label;
+        group.appendChild(circle); group.appendChild(label); svg.appendChild(group);
+    }
+})();
+</script>
+{% endblock %}

@@ -15,6 +15,31 @@ BACKUP_DIR="${REPO_ROOT}/runtime/backups"
 OPENLEDGER_APP_UID=10001
 OPENLEDGER_APP_GID=10001
 
+ensure_database_password() {
+    local password_file="${DATABASE_PASSWORD_FILE}"
+    local temporary_file
+    if [[ -e "${password_file}" && ( ! -f "${password_file}" || -L "${password_file}" ) ]]; then
+        echo "Database password path must be a regular file: ${password_file}"
+        echo "Move the unexpected path aside, then run the updater again."
+        exit 1
+    fi
+    if [[ ! -s "${password_file}" ]]; then
+        install -d -m 0700 -o "${OPENLEDGER_APP_UID}" -g "${OPENLEDGER_APP_GID}" "${REPO_ROOT}/runtime/secrets"
+        temporary_file="$(mktemp "${password_file}.XXXXXX")"
+        openssl rand -hex 32 > "${temporary_file}"
+        if [[ ! -s "${temporary_file}" ]]; then
+            rm -f "${temporary_file}"
+            echo "Database password generation failed."
+            exit 1
+        fi
+        chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" "${temporary_file}"
+        chmod 0600 "${temporary_file}"
+        mv -f "${temporary_file}" "${password_file}"
+    fi
+    chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" "${password_file}"
+    chmod 0600 "${password_file}"
+}
+
 if [[ ! -f "${ENV_FILE}" ]]; then
     echo "Missing ${ENV_FILE}. Run deploy/install.sh first."
     exit 1
@@ -41,11 +66,7 @@ if [[ ! -s "${AUTH_FILE}" ]]; then
     bash "${DEPLOY_DIR}/configure-auth.sh" "${AUTH_FILE}"
 fi
 
-if [[ ! -s "${DATABASE_PASSWORD_FILE}" ]]; then
-    install -d -m 0700 -o "${OPENLEDGER_APP_UID}" -g "${OPENLEDGER_APP_GID}" "${REPO_ROOT}/runtime/secrets"
-    openssl rand -hex 32 > "${DATABASE_PASSWORD_FILE}"
-    chmod 0600 "${DATABASE_PASSWORD_FILE}"
-fi
+ensure_database_password
 install -d -m 0750 -o "${OPENLEDGER_APP_UID}" -g "${OPENLEDGER_APP_GID}" "${REPO_ROOT}/runtime/reports"
 install -d -m 0700 "${BACKUP_DIR}"
 chown -R "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" \

@@ -247,3 +247,144 @@ def test_child_worker_cancellation_is_not_recorded_as_completed(
     done = persistent_store.get_events(job_id)[-1]["event"]
     assert done["type"] == "done"
     assert done["status"] == "cancelled"
+
+
+def test_case_and_persona_workspaces_render_reviewable_evidence(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": "Alice Example"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+
+    cases_page = client.get("/cases").get_data(as_text=True)
+    assert "Cases" in cases_page
+    assert "alice" in cases_page
+    assert f'/cases/{case["id"]}' in cases_page
+
+    case_page = client.get(f'/cases/{case["id"]}').get_data(as_text=True)
+    assert "Open structured profile" in case_page
+    assert f"/personas/{persona_id}" in case_page
+
+    persona_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    assert "Alice Example" in persona_page
+    assert "90% confidence" in persona_page
+    assert "No evidence extracted." in persona_page
+    assert "Digital relationships" in persona_page
+
+
+def test_claim_review_requires_csrf_and_records_operator_decision(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example",
+                        "url": "https://example.test/alice",
+                        "confidence": "moderate",
+                        "evidence": {},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    claim_id = persistent_store.get_persona(persona_id)["claims"][0]["id"]
+
+    rejected = client.post(
+        f"/claims/{claim_id}/review",
+        data={"persona_id": persona_id, "decision": "approved"},
+    )
+    assert rejected.status_code == 302
+    assert (
+        persistent_store.get_persona(persona_id)["claims"][0]["review_status"]
+        == "pending"
+    )
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "review-csrf"
+        browser_session["username"] = "analyst"
+    accepted = client.post(
+        f"/claims/{claim_id}/review",
+        data={
+            "csrf_token": "review-csrf",
+            "persona_id": persona_id,
+            "decision": "approved",
+            "note": "Verified against the linked public profile",
+        },
+    )
+    assert accepted.status_code == 302
+    reviewed = persistent_store.get_persona(persona_id)["claims"][0]
+    assert reviewed["review_status"] == "approved"
+    assert reviewed["reviewed_by"] == "analyst"
+    assert reviewed["reviews"][0]["note"].startswith("Verified")
+
+
+def test_persona_refresh_queues_new_collection_in_the_same_case(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {"top_sites": 250})
+    persistent_store.claim_next("worker:test")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": ["alice"],
+            "individual_reports": [],
+            "graph_file": f"search_{job_id}/graph.html",
+            "found_count": 0,
+        },
+    )
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "refresh-csrf"
+
+    response = client.post(
+        f"/personas/{persona_id}/refresh",
+        data={"csrf_token": "refresh-csrf"},
+    )
+
+    assert response.status_code == 302
+    refresh_job_id = response.location.rsplit("/", 1)[-1]
+    refresh_job = persistent_store.get_job(refresh_job_id)
+    assert refresh_job["case_id"] == case["id"]
+    assert refresh_job["status"] == "queued"
+    assert refresh_job["kind"] == "refresh"
+    assert refresh_job["options"]["top_sites"] == 250

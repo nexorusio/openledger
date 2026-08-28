@@ -14,6 +14,30 @@ DEFAULT_DOMAIN="openledger.nexorus.io"
 OPENLEDGER_APP_UID=10001
 OPENLEDGER_APP_GID=10001
 
+ensure_database_password() {
+    local password_file="${REPO_ROOT}/runtime/secrets/postgres_password"
+    local temporary_file
+    if [[ -e "${password_file}" && ( ! -f "${password_file}" || -L "${password_file}" ) ]]; then
+        echo "Database password path must be a regular file: ${password_file}"
+        echo "Move the unexpected path aside, then run the installer again."
+        exit 1
+    fi
+    if [[ ! -s "${password_file}" ]]; then
+        temporary_file="$(mktemp "${password_file}.XXXXXX")"
+        openssl rand -hex 32 > "${temporary_file}"
+        if [[ ! -s "${temporary_file}" ]]; then
+            rm -f "${temporary_file}"
+            echo "Database password generation failed."
+            exit 1
+        fi
+        chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" "${temporary_file}"
+        chmod 0600 "${temporary_file}"
+        mv -f "${temporary_file}" "${password_file}"
+    fi
+    chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" "${password_file}"
+    chmod 0600 "${password_file}"
+}
+
 install_docker() {
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
         return
@@ -87,14 +111,10 @@ fi
 if [[ ! -f "${REPO_ROOT}/runtime/secrets/openai_api_key" ]]; then
     install -m 0600 -o "${OPENLEDGER_APP_UID}" -g "${OPENLEDGER_APP_GID}" /dev/null "${REPO_ROOT}/runtime/secrets/openai_api_key"
 fi
-if [[ ! -s "${REPO_ROOT}/runtime/secrets/postgres_password" ]]; then
-    openssl rand -hex 32 > "${REPO_ROOT}/runtime/secrets/postgres_password"
-    chmod 0600 "${REPO_ROOT}/runtime/secrets/postgres_password"
-fi
+ensure_database_password
 chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" \
     "${REPO_ROOT}/runtime/web_settings.json" \
-    "${REPO_ROOT}/runtime/secrets/openai_api_key" \
-    "${REPO_ROOT}/runtime/secrets/postgres_password"
+    "${REPO_ROOT}/runtime/secrets/openai_api_key"
 install -d -m 0700 "${REPO_ROOT}/runtime/backups"
 
 echo "Generating protected credentials..."
