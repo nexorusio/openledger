@@ -36,6 +36,11 @@ from maigret.result import MaigretCheckStatus
 from maigret.sites import MaigretDatabase
 from maigret.report import generate_report_context
 from maigret.utils import is_country_tag
+from maigret.web.case_store import (
+    TERMINAL_STATUSES,
+    CaseStore,
+    database_url_from_environment,
+)
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
@@ -73,12 +78,14 @@ class StreamNotify:
     exactly the granularity we want to stream to the browser.
     """
 
-    def __init__(self, event_queue, username):
+    def __init__(self, event_queue, username, cancellation_check=None):
         self.q = event_queue
         self.username = username
+        self.cancellation_check = cancellation_check
         self.total = 0
         self.checked = 0
         self.sites = {}
+        self.cancel_requested = False
         # Per-site results collected so far, in the shape build_reports()
         # expects. If the scan gets cancelled mid-way (Stop button), this is
         # what's left to report on — otherwise every already-streamed
@@ -94,6 +101,12 @@ class StreamNotify:
         self.sites = sites
 
     def update(self, result, is_similar=False):
+        if self.cancellation_check and self.cancellation_check():
+            # This exception may be consumed by an individual executor worker.
+            # Keep an explicit signal so the outer search still records the
+            # investigation as cancelled after that executor winds down.
+            self.cancel_requested = True
+            raise asyncio.CancelledError()
         self.checked += 1
         if not is_similar:
             entry = {'status': result, 'url_user': result.site_url_user}
@@ -166,6 +179,16 @@ app.config["AUTH_REQUIRED"] = os.getenv("AUTH_REQUIRED", "false").lower() in (
     "true",
     "1",
     "yes",
+)
+app.config["DATABASE_URL"] = database_url_from_environment()
+
+# DATABASE_URL is deliberately optional outside production. This keeps the
+# upstream CLI, unit tests, and recovery access to legacy report folders usable.
+# The production Compose deployment always supplies PostgreSQL.
+case_store = (
+    CaseStore(app.config["DATABASE_URL"])
+    if app.config["DATABASE_URL"]
+    else None
 )
 
 # Search-wide defaults, editable from the Settings workspace. Persisted
@@ -764,7 +787,7 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
         raise ValueError('Invalid report session metadata')
 
     status = result.get('status')
-    if status not in {'completed', 'failed'}:
+    if status not in {'completed', 'failed', 'cancelled', 'interrupted'}:
         raise ValueError('Only terminal investigation results can be persisted')
 
     expected_folder = f'search_{session_key}'
@@ -835,6 +858,10 @@ def persist_job_result(session_key: str, result: Dict[str, Any]):
 def record_job_result(session_key: str, result: Dict[str, Any]):
     """Publish a terminal result in memory and durably when storage is available."""
     normalized = normalize_persisted_result(session_key, result)
+    if case_store is not None and case_store.get_job(session_key):
+        # PostgreSQL is authoritative for worker-owned jobs. Do not publish a
+        # terminal SSE event if the database transition itself did not commit.
+        case_store.finish(session_key, normalized)
     job_results[session_key] = normalized
     try:
         persist_job_result(session_key, normalized)
@@ -887,6 +914,14 @@ def refresh_job_results_from_disk():
         if session_key not in job_results:
             job_results[session_key] = result
             loaded_count += 1
+        if case_store is not None:
+            try:
+                case_store.import_legacy_result(session_key, result)
+            except Exception:
+                logging.exception(
+                    'Failed to index legacy investigation %s in the case store',
+                    session_key,
+                )
     return loaded_count
 
 
@@ -904,6 +939,12 @@ def find_result_by_session(session_id: str):
     if result:
         return result
 
+    if case_store is not None and session_id.startswith('search_'):
+        stored = case_store.get_job(session_id.removeprefix('search_'))
+        if stored and stored.get('status') == 'completed':
+            job_results[stored['job_id']] = stored
+            return stored
+
     loaded = load_persisted_job_result(session_id)
     if not loaded:
         return None
@@ -919,12 +960,17 @@ def delete_persisted_investigation(session_folder: str) -> bool:
     ):
         raise ValueError('Invalid report session folder')
 
+    session_key = session_folder.removeprefix('search_')
     loaded = load_persisted_job_result(session_folder)
-    if not loaded:
+    stored = case_store.get_job(session_key) if case_store is not None else None
+    if loaded:
+        session_key, result = loaded
+    elif stored:
+        result = stored
+    else:
         return False
-    session_key, result = loaded
-    if result.get('status') not in {'completed', 'failed'}:
-        raise ValueError('Only completed or failed investigations can be deleted')
+    if result.get('status') not in TERMINAL_STATUSES:
+        raise ValueError('Only terminal investigations can be deleted')
 
     reports_root = os.path.realpath(app.config['REPORTS_FOLDER'])
     session_path = os.path.realpath(os.path.join(reports_root, session_folder))
@@ -933,11 +979,30 @@ def delete_persisted_investigation(session_folder: str) -> bool:
     if session_path == reports_root:
         raise ValueError('Refusing to delete the reports root')
 
+    tombstone_path = f'{session_path}.deleting-{uuid.uuid4().hex}'
+    moved_to_tombstone = False
     with metadata_lock:
-        shutil.rmtree(session_path)
+        try:
+            if os.path.isdir(session_path):
+                os.replace(session_path, tombstone_path)
+                moved_to_tombstone = True
+            if case_store is not None and stored:
+                case_store.delete_job(session_key)
+        except Exception:
+            if moved_to_tombstone and not os.path.exists(session_path):
+                os.replace(tombstone_path, session_path)
+            raise
         job_results.pop(session_key, None)
         background_jobs.pop(session_key, None)
         analysis_locks.pop(session_folder, None)
+    if moved_to_tombstone:
+        try:
+            shutil.rmtree(tombstone_path)
+        except OSError:
+            logging.exception(
+                'Investigation metadata was deleted, but artifact cleanup failed: %s',
+                tombstone_path,
+            )
     return True
 
 
@@ -1326,19 +1391,56 @@ def parse_search_options(form):
     }
 
 
-async def _stream_search(job, usernames, options):
+PERSISTENT_SECRET_OPTION_KEYS = ('proxy', 'tor_proxy', 'i2p_proxy')
+
+
+def sanitize_persistent_options(options):
+    """Remove credential-bearing connection values before database storage."""
+    sanitized = dict(options)
+    for key in PERSISTENT_SECRET_OPTION_KEYS:
+        sanitized[f'{key}_configured'] = bool(sanitized.pop(key, None))
+    return sanitized
+
+
+def hydrate_persistent_options(options):
+    """Resolve protected connection values only inside the worker process."""
+    hydrated = dict(options)
+    settings = load_settings()
+    for key in PERSISTENT_SECRET_OPTION_KEYS:
+        configured = bool(hydrated.pop(f'{key}_configured', False))
+        hydrated[key] = (settings.get(key) or None) if configured else None
+    return hydrated
+
+
+async def _stream_search(job, usernames, options, cancellation_check=None):
     q = job['queue']
     general_results = []
     for username in usernames:
-        if job['cancelled']:
+        if job['cancelled'] or (cancellation_check and cancellation_check()):
+            q.put({'type': 'stopped', 'username': username.strip()})
             break
-        notify = StreamNotify(q, username.strip())
+        notify = StreamNotify(
+            q,
+            username.strip(),
+            cancellation_check=cancellation_check,
+        )
         task = asyncio.ensure_future(
             maigret_search(username.strip(), options, query_notify=notify)
         )
         job['task'] = task
         try:
             results = await task
+            if (
+                notify.cancel_requested
+                or job['cancelled']
+                or (cancellation_check and cancellation_check())
+            ):
+                if notify.results:
+                    general_results.append(
+                        (username.strip(), 'username', notify.results)
+                    )
+                q.put({'type': 'stopped', 'username': username.strip()})
+                break
             general_results.append((username.strip(), 'username', results))
         except asyncio.CancelledError:
             # The task never got to return its own results dict, but every
@@ -1354,6 +1456,77 @@ async def _stream_search(job, usernames, options):
                 general_results.append((username.strip(), 'username', notify.results))
             q.put({'type': 'error', 'message': str(e), 'username': username.strip()})
     return general_results
+
+
+def finalize_stream_job(
+    job_id,
+    usernames,
+    general_results,
+    started_at,
+    event_sink,
+    *,
+    cancelled=False,
+    interrupted=False,
+):
+    """Persist one terminal scan result and publish its final progress event."""
+    done_event = {'type': 'done'}
+    terminal_status = 'failed'
+    if general_results:
+        try:
+            result = build_reports(general_results, usernames, job_id)
+            result['started_at'] = started_at
+            if cancelled or interrupted:
+                result['collection_status'] = (
+                    'interrupted' if interrupted else 'cancelled'
+                )
+                result['collection_message'] = (
+                    'The worker stopped before collection completed.'
+                    if interrupted
+                    else 'The operator stopped collection before it completed.'
+                )
+            record_job_result(job_id, result)
+            terminal_status = 'completed'
+            if cancelled or interrupted:
+                done_event['status'] = 'partial'
+            done_event['redirect'] = f"/results/search_{job_id}"
+        except Exception as e:
+            logging.error(f"Error building reports for live scan {job_id}: {str(e)}")
+            record_job_result(
+                job_id,
+                {
+                    'status': 'failed',
+                    'error': str(e),
+                    'usernames': usernames,
+                    'started_at': started_at,
+                },
+            )
+    elif cancelled or interrupted:
+        terminal_status = 'interrupted' if interrupted else 'cancelled'
+        record_job_result(
+            job_id,
+            {
+                'status': terminal_status,
+                'error': (
+                    'The worker stopped before the investigation produced findings.'
+                    if interrupted
+                    else 'The investigation was cancelled before finding a profile.'
+                ),
+                'usernames': usernames,
+                'started_at': started_at,
+            },
+        )
+    else:
+        record_job_result(
+            job_id,
+            {
+                'status': 'failed',
+                'error': 'The investigation produced no reportable results.',
+                'usernames': usernames,
+                'started_at': started_at,
+            },
+        )
+    done_event.setdefault('status', terminal_status)
+    event_sink.put(done_event)
 
 
 def run_stream_job(job_id, usernames, options):
@@ -1374,38 +1547,80 @@ def run_stream_job(job_id, usernames, options):
 
     # Same report files + results page as the classic /search flow, so the
     # live graph is a progress view, not a replacement for the report.
-    done_event = {'type': 'done'}
-    if general_results:
-        try:
-            result = build_reports(general_results, usernames, job_id)
-            result['started_at'] = started_at
-            record_job_result(job_id, result)
-            done_event['redirect'] = f"/results/search_{job_id}"
-        except Exception as e:
-            logging.error(f"Error building reports for live scan {job_id}: {str(e)}")
-            record_job_result(
-                job_id,
-                {
-                    'status': 'failed',
-                    'error': str(e),
-                    'usernames': usernames,
-                    'started_at': started_at,
-                },
+    finalize_stream_job(
+        job_id,
+        usernames,
+        general_results,
+        started_at,
+        job['queue'],
+        cancelled=bool(job.get('cancelled')),
+    )
+
+
+class PersistentEventSink:
+    """Queue-compatible sink that commits progress before returning to a collector."""
+
+    def __init__(self, store: CaseStore, job_id: str):
+        self.store = store
+        self.job_id = job_id
+
+    def put(self, event):
+        self.store.append_event(self.job_id, event)
+
+
+def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
+    """Execute a claimed database job independently from any browser request."""
+    job_id = job['job_id']
+    usernames = job['usernames']
+    options = hydrate_persistent_options(job['options'])
+    started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    sink = PersistentEventSink(store, job_id)
+    runtime_job = {
+        'queue': sink,
+        'cancelled': False,
+        'loop': None,
+        'task': None,
+    }
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    runtime_job['loop'] = loop
+    general_results = []
+    try:
+        general_results = loop.run_until_complete(
+            _stream_search(
+                runtime_job,
+                usernames,
+                options,
+                cancellation_check=lambda: (
+                    store.is_cancel_requested(job_id)
+                    or bool(shutdown_check and shutdown_check())
+                ),
             )
-    else:
-        record_job_result(
-            job_id,
-            {
-                'status': 'failed',
-                'error': 'The investigation produced no reportable results.',
-                'usernames': usernames,
-                'started_at': started_at,
-            },
         )
-    job['queue'].put(done_event)
+    except Exception as exc:
+        logging.exception('Persistent investigation %s failed', job_id)
+        sink.put({'type': 'error', 'message': str(exc)})
+    finally:
+        loop.close()
+    shutdown_requested = bool(shutdown_check and shutdown_check())
+    finalize_stream_job(
+        job_id,
+        usernames,
+        general_results,
+        started_at,
+        sink,
+        cancelled=store.is_cancel_requested(job_id) and not shutdown_requested,
+        interrupted=shutdown_requested,
+    )
 
 
 def start_live_job(usernames, options):
+    if case_store is not None:
+        return case_store.create_investigation(
+            usernames,
+            sanitize_persistent_options(options),
+            kind='live',
+        )
     job_id = uuid.uuid4().hex
     live_jobs[job_id] = {
         'queue': queue.Queue(),
@@ -1419,6 +1634,12 @@ def start_live_job(usernames, options):
 
 @app.route('/api/scan', methods=['POST'])
 def scan_start():
+    provided_token = (
+        request.headers.get('X-OpenLedger-CSRF', '')
+        or request.form.get('csrf_token', '')
+    )
+    if not is_valid_csrf(provided_token):
+        return {'error': 'Invalid CSRF token.'}, 403
     usernames = parse_usernames(request.form)
     if not usernames:
         return {'error': 'At least one username is required'}, 400
@@ -1430,6 +1651,67 @@ def scan_start():
 
 @app.route('/api/scan/<job_id>/stream')
 def scan_stream(job_id):
+    if case_store is not None:
+        stored_job = case_store.get_job(job_id)
+        if not stored_job:
+            return "Unknown job", 404
+        try:
+            last_event_id = int(
+                request.headers.get('Last-Event-ID')
+                or request.args.get('after', '0')
+            )
+        except ValueError:
+            last_event_id = 0
+
+        def persistent_events():
+            cursor = max(0, last_event_id)
+            last_heartbeat = time.monotonic()
+            saw_done = False
+            while True:
+                events = case_store.get_events(job_id, after_id=cursor)
+                for stored_event in events:
+                    cursor = stored_event['id']
+                    saw_done = saw_done or stored_event['event'].get('type') == 'done'
+                    yield (
+                        f"id: {cursor}\n"
+                        f"data: {json.dumps(stored_event['event'])}\n\n"
+                    )
+                current = case_store.get_job(job_id)
+                if not current:
+                    break
+                if current['status'] in TERMINAL_STATUSES and not events:
+                    if not saw_done:
+                        yield (
+                            "data: "
+                            + json.dumps(
+                                {
+                                    'type': 'done',
+                                    'status': current['status'],
+                                    'redirect': (
+                                        f"/results/{current['session_folder']}"
+                                        if current['status'] == 'completed'
+                                        else None
+                                    ),
+                                }
+                            )
+                            + "\n\n"
+                        )
+                    break
+                if not events:
+                    if time.monotonic() - last_heartbeat >= 15:
+                        yield ": heartbeat\n\n"
+                        last_heartbeat = time.monotonic()
+                    time.sleep(1)
+
+        return Response(
+            persistent_events(),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache, no-transform',
+                'X-Accel-Buffering': 'no',
+            },
+        )
+
     job = live_jobs.get(job_id)
     if not job:
         return "Unknown job", 404
@@ -1449,9 +1731,20 @@ def scan_stream(job_id):
 
 @app.route('/api/scan/<job_id>/stop', methods=['POST'])
 def scan_stop(job_id):
+    if case_store is not None:
+        if not case_store.get_job(job_id):
+            return {'error': 'unknown job'}, 404
+        if not is_valid_csrf(request.headers.get('X-OpenLedger-CSRF', '')):
+            return {'error': 'Invalid CSRF token.'}, 403
+        if not case_store.request_cancel(job_id):
+            return {'error': 'investigation is not running'}, 409
+        return {'ok': True}
+
     job = live_jobs.get(job_id)
     if not job:
         return {'error': 'unknown job'}, 404
+    if not is_valid_csrf(request.headers.get('X-OpenLedger-CSRF', '')):
+        return {'error': 'Invalid CSRF token.'}, 403
 
     job['cancelled'] = True
     loop = job.get('loop')
@@ -1464,7 +1757,11 @@ def scan_stop(job_id):
 @app.route('/')
 def index():
     refresh_job_results_from_disk()
-    entries = list(job_results.values())
+    entries = (
+        case_store.list_jobs()
+        if case_store is not None
+        else list(job_results.values())
+    )
     completed = sum(1 for entry in entries if entry.get('status') == 'completed')
     failed = sum(1 for entry in entries if entry.get('status') == 'failed')
     profiles_found = sum(
@@ -1493,6 +1790,13 @@ def index():
 
 @app.route('/healthz')
 def healthz():
+    if case_store is not None:
+        try:
+            case_store.ping()
+        except Exception:
+            logging.exception('Database health check failed')
+            return {'status': 'degraded', 'database': 'unavailable'}, 503
+        return {'status': 'ok', 'database': 'connected'}
     return {'status': 'ok'}
 
 
@@ -1590,8 +1894,17 @@ def openai_settings_update():
 @app.route('/history')
 def history():
     refresh_job_results_from_disk()
+    entries_by_folder = {}
+    for entry in (case_store.list_jobs() if case_store is not None else []):
+        key = entry.get('session_folder') or f"database:{entry.get('job_id')}"
+        entries_by_folder[key] = entry
+    for session_key, entry in job_results.items():
+        key = entry.get('session_folder') or f"legacy:{session_key}"
+        entries_by_folder.setdefault(key, entry)
     entries = sorted(
-        job_results.values(), key=lambda r: r.get('started_at', ''), reverse=True
+        entries_by_folder.values(),
+        key=lambda r: r.get('started_at', ''),
+        reverse=True,
     )
     return render_template('history.html', entries=entries)
 
@@ -1620,6 +1933,9 @@ def delete_history_entry(session_folder):
 
 @app.route('/live', methods=['POST'])
 def live_start():
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your investigation session expired. Please try again.', 'danger')
+        return redirect(url_for('index'))
     usernames = parse_usernames(request.form)
     if not usernames:
         flash('At least one username is required', 'danger')
@@ -1632,21 +1948,28 @@ def live_start():
 
 @app.route('/live/<job_id>')
 def live_results(job_id):
+    stored_job = case_store.get_job(job_id) if case_store is not None else None
     result = job_results.get(job_id)
     if not result:
         loaded = load_persisted_job_result(f'search_{job_id}')
         if loaded:
             _, result = loaded
             job_results[job_id] = result
-    if job_id not in live_jobs and not result:
+    if job_id not in live_jobs and not stored_job and not result:
         flash('Unknown or expired scan session.', 'danger')
         return redirect(url_for('index'))
 
     done_redirect = None
+    result = result or stored_job
     if result and result.get('status') == 'completed':
         done_redirect = url_for('results', session_id=result['session_folder'])
 
-    return render_template('live.html', job_id=job_id, done_redirect=done_redirect)
+    return render_template(
+        'live.html',
+        job_id=job_id,
+        done_redirect=done_redirect,
+        completed_found_count=(result or {}).get('found_count', 0),
+    )
 
 
 # Modified search route

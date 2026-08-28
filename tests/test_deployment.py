@@ -20,6 +20,18 @@ def test_web_image_uses_single_process_gunicorn_server():
     assert "--worker-class gthread" in web_stage
     assert "maigret.web.app:app" in web_stage
     assert "maigret --web" not in web_stage
+    assert "USER 10001:10001" in web_stage
+
+
+def test_container_build_context_excludes_runtime_secrets():
+    dockerignore = (REPOSITORY_ROOT / ".dockerignore").read_text(encoding="utf-8")
+    ignored = set(dockerignore.splitlines())
+    assert "runtime/" in ignored
+    assert "reports/" in ignored
+    assert "deploy/.env" in ignored
+    assert ".env" in ignored
+    assert ".venv/" in ignored
+    assert "*.log" in ignored
 
 
 def test_caddy_uses_application_login_instead_of_browser_basic_auth():
@@ -31,6 +43,11 @@ def test_caddy_uses_application_login_instead_of_browser_basic_auth():
     assert 'AUTH_REQUIRED: "true"' in compose
     assert "AUTH_FILE: /app/runtime/secrets/auth.json" in compose
     assert "../runtime/secrets:/app/runtime/secrets" in compose
+    assert (
+        "../runtime/secrets/postgres_password:/app/runtime/secrets/postgres_password:ro"
+        in compose
+    )
+    assert 'POSTGRES_INITDB_ARGS: "--data-checksums"' in compose
     assert "image: openledger-maigret:application-auth" in compose
 
 
@@ -67,3 +84,13 @@ def test_deployment_shell_scripts_pass_syntax_check():
             ["bash", "-n", str(REPOSITORY_ROOT / "deploy" / script_name)],
             check=True,
         )
+
+
+def test_update_verifies_database_backup_before_migration():
+    update_script = (REPOSITORY_ROOT / "deploy" / "update.sh").read_text(
+        encoding="utf-8"
+    )
+    backup_position = update_script.index("pg_dump --format=custom")
+    verification_position = update_script.index("pg_restore --list")
+    deploy_position = update_script.index("build --pull app")
+    assert backup_position < verification_position < deploy_position

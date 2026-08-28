@@ -1,0 +1,69 @@
+name: OpenLedger persistence safety
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-and-container:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: openledger_test
+          POSTGRES_USER: openledger_test
+          POSTGRES_PASSWORD: integration-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openledger_test -d openledger_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+psycopg://openledger_test:integration-only-password@127.0.0.1:5432/openledger_test
+      OPENLEDGER_TEST_POSTGRES_URL: postgresql+psycopg://openledger_test:integration-only-password@127.0.0.1:5432/openledger_test
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev
+          python -m pip install --upgrade pip poetry
+          poetry install --with dev
+
+      - name: Apply and verify database migrations
+        run: |
+          poetry run alembic upgrade head
+          poetry run alembic check
+
+      - name: Test PostgreSQL job and worker integrity
+        run: poetry run pytest -q tests/test_postgres_persistence.py
+
+      - name: Validate deployment configuration
+        env:
+          DOMAIN: openledger.example.test
+          FLASK_SECRET_KEY: integration-only-secret
+        run: docker compose -f deploy/compose.yaml config --quiet
+
+      - name: Build the production web and worker image
+        run: docker build --target web --tag openledger:persistence-test .
+
+      - name: Verify the image runs unprivileged
+        run: test "$(docker image inspect --format '{{.Config.User}}' openledger:persistence-test)" = "10001:10001"
