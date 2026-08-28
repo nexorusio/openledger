@@ -15,7 +15,6 @@ permissions:
 env:
   UPSTREAM_REPOSITORY: soxoj/maigret
   SYNC_BRANCH: automation/maigret-upstream-sync
-  CONFLICT_ISSUE_TITLE: "Maigret upstream synchronization needs manual resolution"
 
 jobs:
   synchronize:
@@ -23,7 +22,6 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
-      issues: write
       pull-requests: write
     outputs:
       needed: ${{ steps.pending.outputs.needed }}
@@ -39,7 +37,9 @@ jobs:
       - name: Configure upstream
         run: |
           git remote add upstream "https://github.com/${UPSTREAM_REPOSITORY}.git"
-          git fetch --no-tags upstream main
+          git fetch --no-tags upstream \
+            "+refs/heads/main:refs/remotes/upstream/main"
+          git rev-parse --verify "refs/remotes/upstream/main^{commit}"
           git fetch --no-tags origin \
             "+refs/heads/${SYNC_BRANCH}:refs/remotes/origin/${SYNC_BRANCH}" || true
 
@@ -51,13 +51,13 @@ jobs:
             echo "OpenLedger already contains the current Maigret upstream commit." >> "$GITHUB_STEP_SUMMARY"
           else
             echo "needed=true" >> "$GITHUB_OUTPUT"
-            echo "upstream_sha=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+            upstream_sha="$(git rev-parse --verify refs/remotes/upstream/main)"
+            echo "upstream_sha=$upstream_sha" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Merge upstream on the synchronization branch
         if: steps.pending.outputs.needed == 'true'
         id: merge
-        continue-on-error: true
         run: |
           git config user.name "openledger-upstream-bot"
           git config user.email "openledger-upstream-bot@users.noreply.github.com"
@@ -75,17 +75,24 @@ jobs:
       - name: Report merge conflicts
         if: steps.pending.outputs.needed == 'true' && steps.merge.outputs.clean != 'true'
         env:
-          GH_TOKEN: ${{ github.token }}
           UPSTREAM_SHA: ${{ steps.pending.outputs.upstream_sha }}
         run: |
           conflicts="$(sed 's/^/- `/' /tmp/conflicts.txt | sed 's/$/`/')"
-          body=$(printf 'The scheduled synchronization could not merge Maigret `%s` into OpenLedger `main`.\n\nConflicting files:\n%s\n\nResolve this on a dedicated branch; do not overwrite OpenLedger `main`.' "$UPSTREAM_SHA" "$conflicts")
-          number=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "$CONFLICT_ISSUE_TITLE in:title" --json number --jq '.[0].number // empty')
-          if [ -n "$number" ]; then
-            gh issue comment "$number" --repo "$GITHUB_REPOSITORY" --body "$body"
-          else
-            gh issue create --repo "$GITHUB_REPOSITORY" --title "$CONFLICT_ISSUE_TITLE" --body "$body"
-          fi
+          {
+            echo "## Manual upstream resolution required"
+            echo
+            echo "Maigret \`$UPSTREAM_SHA\` could not be merged into OpenLedger \`main\`."
+            echo
+            echo "Conflicting files:"
+            if [ -n "$conflicts" ]; then
+              printf '%s\n' "$conflicts"
+            else
+              echo "- Conflict list was empty; inspect the merge step log."
+            fi
+            echo
+            echo "Resolve this on a dedicated branch; do not overwrite OpenLedger \`main\`."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=Manual upstream resolution required::Review the workflow summary for the conflicting files."
           exit 1
 
       - name: Create or update synchronization pull request
