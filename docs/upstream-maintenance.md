@@ -15,8 +15,14 @@ deployment, AI, or interface work.
 4. opens or updates one synchronization pull request; and
 5. creates or updates an issue when Git cannot resolve the merge.
 
-The PR integrity workflow uses the guard script from OpenLedger `main`, not the
-candidate branch, so an upstream change cannot weaken its own checks.
+The scheduled workflow runs synchronization, read-only integrity testing, and
+guarded merge as separate jobs. This is intentional: GitHub suppresses recursive
+workflow events created with `GITHUB_TOKEN`, so the safety decision does not rely
+on the generated PR starting another workflow. The optional PR integrity workflow
+provides the same checks when a person updates the synchronization branch.
+
+Both paths use the guard script from OpenLedger `main`, not the candidate branch,
+so an upstream change cannot weaken its own checks.
 
 ## Automatic-merge boundary
 
