@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+
+{% block title %}{{ case.title }} | OpenLedger{% endblock %}
+{% block breadcrumb %}Case workspace{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Case workspace</p>
+        <h1>{{ case.title }}</h1>
+        <p class="page-description">Durable investigation activity and the personas created from its collected evidence.</p>
+    </div>
+    <a href="{{ url_for('cases_workspace') }}" class="btn btn-outline-secondary">All cases</a>
+</section>
+
+<section class="metric-grid" aria-label="Case summary">
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="users-round"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Personas</span>
+            <strong class="metric-value">{{ case.personas | length }}</strong>
+            <small class="metric-detail">Evidence profiles in this case</small>
+        </div>
+    </article>
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="activity"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Investigations</span>
+            <strong class="metric-value">{{ case.jobs | length }}</strong>
+            <small class="metric-detail">Retained collection jobs</small>
+        </div>
+    </article>
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="folder-lock"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Case status</span>
+            <strong class="metric-value">{{ case.status | title }}</strong>
+            <small class="metric-detail">Updated {{ case.updated_at }}</small>
+        </div>
+    </article>
+</section>
+
+<div class="case-layout">
+    <section class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Personas</h2>
+                <p>Review structured claims and their supporting evidence.</p>
+            </div>
+        </header>
+        <div class="panel-body">
+            {% if case.personas %}
+            <div class="persona-card-grid">
+                {% for persona in case.personas %}
+                <a class="persona-summary-card" href="{{ url_for('persona_workspace', persona_id=persona.id) }}">
+                    <span class="persona-summary-icon"><i data-lucide="contact-round"></i></span>
+                    <span>
+                        <strong>{{ persona.display_name }}</strong>
+                        <small>Open structured profile</small>
+                    </span>
+                    <i data-lucide="arrow-up-right"></i>
+                </a>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="form-text mb-0">No personas are associated with this case.</p>
+            {% endif %}
+        </div>
+    </section>
+
+    <section class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Investigation activity</h2>
+                <p>Collection remains independent of the browser session.</p>
+            </div>
+        </header>
+        <div class="panel-body p-0">
+            <div class="table-responsive">
+                <table class="table align-middle mb-0">
+                    <thead><tr><th>Started</th><th>Status</th><th class="text-end">Action</th></tr></thead>
+                    <tbody>
+                        {% for job in case.jobs %}
+                        <tr>
+                            <td>{{ job.started_at or job.created_at }}</td>
+                            <td><span class="badge-soft {{ 'success' if job.status == 'completed' else 'warning' if job.status in ('failed', 'cancelled', 'interrupted') else '' }}">{{ job.status | replace('_', ' ') | title }}</span></td>
+                            <td class="text-end">
+                                {% if job.status == 'completed' %}
+                                <a href="{{ url_for('results', session_id=job.session_folder) }}" class="btn btn-sm btn-outline-secondary">Findings</a>
+                                {% elif job.status in ('queued', 'running', 'cancel_requested') %}
+                                <a href="{{ url_for('live_results', job_id=job.job_id) }}" class="btn btn-sm btn-outline-secondary">Progress</a>
+                                {% endif %}
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+</div>
+{% endblock %}

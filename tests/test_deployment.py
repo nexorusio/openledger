@@ -94,3 +94,12 @@ def test_update_verifies_database_backup_before_migration():
     verification_position = update_script.index("pg_restore --list")
     deploy_position = update_script.index("build --pull app")
     assert backup_position < verification_position < deploy_position
+
+
+def test_deployment_rejects_non_file_database_secret_and_writes_atomically():
+    for script_name in ("install.sh", "update.sh"):
+        script = (REPOSITORY_ROOT / "deploy" / script_name).read_text(encoding="utf-8")
+        assert '! -f "${password_file}"' in script
+        assert '-L "${password_file}"' in script
+        assert 'mktemp "${password_file}.XXXXXX"' in script
+        assert 'mv -f "${temporary_file}" "${password_file}"' in script

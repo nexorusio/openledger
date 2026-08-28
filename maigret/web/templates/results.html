@@ -10,7 +10,12 @@
         <h1>Investigation results</h1>
         <p class="page-description">Review the relationship graph, claimed profiles, reports, and optional AI assessment.</p>
     </div>
-    <a href="{{ url_for('index') }}" class="btn btn-primary px-4">New investigation</a>
+    <div class="heading-actions">
+        {% if result_case %}
+        <a href="{{ url_for('case_workspace', case_id=result_case.id) }}" class="btn btn-outline-secondary">Open case</a>
+        {% endif %}
+        <a href="{{ url_for('index') }}" class="btn btn-primary px-4">New investigation</a>
+    </div>
 </section>
 
 <section class="metric-grid" aria-label="Investigation summary">
@@ -98,6 +103,28 @@
             {% endif %}
         </div>
     </section>
+
+    {% if result_case and result_case.personas %}
+    <section class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Structured personas</h2>
+                <p>Review extracted records, confidence, provenance, and analyst decisions.</p>
+            </div>
+        </header>
+        <div class="panel-body">
+            <div class="persona-card-grid">
+                {% for persona in result_case.personas %}
+                <a class="persona-summary-card" href="{{ url_for('persona_workspace', persona_id=persona.id) }}">
+                    <span class="persona-summary-icon"><i data-lucide="contact-round"></i></span>
+                    <span><strong>{{ persona.display_name }}</strong><small>Open evidence profile</small></span>
+                    <i data-lucide="arrow-up-right"></i>
+                </a>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+    {% endif %}
 
     <section class="panel-card">
         <header class="panel-header">

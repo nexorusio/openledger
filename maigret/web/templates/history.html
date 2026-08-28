@@ -72,6 +72,9 @@
                         {% endif %}
                     </td>
                     <td class="text-end history-actions">
+                        {% if result.case_id %}
+                        <a href="{{ url_for('case_workspace', case_id=result.case_id) }}" class="btn btn-sm btn-outline-secondary">Case</a>
+                        {% endif %}
                         {% if result.status == 'completed' %}
                         <a href="{{ url_for('results', session_id=result.session_folder) }}" class="btn btn-sm btn-outline-secondary">Open findings</a>
                         {% elif result.status in ('queued', 'running', 'cancel_requested') %}

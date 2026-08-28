@@ -41,6 +41,7 @@ from maigret.web.case_store import (
     CaseStore,
     database_url_from_environment,
 )
+from maigret.web.persona_intelligence import group_claims
 
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
@@ -862,6 +863,13 @@ def record_job_result(session_key: str, result: Dict[str, Any]):
         # PostgreSQL is authoritative for worker-owned jobs. Do not publish a
         # terminal SSE event if the database transition itself did not commit.
         case_store.finish(session_key, normalized)
+        if normalized.get('status') == 'completed':
+            try:
+                case_store.sync_persona_claims(session_key, normalized)
+            except Exception:
+                logging.exception(
+                    'Failed to synchronize persona claims for %s', session_key
+                )
     job_results[session_key] = normalized
     try:
         persist_job_result(session_key, normalized)
@@ -917,6 +925,8 @@ def refresh_job_results_from_disk():
         if case_store is not None:
             try:
                 case_store.import_legacy_result(session_key, result)
+                if result.get('status') == 'completed':
+                    case_store.sync_persona_claims(session_key, result)
             except Exception:
                 logging.exception(
                     'Failed to index legacy investigation %s in the case store',
@@ -1909,6 +1919,97 @@ def history():
     return render_template('history.html', entries=entries)
 
 
+@app.route('/cases')
+def cases_workspace():
+    if case_store is None:
+        flash('The case workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    return render_template('cases.html', cases=case_store.list_cases())
+
+
+@app.route('/cases/<case_id>')
+def case_workspace(case_id):
+    if case_store is None:
+        flash('The case workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    case = case_store.get_case(case_id)
+    if not case:
+        flash('That case does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    return render_template('case.html', case=case)
+
+
+@app.route('/personas/<persona_id>')
+def persona_workspace(persona_id):
+    if case_store is None:
+        flash('The persona workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    persona = case_store.get_persona(persona_id)
+    if not persona:
+        flash('That persona does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    graph = case_store.build_persona_graph(persona_id)
+    return render_template(
+        'persona.html',
+        persona=persona,
+        claim_groups=group_claims(persona['claims']),
+        graph=graph,
+    )
+
+
+@app.route('/personas/<persona_id>/refresh', methods=['POST'])
+def refresh_persona(persona_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your review session expired. Please try again.', 'danger')
+        return redirect(url_for('persona_workspace', persona_id=persona_id))
+    if case_store is None:
+        flash('The persona workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    persona = case_store.get_persona(persona_id)
+    if not persona:
+        flash('That persona does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    try:
+        job_id = case_store.repeat_persona_investigation(persona_id)
+    except ValueError:
+        flash('This case already has an active investigation.', 'warning')
+        return redirect(url_for('persona_workspace', persona_id=persona_id))
+    flash(
+        'A fresh investigation was queued. Existing review decisions will be '
+        'preserved when new evidence arrives.',
+        'success',
+    )
+    return redirect(url_for('live_results', job_id=job_id))
+
+
+@app.route('/claims/<claim_id>/review', methods=['POST'])
+def review_persona_claim(claim_id):
+    persona_id = request.form.get('persona_id', '')
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your review session expired. Please try again.', 'danger')
+        return redirect(url_for('persona_workspace', persona_id=persona_id))
+    if case_store is None:
+        flash('The persona workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    decision = request.form.get('decision', '')
+    reviewer = session.get('username') or 'local-operator'
+    try:
+        stored_persona_id = case_store.review_claim(
+            claim_id,
+            decision,
+            reviewer,
+            request.form.get('note', ''),
+        )
+    except ValueError:
+        flash('That review decision is not valid.', 'danger')
+        return redirect(url_for('persona_workspace', persona_id=persona_id))
+    if not stored_persona_id:
+        flash('That evidence record no longer exists.', 'warning')
+        return redirect(url_for('cases_workspace'))
+    flash(f'Record marked {decision}.', 'success')
+    return redirect(url_for('persona_workspace', persona_id=stored_persona_id))
+
+
 @app.route('/history/<session_folder>/delete', methods=['POST'])
 def delete_history_entry(session_folder):
     if not is_valid_csrf(request.form.get('csrf_token')):
@@ -2054,6 +2155,15 @@ def results(session_id):
         logging.error(f"Results for session {session_id} not found in job_results.")
         return redirect(url_for('index'))
 
+    result_case = None
+    if case_store is not None:
+        case_id = result_data.get('case_id')
+        if not case_id and session_id.startswith('search_'):
+            stored_job = case_store.get_job(session_id.removeprefix('search_'))
+            case_id = (stored_job or {}).get('case_id')
+        if case_id:
+            result_case = case_store.get_case(case_id)
+
     return render_template(
         'results.html',
         usernames=result_data['usernames'],
@@ -2064,6 +2174,7 @@ def results(session_id):
         session_id=session_id,
         ai_enabled=bool(get_openai_api_key()),
         csrf_token=get_csrf_token(),
+        result_case=result_case,
     )
 
 

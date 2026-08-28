@@ -6,10 +6,13 @@ from sqlalchemy import func, select, update
 from maigret.web.case_store import (
     CaseStore,
     cases,
+    claim_evidence,
+    claim_reviews,
     database_url_from_environment,
     investigation_events,
     investigation_jobs,
     personas,
+    persona_claims,
     utcnow,
 )
 
@@ -169,3 +172,109 @@ def test_database_url_uses_protected_password_file(tmp_path, monkeypatch):
         "@private-db:5432/case%20records"
     )
     assert "complex:/ password" not in url
+
+
+def test_completed_findings_create_traceable_persona_claims(store):
+    job_id = store.create_investigation(["mastercorbuzier"], {})
+    store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["mastercorbuzier"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "mastercorbuzier",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://social.example/mastercorbuzier",
+                        "confidence": "strong",
+                        "evidence": {
+                            "fullname": "Deddy Corbuzier",
+                            "location": "Indonesia",
+                            "description": "Indonesian media figure",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    assert store.sync_persona_claims(job_id, result) == 4
+
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    persona = store.get_persona(case["personas"][0]["id"])
+    fields = {claim["field_name"] for claim in persona["claims"]}
+    assert fields == {"social_account", "full_name", "current_location", "summary"}
+    full_name = next(
+        claim for claim in persona["claims"] if claim["field_name"] == "full_name"
+    )
+    assert full_name["display_value"] == "Deddy Corbuzier"
+    assert full_name["confidence"] == 90
+    assert full_name["review_status"] == "pending"
+    assert full_name["evidence"][0]["source_url"].startswith("https://")
+
+
+def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store):
+    job_id = store.create_investigation(["alice"], {})
+    store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example",
+                        "url": "https://example.test/alice",
+                        "confidence": "moderate",
+                        "evidence": {"email": "alice@example.test"},
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    store.sync_persona_claims(job_id, result)
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    persona = store.get_persona(persona_id)
+    email = next(claim for claim in persona["claims"] if claim["field_name"] == "email")
+    assert store.review_claim(email["id"], "rejected", "analyst", "Collision")
+
+    refresh_job_id = store.repeat_persona_investigation(persona_id)
+    queued_refresh = store.get_job(refresh_job_id)
+    assert queued_refresh["case_id"] == case["id"]
+    assert queued_refresh["kind"] == "refresh"
+    assert queued_refresh["usernames"] == ["alice"]
+    store.claim_next("worker:refresh")
+    refreshed_result = dict(result)
+    refreshed_result["session_folder"] = f"search_{refresh_job_id}"
+    refreshed_result["graph_file"] = f"search_{refresh_job_id}/graph.html"
+    store.finish(refresh_job_id, refreshed_result)
+    assert store.sync_persona_claims(refresh_job_id, refreshed_result) == 2
+    refreshed = store.get_persona(persona_id)
+    email = next(
+        claim for claim in refreshed["claims"] if claim["field_name"] == "email"
+    )
+    assert email["review_status"] == "rejected"
+    assert email["reviews"][0]["note"] == "Collision"
+    assert email["source_job_id"] == refresh_job_id
+    graph = store.build_persona_graph(persona_id)
+    assert all(node.get("label") != "alice@example.test" for node in graph["nodes"])
+
+    assert store.delete_job(job_id) is True
+    assert store.get_job(job_id) is None
+    assert store.get_case(case["id"]) is not None
+    assert store.get_job(refresh_job_id) is not None
+
+    with store.engine.connect() as connection:
+        assert connection.scalar(select(func.count()).select_from(persona_claims)) == 2
+        assert connection.scalar(select(func.count()).select_from(claim_evidence)) == 2
+        assert connection.scalar(select(func.count()).select_from(claim_reviews)) == 1

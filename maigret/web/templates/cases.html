@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block title %}Cases | OpenLedger{% endblock %}
+{% block breadcrumb %}Cases{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Structured intelligence</p>
+        <h1>Cases</h1>
+        <p class="page-description">Open durable case records and review their evidence-backed personas.</p>
+    </div>
+    <a href="{{ url_for('index') }}" class="btn btn-primary px-4">New investigation</a>
+</section>
+
+<section class="panel-card data-table-card">
+    {% if not cases %}
+    <div class="empty-state">
+        <span class="empty-state-icon"><i data-lucide="folder-search-2"></i></span>
+        <h2>No cases yet</h2>
+        <p>A case is created automatically when an investigation is submitted.</p>
+        <a href="{{ url_for('index') }}" class="btn btn-primary">Start an investigation</a>
+    </div>
+    {% else %}
+    <div class="table-responsive">
+        <table class="table align-middle">
+            <thead>
+                <tr>
+                    <th>Case</th>
+                    <th>Personas</th>
+                    <th>Latest investigation</th>
+                    <th>Updated</th>
+                    <th><span class="visually-hidden">Actions</span></th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for case in cases %}
+                <tr>
+                    <td>
+                        <strong>{{ case.title }}</strong>
+                        <div class="form-text">{{ case.id }}</div>
+                    </td>
+                    <td>{{ case.personas | length }}</td>
+                    <td>
+                        {% if case.latest_job %}
+                        <span class="badge-soft {{ 'success' if case.latest_job.status == 'completed' else 'warning' if case.latest_job.status in ('failed', 'cancelled', 'interrupted') else '' }}">
+                            {{ case.latest_job.status | replace('_', ' ') | title }}
+                        </span>
+                        {% else %}—{% endif %}
+                    </td>
+                    <td>{{ case.updated_at or '—' }}</td>
+                    <td class="text-end">
+                        <a href="{{ url_for('case_workspace', case_id=case.id) }}" class="btn btn-sm btn-outline-secondary">Open case</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+    {% endif %}
+</section>
+{% endblock %}
