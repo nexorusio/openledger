@@ -13,7 +13,8 @@ deployment, AI, or interface work.
 2. stops when the upstream commit is already contained in OpenLedger `main`;
 3. attempts a merge on `automation/maigret-upstream-sync`;
 4. opens or updates one synchronization pull request; and
-5. creates or updates an issue when Git cannot resolve the merge.
+5. records the conflicting files in the workflow summary when Git cannot resolve
+   the merge.
 
 The scheduled workflow runs synchronization, read-only integrity testing, and
 guarded merge as separate jobs. This is intentional: GitHub suppresses recursive
@@ -49,9 +50,10 @@ the recorded upstream ancestry and makes later synchronization attempt to replay
 previous upstream commits.
 
 The workflow uses only the repository `GITHUB_TOKEN`; it needs no personal access
-token or third-party secret. Repository Actions permissions must allow GitHub
-Actions to create pull requests. If organization policy disables that permission,
-the synchronization check will report a permission error without changing main.
+token or third-party secret, and it does not require GitHub Issues to be enabled.
+Repository Actions permissions must allow GitHub Actions to create pull requests.
+If organization policy disables that permission, the synchronization check will
+report a permission error without changing main.
 
 ## Deployment
 
