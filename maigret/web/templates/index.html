@@ -60,6 +60,7 @@
         </header>
         <div class="panel-body">
             <form method="POST" action="{{ url_for('live_start') }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <div class="mb-4">
                     <label for="usernames" class="form-label">Usernames to investigate</label>
                     <textarea class="form-control" id="usernames" name="usernames" rows="4" required

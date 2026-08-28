@@ -11,6 +11,8 @@ ENV_FILE="${DEPLOY_DIR}/.env"
 COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
 AUTH_FILE="${REPO_ROOT}/runtime/secrets/auth.json"
 DEFAULT_DOMAIN="openledger.nexorus.io"
+OPENLEDGER_APP_UID=10001
+OPENLEDGER_APP_GID=10001
 
 install_docker() {
     if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
@@ -76,15 +78,24 @@ if ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1;
 fi
 
 echo "Preparing persistent runtime directories..."
-install -d -m 0750 "${REPO_ROOT}/runtime/reports"
-install -d -m 0700 "${REPO_ROOT}/runtime/secrets"
+install -d -m 0750 -o "${OPENLEDGER_APP_UID}" -g "${OPENLEDGER_APP_GID}" "${REPO_ROOT}/runtime/reports"
+install -d -m 0700 -o "${OPENLEDGER_APP_UID}" -g "${OPENLEDGER_APP_GID}" "${REPO_ROOT}/runtime/secrets"
 if [[ ! -f "${REPO_ROOT}/runtime/web_settings.json" ]]; then
-    install -m 0600 /dev/null "${REPO_ROOT}/runtime/web_settings.json"
+    install -m 0600 -o "${OPENLEDGER_APP_UID}" -g "${OPENLEDGER_APP_GID}" /dev/null "${REPO_ROOT}/runtime/web_settings.json"
     printf '{}\n' > "${REPO_ROOT}/runtime/web_settings.json"
 fi
 if [[ ! -f "${REPO_ROOT}/runtime/secrets/openai_api_key" ]]; then
-    install -m 0600 /dev/null "${REPO_ROOT}/runtime/secrets/openai_api_key"
+    install -m 0600 -o "${OPENLEDGER_APP_UID}" -g "${OPENLEDGER_APP_GID}" /dev/null "${REPO_ROOT}/runtime/secrets/openai_api_key"
 fi
+if [[ ! -s "${REPO_ROOT}/runtime/secrets/postgres_password" ]]; then
+    openssl rand -hex 32 > "${REPO_ROOT}/runtime/secrets/postgres_password"
+    chmod 0600 "${REPO_ROOT}/runtime/secrets/postgres_password"
+fi
+chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" \
+    "${REPO_ROOT}/runtime/web_settings.json" \
+    "${REPO_ROOT}/runtime/secrets/openai_api_key" \
+    "${REPO_ROOT}/runtime/secrets/postgres_password"
+install -d -m 0700 "${REPO_ROOT}/runtime/backups"
 
 echo "Generating protected credentials..."
 bash "${DEPLOY_DIR}/configure-auth.sh" "${AUTH_FILE}"

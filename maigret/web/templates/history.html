@@ -18,7 +18,7 @@
     <div class="empty-state">
         <span class="empty-state-icon"><i data-lucide="clock-3"></i></span>
         <h2>No investigations yet</h2>
-        <p>Completed and failed investigations will appear here.</p>
+        <p>Queued, running, completed, and interrupted investigations will appear here.</p>
         <a href="{{ url_for('index') }}" class="btn btn-primary">Start an investigation</a>
     </div>
     {% else %}
@@ -38,18 +38,46 @@
                 <tr>
                     <td>{{ result.started_at or '—' }}</td>
                     <td>{{ result.usernames | join(', ') if result.usernames else '—' }}</td>
-                    <td>{{ result.found_count if result.status == 'completed' else '—' }}</td>
+                    <td>{%- if result.status == 'completed' -%}
+                        {{- result.found_count -}}
+                        {%- elif result.status in ('queued', 'running', 'cancel_requested') -%}
+                        {{- result.progress.found | default(0) -}}
+                        {%- else -%}
+                        —
+                        {%- endif -%}</td>
                     <td>
-                        {% if result.status == 'completed' %}
+                        {% if result.status == 'completed' and result.collection_status == 'cancelled' %}
+                        <span class="badge-soft warning" title="{{ result.collection_message }}">Partial · stopped</span>
+                        {% elif result.status == 'completed' and result.collection_status == 'interrupted' %}
+                        <span class="badge-soft warning" title="{{ result.collection_message }}">Partial · interrupted</span>
+                        {% elif result.status == 'completed' %}
                         <span class="badge-soft success">Completed</span>
+                        {% elif result.status == 'queued' %}
+                        <span class="badge-soft"><i data-lucide="clock-3"></i> Queued</span>
+                        {% elif result.status == 'running' %}
+                        <span class="badge-soft"><i data-lucide="loader-circle"></i> Running</span>
+                        {% elif result.status == 'cancel_requested' %}
+                        <span class="badge-soft warning">Stopping</span>
+                        {% elif result.status == 'cancelled' %}
+                        <span class="badge-soft warning">Cancelled</span>
+                        {% elif result.status == 'interrupted' %}
+                        <span class="badge-soft warning" title="{{ result.error }}">Interrupted</span>
                         {% else %}
                         <span class="badge-soft warning" title="{{ result.error }}">Failed</span>
+                        {% endif %}
+                        {% if result.status in ('queued', 'running', 'cancel_requested') %}
+                        <div class="form-text">
+                            {{ result.progress.checked | default(0) }} / {{ result.progress.total | default('?', true) }} sources
+                        </div>
                         {% endif %}
                     </td>
                     <td class="text-end history-actions">
                         {% if result.status == 'completed' %}
-                        <a href="{{ url_for('results', session_id=result.session_folder) }}" class="btn btn-sm btn-outline-secondary">Open reports</a>
+                        <a href="{{ url_for('results', session_id=result.session_folder) }}" class="btn btn-sm btn-outline-secondary">Open findings</a>
+                        {% elif result.status in ('queued', 'running', 'cancel_requested') %}
+                        <a href="{{ url_for('live_results', job_id=result.job_id) }}" class="btn btn-sm btn-outline-secondary">Open live progress</a>
                         {% endif %}
+                        {% if result.status in ('completed', 'failed', 'cancelled', 'interrupted') %}
                         <form method="POST"
                               action="{{ url_for('delete_history_entry', session_folder=result.session_folder) }}"
                               class="d-inline"
@@ -60,6 +88,7 @@
                                 Delete
                             </button>
                         </form>
+                        {% endif %}
                     </td>
                 </tr>
                 {% endfor %}

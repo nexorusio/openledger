@@ -9,7 +9,8 @@ It runs:
 - Caddy as the only public service on ports 80 and 443;
 - automatic HTTPS for the configured domain;
 - a branded OpenLedger login with protected password management;
-- persistent reports, investigation history, and web settings under ../runtime;
+- persistent reports, PostgreSQL case state, investigation history, and web
+  settings;
 - optional server-side OpenAI analysis configured from the protected Settings page.
 
 ## Prerequisites
@@ -36,6 +37,26 @@ runtime files with mode 600. The plaintext password is discarded after a
 salted PBKDF2 hash is generated.
 
 Do not commit deploy/.env or runtime data.
+
+The `db` service is private to the Compose network, publishes no host port, and
+initializes with PostgreSQL data checksums. Its password is generated into
+`runtime/secrets/postgres_password` with mode 600.
+The `migrate` service applies explicit Alembic migrations before the application
+and worker start. The worker owns investigation execution, so closing or changing
+the browser page cannot terminate a running collection. PostgreSQL enforces a
+singleton worker lock to prevent two collectors from claiming the same queue.
+Stopping a collection preserves already-collected findings as a clearly marked
+partial result; a stopped job with no findings is retained as cancelled.
+
+Every `deploy/update.sh` run writes and validates a mode-600, UTC-stamped
+PostgreSQL custom-format dump under `runtime/backups` before applying migrations.
+Copy these backups to encrypted off-Droplet storage under the applicable
+retention policy; a backup kept only on the same Droplet is not disaster
+recovery.
+
+A complete recovery set also needs `runtime/reports` and the protected settings
+and secret files. Back those up separately to encrypted, access-controlled
+storage; do not commit them to Git or package them into a container image.
 
 ## Routine commands
 
@@ -92,10 +113,15 @@ The application login uses a protected salted password hash, 12-hour sessions,
 CSRF protection, sign-in rate limiting, password change, and logout. Use a
 database-backed identity provider, per-user authorization, and audit logs
 before exposing OpenLedger as a true multi-user service. Gunicorn intentionally
-runs one worker with multiple threads because live scan coordination is
-process-local; completed and failed investigation metadata is written
-atomically beside the mounted report files and is rebuilt when the application
-restarts.
+runs one web worker with multiple threads. Investigation execution belongs to
+the separate worker service; job state and replayable progress events are stored
+in PostgreSQL, while report files remain in the mounted runtime directory for
+compatibility.
+
+The application and worker run as unprivileged UID/GID 10001. Docker excludes
+the entire `runtime/` directory and deployment environment files from the image
+build context so credentials, reports, and database dumps cannot be copied into
+an image layer.
 
 Deleting an investigation from History permanently removes its metadata,
 reports, graph, and cached AI assessment from the mounted runtime directory.

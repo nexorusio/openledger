@@ -648,7 +648,12 @@ def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    start = client.post('/api/scan', data={'usernames': 'soxoj'})
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={'usernames': 'soxoj'},
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
     assert start.status_code == 200
     job_id = start.get_json()['job_id']
 
@@ -683,8 +688,18 @@ def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
 
 
 def test_live_scan_empty_username_rejected(client, web_app):
-    resp = client.post('/api/scan', data={'usernames': ''})
+    client.get('/')
+    resp = client.post(
+        '/api/scan',
+        data={'usernames': ''},
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
     assert resp.status_code == 400
+
+
+def test_live_scan_start_requires_csrf(client, web_app):
+    resp = client.post('/api/scan', data={'usernames': 'soxoj'})
+    assert resp.status_code == 403
 
 
 def test_live_scan_stop_unknown_job_404(client, web_app):
@@ -711,7 +726,11 @@ def test_live_start_redirects_to_dedicated_live_page(client, web_app, monkeypatc
 
     monkeypatch.setattr(maigret, 'search', fake_search)
 
-    start = client.post('/live', data={'usernames': 'soxoj'})
+    client.get('/')
+    start = client.post(
+        '/live',
+        data={'usernames': 'soxoj', 'csrf_token': _csrf_token(client)},
+    )
     assert start.status_code == 302
     assert start.location.startswith('/live/')
     job_id = start.location.rsplit('/', 1)[1]
@@ -783,7 +802,11 @@ def test_live_scan_done_event_offers_redirect_not_auto_navigation(
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    start = client.post('/live', data={'usernames': 'soxoj'})
+    client.get('/')
+    start = client.post(
+        '/live',
+        data={'usernames': 'soxoj', 'csrf_token': _csrf_token(client)},
+    )
     job_id = start.location.rsplit('/', 1)[1]
 
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
@@ -835,7 +858,11 @@ def test_live_scan_stop_mid_scan_keeps_already_found_results(
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    start = client.post('/live', data={'usernames': 'soxoj'})
+    client.get('/')
+    start = client.post(
+        '/live',
+        data={'usernames': 'soxoj', 'csrf_token': _csrf_token(client)},
+    )
     job_id = start.location.rsplit('/', 1)[1]
 
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)

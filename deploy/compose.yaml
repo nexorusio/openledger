@@ -1,6 +1,51 @@
 name: openledger
 
 services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: openledger
+      POSTGRES_USER: openledger
+      POSTGRES_PASSWORD_FILE: /run/openledger-secrets/postgres_password
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../runtime/secrets/postgres_password:/run/openledger-secrets/postgres_password:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openledger -d openledger"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - openledger
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: web
+    image: openledger-maigret:application-auth
+    restart: "no"
+    entrypoint: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_HOST: db
+      DATABASE_NAME: openledger
+      DATABASE_USER: openledger
+      DATABASE_PASSWORD_FILE: /app/runtime/secrets/postgres_password
+    volumes:
+      - ../runtime/secrets/postgres_password:/app/runtime/secrets/postgres_password:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - openledger
+
   app:
     build:
       context: ..
@@ -22,6 +67,10 @@ services:
       OPENAI_API_KEY_FILE: /app/runtime/secrets/openai_api_key
       OPENAI_MODEL: ${OPENAI_MODEL:-gpt-5.6-terra}
       OPENAI_API_BASE_URL: ${OPENAI_API_BASE_URL:-https://api.openai.com/v1}
+      DATABASE_HOST: db
+      DATABASE_NAME: openledger
+      DATABASE_USER: openledger
+      DATABASE_PASSWORD_FILE: /app/runtime/secrets/postgres_password
     volumes:
       - ../runtime/reports:/tmp/maigret_reports
       - ../runtime/web_settings.json:/app/web_settings.json
@@ -38,6 +87,38 @@ services:
       timeout: 5s
       retries: 5
       start_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - openledger
+
+  worker:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: web
+    image: openledger-maigret:application-auth
+    restart: unless-stopped
+    init: true
+    entrypoint: ["python", "-m", "maigret.web.worker"]
+    environment:
+      WEB_SETTINGS_FILE: /app/web_settings.json
+      DATABASE_HOST: db
+      DATABASE_NAME: openledger
+      DATABASE_USER: openledger
+      DATABASE_PASSWORD_FILE: /app/runtime/secrets/postgres_password
+      WORKER_POLL_SECONDS: "2"
+    volumes:
+      - ../runtime/reports:/tmp/maigret_reports
+      - ../runtime/web_settings.json:/app/web_settings.json:ro
+      - ../runtime/secrets/postgres_password:/app/runtime/secrets/postgres_password:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    stop_grace_period: 90s
     security_opt:
       - no-new-privileges:true
     networks:
@@ -71,3 +152,4 @@ networks:
 volumes:
   caddy_data:
   caddy_config:
+  postgres_data:

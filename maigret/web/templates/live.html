@@ -25,7 +25,7 @@
     <div class="panel-body">
     <div class="live-stats">
         <div class="live-stat"><span>Sources checked</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
-        <div class="live-stat"><span>Profiles found</span><strong id="stat-found">0</strong></div>
+        <div class="live-stat"><span>Profiles found</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
         <div class="live-stat"><span>Graph status</span><strong>Streaming</strong></div>
     </div>
     <div class="progress mb-3" style="height: 8px;">
@@ -41,9 +41,11 @@
 <script>
     const jobId = {{ job_id|tojson }};
     const doneRedirect = {{ done_redirect|tojson }};
+    const csrfToken = {{ csrf_token|tojson }};
+    const completedFoundCount = {{ completed_found_count|tojson }};
 
     let nodes = null, edges = null, network = null;
-    let foundCount = 0;
+    let foundCount = doneRedirect ? completedFoundCount : 0;
 
     function ensureGraph() {
         if (network) return;
@@ -119,7 +121,10 @@
     }
 
     function stopScan() {
-        fetch('/api/scan/' + jobId + '/stop', { method: 'POST' });
+        fetch('/api/scan/' + jobId + '/stop', {
+            method: 'POST',
+            headers: { 'X-OpenLedger-CSRF': csrfToken },
+        });
         document.getElementById('live-status').textContent = 'Stopping…';
         document.getElementById('stopBtn').disabled = true;
     }
@@ -145,9 +150,20 @@
         } else if (ev.type === 'error') {
             statusEl.textContent = 'Error: ' + ev.message;
         } else if (ev.type === 'done') {
-            const text = ev.redirect
-                ? 'Completed — ' + foundCount + ' accounts found.'
-                : 'Completed — nothing to analyze.';
+            let text;
+            if (ev.status === 'cancelled') {
+                text = 'Investigation cancelled.';
+            } else if (ev.status === 'interrupted') {
+                text = 'Investigation interrupted. Review History for details.';
+            } else if (ev.status === 'partial') {
+                text = 'Collection stopped — partial findings were saved.';
+            } else if (ev.status === 'failed') {
+                text = 'Investigation failed. Review History for details.';
+            } else {
+                text = ev.redirect
+                    ? 'Completed — ' + foundCount + ' accounts found.'
+                    : 'Completed — nothing to analyze.';
+            }
             finish(text, ev.redirect);
         }
     }

@@ -8,6 +8,8 @@ fi
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 AUTH_FILE="${1:-${REPO_ROOT}/runtime/secrets/auth.json}"
 DEFAULT_USERNAME="admin"
+OPENLEDGER_APP_UID="${OPENLEDGER_APP_UID:-10001}"
+OPENLEDGER_APP_GID="${OPENLEDGER_APP_GID:-10001}"
 AUTH_PASSWORD=""
 trap 'unset AUTH_PASSWORD' EXIT
 
@@ -48,5 +50,6 @@ fi
 unset AUTH_PASSWORD_CONFIRM
 
 printf '%s' "${AUTH_PASSWORD}" | python3 "${REPO_ROOT}/deploy/create_auth.py" "${AUTH_FILE}" "${AUTH_USER}"
+chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" "${AUTH_FILE}"
 unset AUTH_PASSWORD
 echo "Application login configured for ${AUTH_USER}."
