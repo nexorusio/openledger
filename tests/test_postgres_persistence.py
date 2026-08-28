@@ -64,6 +64,7 @@ def test_postgres_allows_only_one_investigation_worker_lock(postgres_store):
         assert competing_store.try_acquire_worker_lock() is None
     finally:
         first_lock.close()
+        first_lock.close()
 
     replacement_lock = competing_store.try_acquire_worker_lock()
     assert replacement_lock is not None

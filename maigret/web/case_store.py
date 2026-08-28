@@ -31,7 +31,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.engine import Engine
+from sqlalchemy.engine import Connection, Engine
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
@@ -161,6 +161,35 @@ def _as_iso(value: Optional[datetime]) -> Optional[str]:
     return value.astimezone(timezone.utc).isoformat()
 
 
+class WorkerLock:
+    """Own a worker connection and explicitly release its PostgreSQL session lock."""
+
+    def __init__(
+        self,
+        connection: Connection,
+        *,
+        advisory_lock_key: Optional[int] = None,
+    ):
+        self._connection: Optional[Connection] = connection
+        self._advisory_lock_key = advisory_lock_key
+
+    def close(self) -> None:
+        """Release the session lock before SQLAlchemy returns the connection to its pool."""
+        connection = self._connection
+        if connection is None:
+            return
+        self._connection = None
+        try:
+            if self._advisory_lock_key is not None:
+                connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": self._advisory_lock_key},
+                )
+                connection.commit()
+        finally:
+            connection.close()
+
+
 class CaseStore:
     """Small transactional repository shared by the web and worker processes."""
 
@@ -196,7 +225,7 @@ class CaseStore:
         """Hold a session lock so only one production collector can run."""
         connection = self.engine.connect()
         if self.engine.dialect.name != "postgresql":
-            return connection
+            return WorkerLock(connection)
         acquired = connection.execute(
             text("SELECT pg_try_advisory_lock(:lock_key)"),
             {"lock_key": WORKER_LOCK_KEY},
@@ -205,7 +234,7 @@ class CaseStore:
         if not acquired:
             connection.close()
             return None
-        return connection
+        return WorkerLock(connection, advisory_lock_key=WORKER_LOCK_KEY)
 
     def create_investigation(
         self,
