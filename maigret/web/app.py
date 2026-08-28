@@ -85,6 +85,7 @@ class StreamNotify:
         self.total = 0
         self.checked = 0
         self.sites = {}
+        self.cancel_requested = False
         # Per-site results collected so far, in the shape build_reports()
         # expects. If the scan gets cancelled mid-way (Stop button), this is
         # what's left to report on — otherwise every already-streamed
@@ -101,6 +102,10 @@ class StreamNotify:
 
     def update(self, result, is_similar=False):
         if self.cancellation_check and self.cancellation_check():
+            # This exception may be consumed by an individual executor worker.
+            # Keep an explicit signal so the outer search still records the
+            # investigation as cancelled after that executor winds down.
+            self.cancel_requested = True
             raise asyncio.CancelledError()
         self.checked += 1
         if not is_similar:
@@ -1425,6 +1430,17 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
         job['task'] = task
         try:
             results = await task
+            if (
+                notify.cancel_requested
+                or job['cancelled']
+                or (cancellation_check and cancellation_check())
+            ):
+                if notify.results:
+                    general_results.append(
+                        (username.strip(), 'username', notify.results)
+                    )
+                q.put({'type': 'stopped', 'username': username.strip()})
+                break
             general_results.append((username.strip(), 'username', results))
         except asyncio.CancelledError:
             # The task never got to return its own results dict, but every

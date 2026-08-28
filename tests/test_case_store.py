@@ -160,10 +160,12 @@ def test_database_url_uses_protected_password_file(tmp_path, monkeypatch):
     password_file.write_text("complex:/ password\n", encoding="utf-8")
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.setenv("DATABASE_PASSWORD_FILE", str(password_file))
+    monkeypatch.setenv("DATABASE_USER", "case analyst")
     monkeypatch.setenv("DATABASE_HOST", "private-db")
-    monkeypatch.setenv("DATABASE_NAME", "cases")
+    monkeypatch.setenv("DATABASE_NAME", "case records")
     url = database_url_from_environment()
     assert url == (
-        "postgresql+psycopg://openledger:complex%3A%2F+password@private-db:5432/cases"
+        "postgresql+psycopg://case%20analyst:complex%3A%2F%20password"
+        "@private-db:5432/case%20records"
     )
     assert "complex:/ password" not in url

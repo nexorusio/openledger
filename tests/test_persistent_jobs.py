@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from maigret.web.case_store import CaseStore
@@ -215,3 +217,33 @@ def test_worker_shutdown_saves_partial_findings_as_interrupted_collection(
     done = persistent_store.get_events(job_id)[-1]["event"]
     assert done["type"] == "done"
     assert done["status"] == "partial"
+
+
+def test_child_worker_cancellation_is_not_recorded_as_completed(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+
+    async def fake_search(_username, _options, query_notify=None):
+        persistent_store.request_cancel(job_id)
+        try:
+            query_notify.update(object())
+        except asyncio.CancelledError:
+            # Match the executor behavior that originally swallowed the child
+            # worker cancellation before the outer search task could see it.
+            pass
+        return {}
+
+    monkeypatch.setattr(web_app, "maigret_search", fake_search)
+    monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    result = persistent_store.get_job(job_id)
+    assert result["status"] == "cancelled"
+    assert "individual_reports" not in result
+    assert "cancelled before finding" in result["error"]
+    done = persistent_store.get_events(job_id)[-1]["event"]
+    assert done["type"] == "done"
+    assert done["status"] == "cancelled"

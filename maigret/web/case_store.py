@@ -6,7 +6,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote
 
 from sqlalchemy import (
     JSON,
@@ -145,11 +145,11 @@ def database_url_from_environment() -> str:
         password = handle.read().strip()
     if not password:
         raise RuntimeError("The database password file is empty")
-    user = quote_plus(os.getenv("DATABASE_USER", "openledger"))
-    encoded_password = quote_plus(password)
+    user = quote(os.getenv("DATABASE_USER", "openledger"), safe="")
+    encoded_password = quote(password, safe="")
     host = os.getenv("DATABASE_HOST", "db")
     port = int(os.getenv("DATABASE_PORT", "5432"))
-    name = quote_plus(os.getenv("DATABASE_NAME", "openledger"))
+    name = quote(os.getenv("DATABASE_NAME", "openledger"), safe="")
     return f"postgresql+psycopg://{user}:{encoded_password}@{host}:{port}/{name}"
 
 
