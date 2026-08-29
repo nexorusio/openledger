@@ -40,6 +40,37 @@
     </article>
 </section>
 
+{% set latest_spec = case.jobs[0].options.investigation_spec if case.jobs and case.jobs[0].options and case.jobs[0].options.investigation_spec else none %}
+{% if latest_spec %}
+<section class="panel-card case-scope-card">
+    <header class="panel-header">
+        <div>
+            <h2>Investigation scope</h2>
+            <p>Operator-provided context is retained separately from collected evidence.</p>
+        </div>
+        <span class="badge-soft">{{ latest_spec.processing_mode | replace('_', ' ') | title }}</span>
+    </header>
+    <div class="panel-body case-scope-grid">
+        <div>
+            <span class="form-label">Known identifiers</span>
+            <div class="scope-chip-list">
+                {% for identifier in latest_spec.identifiers %}
+                <span class="scope-chip"><small>{{ identifier.type | replace('_', ' ') }}</small>{{ identifier.value }}</span>
+                {% endfor %}
+            </div>
+        </div>
+        <div>
+            <span class="form-label">Research terms</span>
+            <dl class="scope-terms">
+                <div><dt>Include</dt><dd>{{ latest_spec.include_terms | join(', ') if latest_spec.include_terms else 'None' }}</dd></div>
+                <div><dt>Exclude</dt><dd>{{ latest_spec.exclude_terms | join(', ') if latest_spec.exclude_terms else 'None' }}</dd></div>
+                <div><dt>External AI context</dt><dd>{{ 'Allowed for cited research' if latest_spec.allow_ai_context else 'Withheld' }}</dd></div>
+            </dl>
+        </div>
+    </div>
+</section>
+{% endif %}
+
 <div class="case-layout">
     <section class="panel-card">
         <header class="panel-header">

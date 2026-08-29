@@ -54,22 +54,112 @@
         <header class="panel-header">
             <div>
                 <h2>Start a new investigation</h2>
-                <p>Enter one or more usernames and choose the source coverage.</p>
+                <p>Define the subject, account identifiers, and how results should be correlated.</p>
             </div>
             <span class="badge-soft">Live</span>
         </header>
         <div class="panel-body">
-            <form method="POST" action="{{ url_for('live_start') }}">
+            <form method="POST" action="{{ url_for('live_start') }}" id="investigation-builder">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <div class="mb-4">
-                    <label for="usernames" class="form-label">Usernames to investigate</label>
-                    <textarea class="form-control" id="usernames" name="usernames" rows="4" required
-                        autocomplete="off" spellcheck="false"
-                        placeholder="Enter usernames separated by spaces or commas"></textarea>
-                    <div class="form-text">Each username is processed independently. Do not enter passwords or private credentials.</div>
-                </div>
 
-                <fieldset>
+                <fieldset class="investigation-section">
+                    <legend class="visually-hidden">Known identifiers</legend>
+                    <div class="section-heading-row">
+                        <div>
+                            <h3 class="form-label mb-1">Known identifiers</h3>
+                            <p class="form-text mb-0">Use one row per value. A full name may contain spaces; it is never split into separate keywords.</p>
+                        </div>
+                        <button type="button" class="btn btn-sm btn-outline-secondary" id="add-identifier">
+                            <i data-lucide="plus"></i>
+                            Add identifier
+                        </button>
+                    </div>
+
+                    <div class="identifier-list" id="identifier-list">
+                        <div class="identifier-row">
+                            <label class="visually-hidden" for="identifier-type-1">Identifier type</label>
+                            <select class="form-select identifier-type" id="identifier-type-1" name="identifier_type" aria-label="Identifier type">
+                                <option value="username" selected>Username</option>
+                                <option value="social_handle">Social handle</option>
+                                <option value="profile_url">Profile URL</option>
+                                <option value="full_name">Full name</option>
+                                <option value="email">Email address</option>
+                                <option value="phone">Phone number</option>
+                            </select>
+                            <label class="visually-hidden" for="identifier-value-1">Identifier value</label>
+                            <input class="form-control identifier-value" id="identifier-value-1" name="identifier_value"
+                                autocomplete="off" spellcheck="false" required placeholder="e.g. jatipratomo">
+                            <span class="identifier-behavior">Exact account check</span>
+                            <button type="button" class="icon-button identifier-remove" aria-label="Remove identifier" disabled>
+                                <i data-lucide="x"></i>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="generate-name-variants" name="generate_name_variants" checked>
+                        <label class="form-check-label" for="generate-name-variants">Generate reviewable username variants from full names</label>
+                        <div class="form-text">Creates a bounded list such as <code>jatipratomo</code>, <code>jati.pratomo</code>, and <code>jati_pratomo</code>. Phone and email values are never permuted.</div>
+                    </div>
+                </fieldset>
+
+                <fieldset class="investigation-section">
+                    <legend class="form-label mb-2">Result grouping</legend>
+                    <div class="mode-selector">
+                        <div class="mode-option">
+                            <input type="radio" name="processing_mode" id="mode-subject" value="same_subject" checked>
+                            <label for="mode-subject">
+                                <strong>One subject</strong>
+                                <small>Scan identifiers separately, then place their claims under one reviewable persona</small>
+                            </label>
+                        </div>
+                        <div class="mode-option">
+                            <input type="radio" name="processing_mode" id="mode-independent" value="independent">
+                            <label for="mode-independent">
+                                <strong>Independent subjects</strong>
+                                <small>Create a separate persona for every exact or generated account identifier</small>
+                            </label>
+                        </div>
+                    </div>
+                </fieldset>
+
+                <fieldset class="investigation-section">
+                    <legend class="form-label mb-2">Research context</legend>
+                    <div class="research-context-grid">
+                        <div>
+                            <label for="include-terms" class="form-label">Include terms</label>
+                            <textarea class="form-control compact-textarea" id="include-terms" name="include_terms" rows="3"
+                                placeholder="e.g. Jakarta, Nexorus, urban planning"></textarea>
+                            <div class="form-text">Comma or new-line separated. Multi-word phrases stay intact.</div>
+                        </div>
+                        <div>
+                            <label for="exclude-terms" class="form-label">Exclude terms</label>
+                            <textarea class="form-control compact-textarea" id="exclude-terms" name="exclude_terms" rows="3"
+                                placeholder="e.g. fan page, football"></textarea>
+                            <div class="form-text">Used only by keyword-capable AI or future connectors; exclusions do not alter exact account checks.</div>
+                        </div>
+                    </div>
+                    <div class="form-check investigation-check sensitive-context-check">
+                        <input class="form-check-input" type="checkbox" id="allow-ai-context" name="allow_ai_context">
+                        <label class="form-check-label" for="allow-ai-context">Allow the configured AI service to use these identifiers and terms for cited public-web research</label>
+                        <div class="form-text">Off by default. Without consent, names, emails, phones, and terms remain in OpenLedger as case context and are not included in the external AI request.</div>
+                    </div>
+                </fieldset>
+
+                <section class="query-plan" aria-labelledby="query-plan-title" aria-live="polite">
+                    <div class="query-plan-heading">
+                        <div>
+                            <span class="eyebrow">Before collection</span>
+                            <h3 id="query-plan-title">Query plan</h3>
+                        </div>
+                        <span class="query-plan-count" id="query-plan-count">0 account checks</span>
+                    </div>
+                    <p id="query-plan-summary">Add an account identifier or a full name with variant generation enabled.</p>
+                    <div class="query-plan-targets" id="query-plan-targets"></div>
+                    <p class="query-plan-note" id="query-plan-note">Every account candidate is checked independently. Correlation changes only how evidence is organized, never the underlying source result.</p>
+                </section>
+
+                <fieldset class="investigation-section coverage-section">
                     <legend class="form-label mb-2">Source coverage</legend>
                     <div class="mode-selector">
                         <div class="mode-option">
@@ -89,12 +179,187 @@
                     </div>
                 </fieldset>
 
+                <div class="alert alert-danger investigation-form-error" id="investigation-form-error" role="alert" hidden></div>
+
                 <button type="submit" id="startBtn" class="btn btn-primary investigation-submit">
                     Start investigation
                 </button>
             </form>
+
+            <template id="identifier-row-template">
+                <div class="identifier-row">
+                    <label class="visually-hidden">Identifier type</label>
+                    <select class="form-select identifier-type" name="identifier_type" aria-label="Identifier type">
+                        <option value="username">Username</option>
+                        <option value="social_handle">Social handle</option>
+                        <option value="profile_url">Profile URL</option>
+                        <option value="full_name">Full name</option>
+                        <option value="email">Email address</option>
+                        <option value="phone">Phone number</option>
+                    </select>
+                    <label class="visually-hidden">Identifier value</label>
+                    <input class="form-control identifier-value" name="identifier_value" autocomplete="off" spellcheck="false" aria-label="Identifier value" required>
+                    <span class="identifier-behavior">Exact account check</span>
+                    <button type="button" class="icon-button identifier-remove" aria-label="Remove identifier">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+            </template>
         </div>
     </article>
 
 </section>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const form = document.getElementById('investigation-builder');
+    const list = document.getElementById('identifier-list');
+    const template = document.getElementById('identifier-row-template');
+    const addButton = document.getElementById('add-identifier');
+    const generateToggle = document.getElementById('generate-name-variants');
+    const aiContextToggle = document.getElementById('allow-ai-context');
+    const count = document.getElementById('query-plan-count');
+    const summary = document.getElementById('query-plan-summary');
+    const targets = document.getElementById('query-plan-targets');
+    const note = document.getElementById('query-plan-note');
+    const error = document.getElementById('investigation-form-error');
+
+    const behavior = {
+        username: ['e.g. jatipratomo', 'Exact account check'],
+        social_handle: ['e.g. @jatipratomo', 'The @ prefix is removed; exact account check'],
+        profile_url: ['e.g. https://instagram.com/jatipratomo', 'Extract account handle; no URL is fetched'],
+        full_name: ['e.g. Jati Pratomo', 'Retain as one phrase; optional handle variants'],
+        email: ['e.g. name@example.com', 'Case context only; never sent to username checks'],
+        phone: ['e.g. +628123456789', 'Normalized case context only; never permuted']
+    };
+
+    function cleanNameTokens(value) {
+        return value.toLocaleLowerCase().trim().split(/\s+/)
+            .map(token => Array.from(token).filter(char => /[\p{L}\p{N}]/u.test(char)).join(''))
+            .filter(Boolean).slice(0, 6);
+    }
+
+    function generateVariants(value) {
+        const nameTokens = cleanNameTokens(value);
+        if (!nameTokens.length) return [];
+        const groups = [nameTokens];
+        if (nameTokens.length > 1) {
+            groups.push([nameTokens[0], nameTokens[nameTokens.length - 1]]);
+            groups.push([nameTokens[nameTokens.length - 1], nameTokens[0]]);
+        }
+        const output = [];
+        groups.forEach(parts => {
+            ['', '.', '_', '-'].forEach(separator => {
+                const candidate = parts.join(separator);
+                if (candidate && !output.includes(candidate)) output.push(candidate);
+            });
+            if (parts.length > 1) {
+                [parts[0][0] + parts[parts.length - 1], parts[0] + parts[parts.length - 1][0]]
+                    .forEach(candidate => {
+                        if (candidate && !output.includes(candidate)) output.push(candidate);
+                    });
+            }
+        });
+        return output.slice(0, 16);
+    }
+
+    function profileHandle(value) {
+        try {
+            const url = new URL(value);
+            if (!['http:', 'https:'].includes(url.protocol)) return '';
+            const segments = url.pathname.split('/').filter(Boolean);
+            return segments.length ? decodeURIComponent(segments[segments.length - 1]).replace(/^@+/, '') : '';
+        } catch (_) {
+            return '';
+        }
+    }
+
+    function queryTargets() {
+        const output = [];
+        list.querySelectorAll('.identifier-row').forEach(row => {
+            const type = row.querySelector('.identifier-type').value;
+            const value = row.querySelector('.identifier-value').value.trim();
+            if (!value) return;
+            let candidates = [];
+            if (type === 'username' || type === 'social_handle') candidates = [value.replace(/^@+/, '')];
+            if (type === 'profile_url') candidates = [profileHandle(value)];
+            if (type === 'full_name' && generateToggle.checked) candidates = generateVariants(value);
+            candidates.filter(Boolean).forEach(candidate => {
+                if (!output.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) output.push(candidate);
+            });
+        });
+        return output;
+    }
+
+    function updateRow(row) {
+        const type = row.querySelector('.identifier-type').value;
+        const [placeholder, description] = behavior[type];
+        row.querySelector('.identifier-value').placeholder = placeholder;
+        row.querySelector('.identifier-behavior').textContent = description;
+    }
+
+    function updatePlan() {
+        const planned = queryTargets();
+        const grouped = document.getElementById('mode-subject').checked;
+        const contextual = Array.from(list.querySelectorAll('.identifier-row'))
+            .filter(row => ['full_name', 'email', 'phone'].includes(row.querySelector('.identifier-type').value)
+                && row.querySelector('.identifier-value').value.trim()).length;
+        count.textContent = `${planned.length} account ${planned.length === 1 ? 'check' : 'checks'}`;
+        summary.textContent = planned.length
+            ? `${planned.length} exact account candidate${planned.length === 1 ? '' : 's'} will be checked independently${contextual ? `; ${contextual} context value${contextual === 1 ? '' : 's'} will remain attached to the case` : ''}.`
+            : 'Add an account identifier or a full name with variant generation enabled.';
+        targets.replaceChildren(...planned.slice(0, 16).map(value => {
+            const chip = document.createElement('span');
+            chip.className = 'query-target-chip';
+            chip.textContent = value;
+            return chip;
+        }));
+        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
+        error.hidden = true;
+    }
+
+    function bindRow(row) {
+        const type = row.querySelector('.identifier-type');
+        type.addEventListener('change', () => {
+            updateRow(row);
+            updatePlan();
+        });
+        row.querySelector('.identifier-value').addEventListener('input', updatePlan);
+        row.querySelector('.identifier-remove').addEventListener('click', () => {
+            row.remove();
+            list.querySelectorAll('.identifier-remove').forEach((button, index, buttons) => {
+                button.disabled = buttons.length === 1;
+            });
+            updatePlan();
+        });
+        updateRow(row);
+    }
+
+    addButton.addEventListener('click', () => {
+        if (list.children.length >= 24) return;
+        const row = template.content.firstElementChild.cloneNode(true);
+        list.appendChild(row);
+        list.querySelectorAll('.identifier-remove').forEach(button => { button.disabled = false; });
+        bindRow(row);
+        row.querySelector('.identifier-value').focus();
+        if (window.lucide) window.lucide.createIcons({ attrs: { 'stroke-width': 1.8 } });
+        updatePlan();
+    });
+
+    list.querySelectorAll('.identifier-row').forEach(bindRow);
+    [generateToggle, aiContextToggle].forEach(control => control.addEventListener('change', updatePlan));
+    form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
+    form.addEventListener('submit', event => {
+        if (!queryTargets().length) {
+            event.preventDefault();
+            error.textContent = 'Add a username, social handle, profile URL, or a full name with username variants enabled.';
+            error.hidden = false;
+            error.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    });
+    updatePlan();
+})();
+</script>
 {% endblock %}

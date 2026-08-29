@@ -50,8 +50,8 @@
     <section class="panel-card">
         <header class="panel-header">
             <div>
-                <h2>Relationship graph</h2>
-                <p>Combined links between investigated usernames and discovered public profiles.</p>
+                <h2>Discovery evidence graph</h2>
+                <p>Source-level links between investigated usernames and discovered public profiles.</p>
             </div>
             <span class="badge-soft"><i data-lucide="network"></i> Interactive</span>
         </header>
@@ -67,7 +67,7 @@
         <header class="panel-header">
             <div>
                 <h2 id="ai-analysis-heading">AI investigation assessment</h2>
-                <p>Generate a server-side analytical summary of the claimed profiles.</p>
+                <p>Research the identity hypothesis and propose cited evidence for analyst review.</p>
             </div>
             <span class="badge-soft {{ 'success' if ai_enabled else 'warning' }}">
                 {{ 'Connected' if ai_enabled else 'Connection required' }}
@@ -76,11 +76,12 @@
         <div class="panel-body">
             <p class="page-description mt-0">
                 Treat the output as investigative assistance, not verified identity evidence.
-                OpenLedger sends only the normalized report data when you request analysis.
+                OpenLedger sends the normalized report only when you request analysis. Supported
+                public-web findings may enter Persona as pending proposals; AI can never approve them.
             </p>
             {% if ai_enabled %}
             <div class="d-flex align-items-center flex-wrap gap-2 mt-3">
-                <button type="button" class="btn btn-primary" id="generateAiAnalysis">Analyze with AI</button>
+                <button type="button" class="btn btn-primary" id="generateAiAnalysis">Analyze and propose evidence</button>
                 <span class="form-text" id="aiAnalysisStatus" role="status"></span>
             </div>
             <pre class="ai-analysis-output d-none" id="aiAnalysisOutput"></pre>
@@ -88,10 +89,13 @@
                 <h3>Public sources</h3>
                 <ul id="aiAnalysisSourceList"></ul>
             </div>
-            <a class="btn btn-sm btn-outline-secondary mt-3 d-none"
-               id="downloadAiAnalysis"
-               href="{{ url_for('download_report', filename=session_id ~ '/ai_analysis.md') }}"
-               target="_blank" rel="noopener">Download AI assessment</a>
+            <div class="security-callout mt-3 d-none" id="aiProposalNotice" role="status">
+                <i data-lucide="clipboard-check"></i>
+                <span id="aiProposalMessage"></span>
+                {% if result_case and result_case.personas %}
+                <a id="aiProposalReviewLink" href="{{ url_for('persona_workspace', persona_id=result_case.personas[0].id) }}">Review Persona evidence</a>
+                {% endif %}
+            </div>
             {% else %}
             <div class="security-callout mt-3">
                 <i data-lucide="plug-zap"></i>
@@ -109,7 +113,7 @@
         <header class="panel-header">
             <div>
                 <h2>Structured personas</h2>
-                <p>Review extracted records, confidence, provenance, and analyst decisions.</p>
+                <p>Source evidence is synchronized here automatically when collection finishes; this process is independent of AI analysis.</p>
             </div>
         </header>
         <div class="panel-body">
@@ -216,9 +220,10 @@ if (aiButton) {
     aiButton.addEventListener('click', async function () {
         const status = document.getElementById('aiAnalysisStatus');
         const output = document.getElementById('aiAnalysisOutput');
-        const download = document.getElementById('downloadAiAnalysis');
         const sources = document.getElementById('aiAnalysisSources');
         const sourceList = document.getElementById('aiAnalysisSourceList');
+        const proposalNotice = document.getElementById('aiProposalNotice');
+        const proposalMessage = document.getElementById('aiProposalMessage');
         aiButton.disabled = true;
         status.textContent = 'Generating assessment…';
 
@@ -246,10 +251,24 @@ if (aiButton) {
                 sourceList.appendChild(item);
             }
             sources.classList.toggle('d-none', sourceList.children.length === 0);
-            download.classList.remove('d-none');
+            if (proposalNotice && proposalMessage) {
+                const count = Number(payload.proposal_count || 0);
+                const proposalMessages = {
+                    pending_review: `${count} cited evidence proposal${count === 1 ? '' : 's'} added to the human review queue. Nothing was approved automatically.`,
+                    no_valid_proposals: 'No cited AI finding met the evidence validation rules. The narrative assessment remains available above.',
+                    unavailable: 'The narrative assessment was saved, but structured evidence proposals were unavailable for this run.',
+                    storage_unavailable: 'Persistent Persona storage is unavailable, so no evidence proposal was retained.',
+                    investigation_unavailable: 'The investigation record could not be linked to a Persona review queue.'
+                };
+                proposalMessage.textContent = proposalMessages[payload.proposal_status]
+                    || 'No evidence proposal was added.';
+                proposalNotice.classList.remove('d-none');
+                const reviewLink = document.getElementById('aiProposalReviewLink');
+                if (reviewLink) reviewLink.hidden = payload.proposal_status !== 'pending_review';
+            }
             status.textContent = payload.cached
-                ? 'Loaded the saved assessment.'
-                : 'Assessment completed and saved.';
+                ? 'Loaded the saved assessment and synchronized its proposals.'
+                : 'Assessment completed; proposals are ready for human review.';
         } catch (error) {
             status.textContent = error.message;
         } finally {

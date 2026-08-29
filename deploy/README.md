@@ -93,18 +93,31 @@ never returned to the browser or written to the ordinary web settings file.
 
 Never put the API key in GitHub, screenshots, or support messages.
 
-AI assessments use extracted Maigret profile fields rather than only site names
+AI assessments use extracted public-profile fields rather than only site names
 and URLs. When **cited public-web research** is enabled, OpenLedger uses the
 OpenAI Responses web-search tool to corroborate the strongest identity cluster
 and displays the returned public sources as clickable links. This is an OpenAI
 hosted tool, not a separately deployed MCP server. Disable it in Settings when
-an investigation must remain limited to the collected Maigret evidence.
+an investigation must remain limited to collected evidence.
+
+When cited research is enabled, a second schema-constrained model pass may
+propose supported public-biographical fields for Persona. The server accepts
+only allowlisted fields and exact URLs returned by the cited research response,
+caps confidence, and rejects sensitive or malformed suggestions. Accepted
+suggestions enter the Persona review queue as pending. AI cannot approve a
+record, and repeating analysis never clears an analyst rejection.
 
 Country codes under **Source coverage filters** describe where sources are
 focused; they do not assert or filter the subject's location. Selecting `ID`
 keeps broadly available and global platforms while excluding sources explicitly
 focused only on other countries. Language filtering is not offered because the
-Maigret site database does not provide reliable per-source language metadata.
+source database does not provide reliable per-source language metadata.
+
+Approved Persona locations appear on a Leaflet map only when the claim has
+analyst-verified latitude and longitude. OpenLedger does not send location text
+to a public geocoder. The default map loads OpenStreetMap tiles; set
+`OPENLEDGER_MAP_TILE_URL` in `deploy/.env` to an approved internal tile endpoint
+for an isolated or sensitive deployment.
 
 ## Security model
 

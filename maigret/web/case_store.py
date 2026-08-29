@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import math
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -14,6 +16,7 @@ from sqlalchemy import (
     CheckConstraint,
     Column,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -96,6 +99,8 @@ persona_claims = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     Column("reviewed_at", DateTime(timezone=True), nullable=True),
     Column("reviewed_by", String(200), nullable=True),
+    Column("latitude", Float, nullable=True),
+    Column("longitude", Float, nullable=True),
     CheckConstraint(
         "confidence >= 0 AND confidence <= 100",
         name="ck_persona_claims_confidence",
@@ -110,6 +115,12 @@ Index(
     "ix_persona_claims_persona_field",
     persona_claims.c.persona_id,
     persona_claims.c.field_name,
+)
+Index(
+    "ix_persona_claims_relationship_projection",
+    persona_claims.c.review_status,
+    persona_claims.c.field_name,
+    persona_claims.c.normalized_value,
 )
 
 claim_evidence = Table(
@@ -334,10 +345,23 @@ class CaseStore:
         normalized = [str(value).strip() for value in usernames if str(value).strip()]
         if not normalized:
             raise ValueError("At least one username is required")
+        investigation_spec = options.get("investigation_spec")
+        grouped = (
+            isinstance(investigation_spec, dict)
+            and investigation_spec.get("processing_mode") == "same_subject"
+        )
+        subject_label = (
+            str(investigation_spec.get("subject_label") or "").strip()
+            if isinstance(investigation_spec, dict)
+            else ""
+        )
+        persona_names = [subject_label or normalized[0]] if grouped else normalized
         now = utcnow()
         case_id = str(uuid.uuid4())
         job_id = str(uuid.uuid4())
-        title = ", ".join(normalized)[:500]
+        title = (subject_label if grouped and subject_label else ", ".join(normalized))[
+            :500
+        ]
         with self.engine.begin() as connection:
             connection.execute(
                 insert(cases).values(
@@ -357,7 +381,7 @@ class CaseStore:
                         "display_name": username,
                         "created_at": now,
                     }
-                    for username in normalized
+                    for username in persona_names
                 ],
             )
             connection.execute(
@@ -404,21 +428,47 @@ class CaseStore:
             )
             if active_job:
                 raise ValueError("This case already has an active investigation")
-            latest_options = connection.scalar(
-                select(investigation_jobs.c.options)
-                .where(investigation_jobs.c.case_id == persona_row["case_id"])
-                .order_by(investigation_jobs.c.created_at.desc())
-                .limit(1)
+            latest_job = (
+                connection.execute(
+                    select(
+                        investigation_jobs.c.options,
+                        investigation_jobs.c.usernames,
+                    )
+                    .where(investigation_jobs.c.case_id == persona_row["case_id"])
+                    .order_by(investigation_jobs.c.created_at.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            latest_options: Dict[str, Any] = (
+                dict(latest_job["options"] or {}) if latest_job else {}
+            )
+            latest_usernames = (
+                list(latest_job["usernames"] or []) if latest_job else []
+            )
+            investigation_spec = latest_options.get("investigation_spec")
+            grouped = (
+                isinstance(investigation_spec, dict)
+                and investigation_spec.get("processing_mode") == "same_subject"
             )
             username = str(persona_row["display_name"]).strip()
+            usernames = (
+                [str(value).strip() for value in latest_usernames]
+                if grouped
+                else [username]
+            )
+            usernames = [value for value in usernames if value]
+            if not usernames:
+                raise ValueError("No searchable account identifiers are available")
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,
                     case_id=persona_row["case_id"],
                     kind="refresh",
                     status="queued",
-                    usernames=[username],
-                    options=dict(latest_options or {}),
+                    usernames=usernames,
+                    options=latest_options,
                     progress={"checked": 0, "total": None, "found": 0},
                     result=None,
                     error=None,
@@ -435,7 +485,7 @@ class CaseStore:
             )
         self.append_event(
             job_id,
-            {"type": "queued", "usernames": [username], "reason": "persona_refresh"},
+            {"type": "queued", "usernames": usernames, "reason": "persona_refresh"},
         )
         return job_id
 
@@ -776,6 +826,106 @@ class CaseStore:
             "claims": serialized_claims,
         }
 
+    @staticmethod
+    def _upsert_persona_candidates(
+        connection: Connection,
+        *,
+        persona_id: str,
+        job_id: str,
+        candidates: Iterable[Dict[str, Any]],
+        now: datetime,
+    ) -> int:
+        """Persist validated candidates without changing a human decision."""
+        synchronized = 0
+        for candidate in candidates:
+            identity_match = persona_claims.c.fingerprint == candidate["fingerprint"]
+            if (
+                candidate.get("source_engine") == "openai_web_research"
+                and candidate.get("field_name") == "social_account"
+            ):
+                identity_match = or_(
+                    identity_match,
+                    (
+                        (persona_claims.c.field_name == "social_account")
+                        & (persona_claims.c.display_value == candidate["display_value"])
+                    ),
+                )
+            existing = (
+                connection.execute(
+                    select(persona_claims).where(
+                        persona_claims.c.persona_id == persona_id,
+                        identity_match,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if existing:
+                claim_id = existing["id"]
+                confidence = int(existing["confidence"])
+                if (
+                    candidate.get("source_engine") != "openai_web_research"
+                    or existing["review_status"] == "pending"
+                ):
+                    confidence = max(confidence, int(candidate["confidence"]))
+                connection.execute(
+                    update(persona_claims)
+                    .where(persona_claims.c.id == claim_id)
+                    .values(
+                        value=candidate["value"],
+                        display_value=candidate["display_value"],
+                        normalized_value=candidate["normalized_value"],
+                        confidence=confidence,
+                        source_job_id=job_id,
+                        last_seen_at=now,
+                        updated_at=now,
+                    )
+                )
+            else:
+                claim_id = str(uuid.uuid4())
+                connection.execute(
+                    insert(persona_claims).values(
+                        id=claim_id,
+                        persona_id=persona_id,
+                        field_name=candidate["field_name"],
+                        value=candidate["value"],
+                        display_value=candidate["display_value"],
+                        normalized_value=candidate["normalized_value"],
+                        confidence=candidate["confidence"],
+                        review_status="pending",
+                        source_engine=candidate["source_engine"],
+                        source_job_id=job_id,
+                        fingerprint=candidate["fingerprint"],
+                        first_seen_at=now,
+                        last_seen_at=now,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+            for evidence in candidate["evidence"]:
+                present = connection.scalar(
+                    select(claim_evidence.c.id).where(
+                        claim_evidence.c.claim_id == claim_id,
+                        claim_evidence.c.fingerprint == evidence["fingerprint"],
+                    )
+                )
+                if present:
+                    continue
+                connection.execute(
+                    insert(claim_evidence).values(
+                        id=str(uuid.uuid4()),
+                        claim_id=claim_id,
+                        evidence_type=evidence["evidence_type"],
+                        source_name=evidence["source_name"],
+                        source_url=evidence["source_url"] or None,
+                        details=evidence["details"],
+                        fingerprint=evidence["fingerprint"],
+                        observed_at=now,
+                    )
+                )
+            synchronized += 1
+        return synchronized
+
     def sync_persona_claims(self, job_id: str, result: Dict[str, Any]) -> int:
         """Upsert deterministic claims while preserving every human decision."""
         from maigret.web.persona_intelligence import extract_persona_claims
@@ -783,13 +933,19 @@ class CaseStore:
         now = utcnow()
         synchronized = 0
         with self.engine.begin() as connection:
-            case_id = connection.scalar(
-                select(investigation_jobs.c.case_id).where(
-                    investigation_jobs.c.id == job_id
+            job_row = (
+                connection.execute(
+                    select(
+                        investigation_jobs.c.case_id,
+                        investigation_jobs.c.options,
+                    ).where(investigation_jobs.c.id == job_id)
                 )
+                .mappings()
+                .first()
             )
-            if not case_id:
+            if not job_row:
                 raise KeyError(job_id)
+            case_id = job_row["case_id"]
             persona_rows = list(
                 connection.execute(
                     select(personas.c.id, personas.c.display_name).where(
@@ -801,88 +957,129 @@ class CaseStore:
                 str(row["display_name"]).strip().casefold(): row["id"]
                 for row in persona_rows
             }
+            investigation_spec = dict(job_row["options"] or {}).get(
+                "investigation_spec"
+            )
+            grouped_persona_id = (
+                persona_rows[0]["id"]
+                if isinstance(investigation_spec, dict)
+                and investigation_spec.get("processing_mode") == "same_subject"
+                and len(persona_rows) == 1
+                else None
+            )
             for report in result.get("individual_reports") or []:
                 username = str(report.get("username") or "").strip()
-                persona_id = personas_by_name.get(username.casefold())
+                persona_id = grouped_persona_id or personas_by_name.get(
+                    username.casefold()
+                )
                 if not persona_id:
                     continue
-                for candidate in extract_persona_claims(report):
-                    existing = (
-                        connection.execute(
-                            select(persona_claims).where(
-                                persona_claims.c.persona_id == persona_id,
-                                persona_claims.c.fingerprint
-                                == candidate["fingerprint"],
-                            )
-                        )
-                        .mappings()
-                        .first()
-                    )
-                    if existing:
-                        claim_id = existing["id"]
-                        connection.execute(
-                            update(persona_claims)
-                            .where(persona_claims.c.id == claim_id)
-                            .values(
-                                value=candidate["value"],
-                                display_value=candidate["display_value"],
-                                normalized_value=candidate["normalized_value"],
-                                confidence=max(
-                                    int(existing["confidence"]),
-                                    int(candidate["confidence"]),
-                                ),
-                                source_job_id=job_id,
-                                last_seen_at=now,
-                                updated_at=now,
-                            )
-                        )
-                    else:
-                        claim_id = str(uuid.uuid4())
-                        connection.execute(
-                            insert(persona_claims).values(
-                                id=claim_id,
-                                persona_id=persona_id,
-                                field_name=candidate["field_name"],
-                                value=candidate["value"],
-                                display_value=candidate["display_value"],
-                                normalized_value=candidate["normalized_value"],
-                                confidence=candidate["confidence"],
-                                review_status="pending",
-                                source_engine=candidate["source_engine"],
-                                source_job_id=job_id,
-                                fingerprint=candidate["fingerprint"],
-                                first_seen_at=now,
-                                last_seen_at=now,
-                                created_at=now,
-                                updated_at=now,
-                            )
-                        )
-                    for evidence in candidate["evidence"]:
-                        present = connection.scalar(
-                            select(claim_evidence.c.id).where(
-                                claim_evidence.c.claim_id == claim_id,
-                                claim_evidence.c.fingerprint == evidence["fingerprint"],
-                            )
-                        )
-                        if present:
-                            continue
-                        connection.execute(
-                            insert(claim_evidence).values(
-                                id=str(uuid.uuid4()),
-                                claim_id=claim_id,
-                                evidence_type=evidence["evidence_type"],
-                                source_name=evidence["source_name"],
-                                source_url=evidence["source_url"] or None,
-                                details=evidence["details"],
-                                fingerprint=evidence["fingerprint"],
-                                observed_at=now,
-                            )
-                        )
-                    synchronized += 1
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=persona_id,
+                    job_id=job_id,
+                    candidates=extract_persona_claims(report),
+                    now=now,
+                )
             connection.execute(
                 update(cases).where(cases.c.id == case_id).values(updated_at=now)
             )
         return synchronized
+
+    def sync_ai_persona_claims(
+        self,
+        job_id: str,
+        raw_proposals: Any,
+        *,
+        sources: Iterable[Dict[str, Any]],
+        usernames: Iterable[str],
+        model: str,
+    ) -> Dict[str, Any]:
+        """Validate and persist cited AI proposals as pending review records."""
+        from maigret.web.persona_intelligence import extract_ai_persona_claims
+
+        candidates = extract_ai_persona_claims(
+            raw_proposals,
+            sources=sources,
+            usernames=usernames,
+            model=model,
+        )
+        now = utcnow()
+        synchronized = 0
+        accepted_proposals = []
+        with self.engine.begin() as connection:
+            job_row = (
+                connection.execute(
+                    select(
+                        investigation_jobs.c.case_id,
+                        investigation_jobs.c.options,
+                    ).where(investigation_jobs.c.id == job_id)
+                )
+                .mappings()
+                .first()
+            )
+            if not job_row:
+                raise KeyError(job_id)
+            case_id = job_row["case_id"]
+            persona_rows = list(
+                connection.execute(
+                    select(personas.c.id, personas.c.display_name).where(
+                        personas.c.case_id == case_id
+                    )
+                ).mappings()
+            )
+            personas_by_name = {
+                str(row["display_name"]).strip().casefold(): row["id"]
+                for row in persona_rows
+            }
+            investigation_spec = dict(job_row["options"] or {}).get(
+                "investigation_spec"
+            )
+            grouped_persona_id = (
+                persona_rows[0]["id"]
+                if isinstance(investigation_spec, dict)
+                and investigation_spec.get("processing_mode") == "same_subject"
+                and len(persona_rows) == 1
+                else None
+            )
+            for candidate in candidates:
+                persona_id = grouped_persona_id or personas_by_name.get(
+                    candidate["username"].casefold()
+                )
+                if not persona_id:
+                    continue
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=persona_id,
+                    job_id=job_id,
+                    candidates=[candidate],
+                    now=now,
+                )
+                accepted_proposals.append(
+                    {
+                        "username": candidate["username"],
+                        "field_name": candidate["field_name"],
+                        "value": (
+                            candidate["value"].get("url", "")
+                            if isinstance(candidate["value"], dict)
+                            else candidate["value"]
+                        ),
+                        "confidence": candidate["confidence"],
+                        "source_url": candidate["evidence"][0]["source_url"],
+                        "source_title": candidate["evidence"][0]["source_name"],
+                        "reason": candidate["evidence"][0]["details"][
+                            "proposal_reason"
+                        ],
+                    }
+                )
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(updated_at=now)
+            )
+        return {
+            "count": synchronized,
+            "case_id": str(case_id),
+            "proposals": accepted_proposals,
+        }
 
     def review_claim(
         self,
@@ -890,6 +1087,8 @@ class CaseStore:
         decision: str,
         reviewer: str,
         note: str = "",
+        latitude: Optional[str] = None,
+        longitude: Optional[str] = None,
     ) -> Optional[str]:
         """Record an auditable human decision and return the persona id."""
         if decision not in {"pending", "approved", "rejected", "uncertain"}:
@@ -897,24 +1096,43 @@ class CaseStore:
         reviewer = str(reviewer).strip()[:200]
         if not reviewer:
             raise ValueError("A reviewer is required")
+        coordinates = self._validated_coordinates(latitude, longitude)
         now = utcnow()
         with self.engine.begin() as connection:
-            persona_id = connection.scalar(
-                select(persona_claims.c.persona_id).where(
-                    persona_claims.c.id == claim_id
+            claim = (
+                connection.execute(
+                    select(
+                        persona_claims.c.persona_id,
+                        persona_claims.c.field_name,
+                    ).where(persona_claims.c.id == claim_id)
                 )
+                .mappings()
+                .first()
             )
-            if not persona_id:
+            if not claim:
                 return None
+            if coordinates and claim["field_name"] not in {
+                "address",
+                "current_location",
+            }:
+                raise ValueError(
+                    "Coordinates can only be attached to a location record"
+                )
+            values = {
+                "review_status": decision,
+                "reviewed_at": now,
+                "reviewed_by": reviewer,
+                "updated_at": now,
+            }
+            if coordinates:
+                values.update(
+                    latitude=coordinates[0],
+                    longitude=coordinates[1],
+                )
             connection.execute(
                 update(persona_claims)
                 .where(persona_claims.c.id == claim_id)
-                .values(
-                    review_status=decision,
-                    reviewed_at=now,
-                    reviewed_by=reviewer,
-                    updated_at=now,
-                )
+                .values(**values)
             )
             connection.execute(
                 insert(claim_reviews).values(
@@ -925,7 +1143,136 @@ class CaseStore:
                     created_at=now,
                 )
             )
-        return str(persona_id)
+        return str(claim["persona_id"])
+
+    @staticmethod
+    def _validated_coordinates(
+        latitude: Optional[str], longitude: Optional[str]
+    ) -> Optional[tuple[float, float]]:
+        """Validate analyst-supplied coordinates without external geocoding."""
+        raw_latitude = str(latitude or "").strip()
+        raw_longitude = str(longitude or "").strip()
+        if not raw_latitude and not raw_longitude:
+            return None
+        if not raw_latitude or not raw_longitude:
+            raise ValueError("Latitude and longitude must be provided together")
+        try:
+            parsed_latitude = float(raw_latitude)
+            parsed_longitude = float(raw_longitude)
+        except ValueError as error:
+            raise ValueError("Latitude and longitude must be numbers") from error
+        if not math.isfinite(parsed_latitude) or not math.isfinite(parsed_longitude):
+            raise ValueError("Latitude and longitude must be finite numbers")
+        if not -90 <= parsed_latitude <= 90:
+            raise ValueError("Latitude must be between -90 and 90")
+        if not -180 <= parsed_longitude <= 180:
+            raise ValueError("Longitude must be between -180 and 180")
+        return parsed_latitude, parsed_longitude
+
+    def build_relationship_graph(self, case_id: Optional[str] = None) -> Dict[str, Any]:
+        """Project approved, exact shared attributes across two or more personas."""
+        relationship_fields = {
+            "email",
+            "phone",
+            "address",
+            "current_location",
+            "social_account",
+            "website",
+            "occupation",
+            "company",
+            "company_ownership",
+            "vehicle_ownership",
+        }
+        statement = (
+            select(
+                persona_claims.c.id.label("claim_id"),
+                persona_claims.c.field_name,
+                persona_claims.c.display_value,
+                persona_claims.c.normalized_value,
+                persona_claims.c.confidence,
+                personas.c.id.label("persona_id"),
+                personas.c.display_name.label("persona_name"),
+                cases.c.id.label("case_id"),
+                cases.c.title.label("case_title"),
+            )
+            .join(personas, personas.c.id == persona_claims.c.persona_id)
+            .join(cases, cases.c.id == personas.c.case_id)
+            .where(
+                persona_claims.c.review_status == "approved",
+                persona_claims.c.field_name.in_(relationship_fields),
+            )
+        )
+        if case_id:
+            statement = statement.where(cases.c.id == case_id)
+        with self.engine.connect() as connection:
+            rows = list(connection.execute(statement).mappings())
+
+        shared: Dict[tuple[str, str], list] = {}
+        for row in rows:
+            key = (str(row["field_name"]), str(row["normalized_value"]))
+            shared.setdefault(key, []).append(row)
+
+        nodes: list[Dict[str, Any]] = []
+        edges: list[Dict[str, Any]] = []
+        persona_nodes: Dict[str, Dict[str, Any]] = {}
+        field_counts: Dict[str, int] = {}
+        for (field_name, normalized_value), candidates in shared.items():
+            distinct_personas = {str(row["persona_id"]) for row in candidates}
+            if len(distinct_personas) < 2:
+                continue
+            attribute_id = (
+                f"attribute:{field_name}:"
+                + hashlib.sha256(normalized_value.encode("utf-8")).hexdigest()[:20]
+            )
+            display_value = str(candidates[0]["display_value"])
+            field_counts[field_name] = field_counts.get(field_name, 0) + 1
+            nodes.append(
+                {
+                    "id": attribute_id,
+                    "label": display_value,
+                    "kind": "attribute",
+                    "field_name": field_name,
+                    "persona_count": len(distinct_personas),
+                }
+            )
+            seen_personas = set()
+            for row in candidates:
+                persona_id = str(row["persona_id"])
+                if persona_id in seen_personas:
+                    continue
+                seen_personas.add(persona_id)
+                persona_nodes.setdefault(
+                    persona_id,
+                    {
+                        "id": f"persona:{persona_id}",
+                        "label": str(row["persona_name"]),
+                        "kind": "persona",
+                        "persona_id": persona_id,
+                        "case_id": str(row["case_id"]),
+                        "case_title": str(row["case_title"]),
+                    },
+                )
+                edges.append(
+                    {
+                        "id": f"edge:{row['claim_id']}",
+                        "from": f"persona:{persona_id}",
+                        "to": attribute_id,
+                        "label": field_name.replace("_", " "),
+                        "field_name": field_name,
+                        "confidence": int(row["confidence"]),
+                    }
+                )
+        nodes = list(persona_nodes.values()) + nodes
+        return {
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "persona_count": len(persona_nodes),
+                "shared_attribute_count": len(nodes) - len(persona_nodes),
+                "connection_count": len(edges),
+                "field_counts": field_counts,
+            },
+        }
 
     def build_persona_graph(self, persona_id: str) -> Dict[str, Any]:
         """Build a compact evidence graph; rejected claims never become edges."""
@@ -1006,6 +1353,9 @@ class CaseStore:
             "last_seen_at": _as_iso(claim_row["last_seen_at"]),
             "reviewed_at": _as_iso(claim_row["reviewed_at"]),
             "reviewed_by": claim_row["reviewed_by"],
+            "normalized_value": claim_row["normalized_value"],
+            "latitude": claim_row["latitude"],
+            "longitude": claim_row["longitude"],
             "evidence": [
                 {
                     "id": row["id"],

@@ -1,4 +1,8 @@
-from maigret.web.persona_intelligence import extract_persona_claims, group_claims
+from maigret.web.persona_intelligence import (
+    extract_ai_persona_claims,
+    extract_persona_claims,
+    group_claims,
+)
 
 
 def test_extraction_ignores_unsupported_sensitive_inferences_and_unsafe_urls():
@@ -44,3 +48,86 @@ def test_grouped_form_keeps_requested_empty_categories_visible():
     assert fields["financial_profile"] == []
     assert fields["vehicle_ownership"] == []
     assert fields["criminal_record"] == []
+
+
+def test_ai_proposals_require_known_user_cited_url_and_public_field():
+    sources = [{"title": "Official biography", "url": "https://example.test/biography"}]
+    raw = [
+        {
+            "username": "Alice",
+            "field_name": "full_name",
+            "value": "Alice Example",
+            "confidence": 99,
+            "source_url": "https://example.test/biography",
+            "source_title": "Untrusted model title",
+            "reason": "The official biography identifies Alice Example.",
+        },
+        {
+            "username": "alice",
+            "field_name": "criminal_record",
+            "value": "None",
+            "confidence": 80,
+            "source_url": "https://example.test/biography",
+            "source_title": "Official biography",
+            "reason": "Sensitive field is never accepted.",
+        },
+        {
+            "username": "alice",
+            "field_name": "company",
+            "value": "Example Ltd",
+            "confidence": 80,
+            "source_url": "https://invented.test/source",
+            "source_title": "Invented",
+            "reason": "The URL was not returned by web research.",
+        },
+        {
+            "username": "mallory",
+            "field_name": "occupation",
+            "value": "Engineer",
+            "confidence": 80,
+            "source_url": "https://example.test/biography",
+            "source_title": "Official biography",
+            "reason": "The subject was not investigated.",
+        },
+    ]
+
+    claims = extract_ai_persona_claims(
+        raw,
+        sources=sources,
+        usernames=["alice"],
+        model="gpt-5.6-terra",
+    )
+
+    assert len(claims) == 1
+    claim = claims[0]
+    assert claim["field_name"] == "full_name"
+    assert claim["confidence"] == 85
+    assert claim["source_engine"] == "openai_web_research"
+    assert claim["evidence"][0]["source_name"] == "Official biography"
+    assert claim["evidence"][0]["evidence_type"] == "cited_public_web"
+    assert claim["evidence"][0]["details"]["human_review_required"] is True
+
+
+def test_ai_public_account_proposal_keeps_structured_account_value():
+    claims = extract_ai_persona_claims(
+        [
+            {
+                "username": "alice",
+                "field_name": "social_account",
+                "value": "https://social.example/alice",
+                "confidence": 75,
+                "source_url": "https://social.example/alice",
+                "source_title": "Official profile",
+                "reason": "The profile identifies the same public figure.",
+            }
+        ],
+        sources=[{"title": "Official profile", "url": "https://social.example/alice"}],
+        usernames=["alice"],
+        model="gpt-5.6-terra",
+    )
+
+    assert claims[0]["value"] == {
+        "platform": "social.example",
+        "url": "https://social.example/alice",
+        "username": "alice",
+    }
