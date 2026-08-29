@@ -1,19 +1,102 @@
 {% extends "base.html" %}
 
+{% macro claim_record(claim, context='profile') %}
+<article class="claim-record review-{{ claim.review_status }}" data-review-status="{{ claim.review_status }}">
+    <div class="claim-main">
+        <div class="claim-value">
+            {% if claim.field_name == 'social_account' and claim.value is mapping %}
+            <strong>{{ claim.value.platform }}</strong>
+            <a href="{{ claim.value.url }}" target="_blank" rel="noopener noreferrer">{{ claim.value.url }}</a>
+            {% elif claim.field_name == 'photograph' %}
+            <div class="claim-photo-frame">
+                <img src="{{ claim.display_value }}" alt="Photograph evidence for {{ persona.display_name }}" loading="lazy" referrerpolicy="no-referrer" data-profile-image>
+                <span class="photo-fallback" hidden><i data-lucide="image-off"></i><small>Image unavailable</small></span>
+            </div>
+            <a class="claim-source-link" href="{{ claim.display_value }}" target="_blank" rel="noopener noreferrer">Open source image</a>
+            {% elif claim.field_name == 'website' %}
+            <a href="{{ claim.display_value }}" target="_blank" rel="noopener noreferrer">{{ claim.display_value }}</a>
+            {% else %}
+            <span>{{ claim.display_value }}</span>
+            {% endif %}
+        </div>
+        <div class="claim-badges">
+            {% if claim.evidence | selectattr('evidence_type', 'equalto', 'cited_public_web') | list %}
+            <span class="badge-soft warning" title="Includes cited AI-assisted public-web evidence">AI-assisted evidence</span>
+            {% endif %}
+            <span class="confidence-badge" title="Strength of the supporting evidence">{{ claim.confidence }}% confidence</span>
+            <span class="review-badge {{ claim.review_status }}">{{ claim.review_status | title }}</span>
+        </div>
+    </div>
+    <details class="claim-evidence">
+        <summary>{{ claim.evidence | length }} supporting source{{ '' if claim.evidence | length == 1 else 's' }}</summary>
+        <ul>
+            {% for evidence in claim.evidence %}
+            <li>
+                {% if evidence.source_url %}<a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">{{ evidence.source_name }}</a>{% else %}{{ evidence.source_name }}{% endif %}
+                <span>{{ evidence.evidence_type | replace('_', ' ') }}</span>
+                {% if evidence.details.proposal_reason %}<small>{{ evidence.details.proposal_reason }}</small>{% endif %}
+            </li>
+            {% endfor %}
+        </ul>
+    </details>
+    <form method="POST" action="{{ url_for('review_persona_claim', claim_id=claim.id) }}" class="claim-review-form">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <input type="hidden" name="persona_id" value="{{ persona.id }}">
+        {% if claim.field_name in ('address', 'current_location') %}
+        <div class="coordinate-fields">
+            <label>Latitude
+                <input type="number" name="latitude" min="-90" max="90" step="any" value="{{ claim.latitude if claim.latitude is not none else '' }}" placeholder="e.g. -6.1754">
+            </label>
+            <label>Longitude
+                <input type="number" name="longitude" min="-180" max="180" step="any" value="{{ claim.longitude if claim.longitude is not none else '' }}" placeholder="e.g. 106.8272">
+            </label>
+            <small>Optional. Coordinates stay inside OpenLedger; no public geocoder is called.</small>
+        </div>
+        {% endif %}
+        <div class="claim-review-row">
+            <label class="visually-hidden" for="note-{{ context }}-{{ claim.id }}">Review note</label>
+            <input id="note-{{ context }}-{{ claim.id }}" type="text" name="note" maxlength="2000" placeholder="Optional analyst note">
+            <div class="review-actions" role="group" aria-label="Review this record">
+                <button name="decision" value="approved" class="btn btn-sm btn-review approve" type="submit"><i data-lucide="check"></i> Approve</button>
+                <button name="decision" value="uncertain" class="btn btn-sm btn-review uncertain" type="submit"><i data-lucide="circle-help"></i> Uncertain</button>
+                <button name="decision" value="rejected" class="btn btn-sm btn-review reject" type="submit"><i data-lucide="x"></i> Reject</button>
+            </div>
+        </div>
+    </form>
+    {% if claim.reviewed_by %}<small class="review-meta">Last reviewed by {{ claim.reviewed_by }} · {{ claim.reviewed_at }}</small>{% endif %}
+</article>
+{% endmacro %}
+
 {% block title %}{{ persona.display_name }} | OpenLedger{% endblock %}
 {% block breadcrumb %}Persona workspace{% endblock %}
 
+{% block head %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+{% endblock %}
+
 {% block content %}
-<section class="page-heading persona-heading">
-    <div class="persona-heading-copy">
-        <span class="persona-avatar"><i data-lucide="user-round-search"></i></span>
-        <div>
-            <p class="eyebrow">Evidence profile</p>
-            <h1>{{ persona.display_name }}</h1>
-            <p class="page-description">Claims are investigative leads until an analyst reviews their supporting evidence.</p>
+<section class="persona-profile-header">
+    <div class="persona-photo-frame">
+        {% if approved_photograph %}
+        <img src="{{ approved_photograph.display_value }}" alt="{{ persona.display_name }}" referrerpolicy="no-referrer" data-profile-image>
+        {% endif %}
+        <span class="persona-photo-placeholder" {% if approved_photograph %}hidden{% endif %}>
+            <i data-lucide="user-round"></i>
+            <small>No approved photograph</small>
+        </span>
+    </div>
+    <div class="persona-profile-copy">
+        <p class="eyebrow">Evidence-backed persona</p>
+        <h1>{{ persona.display_name }}</h1>
+        <p class="page-description">{{ persona.case_title }} · Claims become canonical only after analyst approval.</p>
+        <div class="persona-status-strip" aria-label="Persona evidence status">
+            <span><strong>{{ review_counts.approved }}</strong> approved</span>
+            <span><strong>{{ review_counts.pending }}</strong> pending</span>
+            <span><strong>{{ review_counts.uncertain }}</strong> uncertain</span>
+            <span><strong>{{ review_counts.rejected }}</strong> rejected</span>
         </div>
     </div>
-    <div class="heading-actions">
+    <div class="heading-actions persona-heading-actions">
         <a href="{{ url_for('case_workspace', case_id=persona.case_id) }}" class="btn btn-outline-secondary">Open case</a>
         <form method="POST" action="{{ url_for('refresh_persona', persona_id=persona.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -22,146 +105,159 @@
     </div>
 </section>
 
-<section class="persona-notice" aria-label="Evidence policy">
+<section class="persona-lifecycle" aria-label="Evidence lifecycle">
+    <div><span>1</span><strong>Collect</strong><small>Source adapters and cited AI research create pending proposals.</small></div>
+    <i data-lucide="chevron-right"></i>
+    <div><span>2</span><strong>Review</strong><small>The analyst approves, rejects, or marks each claim uncertain.</small></div>
+    <i data-lucide="chevron-right"></i>
+    <div><span>3</span><strong>Use</strong><small>Only approved claims populate the canonical map and relationships.</small></div>
+</section>
+
+<section class="persona-notice" aria-label="AI and evidence policy">
     <i data-lucide="shield-check"></i>
     <div>
-        <strong>Evidence-first record</strong>
-        <span>Confidence measures support for each claim, not the probability that every matching account belongs to this person. Empty fields are intentionally not inferred.</span>
+        <strong>AI proposes; the analyst decides</strong>
+        <span>Cited AI findings may enter the review queue as pending suggestions, but AI cannot approve, reject, or make them canonical. Rejected records remain in the audit trail and stay hidden from the default profile, map, and relationship graph.</span>
     </div>
 </section>
 
-<div class="persona-layout">
-    <div class="persona-fields">
-        {% for group in claim_groups %}
-        <section class="panel-card persona-group" id="group-{{ group.key }}">
-            <header class="panel-header">
-                <div><h2>{{ group.title }}</h2></div>
-            </header>
-            <div class="panel-body persona-form">
-                {% for field in group.fields %}
-                <div class="persona-field">
-                    <div class="persona-field-label">{{ field.label }}</div>
-                    <div class="persona-field-content">
-                        {% if field.claims %}
-                            {% for claim in field.claims %}
-                            <article class="claim-record review-{{ claim.review_status }}">
-                                <div class="claim-main">
-                                    <div class="claim-value">
-                                        {% if claim.field_name == 'social_account' and claim.value is mapping %}
-                                        <strong>{{ claim.value.platform }}</strong>
-                                        <a href="{{ claim.value.url }}" target="_blank" rel="noopener noreferrer">{{ claim.value.url }}</a>
-                                        {% elif claim.field_name in ('website', 'photograph') %}
-                                        <a href="{{ claim.display_value }}" target="_blank" rel="noopener noreferrer">{{ claim.display_value }}</a>
-                                        {% else %}
-                                        <span>{{ claim.display_value }}</span>
-                                        {% endif %}
-                                    </div>
-                                    <div class="claim-badges">
-                                        <span class="confidence-badge" title="Evidence confidence">
-                                            {{ claim.confidence }}% confidence
-                                        </span>
-                                        <span class="review-badge {{ claim.review_status }}">{{ claim.review_status | title }}</span>
-                                    </div>
-                                </div>
-                                <details class="claim-evidence">
-                                    <summary>{{ claim.evidence | length }} supporting source{{ '' if claim.evidence | length == 1 else 's' }}</summary>
-                                    <ul>
-                                        {% for evidence in claim.evidence %}
-                                        <li>
-                                            {% if evidence.source_url %}<a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">{{ evidence.source_name }}</a>{% else %}{{ evidence.source_name }}{% endif %}
-                                            <span>{{ evidence.evidence_type | replace('_', ' ') }}</span>
-                                        </li>
-                                        {% endfor %}
-                                    </ul>
-                                </details>
-                                <form method="POST" action="{{ url_for('review_persona_claim', claim_id=claim.id) }}" class="claim-review-form">
-                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                                    <input type="hidden" name="persona_id" value="{{ persona.id }}">
-                                    <label class="visually-hidden" for="note-{{ claim.id }}">Review note</label>
-                                    <input id="note-{{ claim.id }}" type="text" name="note" maxlength="2000" placeholder="Optional analyst note">
-                                    <div class="review-actions" role="group" aria-label="Review this record">
-                                        <button name="decision" value="approved" class="btn btn-sm btn-review approve" type="submit"><i data-lucide="check"></i> Approve</button>
-                                        <button name="decision" value="uncertain" class="btn btn-sm btn-review uncertain" type="submit"><i data-lucide="circle-help"></i> Uncertain</button>
-                                        <button name="decision" value="rejected" class="btn btn-sm btn-review reject" type="submit"><i data-lucide="x"></i> Reject</button>
-                                    </div>
-                                </form>
-                                {% if claim.reviewed_by %}<small class="review-meta">Last reviewed by {{ claim.reviewed_by }} · {{ claim.reviewed_at }}</small>{% endif %}
-                            </article>
-                            {% endfor %}
-                        {% else %}
-                        <div class="empty-field">No evidence extracted.</div>
-                        {% endif %}
-                    </div>
+<nav class="persona-tabs" role="tablist" aria-label="Persona categories">
+    {% for group in claim_groups %}
+    <button type="button" role="tab" class="persona-tab {{ 'active' if loop.first }}" aria-selected="{{ 'true' if loop.first else 'false' }}" data-persona-tab="{{ group.key }}">{{ group.title }}</button>
+    {% endfor %}
+    <button type="button" role="tab" class="persona-tab" aria-selected="false" data-persona-tab="review">Review queue <span>{{ review_claims | length }}</span></button>
+</nav>
+
+<div class="persona-tab-workspace">
+    {% for group in claim_groups %}
+    <section class="panel-card persona-group persona-tab-panel" id="group-{{ group.key }}" data-persona-panel="{{ group.key }}" {% if not loop.first %}hidden{% endif %}>
+        <header class="panel-header">
+            <div>
+                <h2>{{ group.title }}</h2>
+                <p>Approved information and evidence awaiting analyst review.</p>
+            </div>
+        </header>
+        <div class="panel-body persona-form">
+            {% for field in group.fields %}
+            <div class="persona-field">
+                <div class="persona-field-label">{{ field.label }}</div>
+                <div class="persona-field-content">
+                    {% if field.claims %}
+                        {% for claim in field.claims %}{{ claim_record(claim, group.key) }}{% endfor %}
+                    {% else %}
+                    <div class="empty-field">No evidence extracted.</div>
+                    {% endif %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+        {% if group.key == 'contact' %}
+        <div class="persona-map-section">
+            <div class="map-section-heading">
+                <div><h3>Confirmed locations</h3><p>Only approved location claims with analyst-verified coordinates appear here.</p></div>
+                <span class="badge-soft">{{ map_locations | length }} mapped</span>
+            </div>
+            {% if map_locations %}
+            <div id="personaLocationMap" class="persona-location-map" aria-label="Approved persona locations"></div>
+            <p class="map-disclosure">Map tiles are loaded from the configured tile provider. Use an internal tile server for isolated or sensitive deployments.</p>
+            {% else %}
+            <div class="map-empty"><i data-lucide="map-pin-off"></i><span>Approve a location and add latitude/longitude to place it on the map.</span></div>
+            {% endif %}
+        </div>
+        {% endif %}
+    </section>
+    {% endfor %}
+
+    <section class="panel-card persona-group persona-tab-panel" data-persona-panel="review" hidden>
+        <header class="panel-header">
+            <div>
+                <h2>Evidence review queue</h2>
+                <p>Rejected records are retained for audit and reversal, but excluded from the default profile, map, and relationship graph.</p>
+            </div>
+        </header>
+        <div class="review-filter-bar" role="group" aria-label="Filter review records">
+            <button type="button" class="review-filter active" data-review-filter="open">Needs review <span>{{ review_counts.pending + review_counts.uncertain }}</span></button>
+            <button type="button" class="review-filter" data-review-filter="rejected">Rejected <span>{{ review_counts.rejected }}</span></button>
+            <button type="button" class="review-filter" data-review-filter="all">All non-approved <span>{{ review_claims | length }}</span></button>
+        </div>
+        <div class="panel-body review-queue-list" id="reviewQueue">
+            {% if review_claims %}
+                {% for claim in review_claims %}
+                <div class="review-queue-item" data-review-item="{{ claim.review_status }}">
+                    <div class="review-field-name">{{ claim.field_name | replace('_', ' ') | title }}</div>
+                    {{ claim_record(claim, 'review') }}
                 </div>
                 {% endfor %}
-            </div>
-        </section>
-        {% endfor %}
-    </div>
-
-    <aside class="persona-side">
-        <section class="panel-card graph-card">
-            <header class="panel-header">
-                <div>
-                    <h2>Digital relationships</h2>
-                    <p>Highest-confidence evidence paths; rejected records are excluded.</p>
-                </div>
-                <span class="badge-soft">{{ graph.nodes | length }} nodes</span>
-            </header>
-            <div class="panel-body p-0">
-                <svg id="personaGraph" class="persona-graph" viewBox="0 0 720 520" role="img" aria-label="Evidence relationship graph"></svg>
-                {% if graph.nodes | length == 1 %}<p class="graph-empty">No supported relationships are available.</p>{% endif %}
-            </div>
-        </section>
-    </aside>
+            {% else %}
+            <div class="empty-state compact"><i data-lucide="badge-check"></i><h3>No evidence needs review</h3></div>
+            {% endif %}
+        </div>
+    </section>
 </div>
 {% endblock %}
 
 {% block scripts %}
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <script>
 (() => {
-    const graph = {{ graph | tojson }};
-    const svg = document.getElementById('personaGraph');
-    if (!svg || graph.nodes.length === 0) return;
-    const ns = 'http://www.w3.org/2000/svg';
-    const width = 720;
-    const height = 520;
-    const center = {x: width / 2, y: height / 2};
-    const claims = graph.nodes.filter(node => node.kind !== 'persona' && node.kind !== 'source');
-    const sources = graph.nodes.filter(node => node.kind === 'source');
-    const positions = new Map([[graph.nodes[0].id, center]]);
-    const placeRing = (nodes, radius, offset = 0) => nodes.forEach((node, index) => {
-        const angle = (Math.PI * 2 * index / Math.max(nodes.length, 1)) - Math.PI / 2 + offset;
-        positions.set(node.id, {x: center.x + Math.cos(angle) * radius, y: center.y + Math.sin(angle) * radius});
+    const tabs = Array.from(document.querySelectorAll('[data-persona-tab]'));
+    const panels = Array.from(document.querySelectorAll('[data-persona-panel]'));
+    const activateTab = (key) => {
+        tabs.forEach((tab) => {
+            const active = tab.dataset.personaTab === key;
+            tab.classList.toggle('active', active);
+            tab.setAttribute('aria-selected', String(active));
+        });
+        panels.forEach((panel) => { panel.hidden = panel.dataset.personaPanel !== key; });
+        if (key === 'contact' && window.personaMap) setTimeout(() => window.personaMap.invalidateSize(), 0);
+    };
+    tabs.forEach((tab) => tab.addEventListener('click', () => activateTab(tab.dataset.personaTab)));
+
+    document.querySelectorAll('[data-profile-image]').forEach((image) => {
+        image.addEventListener('error', () => {
+            image.hidden = true;
+            const fallback = image.nextElementSibling;
+            if (fallback) fallback.hidden = false;
+        });
     });
-    placeRing(claims, 145);
-    placeRing(sources, 225, Math.PI / Math.max(sources.length, 2));
-    for (const edge of graph.edges) {
-        const start = positions.get(edge.source);
-        const end = positions.get(edge.target);
-        if (!start || !end) continue;
-        const line = document.createElementNS(ns, 'line');
-        line.setAttribute('x1', start.x); line.setAttribute('y1', start.y);
-        line.setAttribute('x2', end.x); line.setAttribute('y2', end.y);
-        line.setAttribute('class', 'graph-edge');
-        svg.appendChild(line);
-    }
-    for (const node of graph.nodes) {
-        const point = positions.get(node.id);
-        if (!point) continue;
-        const group = document.createElementNS(ns, 'g');
-        group.setAttribute('class', `graph-node graph-${node.kind}`);
-        const circle = document.createElementNS(ns, 'circle');
-        circle.setAttribute('cx', point.x); circle.setAttribute('cy', point.y);
-        circle.setAttribute('r', node.kind === 'persona' ? 34 : node.kind === 'source' ? 17 : 23);
-        const title = document.createElementNS(ns, 'title');
-        title.textContent = node.label;
-        circle.appendChild(title);
-        const label = document.createElementNS(ns, 'text');
-        label.setAttribute('x', point.x); label.setAttribute('y', point.y + (node.kind === 'persona' ? 52 : 35));
-        label.setAttribute('text-anchor', 'middle');
-        label.textContent = node.label.length > 22 ? `${node.label.slice(0, 20)}…` : node.label;
-        group.appendChild(circle); group.appendChild(label); svg.appendChild(group);
+
+    const reviewItems = Array.from(document.querySelectorAll('[data-review-item]'));
+    document.querySelectorAll('[data-review-filter]').forEach((button) => {
+        button.addEventListener('click', () => {
+            document.querySelectorAll('[data-review-filter]').forEach((item) => item.classList.toggle('active', item === button));
+            const filter = button.dataset.reviewFilter;
+            reviewItems.forEach((item) => {
+                item.hidden = filter === 'rejected'
+                    ? item.dataset.reviewItem !== 'rejected'
+                    : filter === 'open'
+                        ? item.dataset.reviewItem === 'rejected'
+                        : false;
+            });
+        });
+    });
+    reviewItems.forEach((item) => { item.hidden = item.dataset.reviewItem === 'rejected'; });
+
+    const locations = {{ map_locations | tojson }};
+    const mapElement = document.getElementById('personaLocationMap');
+    if (mapElement && locations.length && window.L) {
+        const map = L.map(mapElement, {scrollWheelZoom: false});
+        window.personaMap = map;
+        L.tileLayer({{ map_tile_url | tojson }}, {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(map);
+        const bounds = [];
+        locations.forEach((location) => {
+            const point = [location.latitude, location.longitude];
+            bounds.push(point);
+            const popup = document.createElement('div');
+            const title = document.createElement('strong'); title.textContent = location.label;
+            const detail = document.createElement('span'); detail.textContent = `${location.field_name.replace('_', ' ')} · ${location.confidence}% confidence`;
+            popup.append(title, document.createElement('br'), detail);
+            L.marker(point).addTo(map).bindPopup(popup);
+        });
+        if (bounds.length === 1) map.setView(bounds[0], 8);
+        else map.fitBounds(bounds, {padding: [28, 28]});
     }
 })();
 </script>

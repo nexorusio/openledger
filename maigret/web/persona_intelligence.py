@@ -109,6 +109,28 @@ CONFIDENCE_SCORES = {
     "unverified": 25,
 }
 
+AI_PROPOSAL_FIELDS = {
+    "summary",
+    "full_name",
+    "current_location",
+    "occupation",
+    "company",
+    "social_account",
+    "website",
+    "photograph",
+}
+
+AI_FIELD_LIMITS = {
+    "summary": 1200,
+    "full_name": 300,
+    "current_location": 300,
+    "occupation": 500,
+    "company": 500,
+    "social_account": 2000,
+    "website": 2000,
+    "photograph": 2000,
+}
+
 
 def _public_url(value: Any) -> str:
     candidate = str(value or "").strip()
@@ -239,6 +261,120 @@ def extract_persona_claims(report: Dict[str, Any]) -> List[Dict[str, Any]]:
                     )
                 )
     return claims
+
+
+def extract_ai_persona_claims(
+    raw_proposals: Any,
+    *,
+    sources: Iterable[Dict[str, Any]],
+    usernames: Iterable[str],
+    model: str,
+) -> List[Dict[str, Any]]:
+    """Validate cited AI suggestions and convert them to pending claim inputs.
+
+    AI output is untrusted even when Structured Outputs is enabled. Only a
+    deliberately narrow public-biographical allowlist is accepted, and every
+    proposal must cite one URL returned by the preceding web-search response.
+    """
+    source_catalog: Dict[str, Dict[str, str]] = {}
+    for source_item in sources:
+        if not isinstance(source_item, dict):
+            continue
+        safe_url = _public_url(source_item.get("url"))
+        if not safe_url:
+            continue
+        source_catalog[safe_url] = {
+            "url": safe_url,
+            "title": str(source_item.get("title") or urlparse(safe_url).netloc).strip()[
+                :300
+            ],
+        }
+    usernames_by_key = {
+        str(username).strip().casefold(): str(username).strip()[:500]
+        for username in usernames
+        if str(username).strip()
+    }
+    if (
+        not isinstance(raw_proposals, list)
+        or not source_catalog
+        or not usernames_by_key
+    ):
+        return []
+
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+    for raw in raw_proposals[:100]:
+        if not isinstance(raw, dict):
+            continue
+        username = usernames_by_key.get(
+            str(raw.get("username") or "").strip().casefold()
+        )
+        field_name = str(raw.get("field_name") or "").strip()
+        source_url = _public_url(raw.get("source_url"))
+        source_record = source_catalog.get(source_url)
+        if not username or field_name not in AI_PROPOSAL_FIELDS or not source_record:
+            continue
+        value = str(raw.get("value") or "").strip()
+        if not value:
+            continue
+        value = value[: AI_FIELD_LIMITS[field_name]]
+        if field_name in {"social_account", "website", "photograph"}:
+            value = _public_url(value)
+            if not value or value not in source_catalog:
+                continue
+        else:
+            value = " ".join(value.split())
+        try:
+            confidence = int(str(raw.get("confidence") or ""))
+        except (TypeError, ValueError):
+            continue
+        if confidence < 40:
+            continue
+        confidence = min(confidence, 85)
+        reason = " ".join(str(raw.get("reason") or "").split())[:1000]
+        if not reason:
+            continue
+
+        stored_value: Any = value
+        if field_name == "social_account":
+            hostname = urlparse(value).hostname or "Public account"
+            stored_value = {
+                "platform": hostname.removeprefix("www.")[:300],
+                "url": value,
+                "username": username,
+            }
+        fingerprint = claim_fingerprint(field_name, stored_value)
+        deduplication_key = (username.casefold(), fingerprint, source_url)
+        if deduplication_key in seen:
+            continue
+        seen.add(deduplication_key)
+        evidence = {
+            "evidence_type": "cited_public_web",
+            "source_name": source_record["title"],
+            "source_url": source_url,
+            "details": {
+                "investigated_username": username,
+                "proposal_reason": reason,
+                "model": str(model).strip()[:100],
+                "human_review_required": True,
+            },
+        }
+        candidates.append(
+            {
+                "username": username,
+                "field_name": field_name,
+                "value": stored_value,
+                "display_value": _display_value(stored_value),
+                "normalized_value": _normalized_value(stored_value),
+                "confidence": confidence,
+                "fingerprint": fingerprint,
+                "source_engine": "openai_web_research",
+                "evidence": [
+                    dict(evidence, fingerprint=evidence_fingerprint(evidence))
+                ],
+            }
+        )
+    return candidates
 
 
 def group_claims(claims: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:

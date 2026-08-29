@@ -6,6 +6,7 @@ Method:
 1. Normalize the searched handle and group profiles into identity clusters using repeated real name, bio, location, linked website, organization, platform links, identifiers, and dates.
 2. Give greatest weight to extracted profile fields and corroborating authoritative public sources. Treat status-code-only, absence-only, empty, and username-only matches as weak leads.
 3. If public web search is available, use it to test the strongest identity hypothesis. Prefer official profiles and websites, reputable news, institutional sources, and well-established reference sources. Search for the exact handle and corroborating names or organizations found in extracted evidence.
+   When authoritative sources consistently connect the exact handle to a known public figure, report the supported full name, coarse location, occupation, company, official public accounts, website, and public photograph URL when available. Do not leave these fields Unknown merely because weak username collisions also exist; isolate those collisions in the conflicts section.
 4. Do not merge attributes from competing clusters. Explain contradictions such as different names or locations.
 5. Distinguish provenance in every conclusion: "OpenLedger evidence", "public-web corroboration", or "inference". Do not claim a fact solely because it is generally known.
 6. Major-platform errors or omissions are diagnostic limitations, not evidence of absence.
@@ -24,7 +25,7 @@ Confidence: <High / Medium / Low> - <short evidence-based reason>
 
 # Evidence
 
-- <fact or finding> - <OpenLedger evidence / public-web corroboration / inference> - <confidence>
+- <one explicit public-biographical fact or finding> - <OpenLedger evidence / public-web corroboration / inference> - <confidence>
 
 # Conflicts and False Positives
 

@@ -3,64 +3,210 @@
 ## Decision
 
 PostgreSQL is the canonical record for cases, personas, investigation jobs,
-structured claims, claim evidence, and analyst review decisions. Generated
-report files remain compatibility artifacts and are not the source of truth for
-the Persona workspace.
+structured claims, evidence, coordinates, and analyst decisions. Collectors,
+AI, report files, maps, and graphs are consumers or producers of evidence; none
+of them owns the canonical Persona profile.
 
-The first delivered slice is deliberately narrow:
+The user journey is deliberately explicit:
 
-1. A completed investigation is synchronized into its case personas.
-2. Only directly observed profiles and extracted source fields become claims.
-3. Every claim retains confidence, provenance, first/last observation times,
-   and a source job.
-4. Analysts can approve, reject, or mark claims uncertain. Each decision is
-   appended to an audit history.
-5. **Run investigation again** queues fresh collection in the same case. Claim
-   synchronization is idempotent and never overwrites analyst decisions.
-6. The relationship graph is derived from non-rejected claims and evidence.
+1. **Collect.** A source adapter emits observations. The current public-profile
+   discovery engine is one adapter, not a privileged path.
+2. **Normalize.** OpenLedger converts each observation into a typed claim,
+   normalizes its value, deduplicates by fingerprint, and attaches provenance.
+3. **Review.** New claims are pending. An analyst approves, rejects, or marks a
+   claim uncertain. Every decision is appended to the review audit.
+4. **Publish inside the workspace.** Approved claims form the default Persona
+   view and may appear on maps and in cross-person Relationships. Rejected
+   claims stay in PostgreSQL for audit and reversal but are suppressed from the
+   default profile, map, and relationship projection.
+5. **Analyze and propose.** AI may summarize selected evidence, perform
+   public-web research, and submit schema-constrained suggestions backed by URLs
+   returned in that same cited research run. Valid suggestions become pending
+   claims. AI cannot approve, reject, or make a record canonical.
 
-Unsupported fields remain empty. In particular, financial, vehicle, ownership,
-and criminal-record fields are never populated merely because a model can make
-an inference.
+Re-running an investigation updates the observation time and evidence attached
+to an existing fingerprint without overwriting its analyst decision. A newly
+observed different value creates a new pending claim.
 
-## Extension boundary
+## Investigation input and query planning
 
-Additional collection engines and authorized internal sources should be added
-as adapters that emit the same normalized observation contract:
+OpenLedger stores a typed investigation specification beside each collection
+job. The input type determines which adapter may use it; values must never be
+silently coerced into a username:
+
+| Input type | Initial behavior |
+|---|---|
+| Username or social handle | Exact public-account check |
+| Supported profile URL | Parse the account identifier locally, then run an exact check; do not fetch the URL during planning |
+| Full name | Preserve as one phrase and, when selected, generate a bounded preview of likely account handles |
+| Email or phone | Normalize and retain as subject context; never send to the username collector or permutation logic |
+| Include and exclude terms | Retain as multi-word phrases for keyword-capable adapters only |
+
+Every generated handle is still checked independently. “One subject” mode
+organizes resulting claims under one Persona for review; it does not make the
+underlying account matches verified identity evidence. “Independent subjects”
+mode creates one Persona candidate per account identifier.
+
+Variant generation is deliberately bounded and deterministic. It uses common
+first/last-name orderings and separators, caps the query plan, and never creates
+phone or email permutations. Arbitrary Cartesian combinations are prohibited
+because they increase collection cost and false-positive risk without adding
+provenance.
+
+Operator-provided names, emails, phones, and research terms remain inside
+OpenLedger by default. They are added to an external AI research request only
+when the analyst explicitly enables that use for the investigation. Even then,
+they remain unverified targeting context and cannot become canonical claims
+without cited evidence and human review.
+
+## Canonical ownership
+
+| Responsibility | Canonical owner |
+|---|---|
+| Raw collector output | Collector run/result artifact |
+| Normalized observation contract | OpenLedger ingestion layer |
+| Claims, evidence, and provenance | PostgreSQL |
+| Analyst decision and audit history | PostgreSQL |
+| Canonical Persona view | Projection of approved claims |
+| Cross-person relationship leads | Projection of approved normalized claims |
+| AI assessment/chat | Separate case analysis record with claim/evidence citations |
+| AI evidence suggestions | Pending claims after server validation; PostgreSQL |
+| Maps and graph visualizations | Read-only presentation projections |
+
+## Source adapter contract
+
+Every public OSINT tool or authorized internal system must emit the same
+observation envelope. Adapters must not write directly to Persona templates,
+AI summaries, maps, or relationship nodes.
 
 ```json
 {
   "case_id": "uuid",
-  "subject_key": "source subject identifier",
-  "field_name": "email",
-  "value": "person@example.org",
+  "subject_key": "adapter-specific-subject-id",
+  "field_name": "current_location",
+  "value": "Jakarta, Indonesia",
+  "normalized_value": "jakarta indonesia",
   "source_engine": "authorized_source_adapter",
+  "source_record_id": "record-123",
   "source_name": "Source system",
   "source_url": "https://evidence.example/record/123",
   "evidence_type": "observed_record",
   "confidence": 90,
-  "observed_at": "2026-08-28T12:00:00Z"
+  "observed_at": "2026-08-28T12:00:00Z",
+  "coordinates": {"latitude": -6.1754, "longitude": 106.8272},
+  "handling": {"classification": "internal", "access_policy": "case-team"}
 }
 ```
 
-Adapters must not write directly to templates or the relationship graph. They
-pass observations through normalization, deduplication, provenance validation,
-and claim synchronization. This prevents one source from bypassing review and
-allows authorized internal data to coexist with public-source findings without
-losing origin or access policy.
+The adapter pipeline performs:
 
-## Next safe phase
+1. schema and field validation;
+2. value normalization and exact fingerprinting;
+3. source-record and evidence provenance validation;
+4. deterministic deduplication inside one Persona;
+5. confidence-policy mapping for that source;
+6. pending claim creation or last-seen/evidence update;
+7. an entity-resolution proposal when the source subject is not already bound
+   to a Persona;
+8. explicit analyst review before canonical publication.
 
-- Add an adapter interface and connector-level access policy.
-- Add entity resolution that proposes, but never auto-approves, cross-source
-  identity links.
-- Store ongoing AI conversations by case with citations to claim and evidence
-  identifiers.
-- Rebuild an assessment when accepted evidence changes while retaining the
-  conversation and prior analyst decisions.
-- Add case-level relationship types only after their evidence and review model
-  is defined.
+## Integrating additional sources
 
-The current graph is an evidence graph, not a follower or interaction network.
-Influence metrics must not be calculated until directed social-interaction data
-is collected from an authorized source.
+### Public OSINT collector
+
+Wrap the tool in an adapter that maps its native fields into OpenLedger field
+names. Preserve the tool name, record URL, record identifier, collection time,
+and original value in evidence. Tool confidence must be translated through a
+documented source-specific policy; it must not be treated as identity certainty.
+
+### Internal data source
+
+Use a service account with least-privilege, read-only access. The adapter should
+run server-side, emit the same observation envelope, and copy only fields the
+case is authorized to use. Store an internal record identifier and handling
+policy even when no browser-accessible source URL exists. A connector must not
+expose internal credentials or raw unrestricted records to the web process.
+
+### Combining results into one Persona
+
+If the adapter already has a trusted binding to an OpenLedger Persona, its
+observations are synchronized there. Otherwise, an entity-resolution service
+proposes candidates using stable identifiers such as verified email, phone, or
+internal employee ID. Names, city, occupation, and usernames alone remain weak
+signals. A human must approve the binding before claims from two source subjects
+are presented as one person.
+
+Claims remain separate records even when their displayed values match. The
+Persona view groups them, preserves all source evidence, and calculates a
+display confidence from documented evidence rules. This prevents one source
+from erasing disagreement or laundering an unsupported assertion through a
+second source.
+
+## AI evidence proposal boundary
+
+AI analysis uses two server-side Responses API stages. The first stage analyzes
+the normalized investigation evidence and may use hosted public web search. The
+second stage receives the assessment and its citation catalogue without browsing
+again, then returns a strict JSON Schema payload. OpenLedger treats that payload
+as untrusted and validates it again before storage.
+
+The initial allowlist is intentionally limited to public-biographical fields:
+summary, full name, coarse current location, occupation, company, public social
+account, website, and photograph. Every accepted suggestion must identify an
+investigated username, cite an exact URL returned by the research stage, contain
+a review rationale, and use confidence between 40 and 85. Email, phone, private
+address, finances, vehicles, criminal records, sensitive traits, and inferred
+relationships are rejected at the server boundary even if the model emits them.
+
+Accepted suggestions use `source_engine=openai_web_research` and
+`evidence_type=cited_public_web`. They enter the same pending review queue as
+collector observations. Re-analysis is idempotent by claim and evidence
+fingerprint: it can add provenance or refresh last-seen time, but it does not
+erase a rejection or any other analyst decision. Only approved claims reach the
+default Persona, map, or Relationships projection.
+
+## Relationship projection
+
+The first safe relationship workspace uses exact normalized values from
+approved claims. It creates a bipartite graph:
+
+- Persona nodes represent reviewed subjects.
+- Attribute nodes represent approved shared values such as a location,
+  company, email, phone, occupation, website, vehicle, or public account.
+- Edges mean only “this Persona has an approved claim with this value.”
+
+Two people connected to the same city or company have a shared-attribute lead,
+not a confirmed personal or social relationship. Approximate matching,
+directional social interactions, ownership, and temporal co-location require
+separate evidence types and review policies before they become graph edges.
+
+Rejected, pending, and uncertain claims do not enter the default relationship
+projection. Rejected claims are retained so an analyst can reverse a decision
+without losing provenance.
+
+## Location privacy
+
+Leaflet renders only approved location claims with coordinates. OpenLedger does
+not silently geocode location strings: public geocoding would disclose a query
+that may be operationally sensitive. Coordinates can be supplied by an
+authorized adapter or entered by an analyst while reviewing the claim.
+
+The default map uses a configurable external tile endpoint. Isolated or
+sensitive deployments should set `OPENLEDGER_MAP_TILE_URL` to an approved
+internal tile server because map tile requests reveal the client IP and viewed
+map area to the tile provider.
+
+## Deferred scope and revisit triggers
+
+- Add a formal connector SDK when a second source adapter is ready.
+- Add source-level access policies before mixing data with different
+  classifications or case permissions.
+- Add probabilistic entity resolution only after labeled analyst decisions can
+  be used to measure false merges and false splits.
+- Persist AI conversations with claim/evidence citations as a separate case
+  artifact; never use chat text as a canonical claim.
+- Add follower, mention, reply, transaction, communication, or co-location
+  edges only when their source-specific observation and review contracts exist.
+- Consider a dedicated graph database only when PostgreSQL projections cannot
+  meet measured query or scale requirements. It must not become a second system
+  of record.

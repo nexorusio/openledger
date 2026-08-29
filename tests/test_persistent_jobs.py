@@ -292,7 +292,9 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "Alice Example" in persona_page
     assert "90% confidence" in persona_page
     assert "No evidence extracted." in persona_page
-    assert "Digital relationships" in persona_page
+    assert "AI proposes; the analyst decides" in persona_page
+    assert "Review queue" in persona_page
+    assert "Relationships" in persona_page
 
 
 def test_claim_review_requires_csrf_and_records_operator_decision(
@@ -388,3 +390,132 @@ def test_persona_refresh_queues_new_collection_in_the_same_case(
     assert refresh_job["status"] == "queued"
     assert refresh_job["kind"] == "refresh"
     assert refresh_job["options"]["top_sites"] == 250
+
+
+def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"email": "collision@example.test"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    email = next(
+        claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "email"
+    )
+    persistent_store.review_claim(email["id"], "rejected", "analyst", "Collision")
+
+    page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    assert page.count("collision@example.test") == 1
+    assert 'data-review-item="rejected"' in page
+    assert "excluded from the default profile, map, and relationship graph" in page
+
+
+def test_approved_location_and_photo_render_in_persona_workspace(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {
+                            "location": "Jakarta, Indonesia",
+                            "photo": "https://images.example.test/alice.jpg",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    claims = persistent_store.get_persona(persona_id)["claims"]
+    location = next(c for c in claims if c["field_name"] == "current_location")
+    photo = next(c for c in claims if c["field_name"] == "photograph")
+    persistent_store.review_claim(
+        location["id"],
+        "approved",
+        "analyst",
+        latitude="-6.1754",
+        longitude="106.8272",
+    )
+    persistent_store.review_claim(photo["id"], "approved", "analyst")
+
+    page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    assert 'id="personaLocationMap"' in page
+    assert "-6.1754" in page
+    assert "106.8272" in page
+    assert page.count('src="https://images.example.test/alice.jpg"') >= 2
+    assert 'class="persona-photo-frame"' in page
+
+
+def test_relationship_workspace_renders_shared_approved_attributes(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice", "bob"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice", "bob"],
+        "individual_reports": [
+            {
+                "username": username,
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example",
+                        "url": f"https://example.test/{username}",
+                        "confidence": "strong",
+                        "evidence": {"company": "Nexorus"},
+                    }
+                ],
+            }
+            for username in ("alice", "bob")
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    for persona_summary in case["personas"]:
+        company = next(
+            claim
+            for claim in persistent_store.get_persona(persona_summary["id"])["claims"]
+            if claim["field_name"] == "company"
+        )
+        persistent_store.review_claim(company["id"], "approved", "analyst")
+
+    page = client.get("/relationships").get_data(as_text=True)
+    assert "Entity and attribute graph" in page
+    assert "Nexorus" in page
+    assert "exact normalized matches across personas" in page
+    assert "vis-network@10.1.1" in page

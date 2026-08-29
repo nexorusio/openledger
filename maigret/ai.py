@@ -13,10 +13,57 @@ from urllib.parse import urlsplit
 
 import aiohttp
 
+AI_EVIDENCE_FIELDS = (
+    "summary",
+    "full_name",
+    "current_location",
+    "occupation",
+    "company",
+    "social_account",
+    "website",
+    "photograph",
+)
+
+AI_EVIDENCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "username": {"type": "string"},
+                    "field_name": {
+                        "type": "string",
+                        "enum": list(AI_EVIDENCE_FIELDS),
+                    },
+                    "value": {"type": "string"},
+                    "confidence": {"type": "integer"},
+                    "source_url": {"type": "string"},
+                    "source_title": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+                "required": [
+                    "username",
+                    "field_name",
+                    "value",
+                    "confidence",
+                    "source_url",
+                    "source_title",
+                    "reason",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["proposals"],
+    "additionalProperties": False,
+}
+
 
 def _openledger_label(text: str) -> str:
     """Prevent the internal engine name from leaking into branded output."""
-    return re.sub(r'\bmaigret\b', 'OpenLedger', text, flags=re.IGNORECASE)
+    return re.sub(r"\bmaigret\b", "OpenLedger", text, flags=re.IGNORECASE)
 
 
 def load_ai_prompt() -> str:
@@ -100,7 +147,7 @@ async def _stream_response(resp, spinner, first_token):
         decoded = line.decode("utf-8").strip()
         if not decoded or not decoded.startswith("data: "):
             continue
-        data_str = decoded[len("data: "):]
+        data_str = decoded[len("data: ") :]
         if data_str == "[DONE]":
             break
         try:
@@ -139,7 +186,7 @@ async def get_ai_analysis(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
+    payload: dict[str, object] = {
         "model": model,
         "stream": True,
         "messages": [
@@ -156,7 +203,9 @@ async def get_ai_analysis(
         async with aiohttp.ClientSession() as session:
             async with session.post(url, json=payload, headers=headers) as resp:
                 await _check_response(resp)
-                first_token, analysis = await _stream_response(resp, spinner, first_token)
+                first_token, analysis = await _stream_response(
+                    resp, spinner, first_token
+                )
     except Exception:
         spinner.stop()
         raise
@@ -204,7 +253,9 @@ async def get_ai_analysis_text(
             try:
                 response_data = await resp.json()
             except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                raise RuntimeError("OpenAI API returned an invalid JSON response") from exc
+                raise RuntimeError(
+                    "OpenAI API returned an invalid JSON response"
+                ) from exc
 
     try:
         analysis = response_data["choices"][0]["message"]["content"]
@@ -264,6 +315,35 @@ def _parse_responses_analysis(response_data):
     return {"analysis": analysis, "sources": sources}
 
 
+def _parse_structured_response(response_data):
+    """Parse one strict Responses API JSON output without trusting its shape."""
+    text_parts = []
+    for item in response_data.get("output", []):
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        for content in item.get("content", []):
+            if not isinstance(content, dict):
+                continue
+            if content.get("type") == "refusal":
+                raise RuntimeError("OpenAI declined to create evidence proposals")
+            if content.get("type") != "output_text":
+                continue
+            text = content.get("text")
+            if isinstance(text, str) and text.strip():
+                text_parts.append(text.strip())
+    if not text_parts:
+        raise RuntimeError("OpenAI API response did not contain evidence proposals")
+    try:
+        payload = json.loads("\n".join(text_parts))
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(
+            "OpenAI API returned invalid evidence proposal JSON"
+        ) from exc
+    if not isinstance(payload, dict) or not isinstance(payload.get("proposals"), list):
+        raise RuntimeError("OpenAI API returned an invalid evidence proposal payload")
+    return payload["proposals"]
+
+
 async def get_enriched_ai_analysis(
     api_key: str,
     investigation_evidence: str,
@@ -282,7 +362,7 @@ async def get_enriched_ai_analysis(
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
-    payload = {
+    payload: dict[str, object] = {
         "model": model,
         "instructions": load_ai_prompt(),
         "input": investigation_evidence,
@@ -297,8 +377,84 @@ async def get_enriched_ai_analysis(
             try:
                 response_data = await resp.json()
             except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
-                raise RuntimeError("OpenAI API returned an invalid JSON response") from exc
+                raise RuntimeError(
+                    "OpenAI API returned an invalid JSON response"
+                ) from exc
     return _parse_responses_analysis(response_data)
+
+
+async def get_ai_evidence_proposals(
+    api_key: str,
+    investigation_evidence: str,
+    analysis: str,
+    sources,
+    model: str = "gpt-5.4",
+    api_base_url: str = "https://api.openai.com/v1",
+    timeout_seconds: int = 180,
+):
+    """Convert a cited assessment into schema-constrained evidence proposals.
+
+    This second pass cannot browse. It may reference only the citation catalogue
+    returned by the preceding web-enabled assessment; the server validates that
+    constraint again before a proposal is persisted.
+    """
+    source_catalog = [
+        {
+            "title": str(source.get("title", ""))[:300],
+            "url": str(source.get("url", ""))[:2000],
+        }
+        for source in list(sources)[:100]
+        if isinstance(source, dict)
+    ]
+    if not source_catalog:
+        return []
+
+    url = f"{api_base_url.rstrip('/')}/responses"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    instructions = """You extract reviewable public-biographical evidence proposals for OpenLedger.
+
+Return only facts explicitly supported by the supplied assessment and citation catalogue. Every
+proposal must use a source_url exactly as written in that catalogue and must identify exactly one
+investigated username. Omit uncertain values instead of guessing. Do not infer or propose private
+addresses, email addresses, phone numbers, finances, vehicles, criminal records, sensitive traits,
+or interpersonal relationships. A summary must be a concise public-professional description, not a
+speculative biography. Confidence measures source support, never identity certainty alone. Keep it
+at or below 85. These are analyst-review proposals and must never be described as verified facts."""
+    structured_input = json.dumps(
+        {
+            "investigation_evidence": investigation_evidence[:100_000],
+            "assessment": analysis[:30_000],
+            "citation_catalogue": source_catalog,
+        },
+        ensure_ascii=False,
+    )
+    payload = {
+        "model": model,
+        "instructions": instructions,
+        "input": structured_input,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "openledger_persona_evidence",
+                "strict": True,
+                "schema": AI_EVIDENCE_SCHEMA,
+            }
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            await _check_response(resp)
+            try:
+                response_data = await resp.json()
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "OpenAI API returned an invalid JSON response"
+                ) from exc
+    return _parse_structured_response(response_data)
 
 
 async def validate_openai_connection(

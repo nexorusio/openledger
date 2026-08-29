@@ -19,6 +19,7 @@ import maigret.report
 import maigret.settings
 from maigret.result import MaigretCheckResult, MaigretCheckStatus
 from maigret.web import app as web_app_module
+from maigret.web.case_store import CaseStore
 
 CUR_PATH = os.path.dirname(os.path.realpath(__file__))
 TEST_DB = os.path.join(CUR_PATH, 'db.json')
@@ -73,7 +74,8 @@ def test_index_renders(client):
     resp = client.get('/')
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'name="usernames"' in body
+    assert 'name="identifier_type"' in body
+    assert 'name="identifier_value"' in body
     assert '<form' in body
 
 
@@ -151,7 +153,94 @@ def test_healthz(client):
 
 def _csrf_token(client):
     with client.session_transaction() as browser_session:
-        return browser_session['csrf_token']
+        token = browser_session.get('csrf_token')
+    if not token:
+        client.get('/')
+        with client.session_transaction() as browser_session:
+            token = browser_session['csrf_token']
+    return token
+
+
+def test_typed_investigation_builder_creates_a_grouped_query_plan(
+    client, web_app, monkeypatch
+):
+    captured = {}
+
+    def fake_start(usernames, options):
+        captured['usernames'] = usernames
+        captured['options'] = options
+        return 'typed-plan'
+
+    monkeypatch.setattr(web_app, 'start_live_job', fake_start)
+    response = client.post(
+        '/live',
+        data={
+            'csrf_token': _csrf_token(client),
+            'identifier_type': ['full_name', 'social_handle', 'email', 'phone'],
+            'identifier_value': [
+                'Jati Pratomo',
+                '@jatipratomo',
+                'jati@example.com',
+                '+62 812 3456 789',
+            ],
+            'processing_mode': 'same_subject',
+            'generate_name_variants': 'on',
+            'allow_ai_context': 'on',
+            'include_terms': 'Jakarta, urban planning',
+            'exclude_terms': 'fan page, football',
+            'mode': 'fast',
+        },
+    )
+
+    assert response.status_code == 302
+    assert response.location.endswith('/live/typed-plan')
+    assert captured['usernames'][0:4] == [
+        'jatipratomo',
+        'jati.pratomo',
+        'jati_pratomo',
+        'jati-pratomo',
+    ]
+    spec = captured['options']['investigation_spec']
+    assert spec['processing_mode'] == 'same_subject'
+    assert spec['subject_label'] == 'Jati Pratomo'
+    assert spec['allow_ai_context'] is True
+    assert spec['exclude_terms'] == ['fan page', 'football']
+    assert 'jati@example.com' not in captured['usernames']
+    assert '+628123456789' not in captured['usernames']
+
+
+def test_context_only_investigation_is_rejected_before_queueing(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setattr(
+        web_app,
+        'start_live_job',
+        lambda *args, **kwargs: pytest.fail('invalid plan must not be queued'),
+    )
+    response = client.post(
+        '/live',
+        data={
+            'csrf_token': _csrf_token(client),
+            'identifier_type': ['email', 'phone'],
+            'identifier_value': ['jati@example.com', '+628123456789'],
+            'processing_mode': 'same_subject',
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert 'retained as context' in body
+
+
+def test_investigation_builder_explains_identifier_capabilities(client):
+    body = client.get('/').get_data(as_text=True)
+
+    assert 'Known identifiers' in body
+    assert 'A full name may contain spaces' in body
+    assert 'Phone and email values are never permuted' in body
+    assert 'Exclude terms' in body
+    assert 'Query plan' in body
 
 
 def test_application_login_replaces_browser_authentication(client, web_app):
@@ -426,7 +515,11 @@ def test_ai_analysis_is_generated_once_and_cached(
             ],
         }
 
+    async def fake_proposals(**kwargs):
+        return []
+
     monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
+    monkeypatch.setattr(web_app, 'get_ai_evidence_proposals', fake_proposals)
     web_app.job_results['session1'] = {
         'status': 'completed',
         'session_folder': 'search_session1',
@@ -471,9 +564,124 @@ def test_ai_analysis_is_generated_once_and_cached(
     assert 'GitHub' in calls[0]['investigation_evidence']
     assert calls[0]['web_search_enabled'] is True
     assert first.get_json()['sources'][0]['title'] == 'Official profile'
+    assert first.get_json()['proposal_status'] == 'storage_unavailable'
     saved = tmp_path / 'search_session1' / 'ai_analysis.md'
     assert saved.exists()
     assert 'requires verification' in saved.read_text(encoding='utf-8')
+
+
+def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = CaseStore(f"sqlite:///{tmp_path / 'cases.db'}", create_schema=True)
+    monkeypatch.setattr(web_app, 'case_store', store)
+    job_id = store.create_investigation(['alice'], {})
+    store.claim_next('worker:test')
+    result = {
+        'status': 'completed',
+        'session_folder': f'search_{job_id}',
+        'graph_file': f'search_{job_id}/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [],
+    }
+    store.finish(job_id, result)
+    web_app.job_results[job_id] = result
+
+    async def fake_analysis(**kwargs):
+        return {
+            'analysis': '# Assessment\n\nThe official biography supports the identity.',
+            'sources': [
+                {
+                    'title': 'Official biography',
+                    'url': 'https://example.test/alice',
+                }
+            ],
+        }
+
+    async def fake_proposals(**kwargs):
+        return [
+            {
+                'username': 'alice',
+                'field_name': 'full_name',
+                'value': 'Alice Example',
+                'confidence': 82,
+                'source_url': 'https://example.test/alice',
+                'source_title': 'Official biography',
+                'reason': 'The official biography identifies Alice Example.',
+            }
+        ]
+
+    monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
+    monkeypatch.setattr(web_app, 'get_ai_evidence_proposals', fake_proposals)
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    first = client.post(
+        f'/api/analysis/search_{job_id}',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+    assert first.status_code == 200
+    assert first.get_json()['proposal_count'] == 1
+    assert first.get_json()['proposal_status'] == 'pending_review'
+    persona_id = store.get_case(store.get_job(job_id)['case_id'])['personas'][0]['id']
+    claim = store.get_persona(persona_id)['claims'][0]
+    assert claim['review_status'] == 'pending'
+    assert claim['source_engine'] == 'openai_web_research'
+
+    store.review_claim(claim['id'], 'rejected', 'analyst', 'False attribution')
+    cached = client.post(
+        f'/api/analysis/search_{job_id}',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+    assert cached.status_code == 200
+    assert cached.get_json()['cached'] is True
+    assert store.get_persona(persona_id)['claims'][0]['review_status'] == 'rejected'
+    store.dispose()
+
+
+def test_ai_assessment_survives_structured_proposal_failure(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    web_app.job_results['session1'] = {
+        'status': 'completed',
+        'session_folder': 'search_session1',
+        'graph_file': 'search_session1/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [],
+    }
+
+    async def fake_analysis(**kwargs):
+        return {
+            'analysis': '# Assessment\n\nCited narrative remains useful.',
+            'sources': [
+                {'title': 'Source', 'url': 'https://example.test/alice'}
+            ],
+        }
+
+    async def failing_proposals(**kwargs):
+        raise RuntimeError('structured output unavailable')
+
+    monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
+    monkeypatch.setattr(web_app, 'get_ai_evidence_proposals', failing_proposals)
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    response = client.post(
+        '/api/analysis/search_session1',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()['proposal_status'] == 'unavailable'
+    assert 'Cited narrative' in response.get_json()['analysis']
+    metadata = json.loads(
+        (tmp_path / 'search_session1' / 'ai_analysis.json').read_text(
+            encoding='utf-8'
+        )
+    )
+    assert metadata['proposal_status'] == 'unavailable'
 
 
 def test_failed_task_redirects_to_index(client, web_app, monkeypatch):
@@ -1159,6 +1367,35 @@ def test_build_reports_computes_found_count(web_app, monkeypatch):
     assert 'Deddy Corbuzier' in ai_input
     assert 'Indonesian mentalist' in ai_input
     assert 'Maigret' not in ai_input
+
+
+def test_ai_markdown_includes_only_explicitly_approved_operator_context(web_app):
+    result = {
+        'individual_reports': [],
+        'options': {
+            'investigation_spec': {
+                'allow_ai_context': True,
+                'subject_label': 'Jati Pratomo',
+                'identifiers': [
+                    {'type': 'full_name', 'value': 'Jati Pratomo'},
+                    {'type': 'email', 'value': 'jati@example.com'},
+                ],
+                'include_terms': ['Jakarta'],
+                'exclude_terms': ['fan page'],
+            }
+        },
+    }
+
+    approved = web_app.build_ai_markdown(result)
+    result['options']['investigation_spec']['allow_ai_context'] = False
+    withheld = web_app.build_ai_markdown(result)
+
+    assert 'Operator-provided research context' in approved
+    assert 'Jati Pratomo' in approved
+    assert 'jati@example.com' in approved
+    assert 'fan page' in approved
+    assert 'Operator-provided research context' not in withheld
+    assert 'jati@example.com' not in withheld
 
 
 @pytest.mark.parametrize(
