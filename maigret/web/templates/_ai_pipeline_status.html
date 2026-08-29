@@ -1,0 +1,42 @@
+<div class="ai-pipeline-status" aria-label="AI evidence pipeline status">
+    <article>
+        <span class="ai-pipeline-step">1</span>
+        <div>
+            <small>Assessment</small>
+            <strong>{{ 'Saved' if ai_analysis_status.has_assessment else 'Not run' }}</strong>
+            <p>{{ ai_analysis_status.model or 'Run AI analysis from the investigation results page.' }}</p>
+        </div>
+    </article>
+    <article>
+        <span class="ai-pipeline-step">2</span>
+        <div>
+            <small>Cited research</small>
+            <strong>{{ ai_analysis_status.source_count }} source{{ '' if ai_analysis_status.source_count == 1 else 's' }}</strong>
+            <p>Only URLs returned by the same research run may support Persona proposals.</p>
+        </div>
+    </article>
+    <article>
+        <span class="ai-pipeline-step">3</span>
+        <div>
+            <small>Persona extraction</small>
+            <strong>{{ ai_analysis_status.proposal_count }} accepted proposal{{ '' if ai_analysis_status.proposal_count == 1 else 's' }}</strong>
+            <p>
+                {% if ai_analysis_status.proposal_status == 'pending_review' %}Validated and synchronized; current analyst decisions appear in the profile.
+                {% elif ai_analysis_status.proposal_status == 'no_valid_proposals' %}No cited finding passed validation.
+                {% elif ai_analysis_status.proposal_status == 'unavailable' %}Structured extraction failed; the assessment was retained.
+                {% elif ai_analysis_status.proposal_status == 'metadata_unavailable' %}Assessment metadata is unavailable.
+                {% else %}No structured extraction has been completed.{% endif %}
+            </p>
+        </div>
+    </article>
+</div>
+{% if ai_analysis_status.diagnostics.rejected %}
+<details class="ai-validation-details">
+    <summary>Why {{ ai_analysis_status.diagnostics.rejected.values() | sum }} proposal{{ '' if ai_analysis_status.diagnostics.rejected.values() | sum == 1 else 's' }} did not enter Persona</summary>
+    <ul>
+        {% for reason, count in ai_analysis_status.diagnostics.rejected | dictsort %}
+        <li><span>{{ reason | replace('_', ' ') | title }}</span><strong>{{ count }}</strong></li>
+        {% endfor %}
+    </ul>
+</details>
+{% endif %}

@@ -79,6 +79,7 @@
                 OpenLedger sends the normalized report only when you request analysis. Supported
                 public-web findings may enter Persona as pending proposals; AI can never approve them.
             </p>
+            {% include '_ai_pipeline_status.html' %}
             {% if ai_enabled %}
             <div class="d-flex align-items-center flex-wrap gap-2 mt-3">
                 <button type="button" class="btn btn-primary" id="generateAiAnalysis">Analyze and propose evidence</button>
@@ -260,8 +261,14 @@ if (aiButton) {
                     storage_unavailable: 'Persistent Persona storage is unavailable, so no evidence proposal was retained.',
                     investigation_unavailable: 'The investigation record could not be linked to a Persona review queue.'
                 };
-                proposalMessage.textContent = proposalMessages[payload.proposal_status]
-                    || 'No evidence proposal was added.';
+                const rejected = Object.entries(payload.proposal_diagnostics?.rejected || {})
+                    .filter(([, rejectedCount]) => Number(rejectedCount) > 0)
+                    .map(([reason, rejectedCount]) => `${String(reason).replaceAll('_', ' ')}: ${rejectedCount}`);
+                const validationDetail = rejected.length
+                    ? ` Validation excluded ${rejected.join(', ')}.`
+                    : '';
+                proposalMessage.textContent = (proposalMessages[payload.proposal_status]
+                    || 'No evidence proposal was added.') + validationDetail;
                 proposalNotice.classList.remove('d-none');
                 const reviewLink = document.getElementById('aiProposalReviewLink');
                 if (reviewLink) reviewLink.hidden = payload.proposal_status !== 'pending_review';

@@ -165,7 +165,20 @@ fingerprint: it can add provenance or refresh last-seen time, but it does not
 erase a rejection or any other analyst decision. Only approved claims reach the
 default Persona, map, or Relationships projection.
 
+For a cited coarse `current_location`, AI may also propose an approximate city
+or region map center. The validator rejects partial coordinates, out-of-range
+values, precise-position labels, and coordinates attached to any other field.
+The proposal remains pending and is visibly labelled approximate; it reaches
+the map only with the analyst's location decision. The UI exposes assessment,
+citation, structured-proposal, and validation-rejection counts so a narrative
+assessment cannot be mistaken for successful Persona extraction.
+
 ## Relationship projection
+
+The Relationships workspace separates two graph contracts. **Persona evidence**
+shows one Persona, every non-rejected claim, its review status, and provenance
+sources. This is a review network and may display pending or uncertain nodes.
+**Shared relationship leads** applies the stricter canonical projection below.
 
 The first safe relationship workspace uses exact normalized values from
 approved claims. It creates a bipartite graph:
@@ -189,7 +202,9 @@ without losing provenance.
 Leaflet renders only approved location claims with coordinates. OpenLedger does
 not silently geocode location strings: public geocoding would disclose a query
 that may be operationally sensitive. Coordinates can be supplied by an
-authorized adapter or entered by an analyst while reviewing the claim.
+authorized adapter, entered by an analyst, or proposed as a visibly approximate
+city/region map center by the cited AI pipeline. AI proposals remain untrusted
+until review and must never be interpreted as the person's precise position.
 
 The default map uses a configurable external tile endpoint. Isolated or
 sensitive deployments should set `OPENLEDGER_MAP_TILE_URL` to an approved

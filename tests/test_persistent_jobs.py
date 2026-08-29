@@ -478,6 +478,64 @@ def test_approved_location_and_photo_render_in_persona_workspace(
     assert "106.8272" in page
     assert page.count('src="https://images.example.test/alice.jpg"') >= 2
     assert 'class="persona-photo-frame"' in page
+    assert "Amend approved record" in page
+    assert "AI evidence pipeline" in page
+
+
+def test_approved_location_requires_saving_ai_map_center_before_mapping(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Profile",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"location": "Jakarta, Indonesia"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    location = persistent_store.get_persona(persona_id)["claims"][0]
+    persistent_store.review_claim(location["id"], "approved", "analyst")
+    persistent_store.sync_ai_persona_claims(
+        job_id,
+        [
+            {
+                "username": "alice",
+                "field_name": "current_location",
+                "value": "Jakarta, Indonesia",
+                "confidence": 75,
+                "source_url": "https://example.test/alice",
+                "source_title": "Profile",
+                "reason": "The profile names Jakarta.",
+                "latitude": -6.1754,
+                "longitude": 106.8272,
+                "coordinate_precision": "city",
+            }
+        ],
+        sources=[{"title": "Profile", "url": "https://example.test/alice"}],
+        usernames=["alice"],
+        model="gpt-5.6-terra",
+    )
+
+    page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    assert "0 mapped" in page
+    assert 'value="-6.1754"' in page
+    assert 'value="106.8272"' in page
+    assert "AI proposed an approximate city map center" in page
 
 
 def test_relationship_workspace_renders_shared_approved_attributes(
@@ -514,8 +572,14 @@ def test_relationship_workspace_renders_shared_approved_attributes(
         )
         persistent_store.review_claim(company["id"], "approved", "analyst")
 
-    page = client.get("/relationships").get_data(as_text=True)
-    assert "Entity and attribute graph" in page
+    page = client.get("/relationships?mode=shared").get_data(as_text=True)
+    assert "Cross-Persona relationship leads" in page
     assert "Nexorus" in page
     assert "exact normalized matches across personas" in page
     assert "vis-network@10.1.1" in page
+
+    persona_page = client.get("/relationships?mode=persona").get_data(as_text=True)
+    assert "Persona evidence network" in persona_page
+    assert "Example" in persona_page
+    assert "Review status remains visible" in persona_page
+    assert "vis-network@10.1.1" in persona_page

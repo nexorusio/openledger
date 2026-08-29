@@ -6,88 +6,138 @@
 {% block content %}
 <section class="page-heading">
     <div>
-        <p class="eyebrow">Cross-person evidence</p>
+        <p class="eyebrow">Evidence networks</p>
         <h1>Relationships</h1>
-        <p class="page-description">Explore exact attributes shared by two or more personas. A shared attribute is an investigative lead, not proof that the people know each other.</p>
+        <p class="page-description">Trace one Persona to its attributes and sources, or investigate exact reviewed attributes shared across people.</p>
     </div>
 </section>
 
+<nav class="relationship-mode-tabs" aria-label="Relationship workspace mode">
+    <a class="{{ 'active' if mode == 'persona' else '' }}" href="{{ url_for('relationships_workspace', mode='persona', case_id=selected_case_id, persona_id=selected_persona_id) }}">
+        <i data-lucide="contact-round"></i><span><strong>Persona evidence</strong><small>One person, attributes, and provenance</small></span>
+    </a>
+    <a class="{{ 'active' if mode == 'shared' else '' }}" href="{{ url_for('relationships_workspace', mode='shared', case_id=selected_case_id) }}">
+        <i data-lucide="git-compare-arrows"></i><span><strong>Shared relationship leads</strong><small>Exact approved overlaps across people</small></span>
+    </a>
+</nav>
+
 <section class="relationship-policy">
-    <i data-lucide="git-compare-arrows"></i>
+    <i data-lucide="{{ 'file-search-2' if mode == 'persona' else 'shield-check' }}"></i>
     <div>
+        {% if mode == 'persona' %}
+        <strong>Review status remains visible</strong>
+        <span>Approved, pending, and uncertain records can be traced to their sources. Rejected records are excluded from the graph but retained in the audit trail.</span>
+        {% else %}
         <strong>Approved evidence only</strong>
-        <span>Pending, uncertain, and rejected records are excluded. OpenLedger never creates an interpersonal relationship from AI prose or approximate text similarity.</span>
+        <span>A shared attribute is an investigative lead—not proof of contact. Pending, uncertain, and rejected records are excluded; no relationship is created from AI prose or fuzzy similarity.</span>
+        {% endif %}
     </div>
 </section>
 
 <section class="relationship-toolbar panel-card">
     <form method="GET" action="{{ url_for('relationships_workspace') }}" class="relationship-case-filter">
-        <label for="relationshipCase">Scope</label>
+        <input type="hidden" name="mode" value="{{ mode }}">
+        <label for="relationshipCase">Case scope</label>
         <select id="relationshipCase" name="case_id" onchange="this.form.submit()">
             <option value="">All cases</option>
             {% for case in cases %}
             <option value="{{ case.id }}" {{ 'selected' if selected_case_id == case.id else '' }}>{{ case.title }}</option>
             {% endfor %}
         </select>
+        {% if mode == 'persona' %}
+        <label for="relationshipPersona">Persona</label>
+        <select id="relationshipPersona" name="persona_id" onchange="this.form.submit()">
+            {% for item in available_personas %}
+            <option value="{{ item.id }}" {{ 'selected' if selected_persona_id == item.id else '' }}>{{ item.display_name }} · {{ item.case_title }}</option>
+            {% endfor %}
+        </select>
+        {% endif %}
     </form>
-    <div class="relationship-field-filters" aria-label="Filter by shared attribute type">
+    <div class="relationship-field-filters" aria-label="Filter by attribute type">
         {% for field_name, count in graph.stats.field_counts | dictsort %}
         <button type="button" class="relationship-filter active" data-relationship-field="{{ field_name }}">
             {{ field_name | replace('_', ' ') | title }} <span>{{ count }}</span>
         </button>
         {% endfor %}
     </div>
-    <button type="button" class="btn btn-outline-secondary relationship-fit" id="fitRelationshipGraph"><i data-lucide="maximize-2"></i> Fit graph</button>
+    {% if graph.nodes %}<button type="button" class="btn btn-outline-secondary relationship-fit" id="fitRelationshipGraph"><i data-lucide="maximize-2"></i> Fit graph</button>{% endif %}
 </section>
 
-<section class="relationship-kpis" aria-label="Relationship graph summary">
+<section class="relationship-kpis" aria-label="Graph summary">
+    {% if mode == 'persona' %}
+    <article><span>Evidence records</span><strong>{{ graph.stats.claim_count }}</strong><small>approved, pending, or uncertain</small></article>
+    <article><span>Sources</span><strong>{{ graph.stats.source_count }}</strong><small>provenance records connected to evidence</small></article>
+    <article><span>Needs review</span><strong>{{ graph.stats.pending_count }}</strong><small>pending or uncertain evidence</small></article>
+    {% else %}
     <article><span>Personas</span><strong>{{ graph.stats.persona_count }}</strong><small>with at least one shared approved attribute</small></article>
     <article><span>Shared attributes</span><strong>{{ graph.stats.shared_attribute_count }}</strong><small>exact normalized matches across personas</small></article>
-    <article><span>Evidence paths</span><strong>{{ graph.stats.connection_count }}</strong><small>persona-to-attribute connections</small></article>
+    <article><span>Evidence paths</span><strong>{{ graph.stats.connection_count }}</strong><small>reviewed persona-to-attribute connections</small></article>
+    {% endif %}
 </section>
 
+{% if mode == 'persona' and graph.stats.truncated_count %}
+<div class="security-callout"><i data-lucide="info"></i><span>The graph shows the 120 highest-priority records; {{ graph.stats.truncated_count }} additional records remain available in the Persona profile.</span></div>
+{% endif %}
+
+{% set has_graph = graph.nodes and (mode == 'shared' or graph.stats.claim_count) %}
 <div class="relationship-layout">
     <section class="panel-card relationship-canvas-card">
         <header class="panel-header">
-            <div><h2>Entity and attribute graph</h2><p>Drag nodes, pan, zoom, filter, and select a node to inspect its evidence context.</p></div>
+            {% if mode == 'persona' %}
+            <div><h2>Persona evidence network</h2><p>Follow each record to its supporting public or internal source. Node color distinguishes approved evidence from unresolved proposals.</p></div>
+            {% else %}
+            <div><h2>Cross-Persona relationship leads</h2><p>Drag nodes, filter attribute types, and select a lead to inspect each reviewed evidence path.</p></div>
+            {% endif %}
         </header>
-        {% if graph.nodes %}
-        <div id="relationshipGraph" class="relationship-graph" aria-label="Interactive cross-person relationship graph"></div>
+        {% if has_graph %}
+        <div id="relationshipGraph" class="relationship-graph" aria-label="Interactive evidence graph"></div>
         {% else %}
         <div class="relationship-empty">
-            <i data-lucide="share-2"></i>
+            <i data-lucide="{{ 'folder-search-2' if mode == 'persona' else 'share-2' }}"></i>
+            {% if mode == 'persona' %}
+            <h3>No reviewable evidence for this Persona yet</h3>
+            <p>Complete an investigation or run a cited AI assessment. New findings will enter as pending records with their sources attached.</p>
+            {% else %}
             <h3>No shared approved attributes yet</h3>
-            <p>Approve matching location, company, contact, account, occupation, website, vehicle, or ownership records on at least two Persona profiles.</p>
+            <p>Select All cases or approve an exact matching location, company, contact, account, occupation, website, vehicle, or ownership record on at least two Persona profiles.</p>
+            {% endif %}
         </div>
         {% endif %}
     </section>
     <aside class="panel-card relationship-inspector" aria-live="polite">
         <header class="panel-header"><div><h2>Selection details</h2><p>Evidence context for the selected node.</p></div></header>
         <div class="panel-body" id="relationshipInspector">
-            <div class="inspector-empty"><i data-lucide="mouse-pointer-click"></i><p>Select a person or shared attribute in the graph.</p></div>
+            <div class="inspector-empty"><i data-lucide="mouse-pointer-click"></i><p>Select a person, evidence record, source, or shared attribute.</p></div>
         </div>
     </aside>
 </div>
 {% endblock %}
 
 {% block scripts %}
-{% if graph.nodes %}
+{% if graph.nodes and (mode == 'shared' or graph.stats.claim_count) %}
 <script src="https://unpkg.com/vis-network@10.1.1/standalone/umd/vis-network.min.js"></script>
 <script>
 (() => {
     const graph = {{ graph | tojson }};
     const container = document.getElementById('relationshipGraph');
     if (!container || !window.vis) return;
+    const nodeColor = (node) => {
+        if (node.kind === 'persona') return {background: '#0f8b8d', border: '#30c7ca', highlight: {background: '#13a5a7', border: '#e8ffff'}};
+        if (node.kind === 'source') return {background: '#152538', border: '#5d7189', highlight: {background: '#1d344d', border: '#30c7ca'}};
+        if (node.kind === 'attribute') return {background: '#17314a', border: '#73a5d1', highlight: {background: '#234868', border: '#d7edff'}};
+        if (node.review_status === 'approved') return {background: '#12392f', border: '#20bd83', highlight: {background: '#185040', border: '#b8ffe2'}};
+        if (node.review_status === 'uncertain') return {background: '#41351e', border: '#d5a846', highlight: {background: '#594a2b', border: '#ffe6aa'}};
+        return {background: '#26364a', border: '#8296ad', highlight: {background: '#344a64', border: '#d9e7f6'}};
+    };
     const originalNodes = graph.nodes.map((node) => ({
         ...node,
-        shape: node.kind === 'persona' ? 'dot' : 'box',
-        size: node.kind === 'persona' ? 23 : 16,
-        color: node.kind === 'persona'
-            ? {background: '#0f8b8d', border: '#30c7ca', highlight: {background: '#13a5a7', border: '#e8ffff'}}
-            : {background: '#152538', border: '#5d7189', highlight: {background: '#1d344d', border: '#30c7ca'}},
-        font: {color: '#d8e2ed', face: 'Alliance No. 2, Arial', size: node.kind === 'persona' ? 15 : 13},
-        borderWidth: node.kind === 'persona' ? 2 : 1,
-        margin: node.kind === 'attribute' ? 10 : undefined
+        shape: node.kind === 'persona' ? 'dot' : node.kind === 'source' ? 'ellipse' : node.kind === 'attribute' ? 'diamond' : 'box',
+        size: node.kind === 'persona' ? 26 : node.kind === 'attribute' ? 20 : 16,
+        color: nodeColor(node),
+        font: {color: '#d8e2ed', face: 'Alliance No. 2, Arial', size: node.kind === 'persona' ? 15 : 12},
+        borderWidth: node.kind === 'persona' || node.review_status === 'approved' ? 2 : 1,
+        margin: node.kind === 'claim' || node.kind === 'source' ? 10 : undefined,
+        widthConstraint: node.kind === 'persona' ? undefined : {maximum: 210}
     }));
     const originalEdges = graph.edges.map((edge) => ({
         ...edge,
@@ -102,21 +152,17 @@
     const network = new vis.Network(container, {nodes, edges}, {
         autoResize: true,
         interaction: {hover: true, navigationButtons: true, keyboard: true, multiselect: false},
-        physics: {stabilization: {iterations: 180}, barnesHut: {gravitationalConstant: -4200, springLength: 145, springConstant: 0.03}},
-        layout: {improvedLayout: true, randomSeed: 23}
+        physics: {stabilization: {iterations: 220}, barnesHut: {gravitationalConstant: -5000, springLength: 155, springConstant: 0.035}},
+        layout: {improvedLayout: true, randomSeed: 29}
     });
     const activeFields = new Set(Object.keys(graph.stats.field_counts));
     const filters = Array.from(document.querySelectorAll('[data-relationship-field]'));
-
     const applyFilters = () => {
-        const visibleAttributes = new Set(originalNodes
-            .filter((node) => node.kind === 'attribute' && activeFields.has(node.field_name))
-            .map((node) => node.id));
-        const visibleEdges = originalEdges.filter((edge) => visibleAttributes.has(edge.to));
-        const visiblePersonas = new Set(visibleEdges.map((edge) => edge.from));
-        const visibleNodes = originalNodes.filter((node) =>
-            node.kind === 'attribute' ? visibleAttributes.has(node.id) : visiblePersonas.has(node.id)
-        );
+        const visibleEdges = originalEdges.filter((edge) => activeFields.has(edge.field_name));
+        const visibleNodeIds = new Set();
+        visibleEdges.forEach((edge) => { visibleNodeIds.add(edge.from); visibleNodeIds.add(edge.to); });
+        if (graph.mode === 'persona') originalNodes.filter((node) => node.kind === 'persona').forEach((node) => visibleNodeIds.add(node.id));
+        const visibleNodes = originalNodes.filter((node) => visibleNodeIds.has(node.id));
         nodes.clear(); edges.clear(); nodes.add(visibleNodes); edges.add(visibleEdges);
         setTimeout(() => network.fit({animation: {duration: 280, easingFunction: 'easeInOutQuad'}}), 0);
     };
@@ -135,15 +181,28 @@
         const content = document.createElement('strong'); content.textContent = value;
         row.append(key, content); inspector.append(row);
     };
+    const addPersonaLink = (persona) => {
+        const link = document.createElement('a'); link.className = 'btn btn-outline-secondary inspector-link';
+        link.href = `/personas/${encodeURIComponent(persona.persona_id)}`; link.textContent = 'Open Persona profile'; inspector.append(link);
+    };
     network.on('selectNode', ({nodes: selected}) => {
         const node = nodeLookup.get(selected[0]);
         if (!node) return;
         inspector.replaceChildren();
         const heading = document.createElement('h3'); heading.textContent = node.label; inspector.append(heading);
         if (node.kind === 'persona') {
-            addLine('Type', 'Persona'); addLine('Case', node.case_title);
-            const link = document.createElement('a'); link.className = 'btn btn-outline-secondary inspector-link';
-            link.href = `/personas/${encodeURIComponent(node.persona_id)}`; link.textContent = 'Open Persona profile'; inspector.append(link);
+            addLine('Type', 'Persona'); addLine('Case', node.case_title); addPersonaLink(node); return;
+        }
+        if (node.kind === 'claim') {
+            addLine('Field', node.field_name.replaceAll('_', ' '));
+            addLine('Review status', node.review_status); addLine('Evidence confidence', `${node.confidence}%`); return;
+        }
+        if (node.kind === 'source') {
+            addLine('Type', node.evidence_type?.replaceAll('_', ' ') || 'Evidence source');
+            if (node.url) {
+                const link = document.createElement('a'); link.className = 'inspector-source-link'; link.href = node.url;
+                link.target = '_blank'; link.rel = 'noopener noreferrer'; link.textContent = 'Open source'; inspector.append(link);
+            }
             return;
         }
         addLine('Shared field', node.field_name.replaceAll('_', ' '));
@@ -152,8 +211,15 @@
         originalEdges.filter((edge) => edge.to === node.id).forEach((edge) => {
             const persona = nodeLookup.get(edge.from); if (!persona) return;
             const item = document.createElement('li');
-            const link = document.createElement('a'); link.href = `/personas/${encodeURIComponent(persona.persona_id)}`; link.textContent = `${persona.label} · ${persona.case_title}`;
-            item.append(link); list.append(item);
+            const link = document.createElement('a'); link.href = `/personas/${encodeURIComponent(persona.persona_id)}`;
+            link.textContent = `${persona.label} · ${persona.case_title}`; item.append(link);
+            const detail = document.createElement('small'); detail.textContent = `${edge.confidence}% evidence confidence`; item.append(detail);
+            (edge.sources || []).forEach((source) => {
+                if (!source.url) return;
+                const sourceLink = document.createElement('a'); sourceLink.href = source.url; sourceLink.target = '_blank';
+                sourceLink.rel = 'noopener noreferrer'; sourceLink.textContent = source.name; sourceLink.className = 'inspector-evidence-source'; item.append(sourceLink);
+            });
+            list.append(item);
         });
         inspector.append(list);
     });

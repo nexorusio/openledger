@@ -508,6 +508,113 @@ def test_approved_coordinates_are_validated_and_serialized(store):
     assert reviewed["longitude"] == pytest.approx(106.8272)
 
 
+def test_ai_location_coordinates_remain_pending_until_human_approval(store):
+    job_id = store.create_investigation(["alice"], {})
+    store.claim_next("worker:test")
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": ["alice"],
+            "individual_reports": [],
+        },
+    )
+    synced = store.sync_ai_persona_claims(
+        job_id,
+        [
+            {
+                "username": "alice",
+                "field_name": "current_location",
+                "value": "Jakarta, Indonesia",
+                "confidence": 75,
+                "source_url": "https://example.test/alice",
+                "source_title": "Biography",
+                "reason": "The biography explicitly names Jakarta.",
+                "latitude": -6.1754,
+                "longitude": 106.8272,
+                "coordinate_precision": "city",
+            }
+        ],
+        sources=[{"title": "Biography", "url": "https://example.test/alice"}],
+        usernames=["alice"],
+        model="gpt-5.6-terra",
+    )
+    persona_id = store.get_case(store.get_job(job_id)["case_id"])["personas"][0][
+        "id"
+    ]
+    claim = store.get_persona(persona_id)["claims"][0]
+    assert synced["diagnostics"]["accepted"] == 1
+    assert claim["review_status"] == "pending"
+    assert claim["latitude"] == pytest.approx(-6.1754)
+
+    store.review_claim(claim["id"], "approved", "analyst")
+    approved = store.get_persona(persona_id)["claims"][0]
+    assert approved["review_status"] == "approved"
+    assert approved["latitude"] == pytest.approx(-6.1754)
+
+
+def test_ai_coordinates_do_not_silently_map_an_already_approved_location(store):
+    job_id = store.create_investigation(["alice"], {})
+    store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Profile",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"location": "Jakarta, Indonesia"},
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    store.sync_persona_claims(job_id, result)
+    persona_id = store.get_case(store.get_job(job_id)["case_id"])["personas"][0][
+        "id"
+    ]
+    location = store.get_persona(persona_id)["claims"][0]
+    store.review_claim(location["id"], "approved", "analyst")
+
+    store.sync_ai_persona_claims(
+        job_id,
+        [
+            {
+                "username": "alice",
+                "field_name": "current_location",
+                "value": "Jakarta, Indonesia",
+                "confidence": 75,
+                "source_url": "https://example.test/alice",
+                "source_title": "Profile",
+                "reason": "The public profile names Jakarta.",
+                "latitude": -6.1754,
+                "longitude": 106.8272,
+                "coordinate_precision": "city",
+            }
+        ],
+        sources=[{"title": "Profile", "url": "https://example.test/alice"}],
+        usernames=["alice"],
+        model="gpt-5.6-terra",
+    )
+
+    refreshed = store.get_persona(persona_id)["claims"][0]
+    assert refreshed["review_status"] == "approved"
+    assert refreshed["latitude"] is None
+    ai_evidence = next(
+        item
+        for item in refreshed["evidence"]
+        if item["evidence_type"] == "cited_public_web"
+    )
+    assert ai_evidence["details"]["proposed_latitude"] == pytest.approx(-6.1754)
+
+
 def test_relationship_graph_uses_only_exact_shared_approved_claims(store):
     job_id = store.create_investigation(["alice", "bob"], {})
     store.claim_next("worker:test")

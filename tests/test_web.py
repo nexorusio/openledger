@@ -609,7 +609,16 @@ def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
                 'source_url': 'https://example.test/alice',
                 'source_title': 'Official biography',
                 'reason': 'The official biography identifies Alice Example.',
-            }
+            },
+            {
+                'username': 'alice',
+                'field_name': 'summary',
+                'value': 'Alice Example is a research engineer.',
+                'confidence': 75,
+                'source_url': 'https://example.test/alice',
+                'source_title': 'Official biography',
+                'reason': 'The cited biography supports this concise summary.',
+            },
         ]
 
     monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
@@ -622,12 +631,23 @@ def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
         headers={'X-OpenLedger-CSRF': 'test-csrf'},
     )
     assert first.status_code == 200
-    assert first.get_json()['proposal_count'] == 1
+    assert first.get_json()['proposal_count'] == 2
     assert first.get_json()['proposal_status'] == 'pending_review'
     persona_id = store.get_case(store.get_job(job_id)['case_id'])['personas'][0]['id']
-    claim = store.get_persona(persona_id)['claims'][0]
+    persona = store.get_persona(persona_id)
+    claim = next(
+        item for item in persona['claims'] if item['field_name'] == 'full_name'
+    )
     assert claim['review_status'] == 'pending'
     assert claim['source_engine'] == 'openai_web_research'
+    summary = next(
+        item for item in persona['claims'] if item['field_name'] == 'summary'
+    )
+    assert summary['review_status'] == 'pending'
+    persona_page = client.get(f'/personas/{persona_id}').get_data(as_text=True)
+    assert 'Alice Example is a research engineer.' in persona_page
+    assert '2 accepted proposals' in persona_page
+    assert '1 source' in persona_page
 
     store.review_claim(claim['id'], 'rejected', 'analyst', 'False attribution')
     cached = client.post(
@@ -636,7 +656,12 @@ def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
     )
     assert cached.status_code == 200
     assert cached.get_json()['cached'] is True
-    assert store.get_persona(persona_id)['claims'][0]['review_status'] == 'rejected'
+    refreshed_claim = next(
+        item
+        for item in store.get_persona(persona_id)['claims']
+        if item['field_name'] == 'full_name'
+    )
+    assert refreshed_claim['review_status'] == 'rejected'
     store.dispose()
 
 

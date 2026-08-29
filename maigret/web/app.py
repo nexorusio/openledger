@@ -253,7 +253,7 @@ SESSION_KEY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_FOLDER_PATTERN = re.compile(r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
-AI_ANALYSIS_SCHEMA_VERSION = 5
+AI_ANALYSIS_SCHEMA_VERSION = 6
 AUTH_SCHEMA_VERSION = 1
 PASSWORD_HASH_NAME = 'sha256'
 PASSWORD_HASH_ITERATIONS = 600_000
@@ -1286,6 +1286,89 @@ def get_analysis_metadata_path(result_data: Dict[str, Any]) -> str:
     )
 
 
+def get_ai_analysis_status(result_data: Dict[str, Any]) -> Dict[str, Any]:
+    """Return a safe, display-oriented summary of the persisted AI pipeline."""
+    status: Dict[str, Any] = {
+        'has_assessment': False,
+        'proposal_status': 'not_requested',
+        'proposal_count': 0,
+        'source_count': 0,
+        'model': None,
+        'diagnostics': {'received': 0, 'accepted': 0, 'rejected': {}},
+        'session_id': result_data.get('session_folder'),
+    }
+    try:
+        analysis_path = get_analysis_path(result_data)
+        status['has_assessment'] = os.path.exists(analysis_path)
+        metadata_path = get_analysis_metadata_path(result_data)
+        if not os.path.exists(metadata_path):
+            if status['has_assessment']:
+                status['proposal_status'] = 'metadata_unavailable'
+            return status
+        with open(metadata_path, encoding='utf-8') as metadata_file:
+            metadata = json.load(metadata_file)
+    except (OSError, ValueError, json.JSONDecodeError, AttributeError):
+        status['proposal_status'] = 'metadata_unavailable'
+        return status
+    sources = metadata.get('sources')
+    proposals = metadata.get('evidence_proposals')
+    diagnostics = metadata.get('proposal_diagnostics')
+    status.update(
+        proposal_status=str(metadata.get('proposal_status') or 'unknown'),
+        proposal_count=len(proposals) if isinstance(proposals, list) else 0,
+        source_count=len(sources) if isinstance(sources, list) else 0,
+        model=(
+            str(metadata.get('model'))[:100]
+            if isinstance(metadata.get('model'), str)
+            else None
+        ),
+    )
+    if isinstance(diagnostics, dict):
+        rejected_counts = {}
+        raw_rejected = diagnostics.get('rejected')
+        if isinstance(raw_rejected, dict):
+            for key, value in raw_rejected.items():
+                try:
+                    count = int(value or 0)
+                except (TypeError, ValueError):
+                    continue
+                if str(key) and count > 0:
+                    rejected_counts[str(key)] = count
+        try:
+            received_count = int(diagnostics.get('received') or 0)
+            accepted_count = int(diagnostics.get('accepted') or 0)
+        except (TypeError, ValueError):
+            received_count = 0
+            accepted_count = 0
+        status['diagnostics'] = {
+            'received': max(0, received_count),
+            'accepted': max(0, accepted_count),
+            'rejected': rejected_counts,
+        }
+    return status
+
+
+def get_case_ai_analysis_status(case_id: str) -> Dict[str, Any]:
+    """Find the newest persisted AI assessment for a case."""
+    case = case_store.get_case(case_id) if case_store is not None else None
+    jobs = (case or {}).get('jobs') or []
+    empty_status = {
+        'has_assessment': False,
+        'proposal_status': 'not_requested',
+        'proposal_count': 0,
+        'source_count': 0,
+        'model': None,
+        'diagnostics': {'received': 0, 'accepted': 0, 'rejected': {}},
+        'session_id': None,
+    }
+    fallback = get_ai_analysis_status(jobs[0]) if jobs else empty_status
+    for job in jobs:
+        candidate = get_ai_analysis_status(job)
+        if candidate['has_assessment']:
+            return candidate
+    return fallback
+
+
 def synchronize_ai_evidence_proposals(
     session_id: str,
     result_data: Dict[str, Any],
@@ -1300,6 +1383,7 @@ def synchronize_ai_evidence_proposals(
             'count': 0,
             'case_id': None,
             'proposals': [],
+            'diagnostics': {'received': 0, 'accepted': 0, 'rejected': {}},
             'status': 'storage_unavailable',
         }
     job_id = str(result_data.get('job_id') or '').strip()
@@ -1310,6 +1394,7 @@ def synchronize_ai_evidence_proposals(
             'count': 0,
             'case_id': None,
             'proposals': [],
+            'diagnostics': {'received': 0, 'accepted': 0, 'rejected': {}},
             'status': 'investigation_unavailable',
         }
     synchronized = case_store.sync_ai_persona_claims(
@@ -2105,6 +2190,14 @@ def persona_workspace(persona_id):
             'longitude': claim['longitude'],
             'field_name': claim['field_name'],
             'confidence': claim['confidence'],
+            'coordinate_precision': next(
+                (
+                    evidence.get('details', {}).get('coordinate_precision')
+                    for evidence in claim['evidence']
+                    if evidence.get('details', {}).get('coordinate_precision')
+                ),
+                None,
+            ),
         }
         for claim in persona['claims']
         if claim['field_name'] in ('address', 'current_location')
@@ -2126,6 +2219,7 @@ def persona_workspace(persona_id):
         review_counts=review_counts,
         approved_photograph=approved_photograph,
         map_locations=map_locations,
+        ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
         map_tile_url=os.getenv(
             'OPENLEDGER_MAP_TILE_URL',
             'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -2139,17 +2233,57 @@ def relationships_workspace():
         flash('The relationships workspace requires persistent storage.', 'warning')
         return redirect(url_for('history'))
     selected_case_id = request.args.get('case_id', '').strip()
+    mode = request.args.get('mode', 'persona').strip()
+    if mode not in {'persona', 'shared'}:
+        mode = 'persona'
     cases = case_store.list_cases()
     known_case_ids = {item['id'] for item in cases}
     if selected_case_id and selected_case_id not in known_case_ids:
         flash('That case does not exist.', 'warning')
         return redirect(url_for('relationships_workspace'))
-    graph = case_store.build_relationship_graph(selected_case_id or None)
+    available_personas = [
+        {
+            'id': persona['id'],
+            'display_name': persona['display_name'],
+            'case_id': case['id'],
+            'case_title': case['title'],
+        }
+        for case in cases
+        if not selected_case_id or case['id'] == selected_case_id
+        for persona in case['personas']
+    ]
+    selected_persona_id = request.args.get('persona_id', '').strip()
+    available_persona_ids = {item['id'] for item in available_personas}
+    if selected_persona_id not in available_persona_ids:
+        selected_persona_id = (
+            available_personas[0]['id'] if available_personas else ''
+        )
+    if mode == 'persona' and selected_persona_id:
+        graph = case_store.build_persona_graph(selected_persona_id)
+    elif mode == 'persona':
+        graph = {
+            'mode': 'persona',
+            'nodes': [],
+            'edges': [],
+            'stats': {
+                'persona_count': 0,
+                'claim_count': 0,
+                'source_count': 0,
+                'pending_count': 0,
+                'field_counts': {},
+                'truncated_count': 0,
+            },
+        }
+    else:
+        graph = case_store.build_relationship_graph(selected_case_id or None)
     return render_template(
         'relationships.html',
         graph=graph,
         cases=cases,
+        mode=mode,
         selected_case_id=selected_case_id,
+        available_personas=available_personas,
+        selected_persona_id=selected_persona_id,
     )
 
 
@@ -2375,6 +2509,7 @@ def results(session_id):
         ai_enabled=bool(get_openai_api_key()),
         csrf_token=get_csrf_token(),
         result_case=result_case,
+        ai_analysis_status=get_ai_analysis_status(result_data),
     )
 
 
@@ -2423,6 +2558,7 @@ def analyze_session(session_id):
                             'sources': metadata['sources'],
                             'proposal_count': proposal_sync['count'],
                             'proposal_status': proposal_sync['status'],
+                            'proposal_diagnostics': proposal_sync['diagnostics'],
                             'cached': True,
                         }
             except (
@@ -2501,6 +2637,7 @@ def analyze_session(session_id):
                     'sources': sources,
                     'evidence_proposals': proposal_sync['proposals'],
                     'proposal_status': proposal_sync['status'],
+                    'proposal_diagnostics': proposal_sync['diagnostics'],
                 },
                 metadata_file,
                 indent=2,
@@ -2512,6 +2649,7 @@ def analyze_session(session_id):
             'sources': sources,
             'proposal_count': proposal_sync['count'],
             'proposal_status': proposal_sync['status'],
+            'proposal_diagnostics': proposal_sync['diagnostics'],
             'cached': False,
         }
     except Exception:

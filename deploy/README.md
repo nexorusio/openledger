@@ -114,8 +114,10 @@ focused only on other countries. Language filtering is not offered because the
 source database does not provide reliable per-source language metadata.
 
 Approved Persona locations appear on a Leaflet map only when the claim has
-analyst-verified latitude and longitude. OpenLedger does not send location text
-to a public geocoder. The default map loads OpenStreetMap tiles; set
+analyst-verified latitude and longitude. Cited AI research may prefill a
+visibly approximate city or region map center, but it remains pending until the
+analyst approves or edits it. OpenLedger does not send location text to a public
+geocoder. The default map loads OpenStreetMap tiles; set
 `OPENLEDGER_MAP_TILE_URL` in `deploy/.env` to an approved internal tile endpoint
 for an isolated or sensitive deployment.
 

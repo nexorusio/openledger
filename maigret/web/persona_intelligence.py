@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, Iterable, List
+import math
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
@@ -269,6 +270,7 @@ def extract_ai_persona_claims(
     sources: Iterable[Dict[str, Any]],
     usernames: Iterable[str],
     model: str,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Validate cited AI suggestions and convert them to pending claim inputs.
 
@@ -276,6 +278,16 @@ def extract_ai_persona_claims(
     deliberately narrow public-biographical allowlist is accepted, and every
     proposal must cite one URL returned by the preceding web-search response.
     """
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics.update(received=0, accepted=0, rejected={})
+
+    def reject(reason: str) -> None:
+        if diagnostics is None:
+            return
+        rejected = diagnostics["rejected"]
+        rejected[reason] = int(rejected.get(reason, 0)) + 1
+
     source_catalog: Dict[str, Dict[str, str]] = {}
     for source_item in sources:
         if not isinstance(source_item, dict):
@@ -294,17 +306,20 @@ def extract_ai_persona_claims(
         for username in usernames
         if str(username).strip()
     }
-    if (
-        not isinstance(raw_proposals, list)
-        or not source_catalog
-        or not usernames_by_key
-    ):
+    if not isinstance(raw_proposals, list):
+        return []
+    if diagnostics is not None:
+        diagnostics["received"] = min(len(raw_proposals), 100)
+    if not source_catalog:
+        return []
+    if not usernames_by_key:
         return []
 
     candidates: List[Dict[str, Any]] = []
     seen = set()
     for raw in raw_proposals[:100]:
         if not isinstance(raw, dict):
+            reject("invalid_record")
             continue
         username = usernames_by_key.get(
             str(raw.get("username") or "").strip().casefold()
@@ -312,28 +327,75 @@ def extract_ai_persona_claims(
         field_name = str(raw.get("field_name") or "").strip()
         source_url = _public_url(raw.get("source_url"))
         source_record = source_catalog.get(source_url)
-        if not username or field_name not in AI_PROPOSAL_FIELDS or not source_record:
+        if not username:
+            reject("unknown_username")
+            continue
+        if field_name not in AI_PROPOSAL_FIELDS:
+            reject("unsupported_field")
+            continue
+        if not source_record:
+            reject("uncited_source")
             continue
         value = str(raw.get("value") or "").strip()
         if not value:
+            reject("empty_value")
             continue
         value = value[: AI_FIELD_LIMITS[field_name]]
         if field_name in {"social_account", "website", "photograph"}:
             value = _public_url(value)
             if not value or value not in source_catalog:
+                reject("invalid_public_url")
                 continue
         else:
             value = " ".join(value.split())
         try:
             confidence = int(str(raw.get("confidence") or ""))
         except (TypeError, ValueError):
+            reject("invalid_confidence")
             continue
         if confidence < 40:
+            reject("low_confidence")
             continue
         confidence = min(confidence, 85)
         reason = " ".join(str(raw.get("reason") or "").split())[:1000]
         if not reason:
+            reject("missing_reason")
             continue
+
+        latitude = raw.get("latitude")
+        longitude = raw.get("longitude")
+        coordinate_precision = raw.get("coordinate_precision")
+        coordinates_supplied = any(
+            item is not None
+            for item in (latitude, longitude, coordinate_precision)
+        )
+        if coordinates_supplied:
+            if (
+                field_name != "current_location"
+                or latitude is None
+                or longitude is None
+                or coordinate_precision not in {"city", "region"}
+            ):
+                reject("invalid_coordinate_proposal")
+                continue
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (TypeError, ValueError):
+                reject("invalid_coordinate_proposal")
+                continue
+            if (
+                not math.isfinite(latitude)
+                or not math.isfinite(longitude)
+                or not -90 <= latitude <= 90
+                or not -180 <= longitude <= 180
+            ):
+                reject("invalid_coordinate_proposal")
+                continue
+        else:
+            latitude = None
+            longitude = None
+            coordinate_precision = None
 
         stored_value: Any = value
         if field_name == "social_account":
@@ -346,9 +408,10 @@ def extract_ai_persona_claims(
         fingerprint = claim_fingerprint(field_name, stored_value)
         deduplication_key = (username.casefold(), fingerprint, source_url)
         if deduplication_key in seen:
+            reject("duplicate_proposal")
             continue
         seen.add(deduplication_key)
-        evidence = {
+        evidence: Dict[str, Any] = {
             "evidence_type": "cited_public_web",
             "source_name": source_record["title"],
             "source_url": source_url,
@@ -359,6 +422,13 @@ def extract_ai_persona_claims(
                 "human_review_required": True,
             },
         }
+        if coordinate_precision:
+            evidence["details"].update(
+                coordinate_precision=coordinate_precision,
+                coordinate_role="approximate_map_center",
+                proposed_latitude=latitude,
+                proposed_longitude=longitude,
+            )
         candidates.append(
             {
                 "username": username,
@@ -369,11 +439,15 @@ def extract_ai_persona_claims(
                 "confidence": confidence,
                 "fingerprint": fingerprint,
                 "source_engine": "openai_web_research",
+                "latitude": latitude,
+                "longitude": longitude,
                 "evidence": [
                     dict(evidence, fingerprint=evidence_fingerprint(evidence))
                 ],
             }
         )
+    if diagnostics is not None:
+        diagnostics["accepted"] = len(candidates)
     return candidates
 
 

@@ -868,18 +868,30 @@ class CaseStore:
                     or existing["review_status"] == "pending"
                 ):
                     confidence = max(confidence, int(candidate["confidence"]))
+                updated_values = {
+                    "value": candidate["value"],
+                    "display_value": candidate["display_value"],
+                    "normalized_value": candidate["normalized_value"],
+                    "confidence": confidence,
+                    "source_job_id": job_id,
+                    "last_seen_at": now,
+                    "updated_at": now,
+                }
+                if (
+                    existing["review_status"] == "pending"
+                    and existing["latitude"] is None
+                    and existing["longitude"] is None
+                    and candidate.get("latitude") is not None
+                    and candidate.get("longitude") is not None
+                ):
+                    updated_values.update(
+                        latitude=candidate["latitude"],
+                        longitude=candidate["longitude"],
+                    )
                 connection.execute(
                     update(persona_claims)
                     .where(persona_claims.c.id == claim_id)
-                    .values(
-                        value=candidate["value"],
-                        display_value=candidate["display_value"],
-                        normalized_value=candidate["normalized_value"],
-                        confidence=confidence,
-                        source_job_id=job_id,
-                        last_seen_at=now,
-                        updated_at=now,
-                    )
+                    .values(**updated_values)
                 )
             else:
                 claim_id = str(uuid.uuid4())
@@ -896,6 +908,8 @@ class CaseStore:
                         source_engine=candidate["source_engine"],
                         source_job_id=job_id,
                         fingerprint=candidate["fingerprint"],
+                        latitude=candidate.get("latitude"),
+                        longitude=candidate.get("longitude"),
                         first_seen_at=now,
                         last_seen_at=now,
                         created_at=now,
@@ -998,11 +1012,13 @@ class CaseStore:
         """Validate and persist cited AI proposals as pending review records."""
         from maigret.web.persona_intelligence import extract_ai_persona_claims
 
+        diagnostics: Dict[str, Any] = {}
         candidates = extract_ai_persona_claims(
             raw_proposals,
             sources=sources,
             usernames=usernames,
             model=model,
+            diagnostics=diagnostics,
         )
         now = utcnow()
         synchronized = 0
@@ -1079,6 +1095,7 @@ class CaseStore:
             "count": synchronized,
             "case_id": str(case_id),
             "proposals": accepted_proposals,
+            "diagnostics": diagnostics,
         }
 
     def review_claim(
@@ -1206,6 +1223,23 @@ class CaseStore:
             statement = statement.where(cases.c.id == case_id)
         with self.engine.connect() as connection:
             rows = list(connection.execute(statement).mappings())
+            evidence_by_claim: Dict[str, list] = {}
+            claim_ids = [str(row["claim_id"]) for row in rows]
+            if claim_ids:
+                for evidence in connection.execute(
+                    select(claim_evidence).where(
+                        claim_evidence.c.claim_id.in_(claim_ids)
+                    )
+                ).mappings():
+                    evidence_by_claim.setdefault(
+                        str(evidence["claim_id"]), []
+                    ).append(
+                        {
+                            "name": str(evidence["source_name"]),
+                            "url": evidence["source_url"],
+                            "type": str(evidence["evidence_type"]),
+                        }
+                    )
 
         shared: Dict[tuple[str, str], list] = {}
         for row in rows:
@@ -1260,10 +1294,15 @@ class CaseStore:
                         "label": field_name.replace("_", " "),
                         "field_name": field_name,
                         "confidence": int(row["confidence"]),
+                        "claim_id": str(row["claim_id"]),
+                        "sources": evidence_by_claim.get(
+                            str(row["claim_id"]), []
+                        )[:10],
                     }
                 )
         nodes = list(persona_nodes.values()) + nodes
         return {
+            "mode": "shared",
             "nodes": nodes,
             "edges": edges,
             "stats": {
@@ -1275,7 +1314,7 @@ class CaseStore:
         }
 
     def build_persona_graph(self, persona_id: str) -> Dict[str, Any]:
-        """Build a compact evidence graph; rejected claims never become edges."""
+        """Build a reviewable Persona-to-claim-to-source evidence graph."""
         persona = self.get_persona(persona_id)
         if not persona:
             raise KeyError(persona_id)
@@ -1284,10 +1323,14 @@ class CaseStore:
                 "id": f"persona:{persona_id}",
                 "label": persona["display_name"],
                 "kind": "persona",
+                "persona_id": persona_id,
+                "case_id": persona["case_id"],
+                "case_title": persona["case_title"],
             }
         ]
         edges = []
         seen_sources = set()
+        field_counts: Dict[str, int] = {}
         graph_claims = sorted(
             persona["claims"],
             key=lambda claim: (
@@ -1295,30 +1338,45 @@ class CaseStore:
                 -int(claim["confidence"]),
                 claim["field_name"],
             ),
-        )[:24]
-        for claim in graph_claims:
-            if claim["review_status"] == "rejected":
-                continue
+        )
+        graph_claims = [
+            claim for claim in graph_claims if claim["review_status"] != "rejected"
+        ]
+        displayed_claims = graph_claims[:120]
+        for claim in displayed_claims:
             claim_node = f"claim:{claim['id']}"
+            field_counts[claim["field_name"]] = (
+                field_counts.get(claim["field_name"], 0) + 1
+            )
             nodes.append(
                 {
                     "id": claim_node,
                     "label": claim["display_value"],
-                    "kind": claim["field_name"],
+                    "kind": "claim",
+                    "claim_id": claim["id"],
+                    "field_name": claim["field_name"],
                     "confidence": claim["confidence"],
                     "review_status": claim["review_status"],
                 }
             )
             edges.append(
                 {
-                    "source": f"persona:{persona_id}",
-                    "target": claim_node,
+                    "id": f"persona-claim:{claim['id']}",
+                    "from": f"persona:{persona_id}",
+                    "to": claim_node,
                     "label": claim["field_name"].replace("_", " "),
+                    "field_name": claim["field_name"],
                 }
             )
+            seen_claim_sources = set()
             for evidence in claim["evidence"]:
                 source_key = evidence.get("source_url") or evidence["source_name"]
-                source_id = "source:" + str(source_key)
+                source_id = "source:" + hashlib.sha256(
+                    str(source_key).encode("utf-8")
+                ).hexdigest()[:20]
+                if source_id in seen_claim_sources:
+                    continue
+                seen_claim_sources.add(source_id)
                 if source_id not in seen_sources:
                     nodes.append(
                         {
@@ -1326,17 +1384,35 @@ class CaseStore:
                             "label": evidence["source_name"],
                             "kind": "source",
                             "url": evidence.get("source_url"),
+                            "evidence_type": evidence["evidence_type"],
                         }
                     )
                     seen_sources.add(source_id)
                 edges.append(
                     {
-                        "source": claim_node,
-                        "target": source_id,
+                        "id": f"claim-source:{claim['id']}:{source_id}",
+                        "from": claim_node,
+                        "to": source_id,
                         "label": "supported by",
+                        "field_name": claim["field_name"],
                     }
                 )
-        return {"nodes": nodes, "edges": edges}
+        return {
+            "mode": "persona",
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "persona_count": 1,
+                "claim_count": len(displayed_claims),
+                "source_count": len(seen_sources),
+                "pending_count": sum(
+                    claim["review_status"] in {"pending", "uncertain"}
+                    for claim in displayed_claims
+                ),
+                "field_counts": field_counts,
+                "truncated_count": max(0, len(graph_claims) - len(displayed_claims)),
+            },
+        }
 
     @staticmethod
     def _serialize_claim(claim_row, evidence_rows, review_rows) -> Dict[str, Any]:
