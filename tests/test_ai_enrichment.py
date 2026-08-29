@@ -139,4 +139,8 @@ def test_evidence_proposal_request_uses_strict_schema_without_web_search(monkeyp
     assert captured["url"] == "https://api.openai.com/v1/responses"
     assert captured["payload"]["text"]["format"]["type"] == "json_schema"
     assert captured["payload"]["text"]["format"]["strict"] is True
+    proposal_schema = captured["payload"]["text"]["format"]["schema"]["properties"]["proposals"]["items"]
+    assert {"latitude", "longitude", "coordinate_precision"}.issubset(
+        proposal_schema["required"]
+    )
     assert "tools" not in captured["payload"]

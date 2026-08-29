@@ -2153,6 +2153,84 @@ textarea.form-control.compact-textarea {
     display: block;
 }
 
+.persona-ai-status {
+    margin-bottom: 16px;
+}
+
+.ai-pipeline-status {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 9px;
+    margin-top: 14px;
+}
+
+.ai-pipeline-status article {
+    display: grid;
+    grid-template-columns: 28px minmax(0, 1fr);
+    gap: 9px;
+    padding: 11px;
+    border: 1px solid var(--ol-border);
+    background: var(--ol-surface-muted);
+}
+
+.ai-pipeline-step {
+    width: 28px;
+    height: 28px;
+    display: grid;
+    place-items: center;
+    border: 1px solid rgba(15, 139, 141, 0.46);
+    color: var(--ol-accent);
+    background: rgba(15, 139, 141, 0.1);
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.ai-pipeline-status small,
+.ai-pipeline-status strong,
+.ai-pipeline-status p {
+    display: block;
+    margin: 0;
+}
+
+.ai-pipeline-status small,
+.ai-pipeline-status p {
+    color: var(--ol-muted);
+}
+
+.ai-pipeline-status strong {
+    margin: 2px 0 3px;
+}
+
+.ai-pipeline-status p {
+    font-size: 0.75rem;
+    line-height: 1.4;
+}
+
+.ai-validation-details {
+    margin-top: 9px;
+    color: var(--ol-muted);
+    font-size: 0.78rem;
+}
+
+.ai-validation-details summary {
+    cursor: pointer;
+}
+
+.ai-validation-details ul {
+    max-width: 540px;
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+}
+
+.ai-validation-details li {
+    display: flex;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--ol-border);
+}
+
 .persona-notice span {
     margin-top: 2px;
     color: var(--ol-muted);
@@ -2309,6 +2387,26 @@ textarea.form-control.compact-textarea {
     grid-template-columns: minmax(140px, 1fr) auto;
     gap: 8px;
     margin-top: 11px;
+}
+
+.claim-amend {
+    margin-top: 10px;
+    border-top: 1px solid var(--ol-border);
+    color: var(--ol-muted);
+}
+
+.claim-amend > summary {
+    width: fit-content;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding-top: 9px;
+    cursor: pointer;
+    font-size: 0.78rem;
+}
+
+.claim-amend > summary svg {
+    width: 14px;
 }
 
 .claim-review-form input[type="text"] {
@@ -2679,6 +2777,13 @@ textarea.form-control.compact-textarea {
     color: var(--ol-muted);
 }
 
+.coordinate-proposal-note {
+    padding: 7px 9px;
+    border-left: 2px solid var(--ol-warning);
+    color: var(--ol-text-soft) !important;
+    background: rgba(216, 149, 36, 0.08);
+}
+
 .persona-map-section {
     padding: 18px;
     border-top: 1px solid var(--ol-border);
@@ -2776,7 +2881,48 @@ textarea.form-control.compact-textarea {
     font-weight: 700;
 }
 
-/* Cross-person relationship workspace */
+/* Evidence relationship workspace */
+.relationship-mode-tabs {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+    margin-bottom: 12px;
+}
+
+.relationship-mode-tabs a {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 10px;
+    padding: 12px 14px;
+    border: 1px solid var(--ol-border);
+    color: var(--ol-muted);
+    background: var(--ol-surface);
+    text-decoration: none;
+}
+
+.relationship-mode-tabs a:hover,
+.relationship-mode-tabs a.active {
+    border-color: var(--ol-accent);
+    color: var(--ol-text);
+    background: rgba(15, 139, 141, 0.08);
+}
+
+.relationship-mode-tabs svg {
+    width: 20px;
+    color: var(--ol-accent);
+}
+
+.relationship-mode-tabs strong,
+.relationship-mode-tabs small {
+    display: block;
+}
+
+.relationship-mode-tabs small {
+    margin-top: 2px;
+    color: var(--ol-muted);
+    font-size: 0.76rem;
+}
+
 .relationship-policy {
     display: grid;
     grid-template-columns: 22px minmax(0, 1fr);
@@ -2806,7 +2952,7 @@ textarea.form-control.compact-textarea {
 
 .relationship-toolbar {
     display: grid;
-    grid-template-columns: minmax(190px, 0.35fr) minmax(0, 1fr) auto;
+    grid-template-columns: minmax(250px, 0.4fr) minmax(0, 1fr) auto;
     gap: 13px;
     align-items: end;
     margin-bottom: 14px;
@@ -2948,6 +3094,28 @@ textarea.form-control.compact-textarea {
     padding-left: 18px;
 }
 
+.inspector-personas li {
+    margin-bottom: 11px;
+}
+
+.inspector-personas li > a,
+.inspector-personas li > small,
+.inspector-evidence-source,
+.inspector-source-link {
+    display: block;
+}
+
+.inspector-personas li > small {
+    margin-top: 2px;
+    color: var(--ol-muted);
+}
+
+.inspector-evidence-source,
+.inspector-source-link {
+    margin-top: 5px;
+    font-size: 0.78rem;
+}
+
 @media (max-width: 1199px) {
     .persona-profile-header {
         grid-template-columns: 96px minmax(0, 1fr);
@@ -2982,6 +3150,8 @@ textarea.form-control.compact-textarea {
     }
 
     .persona-lifecycle,
+    .ai-pipeline-status,
+    .relationship-mode-tabs,
     .relationship-toolbar,
     .relationship-kpis,
     .review-queue-item {

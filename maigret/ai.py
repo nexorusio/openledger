@@ -42,6 +42,12 @@ AI_EVIDENCE_SCHEMA = {
                     "source_url": {"type": "string"},
                     "source_title": {"type": "string"},
                     "reason": {"type": "string"},
+                    "latitude": {"type": ["number", "null"]},
+                    "longitude": {"type": ["number", "null"]},
+                    "coordinate_precision": {
+                        "type": ["string", "null"],
+                        "enum": ["city", "region", None],
+                    },
                 },
                 "required": [
                     "username",
@@ -51,6 +57,9 @@ AI_EVIDENCE_SCHEMA = {
                     "source_url",
                     "source_title",
                     "reason",
+                    "latitude",
+                    "longitude",
+                    "coordinate_precision",
                 ],
                 "additionalProperties": False,
             },
@@ -422,7 +431,11 @@ investigated username. Omit uncertain values instead of guessing. Do not infer o
 addresses, email addresses, phone numbers, finances, vehicles, criminal records, sensitive traits,
 or interpersonal relationships. A summary must be a concise public-professional description, not a
 speculative biography. Confidence measures source support, never identity certainty alone. Keep it
-at or below 85. These are analyst-review proposals and must never be described as verified facts."""
+at or below 85. For a coarse current_location only, latitude and longitude may contain an
+approximate city or region map center when that place is explicitly supported; set
+coordinate_precision accordingly. They must never represent a person's precise position. Use null
+for all coordinate fields otherwise. These are analyst-review proposals and must never be described
+as verified facts."""
     structured_input = json.dumps(
         {
             "investigation_evidence": investigation_evidence[:100_000],

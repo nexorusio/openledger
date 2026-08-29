@@ -131,3 +131,52 @@ def test_ai_public_account_proposal_keeps_structured_account_value():
         "url": "https://social.example/alice",
         "username": "alice",
     }
+
+
+def test_ai_location_map_center_is_reviewable_and_invalid_coordinates_are_explained():
+    diagnostics = {}
+    claims = extract_ai_persona_claims(
+        [
+            {
+                "username": "alice",
+                "field_name": "current_location",
+                "value": "Jakarta, Indonesia",
+                "confidence": 76,
+                "source_url": "https://example.test/biography",
+                "source_title": "Biography",
+                "reason": "The biography explicitly names Jakarta.",
+                "latitude": -6.1754,
+                "longitude": 106.8272,
+                "coordinate_precision": "city",
+            },
+            {
+                "username": "alice",
+                "field_name": "occupation",
+                "value": "Engineer",
+                "confidence": 70,
+                "source_url": "https://example.test/biography",
+                "source_title": "Biography",
+                "reason": "The biography names the occupation.",
+                "latitude": -6.2,
+                "longitude": 106.8,
+                "coordinate_precision": "city",
+            },
+        ],
+        sources=[
+            {"title": "Biography", "url": "https://example.test/biography"}
+        ],
+        usernames=["alice"],
+        model="gpt-5.6-terra",
+        diagnostics=diagnostics,
+    )
+
+    assert len(claims) == 1
+    assert claims[0]["latitude"] == -6.1754
+    assert claims[0]["longitude"] == 106.8272
+    assert claims[0]["evidence"][0]["details"]["coordinate_precision"] == "city"
+    assert claims[0]["evidence"][0]["details"]["proposed_latitude"] == -6.1754
+    assert diagnostics == {
+        "received": 2,
+        "accepted": 1,
+        "rejected": {"invalid_coordinate_proposal": 1},
+    }
