@@ -7,6 +7,13 @@
             {% if claim.field_name == 'social_account' and claim.value is mapping %}
             <strong>{{ claim.value.platform }}</strong>
             <a href="{{ claim.value.url }}" target="_blank" rel="noopener noreferrer">{{ claim.value.url }}</a>
+            {% elif claim.field_name == 'platform_identifier' and claim.value is mapping %}
+            <strong>{{ claim.value.platform }}</strong>
+            <span class="claim-identifier"><span>{{ claim.value.identifier_type | replace('_', ' ') | title }}</span><code>{{ claim.value.identifier }}</code></span>
+            <small class="claim-context-note">Account-continuity evidence only. It does not independently prove who controls the account.</small>
+            {% elif claim.field_name == 'linked_profile_lead' %}
+            <a href="{{ claim.display_value }}" target="_blank" rel="noopener noreferrer">{{ claim.display_value }}</a>
+            <small class="claim-context-note">Unverified pivot found on another public profile. Review it independently before use.</small>
             {% elif claim.field_name == 'photograph' %}
             <div class="claim-photo-frame">
                 <img src="{{ claim.display_value }}" alt="Photograph evidence for {{ persona.display_name }}" loading="lazy" referrerpolicy="no-referrer" data-profile-image>
@@ -23,6 +30,11 @@
             {% if claim.evidence | selectattr('evidence_type', 'equalto', 'cited_public_web') | list %}
             <span class="badge-soft warning" title="Includes cited AI-assisted public-web evidence">AI-assisted evidence</span>
             {% endif %}
+            {% if claim.field_name == 'platform_identifier' %}
+            <span class="badge-soft" title="A platform identifier that may survive account renames">Continuity ID</span>
+            {% elif claim.field_name == 'linked_profile_lead' %}
+            <span class="badge-soft warning" title="A public link that has not been independently verified">Unverified pivot</span>
+            {% endif %}
             <span class="confidence-badge" title="Strength of the supporting evidence">{{ claim.confidence }}% confidence</span>
             <span class="review-badge {{ claim.review_status }}">{{ claim.review_status | title }}</span>
         </div>
@@ -35,6 +47,26 @@
                 {% if evidence.source_url %}<a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">{{ evidence.source_name }}</a>{% else %}{{ evidence.source_name }}{% endif %}
                 <span>{{ evidence.evidence_type | replace('_', ' ') }}</span>
                 {% if evidence.details.proposal_reason %}<small>{{ evidence.details.proposal_reason }}</small>{% endif %}
+                {% if evidence.details.extractor %}<small>Parsed by {{ evidence.details.extractor }}</small>{% endif %}
+                {% if evidence.details.account_metadata %}
+                {% set metadata_labels = {
+                    'created_at': 'Account created',
+                    'updated_at': 'Profile updated',
+                    'latest_activity_at': 'Latest public activity',
+                    'is_verified': 'Verified account',
+                    'is_private': 'Private account',
+                    'follower_count': 'Followers',
+                    'following_count': 'Following'
+                } %}
+                <dl class="account-metadata-list">
+                    {% for metadata_key, metadata_value in evidence.details.account_metadata.items() %}
+                    <div>
+                        <dt>{{ metadata_labels.get(metadata_key, metadata_key | replace('_', ' ') | title) }}</dt>
+                        <dd>{% if metadata_value is sameas true %}Yes{% elif metadata_value is sameas false %}No{% else %}{{ metadata_value }}{% endif %}</dd>
+                    </div>
+                    {% endfor %}
+                </dl>
+                {% endif %}
             </li>
             {% endfor %}
         </ul>

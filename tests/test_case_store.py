@@ -504,6 +504,129 @@ def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store)
         assert connection.scalar(select(func.count()).select_from(claim_reviews)) == 1
 
 
+def test_socid_metadata_refresh_preserves_account_claim_and_observation_history(store):
+    job_id = store.create_investigation(["alice"], {})
+    store.claim_next("worker:first")
+
+    def result_for(job, follower_count):
+        return {
+            "status": "completed",
+            "session_folder": f"search_{job}",
+            "usernames": ["alice"],
+            "found_count": 1,
+            "individual_reports": [
+                {
+                    "username": "alice",
+                    "claimed_profiles": [
+                        {
+                            "site_name": "Example Social",
+                            "url": "https://social.example.test/alice",
+                            "confidence": "strong",
+                            "evidence": {
+                                "uid": "stable-123",
+                                "follower_count": str(follower_count),
+                                "is_verified": "True",
+                                "links": ["https://linked.example.test/alice"],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+
+    first_result = result_for(job_id, 10)
+    store.finish(job_id, first_result)
+    assert store.sync_persona_claims(job_id, first_result) == 3
+    persona_id = store.get_case(store.get_job(job_id)["case_id"])["personas"][0][
+        "id"
+    ]
+    first_persona = store.get_persona(persona_id)
+    account = next(
+        claim
+        for claim in first_persona["claims"]
+        if claim["field_name"] == "social_account"
+    )
+    assert store.review_claim(account["id"], "approved", "analyst") == persona_id
+
+    refresh_job_id = store.repeat_persona_investigation(persona_id)
+    store.claim_next("worker:refresh")
+    refresh_result = result_for(refresh_job_id, 11)
+    store.finish(refresh_job_id, refresh_result)
+    assert store.sync_persona_claims(refresh_job_id, refresh_result) == 3
+
+    refreshed = store.get_persona(persona_id)
+    assert [claim["field_name"] for claim in refreshed["claims"]].count(
+        "social_account"
+    ) == 1
+    assert [claim["field_name"] for claim in refreshed["claims"]].count(
+        "platform_identifier"
+    ) == 1
+    assert [claim["field_name"] for claim in refreshed["claims"]].count(
+        "linked_profile_lead"
+    ) == 1
+    account = next(
+        claim
+        for claim in refreshed["claims"]
+        if claim["field_name"] == "social_account"
+    )
+    assert account["review_status"] == "approved"
+    assert len(account["evidence"]) == 2
+    assert {
+        evidence["details"]["account_metadata"]["follower_count"]
+        for evidence in account["evidence"]
+    } == {10, 11}
+    lineage = store.get_claim_lineage(account["id"])
+    assert len(lineage) == 2
+    assert [
+        item["details"]["observation"]["account_metadata"]["follower_count"]
+        for item in lineage
+    ] == [10, 11]
+
+
+def test_stable_ids_and_linked_profile_leads_never_create_shared_relationships(
+    store,
+):
+    job_id = store.create_investigation(["alice", "bob"], {})
+    store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice", "bob"],
+        "individual_reports": [
+            {
+                "username": username,
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": f"https://social.example.test/{username}",
+                        "confidence": "strong",
+                        "evidence": {
+                            "uid": "collision-123",
+                            "links": ["https://linked.example.test/shared"],
+                        },
+                    }
+                ],
+            }
+            for username in ("alice", "bob")
+        ],
+    }
+    store.finish(job_id, result)
+    assert store.sync_persona_claims(job_id, result) == 6
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    for persona_summary in case["personas"]:
+        persona = store.get_persona(persona_summary["id"])
+        for claim in persona["claims"]:
+            if claim["field_name"] in {
+                "platform_identifier",
+                "linked_profile_lead",
+            }:
+                store.review_claim(claim["id"], "approved", "analyst")
+
+    graph = store.build_relationship_graph(case["id"])
+    assert graph["nodes"] == []
+    assert graph["edges"] == []
+    assert graph["stats"]["field_counts"] == {}
+
+
 def test_approved_coordinates_are_validated_and_serialized(store):
     job_id = store.create_investigation(["alice"], {})
     store.claim_next("worker:test")
