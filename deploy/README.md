@@ -148,6 +148,12 @@ the entire `runtime/` directory and deployment environment files from the image
 build context so credentials, reports, and database dumps cannot be copied into
 an image layer.
 
+The generated discovery graph is the only report permitted to render in a
+same-origin iframe. Its path is strictly allowlisted and the iframe is sandboxed
+to scripts without same-origin DOM access. All other application pages and
+reports retain `DENY`/`frame-ancestors 'none'` anti-framing controls. Flask owns
+this route-specific policy so the reverse proxy must not replace it globally.
+
 Deleting an investigation from History permanently removes its metadata,
 reports, graph, and cached AI assessment from the mounted runtime directory.
 

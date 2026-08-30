@@ -54,7 +54,9 @@ def test_caddy_uses_application_login_instead_of_browser_basic_auth():
     )
     assert 'POSTGRES_INITDB_ARGS: "--data-checksums"' in compose
     assert "image: openledger-maigret:application-auth" in compose
-    assert "X-Frame-Options DENY" in caddyfile
+    # Flask owns the route-specific framing policy. A global proxy header would
+    # override the one authenticated evidence graph that is safe to embed.
+    assert "\n        X-Frame-Options " not in caddyfile
     assert "Permissions-Policy" in caddyfile
     assert "X-Robots-Tag" in caddyfile
 

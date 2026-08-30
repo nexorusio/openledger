@@ -298,6 +298,9 @@ OPENAI_ANALYSIS_MODEL_IDS = {model['id'] for model in OPENAI_ANALYSIS_MODELS}
 AUTH_USERNAME_PATTERN = re.compile(r'^[A-Za-z0-9_.-]{1,64}$')
 SESSION_KEY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_FOLDER_PATTERN = re.compile(r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
+EMBEDDED_GRAPH_PATH_PATTERN = re.compile(
+    r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}/combined_graph\.html$'
+)
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
 AI_ANALYSIS_SCHEMA_VERSION = 7
@@ -1323,13 +1326,22 @@ def require_application_login():
 
 @app.after_request
 def protect_sensitive_responses(response):
+    embedded_graph = bool(
+        request.endpoint == 'download_report'
+        and EMBEDDED_GRAPH_PATH_PATTERN.fullmatch(
+            str((request.view_args or {}).get('filename') or '')
+        )
+    )
+    results_page = request.endpoint == 'results'
     if request.endpoint != 'static' and (
         app.config.get('AUTH_REQUIRED') or session.get('authenticated')
     ):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Pragma'] = 'no-cache'
     response.headers.setdefault('X-Content-Type-Options', 'nosniff')
-    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault(
+        'X-Frame-Options', 'SAMEORIGIN' if embedded_graph else 'DENY'
+    )
     response.headers.setdefault('Referrer-Policy', 'no-referrer')
     response.headers.setdefault(
         'Permissions-Policy',
@@ -1346,14 +1358,18 @@ def protect_sensitive_responses(response):
                 "default-src 'self'",
                 "base-uri 'self'",
                 "object-src 'none'",
-                "frame-ancestors 'none'",
+                (
+                    "frame-ancestors 'self'"
+                    if embedded_graph
+                    else "frame-ancestors 'none'"
+                ),
                 "form-action 'self'",
                 "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com",
                 "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com",
                 "img-src 'self' data: https:",
                 "font-src 'self' data: https://cdn.jsdelivr.net",
                 "connect-src 'self'",
-                "frame-src 'none'",
+                "frame-src 'self'" if results_page else "frame-src 'none'",
             )
         ),
     )

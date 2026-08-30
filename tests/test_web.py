@@ -98,6 +98,65 @@ def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
     assert "object-src 'none'" in policy
 
 
+def test_only_discovery_graph_report_can_be_framed_same_origin(
+    client, web_app, tmp_path
+):
+    session_folder = tmp_path / 'search_frameable'
+    session_folder.mkdir()
+    graph_path = session_folder / 'combined_graph.html'
+    graph_path.write_text(
+        '<!doctype html><script>document.body.dataset.ready = "true";</script>',
+        encoding='utf-8',
+    )
+    ordinary_report = session_folder / 'report_alice.html'
+    ordinary_report.write_text('<!doctype html><p>Report</p>', encoding='utf-8')
+    nested_folder = session_folder / 'nested'
+    nested_folder.mkdir()
+    (nested_folder / 'combined_graph.html').write_text(
+        '<!doctype html><p>Not an embeddable graph</p>', encoding='utf-8'
+    )
+    web_app.job_results['frameable'] = {
+        'status': 'completed',
+        'session_folder': 'search_frameable',
+        'graph_file': 'search_frameable/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [],
+        'found_count': 0,
+    }
+
+    results_response = client.get('/results/search_frameable')
+    assert results_response.status_code == 200
+    assert results_response.headers['X-Frame-Options'] == 'DENY'
+    results_policy = results_response.headers['Content-Security-Policy']
+    assert "frame-ancestors 'none'" in results_policy
+    assert "frame-src 'self'" in results_policy
+    results_body = results_response.get_data(as_text=True)
+    assert 'sandbox="allow-scripts"' in results_body
+    assert 'allow-same-origin' not in results_body
+
+    graph_response = client.get(
+        '/reports/search_frameable/combined_graph.html'
+    )
+    assert graph_response.status_code == 200
+    assert graph_response.headers['X-Frame-Options'] == 'SAMEORIGIN'
+    graph_policy = graph_response.headers['Content-Security-Policy']
+    assert "frame-ancestors 'self'" in graph_policy
+    assert "frame-src 'none'" in graph_policy
+
+    report_response = client.get('/reports/search_frameable/report_alice.html')
+    assert report_response.status_code == 200
+    assert report_response.headers['X-Frame-Options'] == 'DENY'
+    assert "frame-ancestors 'none'" in report_response.headers[
+        'Content-Security-Policy'
+    ]
+
+    nested_response = client.get(
+        '/reports/search_frameable/nested/combined_graph.html'
+    )
+    assert nested_response.status_code == 200
+    assert nested_response.headers['X-Frame-Options'] == 'DENY'
+
+
 def test_internal_errors_are_generic_for_clients_and_single_line_in_logs(
     web_app, caplog
 ):
