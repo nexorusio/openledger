@@ -74,11 +74,14 @@
             </span>
         </header>
         <div class="panel-body">
-            <p class="page-description mt-0">
-                Treat the output as investigative assistance, not verified identity evidence.
-                OpenLedger sends the normalized report only when you request analysis. Supported
-                public-web findings may enter Persona as pending proposals; AI can never approve them.
-            </p>
+            <div class="analysis-disclaimer">
+                <i data-lucide="shield-alert"></i>
+                <p>
+                    AI output is investigative assistance, not verified identity evidence. OpenLedger
+                    submits the normalized report only when you request analysis. Supported public-web
+                    findings become pending Persona proposals; AI cannot approve them.
+                </p>
+            </div>
             {% include '_ai_pipeline_status.html' %}
             {% if ai_enabled %}
             <div class="d-flex align-items-center flex-wrap gap-2 mt-3">

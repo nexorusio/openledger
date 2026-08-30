@@ -117,7 +117,7 @@
             </header>
             <div class="panel-body">
                 <div class="connection-card">
-                    <form method="POST" action="{{ url_for('openai_settings_update') }}">
+                    <form method="POST" action="{{ url_for('openai_settings_update') }}" class="connection-form">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                         <input type="hidden" name="action" value="connect">
                         <div class="connection-brand">
@@ -178,7 +178,7 @@
                         </div>
                     </form>
 
-                    <div class="security-callout">
+                    <div class="security-callout connection-security">
                         <i data-lucide="lock-keyhole"></i>
                         <span>
                             Stored only in the protected runtime secret file with mode 600.

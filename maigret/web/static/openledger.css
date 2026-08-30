@@ -320,6 +320,7 @@ a {
 }
 
 .app-workspace {
+    min-width: 0;
     min-height: 100vh;
     display: flex;
     flex-direction: column;
@@ -355,6 +356,7 @@ a {
 }
 
 .topbar-actions {
+    flex: 0 0 auto;
     gap: 12px;
 }
 
@@ -531,6 +533,11 @@ a {
     margin-bottom: 26px;
 }
 
+.page-heading > :first-child,
+.panel-header > :first-child {
+    min-width: 0;
+}
+
 .eyebrow {
     margin: 0 0 7px;
     color: var(--ol-accent-strong);
@@ -658,6 +665,7 @@ a {
     margin: 6px 0 0;
     color: var(--ol-muted);
     font-size: 0.78rem;
+    overflow-wrap: anywhere;
 }
 
 .panel-body {
@@ -699,6 +707,8 @@ textarea.form-control {
 .form-text {
     color: var(--ol-muted);
     font-size: 0.7rem;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
 }
 
 .btn {
@@ -713,6 +723,7 @@ textarea.form-control {
     line-height: 1.2;
     text-align: center;
     vertical-align: middle;
+    overflow-wrap: anywhere;
 }
 
 .btn-primary {
@@ -1052,6 +1063,7 @@ textarea.form-control.compact-textarea {
 }
 
 .badge-soft {
+    flex: 0 0 auto;
     display: inline-flex;
     align-items: center;
     gap: 6px;
@@ -1061,6 +1073,7 @@ textarea.form-control.compact-textarea {
     color: var(--ol-accent-strong);
     font-size: 0.67rem;
     font-weight: 700;
+    white-space: nowrap;
 }
 
 .badge-soft.success {
@@ -1140,9 +1153,17 @@ textarea.form-control.compact-textarea {
 
 .connection-card {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-columns: minmax(360px, 1.25fr) minmax(240px, 0.75fr);
     gap: 24px;
     align-items: start;
+}
+
+.connection-form {
+    min-width: 0;
+}
+
+.connection-security {
+    min-width: 0;
 }
 
 .connection-brand {
@@ -1226,6 +1247,31 @@ textarea.form-control.compact-textarea {
     color: var(--ol-muted);
     font-size: 0.7rem;
     line-height: 1.55;
+    overflow-wrap: anywhere;
+}
+
+.analysis-disclaimer {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    gap: 11px;
+    margin-bottom: 16px;
+    padding: 13px 15px;
+    border: 1px solid color-mix(in srgb, var(--ol-info) 30%, var(--ol-border));
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--ol-info) 7%, var(--ol-surface));
+    color: var(--ol-muted);
+}
+
+.analysis-disclaimer svg {
+    width: 19px;
+    height: 19px;
+    color: var(--ol-info);
+}
+
+.analysis-disclaimer p {
+    margin: 0;
+    line-height: 1.55;
+    overflow-wrap: anywhere;
 }
 
 .security-callout svg {
@@ -1737,6 +1783,16 @@ textarea.form-control.compact-textarea {
     gap: 8px;
 }
 
+.profile-link {
+    min-width: 0;
+    max-width: 100%;
+}
+
+.profile-link a {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
 .tag-container {
     flex-wrap: wrap;
     justify-content: flex-end;
@@ -1787,6 +1843,24 @@ textarea.form-control.compact-textarea {
     font-size: 0.76rem;
 }
 
+@media (max-width: 1279px) {
+    .settings-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .settings-nav {
+        position: static;
+        display: flex;
+        overflow-x: auto;
+        overscroll-behavior-inline: contain;
+        scrollbar-width: thin;
+    }
+
+    .settings-nav a {
+        flex: 0 0 auto;
+    }
+}
+
 /* A restrained radius system keeps the analytical workspace compact and
    avoids the soft, consumer-app appearance of deeply rounded frames. */
 .brand-mark-wrap,
@@ -1828,9 +1902,11 @@ textarea.form-control.compact-textarea {
     .dashboard-grid {
         grid-template-columns: minmax(0, 1.4fr) minmax(250px, 0.7fr);
     }
+}
 
-    .settings-layout {
-        grid-template-columns: 190px minmax(0, 1fr);
+@media (max-width: 1099px) {
+    .connection-card {
+        grid-template-columns: 1fr;
     }
 }
 
@@ -1881,19 +1957,8 @@ textarea.form-control.compact-textarea {
 
     .dashboard-grid,
     .security-page-grid,
-    .settings-layout,
     .case-scope-grid {
         grid-template-columns: 1fr;
-    }
-
-    .settings-nav {
-        position: static;
-        display: flex;
-        overflow-x: auto;
-    }
-
-    .settings-nav a {
-        flex: 0 0 auto;
     }
 
     .identifier-row {
@@ -2013,6 +2078,85 @@ textarea.form-control.compact-textarea {
 
     .app-footer {
         flex-direction: column;
+    }
+}
+
+@media (max-width: 575px) {
+    .app-topbar {
+        gap: 10px;
+        padding: 0 12px;
+    }
+
+    .topbar-left {
+        gap: 10px;
+    }
+
+    .breadcrumb-line > a,
+    .breadcrumb-line > svg,
+    .topbar-profile {
+        display: none;
+    }
+
+    .app-content {
+        padding: 22px 14px 32px;
+    }
+
+    .page-heading {
+        gap: 14px;
+        margin-bottom: 22px;
+    }
+
+    .page-heading > .badge-soft {
+        align-self: flex-start;
+    }
+
+    .panel-header {
+        align-items: stretch;
+        flex-direction: column;
+        gap: 12px;
+        padding: 17px;
+    }
+
+    .panel-header > .badge-soft {
+        align-self: flex-start;
+    }
+
+    .panel-body {
+        padding: 17px;
+    }
+
+    .connection-actions {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .connection-actions .btn {
+        width: 100%;
+    }
+
+    .scope-terms div {
+        grid-template-columns: 1fr;
+        gap: 3px;
+    }
+
+    .report-header {
+        align-items: flex-start;
+        gap: 12px;
+        overflow-wrap: anywhere;
+    }
+
+    .report-header .chevron {
+        flex: 0 0 auto;
+    }
+
+    .map-section-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .profile-link {
+        align-items: flex-start;
+        flex-wrap: wrap;
     }
 }
 
