@@ -642,10 +642,14 @@ def test_relationship_workspace_renders_shared_approved_attributes(
     assert "Cross-Persona relationship leads" in page
     assert "Nexorus" in page
     assert "exact normalized matches across personas" in page
-    assert "vis-network@10.1.1" in page
+    assert "/static/vendor/vis-network-10.1.1.min.js" in page
+    assert "https://unpkg.com/vis-network" not in page
 
-    persona_page = client.get("/relationships?mode=persona").get_data(as_text=True)
+    persona_page = client.get("/relationships?mode=persona").get_data(
+        as_text=True
+    )
     assert "Persona evidence network" in persona_page
     assert "Example" in persona_page
     assert "Review status remains visible" in persona_page
-    assert "vis-network@10.1.1" in persona_page
+    assert "/static/vendor/vis-network-10.1.1.min.js" in persona_page
+    assert "/static/relationships.js" in persona_page
