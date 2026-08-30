@@ -37,6 +37,17 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Connection, Engine
 
+from maigret.web.external_evidence import (
+    ExternalEvidenceValidationError,
+    bounded_text,
+    normalize_bounded_document,
+    normalize_classification,
+    normalize_external_evidence,
+    normalize_policy_context,
+    normalize_source_id,
+    stable_fingerprint,
+)
+
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
 
@@ -221,6 +232,165 @@ Index(
     investigation_events.c.job_id,
     investigation_events.c.id,
 )
+
+data_sources = Table(
+    "data_sources",
+    metadata,
+    Column("id", String(100), primary_key=True),
+    Column("name", String(200), nullable=False),
+    Column("source_type", String(64), nullable=False),
+    Column("authority", String(200), nullable=False),
+    Column("schema_version", Integer, nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("default_classification", String(64), nullable=False),
+    Column("handling_defaults", json_document, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("updated_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint("schema_version > 0", name="ck_data_sources_schema_version"),
+)
+
+query_receipts = Table(
+    "query_receipts",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "case_id",
+        String(36),
+        ForeignKey("cases.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "source_id",
+        String(100),
+        ForeignKey("data_sources.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("requested_by", String(200), nullable=False),
+    Column("purpose", Text, nullable=False),
+    Column("query_fingerprint", String(64), nullable=False),
+    Column("query_document", json_document, nullable=False),
+    Column("policy_context", json_document, nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("result_count", Integer, nullable=True),
+    Column("error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint(
+        "status IN ('queued', 'running', 'completed', 'failed', 'cancelled')",
+        name="ck_query_receipts_status",
+    ),
+    CheckConstraint(
+        "result_count IS NULL OR result_count >= 0",
+        name="ck_query_receipts_result_count",
+    ),
+)
+Index("ix_query_receipts_case_created", query_receipts.c.case_id, query_receipts.c.created_at)
+Index("ix_query_receipts_source_status", query_receipts.c.source_id, query_receipts.c.status)
+
+external_evidence_records = Table(
+    "external_evidence_records",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "case_id",
+        String(36),
+        ForeignKey("cases.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "source_id",
+        String(100),
+        ForeignKey("data_sources.id", ondelete="RESTRICT"),
+        nullable=False,
+    ),
+    Column("source_record_id", String(500), nullable=False),
+    Column("source_version", String(200), nullable=False),
+    Column("record_type", String(100), nullable=False),
+    Column("content_hash", String(71), nullable=False),
+    Column("locator", json_document, nullable=False),
+    Column("preview", Text, nullable=False),
+    Column("attributes", json_document, nullable=False),
+    Column("handling", json_document, nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    Column("valid_from", DateTime(timezone=True), nullable=True),
+    Column("valid_to", DateTime(timezone=True), nullable=True),
+    UniqueConstraint(
+        "case_id",
+        "source_id",
+        "source_record_id",
+        "source_version",
+        name="uq_external_evidence_source_version",
+    ),
+)
+Index("ix_external_evidence_case_source", external_evidence_records.c.case_id, external_evidence_records.c.source_id)
+Index("ix_external_evidence_content_hash", external_evidence_records.c.content_hash)
+
+external_evidence_receipts = Table(
+    "external_evidence_receipts",
+    metadata,
+    Column(
+        "evidence_id",
+        String(36),
+        ForeignKey("external_evidence_records.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "query_receipt_id",
+        String(36),
+        ForeignKey("query_receipts.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column("attached_by", String(200), nullable=False),
+    Column("attached_at", DateTime(timezone=True), nullable=False),
+)
+Index(
+    "ix_external_evidence_receipts_receipt",
+    external_evidence_receipts.c.query_receipt_id,
+)
+
+claim_observations = Table(
+    "claim_observations",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "claim_id",
+        String(36),
+        ForeignKey("persona_claims.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("provenance_type", String(32), nullable=False),
+    Column("provenance_id", String(500), nullable=False),
+    Column(
+        "job_id",
+        String(36),
+        ForeignKey("investigation_jobs.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    Column(
+        "external_evidence_id",
+        String(36),
+        ForeignKey("external_evidence_records.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    Column("source_engine", String(100), nullable=False),
+    Column("source_record_id", String(500), nullable=True),
+    Column("confidence", Integer, nullable=True),
+    Column("native_status", String(100), nullable=False),
+    Column("details", json_document, nullable=False),
+    Column("fingerprint", String(64), nullable=False),
+    Column("observed_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "provenance_type IN ('investigation_job', 'external_evidence')",
+        name="ck_claim_observations_provenance_type",
+    ),
+    CheckConstraint(
+        "confidence IS NULL OR (confidence >= 0 AND confidence <= 100)",
+        name="ck_claim_observations_confidence",
+    ),
+    UniqueConstraint("claim_id", "fingerprint", name="uq_claim_observation_fingerprint"),
+)
+Index("ix_claim_observations_claim_observed", claim_observations.c.claim_id, claim_observations.c.observed_at)
+Index("ix_claim_observations_provenance", claim_observations.c.provenance_type, claim_observations.c.provenance_id)
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
@@ -758,6 +928,482 @@ class CaseStore:
             "jobs": [self._serialize_job(row) for row in job_rows],
         }
 
+    def register_data_source(
+        self,
+        source_id: str,
+        *,
+        name: str,
+        source_type: str,
+        authority: str,
+        schema_version: int = 1,
+        default_classification: str,
+        handling_defaults: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Register immutable source identity and non-secret handling metadata."""
+        normalized_id = normalize_source_id(source_id)
+        normalized = {
+            "name": bounded_text(name, "name", max_chars=200),
+            "source_type": bounded_text(
+                source_type, "source_type", max_chars=64
+            ).casefold(),
+            "authority": bounded_text(authority, "authority", max_chars=200),
+            "schema_version": int(schema_version),
+            "default_classification": normalize_classification(
+                default_classification,
+                "default_classification",
+            ),
+            "handling_defaults": normalize_bounded_document(
+                handling_defaults or {}, "handling_defaults"
+            ),
+        }
+        if normalized["schema_version"] <= 0:
+            raise ExternalEvidenceValidationError("schema_version must be positive")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            existing = (
+                connection.execute(
+                    select(data_sources).where(data_sources.c.id == normalized_id)
+                )
+                .mappings()
+                .first()
+            )
+            if existing:
+                for key, expected in normalized.items():
+                    actual = (
+                        dict(existing[key] or {})
+                        if key == "handling_defaults"
+                        else existing[key]
+                    )
+                    if actual != expected:
+                        raise ExternalEvidenceValidationError(
+                            "Registered data-source identity is immutable"
+                        )
+                return normalized_id
+            connection.execute(
+                insert(data_sources).values(
+                    id=normalized_id,
+                    enabled=True,
+                    created_at=now,
+                    updated_at=now,
+                    **normalized,
+                )
+            )
+        return normalized_id
+
+    def set_data_source_enabled(self, source_id: str, enabled: bool) -> None:
+        normalized_id = normalize_source_id(source_id)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(data_sources)
+                .where(data_sources.c.id == normalized_id)
+                .values(enabled=bool(enabled), updated_at=utcnow())
+            )
+            if result.rowcount != 1:
+                raise KeyError(normalized_id)
+
+    def create_query_receipt(
+        self,
+        case_id: str,
+        source_id: str,
+        *,
+        requested_by: str,
+        purpose: str,
+        query_document: Dict[str, Any],
+        policy_context: Dict[str, Any],
+    ) -> str:
+        """Record who queried which source, for what case and declared purpose."""
+        normalized_source_id = normalize_source_id(source_id)
+        actor = bounded_text(requested_by, "requested_by", max_chars=200)
+        declared_purpose = bounded_text(purpose, "purpose", max_chars=2_000)
+        query = normalize_bounded_document(query_document, "query_document")
+        policy = normalize_policy_context(
+            policy_context,
+            requested_by=actor,
+            purpose=declared_purpose,
+        )
+        receipt_id = str(uuid.uuid4())
+        now = utcnow()
+        with self.engine.begin() as connection:
+            if not connection.scalar(select(cases.c.id).where(cases.c.id == case_id)):
+                raise KeyError(case_id)
+            source = (
+                connection.execute(
+                    select(data_sources).where(data_sources.c.id == normalized_source_id)
+                )
+                .mappings()
+                .first()
+            )
+            if not source:
+                raise KeyError(normalized_source_id)
+            if not source["enabled"]:
+                raise ExternalEvidenceValidationError("Data source is disabled")
+            if policy["authority"] != source["authority"]:
+                raise ExternalEvidenceValidationError(
+                    "policy_context.authority does not match the registered source"
+                )
+            if (
+                policy["classification_ceiling"]
+                != source["default_classification"]
+            ):
+                raise ExternalEvidenceValidationError(
+                    "policy_context.classification_ceiling is not authorized "
+                    "for the registered source"
+                )
+            connection.execute(
+                insert(query_receipts).values(
+                    id=receipt_id,
+                    case_id=case_id,
+                    source_id=normalized_source_id,
+                    requested_by=actor,
+                    purpose=declared_purpose,
+                    query_fingerprint=stable_fingerprint(query),
+                    query_document=query,
+                    policy_context=policy,
+                    status="queued",
+                    result_count=None,
+                    error=None,
+                    created_at=now,
+                    completed_at=None,
+                )
+            )
+        return receipt_id
+
+    def complete_query_receipt(self, receipt_id: str, result_count: int) -> None:
+        count = int(result_count)
+        if count < 0:
+            raise ExternalEvidenceValidationError("result_count must not be negative")
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(query_receipts)
+                .where(
+                    query_receipts.c.id == receipt_id,
+                    query_receipts.c.status.in_(("queued", "running")),
+                )
+                .values(
+                    status="completed",
+                    result_count=count,
+                    completed_at=utcnow(),
+                )
+            )
+            if result.rowcount != 1:
+                raise KeyError(receipt_id)
+
+    def fail_query_receipt(self, receipt_id: str, error: str) -> None:
+        bounded_error = bounded_text(error, "error", max_chars=4_000)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(query_receipts)
+                .where(
+                    query_receipts.c.id == receipt_id,
+                    query_receipts.c.status.in_(("queued", "running")),
+                )
+                .values(
+                    status="failed",
+                    error=bounded_error,
+                    completed_at=utcnow(),
+                )
+            )
+            if result.rowcount != 1:
+                raise KeyError(receipt_id)
+
+    def attach_external_evidence(
+        self,
+        case_id: str,
+        receipt_id: str,
+        payload: Dict[str, Any],
+        *,
+        attached_by: str,
+    ) -> str:
+        """Attach a validated immutable source version to one case query receipt."""
+        evidence = normalize_external_evidence(payload)
+        actor = bounded_text(attached_by, "attached_by", max_chars=200)
+        now = utcnow()
+        with self.engine.begin() as connection:
+            receipt = (
+                connection.execute(
+                    select(query_receipts).where(query_receipts.c.id == receipt_id)
+                )
+                .mappings()
+                .first()
+            )
+            if not receipt:
+                raise KeyError(receipt_id)
+            if receipt["case_id"] != case_id:
+                raise ExternalEvidenceValidationError(
+                    "Query receipt belongs to a different case"
+                )
+            if receipt["status"] != "completed":
+                raise ExternalEvidenceValidationError(
+                    "External evidence requires a completed query receipt"
+                )
+            if receipt["source_id"] != evidence["source_id"]:
+                raise ExternalEvidenceValidationError(
+                    "Evidence source does not match the query receipt"
+                )
+            source = (
+                connection.execute(
+                    select(data_sources).where(
+                        data_sources.c.id == evidence["source_id"]
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            if not source["enabled"]:
+                raise ExternalEvidenceValidationError("Data source is disabled")
+            if evidence["handling"]["authority"] != source["authority"]:
+                raise ExternalEvidenceValidationError(
+                    "Evidence authority does not match the registered source"
+                )
+            classification_ceiling = receipt["policy_context"][
+                "classification_ceiling"
+            ]
+            if evidence["handling"]["classification"] != classification_ceiling:
+                raise ExternalEvidenceValidationError(
+                    "Evidence classification does not match the authorized ceiling"
+                )
+            existing = (
+                connection.execute(
+                    select(external_evidence_records).where(
+                        external_evidence_records.c.case_id == case_id,
+                        external_evidence_records.c.source_id == evidence["source_id"],
+                        external_evidence_records.c.source_record_id
+                        == evidence["source_record_id"],
+                        external_evidence_records.c.source_version
+                        == evidence["source_version"],
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if existing:
+                immutable = {
+                    "content_hash": evidence["content_hash"],
+                    "locator": evidence["locator"],
+                    "record_type": evidence["record_type"],
+                }
+                if any(existing[key] != value for key, value in immutable.items()):
+                    raise ExternalEvidenceValidationError(
+                        "External source versions are immutable"
+                    )
+                evidence_id = str(existing["id"])
+            else:
+                evidence_id = str(uuid.uuid4())
+                stored_evidence = {
+                    key: value
+                    for key, value in evidence.items()
+                    if key != "schema_version"
+                }
+                connection.execute(
+                    insert(external_evidence_records).values(
+                        id=evidence_id,
+                        case_id=case_id,
+                        **stored_evidence,
+                    )
+                )
+            linked = connection.scalar(
+                select(external_evidence_receipts.c.evidence_id).where(
+                    external_evidence_receipts.c.evidence_id == evidence_id,
+                    external_evidence_receipts.c.query_receipt_id == receipt_id,
+                )
+            )
+            if not linked:
+                connection.execute(
+                    insert(external_evidence_receipts).values(
+                        evidence_id=evidence_id,
+                        query_receipt_id=receipt_id,
+                        attached_by=actor,
+                        attached_at=now,
+                    )
+                )
+        return evidence_id
+
+    def get_external_evidence(
+        self, case_id: str, evidence_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Read external evidence only through its owning case boundary."""
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(external_evidence_records).where(
+                        external_evidence_records.c.id == evidence_id,
+                        external_evidence_records.c.case_id == case_id,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if not row:
+            return None
+        serialized = dict(row)
+        for field in ("observed_at", "valid_from", "valid_to"):
+            serialized[field] = _as_iso(row[field])
+        with self.engine.connect() as connection:
+            receipt_rows = list(
+                connection.execute(
+                    select(external_evidence_receipts)
+                    .where(
+                        external_evidence_receipts.c.evidence_id == evidence_id
+                    )
+                    .order_by(external_evidence_receipts.c.attached_at)
+                ).mappings()
+            )
+        serialized["query_receipts"] = [
+            {
+                **dict(receipt_row),
+                "attached_at": _as_iso(receipt_row["attached_at"]),
+            }
+            for receipt_row in receipt_rows
+        ]
+        return serialized
+
+    def record_claim_observation(
+        self,
+        claim_id: str,
+        *,
+        source_engine: str,
+        native_status: str,
+        job_id: Optional[str] = None,
+        external_evidence_id: Optional[str] = None,
+        source_record_id: Optional[str] = None,
+        confidence: Optional[int] = None,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """Append idempotent provenance without overwriting claim history."""
+        if (job_id is None) == (external_evidence_id is None):
+            raise ExternalEvidenceValidationError(
+                "Provide exactly one provenance record"
+            )
+        with self.engine.begin() as connection:
+            claim_case_id = connection.scalar(
+                select(personas.c.case_id)
+                .select_from(
+                    persona_claims.join(
+                        personas, personas.c.id == persona_claims.c.persona_id
+                    )
+                )
+                .where(persona_claims.c.id == claim_id)
+            )
+            if not claim_case_id:
+                raise KeyError(claim_id)
+            provenance_id = str(job_id or external_evidence_id)
+            if job_id:
+                provenance_case_id = connection.scalar(
+                    select(investigation_jobs.c.case_id).where(
+                        investigation_jobs.c.id == job_id
+                    )
+                )
+                provenance_type = "investigation_job"
+            else:
+                provenance_case_id = connection.scalar(
+                    select(external_evidence_records.c.case_id).where(
+                        external_evidence_records.c.id == external_evidence_id
+                    )
+                )
+                provenance_type = "external_evidence"
+            if not provenance_case_id:
+                raise KeyError(provenance_id)
+            if provenance_case_id != claim_case_id:
+                raise ExternalEvidenceValidationError(
+                    "Claim and provenance belong to different cases"
+                )
+            return self._record_claim_observation_with_connection(
+                connection,
+                claim_id=claim_id,
+                provenance_type=provenance_type,
+                provenance_id=provenance_id,
+                job_id=job_id,
+                external_evidence_id=external_evidence_id,
+                source_engine=source_engine,
+                source_record_id=source_record_id,
+                confidence=confidence,
+                native_status=native_status,
+                details=details or {},
+                now=utcnow(),
+            )
+
+    def get_claim_lineage(self, claim_id: str) -> list[Dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = list(
+                connection.execute(
+                    select(claim_observations)
+                    .where(claim_observations.c.claim_id == claim_id)
+                    .order_by(claim_observations.c.observed_at)
+                ).mappings()
+            )
+        return [
+            {**dict(row), "observed_at": _as_iso(row["observed_at"])}
+            for row in rows
+        ]
+
+    @staticmethod
+    def _record_claim_observation_with_connection(
+        connection: Connection,
+        *,
+        claim_id: str,
+        provenance_type: str,
+        provenance_id: str,
+        job_id: Optional[str],
+        external_evidence_id: Optional[str],
+        source_engine: str,
+        source_record_id: Optional[str],
+        confidence: Optional[int],
+        native_status: str,
+        details: Dict[str, Any],
+        now: datetime,
+    ) -> str:
+        engine = bounded_text(source_engine, "source_engine", max_chars=100)
+        status = bounded_text(native_status, "native_status", max_chars=100)
+        record_id = (
+            bounded_text(source_record_id, "source_record_id", max_chars=500)
+            if source_record_id is not None
+            else None
+        )
+        normalized_details = normalize_bounded_document(details, "details")
+        normalized_confidence = None if confidence is None else int(confidence)
+        if normalized_confidence is not None and not 0 <= normalized_confidence <= 100:
+            raise ExternalEvidenceValidationError(
+                "confidence must be between 0 and 100"
+            )
+        fingerprint = stable_fingerprint(
+            {
+                "provenance_type": provenance_type,
+                "provenance_id": provenance_id,
+                "source_engine": engine,
+                "source_record_id": record_id,
+                "confidence": normalized_confidence,
+                "native_status": status,
+                "details": normalized_details,
+            }
+        )
+        existing_id = connection.scalar(
+            select(claim_observations.c.id).where(
+                claim_observations.c.claim_id == claim_id,
+                claim_observations.c.fingerprint == fingerprint,
+            )
+        )
+        if existing_id:
+            return str(existing_id)
+        observation_id = str(uuid.uuid4())
+        connection.execute(
+            insert(claim_observations).values(
+                id=observation_id,
+                claim_id=claim_id,
+                provenance_type=provenance_type,
+                provenance_id=provenance_id,
+                job_id=job_id,
+                external_evidence_id=external_evidence_id,
+                source_engine=engine,
+                source_record_id=record_id,
+                confidence=normalized_confidence,
+                native_status=status,
+                details=normalized_details,
+                fingerprint=fingerprint,
+                observed_at=now,
+            )
+        )
+        return observation_id
+
     def get_persona(self, persona_id: str) -> Optional[Dict[str, Any]]:
         """Load a persona, its evidence-backed claims, and review history."""
         with self.engine.connect() as connection:
@@ -957,6 +1603,25 @@ class CaseStore:
                         observed_at=now,
                     )
                 )
+            CaseStore._record_claim_observation_with_connection(
+                connection,
+                claim_id=claim_id,
+                provenance_type="investigation_job",
+                provenance_id=job_id,
+                job_id=job_id,
+                external_evidence_id=None,
+                source_engine=candidate["source_engine"],
+                source_record_id=candidate.get("source_record_id"),
+                confidence=candidate.get("confidence"),
+                native_status=candidate.get("native_status", "observed"),
+                details={
+                    "claim_fingerprint": candidate["fingerprint"],
+                    "evidence_fingerprints": [
+                        evidence["fingerprint"] for evidence in candidate["evidence"]
+                    ],
+                },
+                now=now,
+            )
             synchronized += 1
         return synchronized
 

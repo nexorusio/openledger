@@ -7,6 +7,11 @@ structured claims, evidence, coordinates, and analyst decisions. Collectors,
 AI, report files, maps, and graphs are consumers or producers of evidence; none
 of them owns the canonical Persona profile.
 
+The governed client-datamart boundary, immutable external-evidence envelope,
+complete claim observation lineage, engine roles, MCP constraints, graph-scale
+plan, and deployment threat controls are specified in
+[Datamart readiness and security design](datamart-readiness-security.md).
+
 The user journey is deliberately explicit:
 
 1. **Collect.** A source adapter emits observations. The current public-profile

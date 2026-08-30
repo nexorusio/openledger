@@ -41,6 +41,9 @@ def test_caddy_uses_application_login_instead_of_browser_basic_auth():
     assert "basic_auth" not in caddyfile
     assert "AUTH_PASSWORD_HASH" not in caddyfile
     assert 'AUTH_REQUIRED: "true"' in compose
+    assert 'SESSION_COOKIE_SECURE: "true"' in compose
+    assert 'OPENLEDGER_PROXY_HOPS: "1"' in compose
+    assert 'OPENLEDGER_TRUSTED_HOSTS: "${DOMAIN},127.0.0.1,localhost,app"' in compose
     assert "AUTH_FILE: /app/runtime/secrets/auth.json" in compose
     assert "../runtime/secrets:/app/runtime/secrets" in compose
     assert (
@@ -49,6 +52,22 @@ def test_caddy_uses_application_login_instead_of_browser_basic_auth():
     )
     assert 'POSTGRES_INITDB_ARGS: "--data-checksums"' in compose
     assert "image: openledger-maigret:application-auth" in compose
+    assert "X-Frame-Options DENY" in caddyfile
+    assert "Permissions-Policy" in caddyfile
+    assert "X-Robots-Tag" in caddyfile
+
+
+def test_codeql_scans_pull_requests_with_current_actions_and_extended_queries():
+    workflow = (
+        REPOSITORY_ROOT / ".github" / "workflows" / "codeql-analysis.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "pull_request:" in workflow
+    assert "actions/checkout@v4" in workflow
+    assert "github/codeql-action/init@v3" in workflow
+    assert "github/codeql-action/analyze@v3" in workflow
+    assert "queries: security-extended" in workflow
+    assert "github/codeql-action/init@v1" not in workflow
 
 
 def test_create_auth_script_hashes_password_and_protects_file(tmp_path):

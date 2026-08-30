@@ -8,8 +8,10 @@
     header {
         -Server
         X-Content-Type-Options nosniff
-        X-Frame-Options SAMEORIGIN
+        X-Frame-Options DENY
         Referrer-Policy no-referrer
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), usb=()"
+        X-Robots-Tag "noindex, nofollow, noarchive"
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
     }
 
