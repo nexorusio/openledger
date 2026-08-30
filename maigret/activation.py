@@ -91,6 +91,9 @@ class ParsingActivator:
         def _sign(path):
             t = str(int(_time.time() * 1000))
             msg = "\n".join([static_param, t, path, user_id]).encode()
+            # OnlyFans mandates SHA-1 for this upstream request signature. It is
+            # an interoperability checksum, not password storage, authentication,
+            # or an OpenLedger security decision; changing it would break the API.
             sha = hashlib.sha1(msg).hexdigest()
             cs = sum(ord(sha[i]) for i in indexes) + constant
             return t, fmt.format(sha, abs(cs))

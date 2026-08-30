@@ -98,6 +98,100 @@ def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
     assert "object-src 'none'" in policy
 
 
+def test_only_discovery_graph_report_can_be_framed_same_origin(
+    client, web_app, tmp_path
+):
+    session_folder = tmp_path / 'search_frameable'
+    session_folder.mkdir()
+    graph_path = session_folder / 'combined_graph.html'
+    graph_path.write_text(
+        '<!doctype html><script>document.body.dataset.ready = "true";</script>',
+        encoding='utf-8',
+    )
+    ordinary_report = session_folder / 'report_alice.html'
+    ordinary_report.write_text('<!doctype html><p>Report</p>', encoding='utf-8')
+    nested_folder = session_folder / 'nested'
+    nested_folder.mkdir()
+    (nested_folder / 'combined_graph.html').write_text(
+        '<!doctype html><p>Not an embeddable graph</p>', encoding='utf-8'
+    )
+    web_app.job_results['frameable'] = {
+        'status': 'completed',
+        'session_folder': 'search_frameable',
+        'graph_file': 'search_frameable/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [],
+        'found_count': 0,
+    }
+
+    results_response = client.get('/results/search_frameable')
+    assert results_response.status_code == 200
+    assert results_response.headers['X-Frame-Options'] == 'DENY'
+    results_policy = results_response.headers['Content-Security-Policy']
+    assert "frame-ancestors 'none'" in results_policy
+    assert "frame-src 'self'" in results_policy
+    results_body = results_response.get_data(as_text=True)
+    assert 'sandbox="allow-scripts"' in results_body
+    assert 'allow-same-origin' not in results_body
+
+    graph_response = client.get(
+        '/reports/search_frameable/combined_graph.html'
+    )
+    assert graph_response.status_code == 200
+    assert graph_response.headers['X-Frame-Options'] == 'SAMEORIGIN'
+    graph_policy = graph_response.headers['Content-Security-Policy']
+    assert "frame-ancestors 'self'" in graph_policy
+    assert "frame-src 'none'" in graph_policy
+
+    report_response = client.get('/reports/search_frameable/report_alice.html')
+    assert report_response.status_code == 200
+    assert report_response.headers['X-Frame-Options'] == 'DENY'
+    assert "frame-ancestors 'none'" in report_response.headers[
+        'Content-Security-Policy'
+    ]
+
+    nested_response = client.get(
+        '/reports/search_frameable/nested/combined_graph.html'
+    )
+    assert nested_response.status_code == 200
+    assert nested_response.headers['X-Frame-Options'] == 'DENY'
+
+
+def test_internal_errors_are_generic_for_clients_and_single_line_in_logs(
+    web_app, caplog
+):
+    public_message = web_app.record_internal_error(
+        'Investigation failed',
+        RuntimeError('upstream secret\nFORGED LOG ENTRY'),
+        session='safe\nFORGED SESSION',
+    )
+
+    assert public_message.startswith('Investigation failed. Reference: ')
+    assert 'upstream secret' not in public_message
+    assert 'FORGED' not in public_message
+    log_message = caplog.records[-1].getMessage()
+    assert '\n' not in log_message
+    assert '\r' not in log_message
+
+
+def test_failed_background_job_does_not_persist_upstream_exception_details(
+    web_app, monkeypatch
+):
+    async def failing_search(_usernames, _options):
+        raise RuntimeError('private upstream response\ninternal stack trace')
+
+    monkeypatch.setattr(web_app, 'search_multiple_usernames', failing_search)
+    web_app.process_search_task(['alice'], {}, 'failure-sanitization')
+
+    stored = web_app.job_results['failure-sanitization']
+    assert stored['status'] == 'failed'
+    assert stored['error'].startswith(
+        'Investigation processing failed. Reference: '
+    )
+    assert 'private upstream response' not in stored['error']
+    assert 'internal stack trace' not in stored['error']
+
+
 def test_untrusted_host_is_rejected(client, web_app):
     web_app.app.config['TRUSTED_HOSTS'] = ['openledger.example']
     try:
@@ -326,6 +420,37 @@ def test_login_rejects_external_redirects_and_invalid_credentials(client, web_ap
     assert response.status_code == 200
     assert 'Invalid username or password.' in response.get_data(as_text=True)
     assert response.request.path == '/login'
+
+
+@pytest.mark.parametrize(
+    'next_path',
+    [
+        'https://evil.example/steal',
+        '//evil.example/steal',
+        '///evil.example/steal',
+        '/\\evil.example/steal',
+        '/%5cevil.example/steal',
+        '/%2f%2fevil.example/steal',
+        '/safe%0d%0aLocation:%20https://evil.example/steal',
+    ],
+)
+def test_login_never_redirects_to_an_untrusted_origin(client, web_app, next_path):
+    web_app.app.config['AUTH_REQUIRED'] = True
+    web_app.save_auth_credentials('operator', 'correct-horse-battery-staple')
+    client.get('/login', query_string={'next': next_path})
+
+    response = client.post(
+        '/login',
+        data={
+            'csrf_token': _csrf_token(client),
+            'next': next_path,
+            'username': 'operator',
+            'password': 'correct-horse-battery-staple',
+        },
+    )
+
+    assert response.status_code == 302
+    assert response.location.endswith('/')
 
 
 def test_password_change_is_protected_and_invalidates_other_sessions(web_app):
@@ -1308,6 +1433,34 @@ def test_history_deletion_requires_csrf(client, web_app):
     assert 'keep-me' in web_app.job_results
 
 
+@pytest.mark.parametrize(
+    'session_folder',
+    [
+        None,
+        '',
+        'search_../outside',
+        'search_valid/../outside',
+        'search_valid\\outside',
+        'search_valid\noutside',
+        'search_évidence',
+        f"search_{'a' * 129}",
+    ],
+)
+def test_history_deletion_rejects_uncontrolled_paths(
+    web_app, tmp_path, session_folder
+):
+    reports_root = tmp_path / 'reports'
+    reports_root.mkdir()
+    outside_file = tmp_path / 'outside-sentinel.txt'
+    outside_file.write_text('preserve me', encoding='utf-8')
+    web_app.app.config['REPORTS_FOLDER'] = str(reports_root)
+
+    with pytest.raises(ValueError, match='Invalid report session folder'):
+        web_app.delete_persisted_investigation(session_folder)
+
+    assert outside_file.read_text(encoding='utf-8') == 'preserve me'
+
+
 def test_completed_investigation_survives_process_restart(client, web_app):
     result = {
         'status': 'completed',
@@ -1793,6 +1946,22 @@ def test_openai_connection_is_verified_and_saved_server_side(
     assert web_app.load_settings()['openai_model'] == 'gpt-5.4'
     assert web_app.load_settings()['ai_web_enrichment'] is True
     assert captured['api_base_url'] == 'https://api.openai.com/v1'
+    assert captured['allow_custom_endpoint'] is False
+    assert captured['allow_private_endpoint'] is False
+
+
+def test_custom_ai_endpoint_requires_two_explicit_server_flags(
+    web_app, monkeypatch
+):
+    monkeypatch.setenv('OPENAI_API_BASE_URL', 'https://10.20.30.40/v1')
+    monkeypatch.setenv('OPENLEDGER_ALLOW_CUSTOM_AI_ENDPOINT', 'true')
+    monkeypatch.setenv('OPENLEDGER_ALLOW_PRIVATE_AI_ENDPOINT', 'true')
+
+    assert web_app.ai_endpoint_options() == {
+        'api_base_url': 'https://10.20.30.40/v1',
+        'allow_custom_endpoint': True,
+        'allow_private_endpoint': True,
+    }
 
 
 def test_failed_openai_verification_does_not_store_key(

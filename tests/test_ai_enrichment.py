@@ -5,11 +5,85 @@ import pytest
 from maigret import ai
 from maigret.ai import (
     AIEnrichmentContractError,
+    _check_response,
     _parse_responses_analysis,
     _parse_structured_response,
     get_ai_evidence_proposals,
     get_enriched_ai_analysis,
+    validate_ai_api_base_url,
 )
+
+
+def test_remote_ai_error_body_is_not_exposed():
+    class ErrorResponse:
+        status = 500
+
+        async def read(self):
+            return b"upstream secret and internal stack trace"
+
+    with pytest.raises(RuntimeError, match=r"OpenAI API error \(HTTP 500\)") as exc:
+        asyncio.run(_check_response(ErrorResponse()))
+
+    assert "upstream secret" not in str(exc.value)
+
+
+def test_ai_api_endpoint_defaults_to_the_fixed_openai_origin():
+    assert (
+        validate_ai_api_base_url("https://api.openai.com/v1/")
+        == "https://api.openai.com/v1"
+    )
+
+
+def test_custom_ai_endpoint_requires_server_authorization():
+    with pytest.raises(ValueError, match="explicit server authorization"):
+        validate_ai_api_base_url("https://gateway.example.test/openai/v1")
+
+    assert (
+        validate_ai_api_base_url(
+            "https://gateway.example.test/openai/v1",
+            allow_custom_endpoint=True,
+        )
+        == "https://gateway.example.test/openai/v1"
+    )
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://user:password@api.openai.com/v1",
+        "https://api.openai.com/v1?target=http://127.0.0.1",
+        "https://api.openai.com/v1#fragment",
+        "http://gateway.example.test/v1",
+        "file:///etc/passwd",
+    ],
+)
+def test_ai_api_endpoint_rejects_unsafe_urls(endpoint):
+    with pytest.raises(ValueError):
+        validate_ai_api_base_url(endpoint, allow_custom_endpoint=True)
+
+
+def test_private_ai_endpoint_requires_separate_authorization():
+    with pytest.raises(ValueError, match="special-purpose"):
+        validate_ai_api_base_url(
+            "https://169.254.169.254/latest/meta-data",
+            allow_custom_endpoint=True,
+        )
+
+    assert (
+        validate_ai_api_base_url(
+            "http://127.0.0.1:11434/v1",
+            allow_custom_endpoint=True,
+        )
+        == "http://127.0.0.1:11434/v1"
+    )
+    assert (
+        validate_ai_api_base_url(
+            "https://10.20.30.40/v1",
+            allow_custom_endpoint=True,
+            allow_private_endpoint=True,
+        )
+        == "https://10.20.30.40/v1"
+    )
 
 
 def test_responses_analysis_preserves_deduplicated_safe_citations():

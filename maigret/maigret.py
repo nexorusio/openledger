@@ -1132,6 +1132,10 @@ async def main():
                     api_base_url=getattr(
                         settings, 'openai_api_base_url', 'https://api.openai.com/v1'
                     ),
+                    # CLI settings are controlled by the local operator and
+                    # deliberately support on-prem OpenAI-compatible servers.
+                    allow_custom_endpoint=True,
+                    allow_private_endpoint=True,
                 )
             except Exception as e:
                 query_notify.warning(f'AI analysis failed: {e}')

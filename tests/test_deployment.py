@@ -44,6 +44,8 @@ def test_caddy_uses_application_login_instead_of_browser_basic_auth():
     assert 'SESSION_COOKIE_SECURE: "true"' in compose
     assert 'OPENLEDGER_PROXY_HOPS: "1"' in compose
     assert 'OPENLEDGER_TRUSTED_HOSTS: "${DOMAIN},127.0.0.1,localhost,app"' in compose
+    assert "OPENLEDGER_ALLOW_CUSTOM_AI_ENDPOINT" in compose
+    assert "OPENLEDGER_ALLOW_PRIVATE_AI_ENDPOINT" in compose
     assert "AUTH_FILE: /app/runtime/secrets/auth.json" in compose
     assert "../runtime/secrets:/app/runtime/secrets" in compose
     assert (
@@ -52,7 +54,9 @@ def test_caddy_uses_application_login_instead_of_browser_basic_auth():
     )
     assert 'POSTGRES_INITDB_ARGS: "--data-checksums"' in compose
     assert "image: openledger-maigret:application-auth" in compose
-    assert "X-Frame-Options DENY" in caddyfile
+    # Flask owns the route-specific framing policy. A global proxy header would
+    # override the one authenticated evidence graph that is safe to embed.
+    assert "\n        X-Frame-Options " not in caddyfile
     assert "Permissions-Policy" in caddyfile
     assert "X-Robots-Tag" in caddyfile
 
@@ -67,7 +71,15 @@ def test_codeql_scans_pull_requests_with_current_actions_and_extended_queries():
     assert "github/codeql-action/init@v3" in workflow
     assert "github/codeql-action/analyze@v3" in workflow
     assert "queries: security-extended" in workflow
+    assert "language: [python, javascript-typescript]" in workflow
+    assert "languages: ${{ matrix.language }}" in workflow
+    assert "config-file: ./.github/codeql-config.yml" in workflow
     assert "github/codeql-action/init@v1" not in workflow
+
+    config = (REPOSITORY_ROOT / ".github" / "codeql-config.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "maigret/web/static/vendor/**" in config
 
 
 def test_create_auth_script_hashes_password_and_protects_file(tmp_path):
@@ -90,6 +102,26 @@ def test_create_auth_script_hashes_password_and_protects_file(tmp_path):
     assert password not in auth_file.read_text(encoding="utf-8")
     assert os.stat(auth_file).st_mode & 0o777 == 0o600
     assert len(payload["revision"]) >= 16
+
+
+def test_create_auth_rejects_short_password_without_echoing_it(tmp_path):
+    password = "tiny-secret"
+    result = subprocess.run(
+        [
+            str(REPOSITORY_ROOT / "deploy" / "create_auth.py"),
+            str(tmp_path / "auth.json"),
+            "operator",
+        ],
+        input=password,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert password not in result.stdout
+    assert password not in result.stderr
+    assert "Password must contain at least" in result.stderr
 
 
 def test_deployment_shell_scripts_pass_syntax_check():

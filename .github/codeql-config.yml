@@ -1,0 +1,4 @@
+name: OpenLedger CodeQL configuration
+
+paths-ignore:
+  - maigret/web/static/vendor/**
