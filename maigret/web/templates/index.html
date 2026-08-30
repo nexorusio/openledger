@@ -88,7 +88,7 @@
                             </select>
                             <label class="visually-hidden" for="identifier-value-1">Identifier value</label>
                             <input class="form-control identifier-value" id="identifier-value-1" name="identifier_value"
-                                autocomplete="off" spellcheck="false" required placeholder="e.g. jatipratomo">
+                                autocomplete="off" spellcheck="false" required placeholder="e.g. johndoe">
                             <span class="identifier-behavior">Exact account check</span>
                             <button type="button" class="icon-button identifier-remove" aria-label="Remove identifier" disabled>
                                 <i data-lucide="x"></i>
@@ -99,7 +99,7 @@
                     <div class="form-check investigation-check">
                         <input class="form-check-input" type="checkbox" id="generate-name-variants" name="generate_name_variants" checked>
                         <label class="form-check-label" for="generate-name-variants">Generate reviewable username variants from full names</label>
-                        <div class="form-text">Creates a bounded list such as <code>jatipratomo</code>, <code>jati.pratomo</code>, and <code>jati_pratomo</code>. Phone and email values are never permuted.</div>
+                        <div class="form-text">Creates a bounded list such as <code>johndoe</code>, <code>john.doe</code>, and <code>john_doe</code>. Phone and email values are never permuted.</div>
                     </div>
                 </fieldset>
 
@@ -123,26 +123,35 @@
                     </div>
                 </fieldset>
 
-                <fieldset class="investigation-section">
-                    <legend class="form-label mb-2">Research context</legend>
-                    <div class="research-context-grid">
-                        <div>
-                            <label for="include-terms" class="form-label">Include terms</label>
-                            <textarea class="form-control compact-textarea" id="include-terms" name="include_terms" rows="3"
-                                placeholder="e.g. Jakarta, Nexorus, urban planning"></textarea>
-                            <div class="form-text">Comma or new-line separated. Multi-word phrases stay intact.</div>
-                        </div>
-                        <div>
-                            <label for="exclude-terms" class="form-label">Exclude terms</label>
-                            <textarea class="form-control compact-textarea" id="exclude-terms" name="exclude_terms" rows="3"
-                                placeholder="e.g. fan page, football"></textarea>
-                            <div class="form-text">Used only by keyword-capable AI or future connectors; exclusions do not alter exact account checks.</div>
-                        </div>
+                <fieldset class="investigation-section coverage-filter-section">
+                    <legend class="form-label mb-2">Case source filters</legend>
+                    <p class="form-text mb-2">
+                        These categories and countries apply only to this case. Select once to include, twice to exclude,
+                        and a third time to clear. Countries describe a source's audience, not the subject's location.
+                    </p>
+                    <div class="tag-cloud" id="caseTagCloud">
+                        {% for group, label in [('category', 'Categories'), ('country', 'Countries')] %}
+                        <p class="tag-group-label">{{ label }}</p>
+                        {% for tag in available_tags if tag.group == group %}
+                        <button type="button" class="tag" data-value="{{ tag.value }}">{{ tag.label }}</button>
+                        {% endfor %}
+                        {% endfor %}
                     </div>
+                    <select multiple class="hidden-select" id="caseTags" name="tags" aria-hidden="true">
+                        {% for tag in available_tags %}<option value="{{ tag.value }}">{{ tag.label }}</option>{% endfor %}
+                    </select>
+                    <select multiple class="hidden-select" id="caseExcludedTags" name="excluded_tags" aria-hidden="true">
+                        {% for tag in available_tags %}<option value="{{ tag.value }}">{{ tag.label }}</option>{% endfor %}
+                    </select>
+                    <p class="form-text mt-2">Leave all filters clear to use every eligible source in the selected Fast or Full coverage mode.</p>
+                </fieldset>
+
+                <fieldset class="investigation-section">
+                    <legend class="form-label mb-2">Cited public-web research</legend>
                     <div class="form-check investigation-check sensitive-context-check">
                         <input class="form-check-input" type="checkbox" id="allow-ai-context" name="allow_ai_context">
-                        <label class="form-check-label" for="allow-ai-context">Allow the configured AI service to use these identifiers and terms for cited public-web research</label>
-                        <div class="form-text">Off by default. Without consent, names, emails, phones, and terms remain in OpenLedger as case context and are not included in the external AI request.</div>
+                        <label class="form-check-label" for="allow-ai-context">Allow the configured AI service to use case identifiers for cited public-web research</label>
+                        <div class="form-text">Off by default. Without consent, names, emails, and phone numbers remain inside OpenLedger and are not included in the external AI request.</div>
                     </div>
                 </fieldset>
 
@@ -173,10 +182,11 @@
                             <input type="radio" name="mode" id="mode-full" value="full">
                             <label for="mode-full">
                                 <strong>Full check</strong>
-                                <small>Scan every enabled site; takes considerably longer</small>
+                                <small>Scan every enabled site matching this case's filters; takes considerably longer</small>
                             </label>
                         </div>
                     </div>
+                    <p class="form-text mt-2">Full check uses every enabled source in the bundled OpenLedger database. Disabled sources listed in <code>sites.md</code> are documented but are not contacted.</p>
                 </fieldset>
 
                 <div class="alert alert-danger investigation-form-error" id="investigation-form-error" role="alert" hidden></div>
@@ -225,12 +235,15 @@
     const targets = document.getElementById('query-plan-targets');
     const note = document.getElementById('query-plan-note');
     const error = document.getElementById('investigation-form-error');
+    const sourceTags = Array.from(document.querySelectorAll('#caseTagCloud .tag'));
+    const includedSourceTags = document.getElementById('caseTags');
+    const excludedSourceTags = document.getElementById('caseExcludedTags');
 
     const behavior = {
-        username: ['e.g. jatipratomo', 'Exact account check'],
-        social_handle: ['e.g. @jatipratomo', 'The @ prefix is removed; exact account check'],
-        profile_url: ['e.g. https://instagram.com/jatipratomo', 'Extract account handle; no URL is fetched'],
-        full_name: ['e.g. Jati Pratomo', 'Retain as one phrase; optional handle variants'],
+        username: ['e.g. johndoe', 'Exact account check'],
+        social_handle: ['e.g. @johndoe', 'The @ prefix is removed; exact account check'],
+        profile_url: ['e.g. https://instagram.com/johndoe', 'Extract account handle; no URL is fetched'],
+        full_name: ['e.g. John Doe', 'Retain as one phrase; optional handle variants'],
         email: ['e.g. name@example.com', 'Case context only; never sent to username checks'],
         phone: ['e.g. +628123456789', 'Normalized case context only; never permuted']
     };
@@ -320,6 +333,21 @@
         error.hidden = true;
     }
 
+    function updateSourceTagSelects() {
+        Array.from(includedSourceTags.options).forEach(option => { option.selected = false; });
+        Array.from(excludedSourceTags.options).forEach(option => { option.selected = false; });
+        sourceTags.forEach(tag => {
+            const selector = 'option[value="' + CSS.escape(tag.dataset.value) + '"]';
+            if (tag.classList.contains('selected')) {
+                const option = includedSourceTags.querySelector(selector);
+                if (option) option.selected = true;
+            } else if (tag.classList.contains('excluded')) {
+                const option = excludedSourceTags.querySelector(selector);
+                if (option) option.selected = true;
+            }
+        });
+    }
+
     function bindRow(row) {
         const type = row.querySelector('.identifier-type');
         type.addEventListener('change', () => {
@@ -349,6 +377,19 @@
     });
 
     list.querySelectorAll('.identifier-row').forEach(bindRow);
+    sourceTags.forEach(tag => {
+        tag.addEventListener('click', () => {
+            if (tag.classList.contains('selected')) {
+                tag.classList.remove('selected');
+                tag.classList.add('excluded');
+            } else if (tag.classList.contains('excluded')) {
+                tag.classList.remove('excluded');
+            } else {
+                tag.classList.add('selected');
+            }
+            updateSourceTagSelects();
+        });
+    });
     [generateToggle, aiContextToggle].forEach(control => control.addEventListener('change', updatePlan));
     form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
     form.addEventListener('submit', event => {

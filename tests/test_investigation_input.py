@@ -48,6 +48,8 @@ def test_identifiers_are_typed_and_sensitive_context_is_not_scanned():
                 "Jati Pratomo",
             ],
             "processing_mode": "same_subject",
+            "tags": ["social", "id", "SOCIAL"],
+            "excluded_tags": ["gaming"],
             "include_terms": "urban planning, Jakarta Selatan",
             "exclude_terms": "fan page\nfootball club",
         }
@@ -62,6 +64,20 @@ def test_identifiers_are_typed_and_sensitive_context_is_not_scanned():
     ]
     assert plan["include_terms"] == ["urban planning", "Jakarta Selatan"]
     assert plan["exclude_terms"] == ["fan page", "football club"]
+    assert plan["tags"] == ["social", "id"]
+    assert plan["excluded_tags"] == ["gaming"]
+
+
+def test_case_source_filter_cannot_include_and_exclude_the_same_tag():
+    with pytest.raises(InvestigationInputError, match="both included and excluded"):
+        build_investigation_plan(
+            {
+                "identifier_type": ["username"],
+                "identifier_value": ["johndoe"],
+                "tags": ["social"],
+                "excluded_tags": ["SOCIAL"],
+            }
+        )
 
 
 def test_profile_url_extracts_handle_without_fetching():

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
-from typing import Any, Callable, Dict, Iterable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import unquote, urlsplit
 
 from maigret.utils import is_plausible_username
@@ -21,6 +21,7 @@ IDENTIFIER_TYPES = {
 PROCESSING_MODES = {"independent", "same_subject"}
 MAX_IDENTIFIERS = 24
 MAX_TERMS = 20
+MAX_SOURCE_TAGS = 64
 MAX_USERNAME_LENGTH = 128
 MAX_CONTEXT_LENGTH = 500
 MAX_VARIANTS = 16
@@ -30,6 +31,7 @@ _EMAIL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _TERM_SPLIT_PATTERN = re.compile(r"[,\n\r]+")
+_SOURCE_TAG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _GENERIC_PROFILE_SEGMENTS = {
     "account",
     "accounts",
@@ -199,6 +201,20 @@ def _form_list(form: Any, key: str) -> List[str]:
     return [str(value)] if value not in (None, "") else []
 
 
+def parse_source_tags(form: Any, key: str) -> List[str]:
+    """Normalize a bounded case-scoped source filter without trusting the form."""
+    tags: List[str] = []
+    for raw_tag in _form_list(form, key):
+        tag = _normalize_text(raw_tag, limit=64).casefold()
+        if not tag or not _SOURCE_TAG_PATTERN.fullmatch(tag):
+            raise InvestigationInputError("Select a valid source category or country.")
+        if tag not in tags:
+            tags.append(tag)
+        if len(tags) >= MAX_SOURCE_TAGS:
+            break
+    return tags
+
+
 def build_investigation_plan(
     form: Any,
     *,
@@ -218,6 +234,12 @@ def build_investigation_plan(
         raise InvestigationInputError("Select a valid identifier processing mode.")
     generate_variants = "generate_name_variants" in form
     allow_ai_context = "allow_ai_context" in form
+    tags = parse_source_tags(form, "tags")
+    excluded_tags = parse_source_tags(form, "excluded_tags")
+    if set(tags).intersection(excluded_tags):
+        raise InvestigationInputError(
+            "A source category or country cannot be both included and excluded."
+        )
     identifiers: List[Dict[str, Any]] = []
     search_targets: List[Dict[str, str]] = []
 
@@ -290,6 +312,10 @@ def build_investigation_plan(
         "allow_ai_context": allow_ai_context,
         "subject_label": subject_label,
         "identifiers": identifiers,
+        "tags": tags,
+        "excluded_tags": excluded_tags,
+        # Retain legacy keys so old stored jobs and API clients remain readable.
+        # The browser investigation builder no longer collects free-form terms.
         "include_terms": parse_terms(form.get("include_terms", "")),
         "exclude_terms": parse_terms(form.get("exclude_terms", "")),
         "search_targets": search_targets,

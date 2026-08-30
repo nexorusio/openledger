@@ -40,7 +40,7 @@ silently coerced into a username:
 | Supported profile URL | Parse the account identifier locally, then run an exact check; do not fetch the URL during planning |
 | Full name | Preserve as one phrase and, when selected, generate a bounded preview of likely account handles |
 | Email or phone | Normalize and retain as subject context; never send to the username collector or permutation logic |
-| Include and exclude terms | Retain as multi-word phrases for keyword-capable adapters only |
+| Source categories and countries | Persist include/exclude selections on this case and apply them only to its account checks |
 
 Every generated handle is still checked independently. “One subject” mode
 organizes resulting claims under one Persona for review; it does not make the
@@ -145,7 +145,9 @@ second source.
 ## AI evidence proposal boundary
 
 AI analysis uses two server-side Responses API stages. The first stage analyzes
-the normalized investigation evidence and may use hosted public web search. The
+the normalized investigation evidence and, when enrichment is enabled, requires
+hosted public web search plus URL citations. An uncited model-only response is
+rejected and is not saved as a successful assessment. The
 second stage receives the assessment and its citation catalogue without browsing
 again, then returns a strict JSON Schema payload. OpenLedger treats that payload
 as untrusted and validates it again before storage.
@@ -199,17 +201,19 @@ without losing provenance.
 
 ## Location privacy
 
-Leaflet renders only approved location claims with coordinates. OpenLedger does
-not silently geocode location strings: public geocoding would disclose a query
-that may be operationally sensitive. Coordinates can be supplied by an
-authorized adapter, entered by an analyst, or proposed as a visibly approximate
-city/region map center by the cited AI pipeline. AI proposals remain untrusted
-until review and must never be interpreted as the person's precise position.
+Leaflet renders only approved location claims with coordinates. When an analyst
+approves an address or current-location claim without coordinates, OpenLedger
+sends that approved place label to the configured HTTPS geocoder and stores the
+returned bounding-box centroid. This is an explicit review-time action rather
+than background disclosure of every extracted place. Coordinates can also be
+supplied by an authorized adapter, entered by an analyst, or proposed as a
+visibly approximate city/region map center by the cited AI pipeline. These map
+centers must never be interpreted as the person's precise position.
 
-The default map uses a configurable external tile endpoint. Isolated or
-sensitive deployments should set `OPENLEDGER_MAP_TILE_URL` to an approved
-internal tile server because map tile requests reveal the client IP and viewed
-map area to the tile provider.
+The default geocoder and map use configurable external endpoints. Isolated or
+sensitive deployments should set `OPENLEDGER_GEOCODER_URL` and
+`OPENLEDGER_MAP_TILE_URL` to approved internal services because geocoding and
+map tile requests reveal query or viewed-area information to their providers.
 
 ## Deferred scope and revisit triggers
 

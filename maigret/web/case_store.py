@@ -826,6 +826,26 @@ class CaseStore:
             "claims": serialized_claims,
         }
 
+    def get_claim(self, claim_id: str) -> Optional[Dict[str, Any]]:
+        """Load the bounded claim fields needed before an analyst review."""
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(
+                        persona_claims.c.id,
+                        persona_claims.c.persona_id,
+                        persona_claims.c.field_name,
+                        persona_claims.c.display_value,
+                        persona_claims.c.review_status,
+                        persona_claims.c.latitude,
+                        persona_claims.c.longitude,
+                    ).where(persona_claims.c.id == claim_id)
+                )
+                .mappings()
+                .first()
+            )
+        return dict(row) if row else None
+
     @staticmethod
     def _upsert_persona_candidates(
         connection: Connection,

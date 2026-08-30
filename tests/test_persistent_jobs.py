@@ -357,6 +357,72 @@ def test_claim_review_requires_csrf_and_records_operator_decision(
     assert reviewed["reviews"][0]["note"].startswith("Verified")
 
 
+def test_approving_place_without_coordinates_generates_and_persists_centroid(
+    client, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Profile",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"location": "Jakarta, Indonesia"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    persona_id = persistent_store.get_case(
+        persistent_store.get_job(job_id)["case_id"]
+    )["personas"][0]["id"]
+    location = persistent_store.get_persona(persona_id)["claims"][0]
+    captured = {}
+
+    def fake_geocode(place, **kwargs):
+        captured.update(place=place, kwargs=kwargs)
+        return {
+            "latitude": -6.1841,
+            "longitude": 106.831,
+            "display_name": "Jakarta, Indonesia",
+            "precision": "place",
+        }
+
+    monkeypatch.setattr(web_app_module, "geocode_place_center", fake_geocode)
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "review-csrf"
+        browser_session["username"] = "analyst"
+
+    response = client.post(
+        f"/claims/{location['id']}/review",
+        data={
+            "csrf_token": "review-csrf",
+            "persona_id": persona_id,
+            "decision": "approved",
+        },
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert captured["place"] == "Jakarta, Indonesia"
+    reviewed = persistent_store.get_persona(persona_id)["claims"][0]
+    assert reviewed["review_status"] == "approved"
+    assert reviewed["latitude"] == pytest.approx(-6.1841)
+    assert reviewed["longitude"] == pytest.approx(106.831)
+    page = response.get_data(as_text=True)
+    assert "generated place centroid" in page
+    assert 'id="personaLocationMap"' in page
+
+
 def test_persona_refresh_queues_new_collection_in_the_same_case(
     client, persistent_store
 ):

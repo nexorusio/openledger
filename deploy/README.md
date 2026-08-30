@@ -107,19 +107,20 @@ caps confidence, and rejects sensitive or malformed suggestions. Accepted
 suggestions enter the Persona review queue as pending. AI cannot approve a
 record, and repeating analysis never clears an analyst rejection.
 
-Country codes under **Source coverage filters** describe where sources are
-focused; they do not assert or filter the subject's location. Selecting `ID`
-keeps broadly available and global platforms while excluding sources explicitly
-focused only on other countries. Language filtering is not offered because the
-source database does not provide reliable per-source language metadata.
+Category and country filters are selected in the new-investigation form and are
+stored with that case rather than applied globally. Country codes describe where
+sources are focused; they do not assert or filter the subject's location.
+Selecting `ID` keeps broadly available and global platforms while excluding
+sources explicitly focused only on other countries. Language filtering is not
+offered because the source database has no reliable per-source language field.
 
-Approved Persona locations appear on a Leaflet map only when the claim has
-analyst-verified latitude and longitude. Cited AI research may prefill a
-visibly approximate city or region map center, but it remains pending until the
-analyst approves or edits it. OpenLedger does not send location text to a public
-geocoder. The default map loads OpenStreetMap tiles; set
-`OPENLEDGER_MAP_TILE_URL` in `deploy/.env` to an approved internal tile endpoint
-for an isolated or sensitive deployment.
+When an analyst approves a place without coordinates, OpenLedger sends that
+approved label to the configured HTTPS geocoder and stores the returned
+bounding-box centroid. Cited AI research may also prefill a visibly approximate
+city or region map center. The defaults use Nominatim and OpenStreetMap tiles;
+set `OPENLEDGER_GEOCODER_URL` and `OPENLEDGER_MAP_TILE_URL` in `deploy/.env` to
+approved internal endpoints for an isolated or sensitive deployment. Set
+`OPENLEDGER_GEOCODER_TIMEOUT_SECONDS` to change the default 10-second timeout.
 
 ## Security model
 

@@ -25,12 +25,14 @@ import shutil
 import time
 import uuid
 from datetime import datetime, timedelta
+from functools import lru_cache
 from threading import Lock, Thread
 from typing import Any, Dict
 from urllib.parse import urlsplit
 import maigret
 import maigret.settings
 from maigret.ai import (
+    AIEnrichmentContractError,
     get_ai_evidence_proposals,
     get_enriched_ai_analysis,
     validate_openai_connection,
@@ -45,6 +47,7 @@ from maigret.web.case_store import (
     CaseStore,
     database_url_from_environment,
 )
+from maigret.web.geocoding import GeocodingError, geocode_place_center
 from maigret.web.investigation_input import (
     InvestigationInputError,
     build_investigation_plan,
@@ -182,6 +185,16 @@ app.config["OPENAI_API_KEY_FILE"] = os.getenv(
     "OPENAI_API_KEY_FILE",
     os.path.join("runtime", "secrets", "openai_api_key"),
 )
+app.config["GEOCODER_URL"] = os.getenv(
+    "OPENLEDGER_GEOCODER_URL",
+    "https://nominatim.openstreetmap.org/search",
+)
+try:
+    app.config["GEOCODER_TIMEOUT_SECONDS"] = int(
+        os.getenv("OPENLEDGER_GEOCODER_TIMEOUT_SECONDS", "10")
+    )
+except ValueError:
+    app.config["GEOCODER_TIMEOUT_SECONDS"] = 10
 app.config["AUTH_FILE"] = os.getenv(
     "AUTH_FILE",
     os.path.join("runtime", "secrets", "auth.json"),
@@ -253,7 +266,7 @@ SESSION_KEY_PATTERN = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_FOLDER_PATTERN = re.compile(r'^search_[A-Za-z0-9][A-Za-z0-9_-]{0,127}$')
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
-AI_ANALYSIS_SCHEMA_VERSION = 6
+AI_ANALYSIS_SCHEMA_VERSION = 7
 AUTH_SCHEMA_VERSION = 1
 PASSWORD_HASH_NAME = 'sha256'
 PASSWORD_HASH_ITERATIONS = 600_000
@@ -531,8 +544,10 @@ def parse_settings_form(form):
     return {
         'timeout': timeout,
         'top_sites': top_sites,
-        'tags': form.getlist('tags'),
-        'excluded_tags': form.getlist('excluded_tags'),
+        # Source category/country filters are persisted per investigation.
+        # Clear legacy global values whenever Settings is saved.
+        'tags': [],
+        'excluded_tags': [],
         'site_list': [s.strip() for s in form.get('site', '').split(',') if s.strip()],
         'proxy': form.get('proxy', '').strip(),
         'tor_proxy': form.get('tor_proxy', '').strip(),
@@ -558,9 +573,10 @@ def inject_settings():
     }
 
 
-def get_available_tags():
-    """Load current tags from Maigret's database for the Settings workspace."""
-    db = MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"])
+@lru_cache(maxsize=4)
+def _available_tags_for_database(database_path, modified_at):
+    del modified_at  # Part of the cache key so upstream database updates invalidate it.
+    db = MaigretDatabase().load_from_path(database_path)
     values = {
         tag
         for site in db.sites
@@ -580,6 +596,16 @@ def get_available_tags():
         }
         for tag in sorted(values)
     ]
+
+
+def get_available_tags():
+    """Load cached source filters for the case investigation builder."""
+    database_path = os.path.abspath(app.config["MAIGRET_DB_FILE"])
+    try:
+        modified_at = os.path.getmtime(database_path)
+    except OSError:
+        modified_at = None
+    return _available_tags_for_database(database_path, modified_at)
 
 
 def setup_logger(log_level, name):
@@ -1583,6 +1609,16 @@ def parse_investigation_submission(form):
         'identifiers': [
             {'type': 'username', 'value': username} for username in usernames
         ],
+        'tags': [
+            str(tag).strip().casefold()
+            for tag in form.getlist('tags')
+            if str(tag).strip()
+        ],
+        'excluded_tags': [
+            str(tag).strip().casefold()
+            for tag in form.getlist('excluded_tags')
+            if str(tag).strip()
+        ],
         'include_terms': [],
         'exclude_terms': [],
         'search_targets': [
@@ -1599,6 +1635,16 @@ def parse_investigation_submission(form):
 
 def parse_search_options(form, investigation_plan=None):
     settings = load_settings()
+    case_tags = (
+        list(investigation_plan.get('tags') or [])
+        if isinstance(investigation_plan, dict)
+        else []
+    )
+    case_excluded_tags = (
+        list(investigation_plan.get('excluded_tags') or [])
+        if isinstance(investigation_plan, dict)
+        else []
+    )
     options = {
         'top_sites': settings['top_sites'],
         'timeout': settings['timeout'],
@@ -1610,8 +1656,9 @@ def parse_search_options(form, investigation_plan=None):
         'proxy': settings['proxy'] or None,
         'tor_proxy': settings['tor_proxy'] or None,
         'i2p_proxy': settings['i2p_proxy'] or None,
-        'tags': settings['tags'],
-        'excluded_tags': settings['excluded_tags'],
+        # Categories and countries belong to the case, not global settings.
+        'tags': case_tags,
+        'excluded_tags': case_excluded_tags,
         'site_list': settings['site_list'],
     }
     if investigation_plan:
@@ -2007,6 +2054,7 @@ def index():
             continue
     return render_template(
         'index.html',
+        available_tags=get_available_tags(),
         dashboard_metrics={
             'investigations': len(entries),
             'completed': completed,
@@ -2047,7 +2095,6 @@ def settings_update():
     if request.method == 'GET':
         return render_template(
             'settings.html',
-            available_tags=get_available_tags(),
             openai_key_source=get_openai_key_source(),
         )
 
@@ -2323,14 +2370,47 @@ def review_persona_claim(claim_id):
         return redirect(url_for('history'))
     decision = request.form.get('decision', '')
     reviewer = session.get('username') or 'local-operator'
+    latitude = request.form.get('latitude')
+    longitude = request.form.get('longitude')
+    generated_map_center = False
+    geocoding_warning = None
+    if (
+        decision == 'approved'
+        and not str(latitude or '').strip()
+        and not str(longitude or '').strip()
+    ):
+        claim = case_store.get_claim(claim_id)
+        if claim and claim.get('field_name') in {'address', 'current_location'}:
+            try:
+                center = geocode_place_center(
+                    claim.get('display_value', ''),
+                    endpoint=app.config['GEOCODER_URL'],
+                    timeout_seconds=app.config['GEOCODER_TIMEOUT_SECONDS'],
+                )
+            except GeocodingError as error:
+                logging.warning("Approved-place geocoding failed: %s", error)
+                geocoding_warning = (
+                    'The record was approved, but OpenLedger could not generate '
+                    'its map center. You can add coordinates by amending the record.'
+                )
+            else:
+                if center:
+                    latitude = str(center['latitude'])
+                    longitude = str(center['longitude'])
+                    generated_map_center = True
+                else:
+                    geocoding_warning = (
+                        'The record was approved, but no map center was found. '
+                        'You can add coordinates by amending the record.'
+                    )
     try:
         stored_persona_id = case_store.review_claim(
             claim_id,
             decision,
             reviewer,
             request.form.get('note', ''),
-            request.form.get('latitude'),
-            request.form.get('longitude'),
+            latitude,
+            longitude,
         )
     except ValueError as error:
         flash(str(error), 'danger')
@@ -2338,7 +2418,15 @@ def review_persona_claim(claim_id):
     if not stored_persona_id:
         flash('That evidence record no longer exists.', 'warning')
         return redirect(url_for('cases_workspace'))
-    flash(f'Record marked {decision}.', 'success')
+    if generated_map_center:
+        flash(
+            'Record approved and mapped to the generated place centroid.',
+            'success',
+        )
+    else:
+        flash(f'Record marked {decision}.', 'success')
+    if geocoding_warning:
+        flash(geocoding_warning, 'warning')
     return redirect(url_for('persona_workspace', persona_id=stored_persona_id))
 
 
@@ -2652,6 +2740,16 @@ def analyze_session(session_id):
             'proposal_diagnostics': proposal_sync['diagnostics'],
             'cached': False,
         }
+    except AIEnrichmentContractError:
+        logging.exception(
+            'Cited AI enrichment contract failed for session %s', session_id
+        )
+        return {
+            'error': (
+                'Cited public-web research returned no usable citations. '
+                'No assessment or Persona proposals were saved; retry the analysis.'
+            )
+        }, 502
     except Exception:
         logging.exception('AI analysis failed for session %s', session_id)
         return {

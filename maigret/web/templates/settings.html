@@ -9,7 +9,7 @@
         <p class="eyebrow">Workspace configuration</p>
         <h1>Settings</h1>
         <p class="page-description">
-            Configure investigation defaults, source filters, network routing, and protected AI connections.
+            Configure investigation defaults, optional site restrictions, network routing, and protected AI connections.
         </p>
     </div>
     <span class="badge-soft success"><i data-lucide="shield-check"></i> Server protected</span>
@@ -18,7 +18,7 @@
 <div class="settings-layout">
     <nav class="panel-card settings-nav" aria-label="Settings sections">
         <a href="#investigation" class="active"><i data-lucide="sliders-horizontal"></i> Investigation</a>
-        <a href="#filters"><i data-lucide="list-filter"></i> Sources & filters</a>
+        <a href="#filters"><i data-lucide="list-filter"></i> Sites & routing</a>
         <a href="#connections"><i data-lucide="plug-zap"></i> AI connections</a>
     </nav>
 
@@ -79,31 +79,6 @@
                 <input type="hidden" id="settings-site" name="site" value="{{ web_settings.site_list | join(',') }}">
                 <datalist id="settingsSiteOptions"></datalist>
                 <div class="selected-sites" id="settingsSelectedSites"></div>
-
-                <h3 class="settings-section-title">Source coverage filters</h3>
-                <p class="form-text mb-2">
-                    Select once to include, twice to exclude, and a third time to clear. Country codes describe a source's audience;
-                    they do not filter a person's location. Global platforms remain included with a selected country.
-                </p>
-                <div class="tag-cloud" id="settingsTagCloud">
-                    {% for group, label in [('category', 'Categories'), ('country', 'Countries')] %}
-                    <p class="tag-group-label">{{ label }}</p>
-                    {% for tag in available_tags if tag.group == group %}
-                    <button type="button" class="tag {{ 'selected' if tag.value in web_settings.tags }} {{ 'excluded' if tag.value in web_settings.excluded_tags }}"
-                        data-value="{{ tag.value }}">{{ tag.label }}</button>
-                    {% endfor %}
-                    {% endfor %}
-                </div>
-                <select multiple class="hidden-select" id="settingsTags" name="tags" aria-hidden="true">
-                    {% for tag in available_tags %}
-                    <option value="{{ tag.value }}" {{ 'selected' if tag.value in web_settings.tags }}>{{ tag.label }}</option>
-                    {% endfor %}
-                </select>
-                <select multiple class="hidden-select" id="settingsExcludedTags" name="excluded_tags" aria-hidden="true">
-                    {% for tag in available_tags %}
-                    <option value="{{ tag.value }}" {{ 'selected' if tag.value in web_settings.excluded_tags }}>{{ tag.label }}</option>
-                    {% endfor %}
-                </select>
 
                 <h3 class="settings-section-title">Proxy routing</h3>
                 <div class="settings-grid">
@@ -229,39 +204,6 @@
 {% block scripts %}
 <script>
 document.addEventListener('DOMContentLoaded', function () {
-    const tags = Array.from(document.querySelectorAll('#settingsTagCloud .tag'));
-    const includedSelect = document.getElementById('settingsTags');
-    const excludedSelect = document.getElementById('settingsExcludedTags');
-
-    function updateTagSelects() {
-        Array.from(includedSelect.options).forEach(option => { option.selected = false; });
-        Array.from(excludedSelect.options).forEach(option => { option.selected = false; });
-        tags.forEach(tag => {
-            const selector = 'option[value="' + CSS.escape(tag.dataset.value) + '"]';
-            if (tag.classList.contains('selected')) {
-                const option = includedSelect.querySelector(selector);
-                if (option) option.selected = true;
-            } else if (tag.classList.contains('excluded')) {
-                const option = excludedSelect.querySelector(selector);
-                if (option) option.selected = true;
-            }
-        });
-    }
-
-    tags.forEach(tag => {
-        tag.addEventListener('click', function () {
-            if (tag.classList.contains('selected')) {
-                tag.classList.remove('selected');
-                tag.classList.add('excluded');
-            } else if (tag.classList.contains('excluded')) {
-                tag.classList.remove('excluded');
-            } else {
-                tag.classList.add('selected');
-            }
-            updateTagSelects();
-        });
-    });
-
     const siteInput = document.getElementById('settingsSiteInput');
     const siteHidden = document.getElementById('settings-site');
     const siteContainer = document.getElementById('settingsSelectedSites');
