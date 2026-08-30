@@ -60,10 +60,10 @@
             </div>
         </div>
         <div>
-            <span class="form-label">Research terms</span>
+            <span class="form-label">Case source coverage</span>
             <dl class="scope-terms">
-                <div><dt>Include</dt><dd>{{ latest_spec.include_terms | join(', ') if latest_spec.include_terms else 'None' }}</dd></div>
-                <div><dt>Exclude</dt><dd>{{ latest_spec.exclude_terms | join(', ') if latest_spec.exclude_terms else 'None' }}</dd></div>
+                <div><dt>Include</dt><dd>{{ latest_spec.tags | join(', ') if latest_spec.tags else 'All categories and countries' }}</dd></div>
+                <div><dt>Exclude</dt><dd>{{ latest_spec.excluded_tags | join(', ') if latest_spec.excluded_tags else 'None' }}</dd></div>
                 <div><dt>External AI context</dt><dd>{{ 'Allowed for cited research' if latest_spec.allow_ai_context else 'Withheld' }}</dd></div>
             </dl>
         </div>

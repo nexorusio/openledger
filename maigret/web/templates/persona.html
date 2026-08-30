@@ -64,7 +64,7 @@
             <label>Longitude
                 <input type="number" name="longitude" min="-180" max="180" step="any" value="{{ coordinate.longitude if coordinate.longitude is not none else '' }}" placeholder="e.g. 106.8272">
             </label>
-            <small>Optional. Coordinates stay inside OpenLedger; no public geocoder is called.</small>
+            <small>Optional override. If both fields are empty when you approve, OpenLedger sends the approved place label to the configured geocoder and stores its bounding-box centroid.</small>
             {% for evidence in claim.evidence %}
                 {% if evidence.details.coordinate_role == 'approximate_map_center' %}
                 <small class="coordinate-proposal-note">AI proposed an approximate {{ evidence.details.coordinate_precision }} map center ({{ evidence.details.proposed_latitude }}, {{ evidence.details.proposed_longitude }}). Verify that it represents the named place, not the person's precise position, then save the decision.</small>
@@ -183,14 +183,14 @@
         {% if group.key == 'contact' %}
         <div class="persona-map-section">
             <div class="map-section-heading">
-                <div><h3>Confirmed locations</h3><p>Only approved location claims with analyst-verified coordinates appear here.</p></div>
+                <div><h3>Confirmed locations</h3><p>Approved places are mapped from analyst coordinates, cited AI proposals, or a generated place centroid.</p></div>
                 <span class="badge-soft">{{ map_locations | length }} mapped</span>
             </div>
             {% if map_locations %}
             <div id="personaLocationMap" class="persona-location-map" aria-label="Approved persona locations"></div>
             <p class="map-disclosure">Map tiles are loaded from the configured tile provider. Use an internal tile server for isolated or sensitive deployments.</p>
             {% else %}
-            <div class="map-empty"><i data-lucide="map-pin-off"></i><span>Approve a location and add latitude/longitude to place it on the map.</span></div>
+            <div class="map-empty"><i data-lucide="map-pin-off"></i><span>Approve a place to generate its map center automatically, or enter coordinates as an override.</span></div>
             {% endif %}
         </div>
         {% endif %}

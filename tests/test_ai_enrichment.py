@@ -4,9 +4,11 @@ import pytest
 
 from maigret import ai
 from maigret.ai import (
+    AIEnrichmentContractError,
     _parse_responses_analysis,
     _parse_structured_response,
     get_ai_evidence_proposals,
+    get_enriched_ai_analysis,
 )
 
 
@@ -49,6 +51,101 @@ def test_responses_analysis_preserves_deduplicated_safe_citations():
     assert result["sources"] == [
         {"title": "Official OpenLedger profile", "url": "https://example.com/profile"}
     ]
+    assert result["web_search_completed"] is True
+
+
+def test_required_web_enrichment_rejects_uncited_model_only_prose():
+    model_only = {
+        "output": [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Assessment."}],
+            }
+        ]
+    }
+    searched_without_citations = {
+        "output": [
+            {"type": "web_search_call", "status": "completed"},
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "Assessment."}],
+            },
+        ]
+    }
+
+    with pytest.raises(AIEnrichmentContractError, match="did not perform"):
+        _parse_responses_analysis(model_only, require_web_search=True)
+    with pytest.raises(AIEnrichmentContractError, match="no cited public sources"):
+        _parse_responses_analysis(
+            searched_without_citations,
+            require_web_search=True,
+        )
+
+
+def test_enriched_analysis_request_requires_web_search_when_enabled(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "output": [
+                    {"type": "web_search_call", "status": "completed"},
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Cited assessment.",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://example.test/source",
+                                        "title": "Source",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def post(self, url, *, json, headers):
+            captured.update(url=url, payload=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai.aiohttp, "ClientSession", FakeSession)
+    result = asyncio.run(
+        get_enriched_ai_analysis(
+            api_key="test-key",
+            investigation_evidence="evidence",
+            model="gpt-5.6-terra",
+            web_search_enabled=True,
+        )
+    )
+
+    assert result["sources"] == [
+        {"title": "Source", "url": "https://example.test/source"}
+    ]
+    assert captured["payload"]["tools"] == [{"type": "web_search"}]
+    assert captured["payload"]["tool_choice"] == "required"
 
 
 def test_structured_proposal_response_requires_json_object_with_list():

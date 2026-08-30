@@ -70,6 +70,10 @@ AI_EVIDENCE_SCHEMA = {
 }
 
 
+class AIEnrichmentContractError(RuntimeError):
+    """The enrichment response did not contain the required cited research."""
+
+
 def _openledger_label(text: str) -> str:
     """Prevent the internal engine name from leaking into branded output."""
     return re.sub(r"\bmaigret\b", "OpenLedger", text, flags=re.IGNORECASE)
@@ -276,11 +280,17 @@ async def get_ai_analysis_text(
     return analysis.strip()
 
 
-def _parse_responses_analysis(response_data):
-    """Extract assistant text and deduplicated web citations from Responses."""
+def _parse_responses_analysis(response_data, *, require_web_search=False):
+    """Extract assistant text and citations, enforcing requested web grounding."""
     text_parts = []
     sources = []
     seen_urls = set()
+    web_search_completed = any(
+        isinstance(item, dict)
+        and item.get("type") == "web_search_call"
+        and item.get("status") == "completed"
+        for item in response_data.get("output", [])
+    )
     for item in response_data.get("output", []):
         if not isinstance(item, dict) or item.get("type") != "message":
             continue
@@ -321,7 +331,19 @@ def _parse_responses_analysis(response_data):
     analysis = "\n\n".join(text_parts).strip()
     if not analysis:
         raise RuntimeError("OpenAI API response did not contain an analysis")
-    return {"analysis": analysis, "sources": sources}
+    if require_web_search and not web_search_completed:
+        raise AIEnrichmentContractError(
+            "OpenAI API did not perform the required cited public-web search"
+        )
+    if require_web_search and not sources:
+        raise AIEnrichmentContractError(
+            "OpenAI API completed web search but returned no cited public sources"
+        )
+    return {
+        "analysis": analysis,
+        "sources": sources,
+        "web_search_completed": web_search_completed,
+    }
 
 
 def _parse_structured_response(response_data):
@@ -378,6 +400,9 @@ async def get_enriched_ai_analysis(
     }
     if web_search_enabled:
         payload["tools"] = [{"type": "web_search"}]
+        # Merely listing the tool leaves selection on auto. OpenLedger promises
+        # cited enrichment here, so an uncited model-only answer is not valid.
+        payload["tool_choice"] = "required"
 
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
     async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -389,7 +414,10 @@ async def get_enriched_ai_analysis(
                 raise RuntimeError(
                     "OpenAI API returned an invalid JSON response"
                 ) from exc
-    return _parse_responses_analysis(response_data)
+    return _parse_responses_analysis(
+        response_data,
+        require_web_search=web_search_enabled,
+    )
 
 
 async def get_ai_evidence_proposals(

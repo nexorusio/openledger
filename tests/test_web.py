@@ -77,6 +77,10 @@ def test_index_renders(client):
     assert 'name="identifier_type"' in body
     assert 'name="identifier_value"' in body
     assert '<form' in body
+    assert 'Case source filters' in body
+    assert 'e.g. John Doe' in body
+    assert 'Jati Pratomo' not in body
+    assert 'Nexorus, urban planning' not in body
 
 
 def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
@@ -186,8 +190,8 @@ def test_typed_investigation_builder_creates_a_grouped_query_plan(
             'processing_mode': 'same_subject',
             'generate_name_variants': 'on',
             'allow_ai_context': 'on',
-            'include_terms': 'Jakarta, urban planning',
-            'exclude_terms': 'fan page, football',
+            'tags': ['social', 'id'],
+            'excluded_tags': ['gaming'],
             'mode': 'fast',
         },
     )
@@ -204,7 +208,10 @@ def test_typed_investigation_builder_creates_a_grouped_query_plan(
     assert spec['processing_mode'] == 'same_subject'
     assert spec['subject_label'] == 'Jati Pratomo'
     assert spec['allow_ai_context'] is True
-    assert spec['exclude_terms'] == ['fan page', 'football']
+    assert spec['tags'] == ['social', 'id']
+    assert spec['excluded_tags'] == ['gaming']
+    assert captured['options']['tags'] == ['social', 'id']
+    assert captured['options']['excluded_tags'] == ['gaming']
     assert 'jati@example.com' not in captured['usernames']
     assert '+628123456789' not in captured['usernames']
 
@@ -239,7 +246,9 @@ def test_investigation_builder_explains_identifier_capabilities(client):
     assert 'Known identifiers' in body
     assert 'A full name may contain spaces' in body
     assert 'Phone and email values are never permuted' in body
-    assert 'Exclude terms' in body
+    assert 'Case source filters' in body
+    assert 'Include terms' not in body
+    assert 'Exclude terms' not in body
     assert 'Query plan' in body
 
 
@@ -1522,8 +1531,8 @@ def test_settings_update_saves_and_redirects_to_settings(client, web_app):
     settings = web_app.load_settings()
     assert settings['timeout'] == 15
     assert settings['top_sites'] == 250
-    assert settings['tags'] == ['coding', 'tech']
-    assert settings['excluded_tags'] == ['porn']
+    assert settings['tags'] == []
+    assert settings['excluded_tags'] == []
     assert settings['site_list'] == ['GitHub', 'Reddit']
     assert settings['proxy'] == '127.0.0.1:1080'
     assert settings['with_domains'] is True
@@ -1546,7 +1555,7 @@ def test_settings_update_invalid_timeout_falls_back_to_default(client, web_app):
     assert settings['top_sites'] == web_app.DEFAULT_SETTINGS['top_sites']
 
 
-def test_parse_search_options_uses_saved_settings(web_app):
+def test_parse_search_options_uses_saved_defaults_and_case_filters(web_app):
     web_app.save_settings(
         {
             **web_app.DEFAULT_SETTINGS,
@@ -1559,12 +1568,16 @@ def test_parse_search_options_uses_saved_settings(web_app):
         }
     )
 
-    options = web_app.parse_search_options({})
+    options = web_app.parse_search_options(
+        {},
+        {'tags': ['social', 'id'], 'excluded_tags': ['gaming']},
+    )
 
     assert options['timeout'] == 20
     assert options['top_sites'] == 100
     assert options['proxy'] == '127.0.0.1:8080'
-    assert options['tags'] == ['gaming']
+    assert options['tags'] == ['social', 'id']
+    assert options['excluded_tags'] == ['gaming']
     assert options['site_list'] == ['GitHub']
     assert options['disable_extracting'] is True
     assert options['all_sites'] is False
