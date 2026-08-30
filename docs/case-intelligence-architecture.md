@@ -124,6 +124,27 @@ names. Preserve the tool name, record URL, record identifier, collection time,
 and original value in evidence. Tool confidence must be translated through a
 documented source-specific policy; it must not be treated as identity certainty.
 
+The initial User Scanner integration is deliberately narrower than the tool's
+full capability. It runs email-registration checks only after explicit case
+opt-in, only in one-subject mode, and always with notification-producing and
+adult modules disabled. It executes in a subprocess because User Scanner
+patches shared HTTP client classes when imported. Positive registrations become
+pending `account_registration` claims; all bounded native outcomes remain on
+the investigation result for diagnostics and AI analysis. User Scanner's
+username sweep and recursive cross-scan are deferred because they overlap
+Maigret and can turn handle collisions into unsupported identity links.
+
+OpenGraph Intel (OGI) may consume a read-only graph projection of approved
+OpenLedger claims and their evidence. Its project, entity, and edge tables are
+not authoritative and must not receive collector writes independently. An OGI
+adapter must preserve OpenLedger claim/evidence identifiers and rebuild from
+PostgreSQL, so deleting the projection never deletes case evidence.
+
+The production image installs User Scanner from an immutable, reviewed commit
+archive. A fork synchronization does not change the running collector until a
+separate OpenLedger pull request updates that pin and passes the OpenLedger
+regression and image-build gates.
+
 ### Internal data source
 
 Use a service account with least-privilege, read-only access. The adapter should

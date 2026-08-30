@@ -1658,6 +1658,7 @@ class CaseStore:
 
     def sync_persona_claims(self, job_id: str, result: Dict[str, Any]) -> int:
         """Upsert deterministic claims while preserving every human decision."""
+        from maigret.web.collector_adapters import extract_user_scanner_claims
         from maigret.web.persona_intelligence import extract_persona_claims
 
         now = utcnow()
@@ -1709,6 +1710,16 @@ class CaseStore:
                     persona_id=persona_id,
                     job_id=job_id,
                     candidates=extract_persona_claims(report),
+                    now=now,
+                )
+            if grouped_persona_id:
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=grouped_persona_id,
+                    job_id=job_id,
+                    candidates=extract_user_scanner_claims(
+                        result.get("collector_observations") or []
+                    ),
                     now=now,
                 )
             connection.execute(

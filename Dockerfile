@@ -24,6 +24,11 @@ ENV FLASK_HOST=0.0.0.0
 # run in the separate worker service; threads allow concurrent page, report,
 # and replayable streaming requests.
 FROM base AS web
+# Keep the optional web collector isolated from OpenLedger's declared Python
+# dependency graph and pin it to a safety-reviewed commit. Upgrades happen only
+# through a reviewed pin change, never by following a moving branch at build.
+ARG USER_SCANNER_ARCHIVE_URL="https://github.com/nexorusio/user-scanner/archive/6fcd9d677eb25601268ebab5bfb4ed27e00e1157.tar.gz"
+RUN python3 -m pip install --no-cache-dir "${USER_SCANNER_ARCHIVE_URL}"
 RUN pip install --no-cache-dir '.[pdf]' 'gunicorn>=23,<24'
 ENV PORT=5000
 ENV GUNICORN_THREADS=4

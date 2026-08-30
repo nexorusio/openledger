@@ -103,6 +103,17 @@
                     </div>
                 </fieldset>
 
+                {% if user_scanner_available %}
+                <fieldset class="investigation-section">
+                    <legend class="form-label mb-2">Additional email evidence</legend>
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="enable-user-scanner-email" name="enable_user_scanner_email">
+                        <label class="form-check-label" for="enable-user-scanner-email">Check email registrations with User Scanner</label>
+                        <div class="form-text">Off by default. Runs only in One subject mode, skips notification-producing and adult modules, and stores positive registrations as pending evidence for analyst review.</div>
+                    </div>
+                </fieldset>
+                {% endif %}
+
                 <fieldset class="investigation-section">
                     <legend class="form-label mb-2">Result grouping</legend>
                     <div class="mode-selector">
@@ -230,6 +241,7 @@
     const addButton = document.getElementById('add-identifier');
     const generateToggle = document.getElementById('generate-name-variants');
     const aiContextToggle = document.getElementById('allow-ai-context');
+    const userScannerToggle = document.getElementById('enable-user-scanner-email');
     const count = document.getElementById('query-plan-count');
     const summary = document.getElementById('query-plan-summary');
     const targets = document.getElementById('query-plan-targets');
@@ -244,7 +256,7 @@
         social_handle: ['e.g. @johndoe', 'The @ prefix is removed; exact account check'],
         profile_url: ['e.g. https://instagram.com/johndoe', 'Extract account handle; no URL is fetched'],
         full_name: ['e.g. John Doe', 'Retain as one phrase; optional handle variants'],
-        email: ['e.g. name@example.com', 'Case context only; never sent to username checks'],
+        email: ['e.g. name@example.com', 'Case context; optional silent registration evidence'],
         phone: ['e.g. +628123456789', 'Normalized case context only; never permuted']
     };
 
@@ -319,6 +331,13 @@
         const contextual = Array.from(list.querySelectorAll('.identifier-row'))
             .filter(row => ['full_name', 'email', 'phone'].includes(row.querySelector('.identifier-type').value)
                 && row.querySelector('.identifier-value').value.trim()).length;
+        const emails = Array.from(list.querySelectorAll('.identifier-row'))
+            .filter(row => row.querySelector('.identifier-type').value === 'email'
+                && row.querySelector('.identifier-value').value.trim()).length;
+        if (userScannerToggle) {
+            userScannerToggle.disabled = !grouped || emails !== 1;
+            if (userScannerToggle.disabled) userScannerToggle.checked = false;
+        }
         count.textContent = `${planned.length} account ${planned.length === 1 ? 'check' : 'checks'}`;
         summary.textContent = planned.length
             ? `${planned.length} exact account candidate${planned.length === 1 ? '' : 's'} will be checked independently${contextual ? `; ${contextual} context value${contextual === 1 ? '' : 's'} will remain attached to the case` : ''}.`
@@ -329,7 +348,10 @@
             chip.textContent = value;
             return chip;
         }));
-        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
+        const scannerNote = userScannerToggle && userScannerToggle.checked
+            ? ' Silent User Scanner email registrations will enter the same pending evidence review.'
+            : '';
+        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${scannerNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
         error.hidden = true;
     }
 
@@ -390,7 +412,8 @@
             updateSourceTagSelects();
         });
     });
-    [generateToggle, aiContextToggle].forEach(control => control.addEventListener('change', updatePlan));
+    [generateToggle, aiContextToggle, userScannerToggle].filter(Boolean)
+        .forEach(control => control.addEventListener('change', updatePlan));
     form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
     form.addEventListener('submit', event => {
         if (!queryTargets().length) {

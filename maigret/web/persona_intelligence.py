@@ -33,6 +33,7 @@ FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
         "title": "Digital presence",
         "fields": (
             ("social_account", "Social media and public accounts"),
+            ("account_registration", "Email registration evidence"),
             ("website", "Website"),
         ),
     },

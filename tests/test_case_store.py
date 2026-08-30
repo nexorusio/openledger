@@ -388,6 +388,59 @@ def test_ai_corroboration_merges_existing_claim_without_altering_reviewed_score(
     assert len(account_claim["evidence"]) == 2
 
 
+def test_user_scanner_observations_share_the_canonical_claim_and_evidence_store(store):
+    job_id = store.create_investigation(
+        ["alice"],
+        {
+            "investigation_spec": {
+                "processing_mode": "same_subject",
+                "subject_label": "Alice",
+                "enable_user_scanner_email": True,
+            }
+        },
+    )
+    store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 0,
+        "individual_reports": [],
+        "collector_observations": [
+            {
+                "source_engine": "user_scanner_email",
+                "subject_type": "email",
+                "subject_value": "alice@example.test",
+                "status": "Registered",
+                "site_name": "Gravatar",
+                "category": "social",
+                "source_url": "https://gravatar.com",
+                "extra": {"username": "alice"},
+                "media": {},
+            }
+        ],
+    }
+    store.finish(job_id, result)
+
+    assert store.sync_persona_claims(job_id, result) == 1
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    persona = store.get_persona(case["personas"][0]["id"])
+    claim = persona["claims"][0]
+
+    assert claim["field_name"] == "account_registration"
+    assert claim["review_status"] == "pending"
+    assert claim["source_engine"] == "user_scanner_email"
+    assert claim["evidence"][0]["evidence_type"] == "email_registration_probe"
+    lineage = store.get_claim_lineage(claim["id"])
+    assert len(lineage) == 1
+    assert lineage[0]["provenance_type"] == "investigation_job"
+    assert lineage[0]["job_id"] == job_id
+    assert lineage[0]["source_engine"] == "user_scanner_email"
+    assert lineage[0]["native_status"] == "registered"
+    assert lineage[0]["source_record_id"].startswith("user_scanner_email:")
+
+
 def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store):
     job_id = store.create_investigation(["alice"], {})
     store.claim_next("worker:test")

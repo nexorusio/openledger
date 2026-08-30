@@ -26,6 +26,7 @@
     <div class="live-stats">
         <div class="live-stat"><span>Sources checked</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
         <div class="live-stat"><span>Profiles found</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
+        <div class="live-stat"><span>Email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
         <div class="live-stat"><span>Graph status</span><strong>Streaming</strong></div>
     </div>
     <div class="progress mb-3" style="height: 8px;">
@@ -43,9 +44,11 @@
     const doneRedirect = {{ done_redirect|tojson }};
     const csrfToken = {{ csrf_token|tojson }};
     const completedFoundCount = {{ completed_found_count|tojson }};
+    const completedRegistrationCount = {{ completed_registration_count|tojson }};
 
     let nodes = null, edges = null, network = null;
     let foundCount = doneRedirect ? completedFoundCount : 0;
+    let registrationCount = doneRedirect ? completedRegistrationCount : 0;
 
     function ensureGraph() {
         if (network) return;
@@ -120,6 +123,11 @@
         }
     }
 
+    function completionText() {
+        return 'Completed — ' + foundCount + ' accounts and ' + registrationCount
+            + ' email registrations found.';
+    }
+
     function stopScan() {
         fetch('/api/scan/' + jobId + '/stop', {
             method: 'POST',
@@ -145,6 +153,19 @@
             foundCount++;
             document.getElementById('stat-found').textContent = foundCount;
             addFound(ev);
+        } else if (ev.type === 'collector_started') {
+            statusEl.textContent = 'Checking email registrations with User Scanner (silent modules only)…';
+            const bar = document.getElementById('live-progress');
+            bar.style.width = '100%';
+            bar.classList.add('progress-bar-striped', 'progress-bar-animated');
+        } else if (ev.type === 'collector_completed') {
+            registrationCount += Number(ev.found || 0);
+            document.getElementById('stat-registrations').textContent = registrationCount;
+            document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
+            statusEl.textContent = 'Email evidence collected. Finalizing the investigation…';
+        } else if (ev.type === 'collector_error') {
+            document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
+            statusEl.textContent = 'Email evidence was unavailable; finalizing profile findings…';
         } else if (ev.type === 'stopped') {
             statusEl.textContent = 'Stopped.';
         } else if (ev.type === 'error') {
@@ -161,7 +182,7 @@
                 text = 'Investigation failed. Review History for details.';
             } else {
                 text = ev.redirect
-                    ? 'Completed — ' + foundCount + ' accounts found.'
+                    ? completionText()
                     : 'Completed — nothing to analyze.';
             }
             finish(text, ev.redirect);
@@ -171,7 +192,7 @@
     document.getElementById('stopBtn').addEventListener('click', stopScan);
 
     if (doneRedirect) {
-        finish('Completed — ' + foundCount + ' accounts found.', doneRedirect);
+        finish(completionText(), doneRedirect);
     } else {
         const evtSource = new EventSource('/api/scan/' + jobId + '/stream');
         evtSource.onmessage = onScanEvent;

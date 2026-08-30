@@ -47,6 +47,11 @@ from maigret.web.case_store import (
     CaseStore,
     database_url_from_environment,
 )
+from maigret.web.collector_adapters import (
+    run_user_scanner_email,
+    user_scanner_available,
+    user_scanner_email_targets,
+)
 from maigret.web.geocoding import GeocodingError, geocode_place_center
 from maigret.web.investigation_input import (
     InvestigationInputError,
@@ -598,6 +603,7 @@ def inject_settings():
         'csrf_token': get_csrf_token(),
         'current_user': session.get('username'),
         'openai_analysis_models': OPENAI_ANALYSIS_MODELS,
+        'user_scanner_available': user_scanner_available(),
     }
 
 
@@ -1172,6 +1178,31 @@ def build_ai_markdown(
                 )
         lines.append('')
 
+    observations = result_data.get('collector_observations') or []
+    if observations:
+        allow_subject_value = bool(
+            (investigation_plan or get_investigation_plan(result_data)).get(
+                'allow_ai_context'
+            )
+        )
+        lines.extend(['## Additional collector evidence', ''])
+        for observation in list(observations)[:600]:
+            if not isinstance(observation, dict):
+                continue
+            summary = {
+                'source_engine': observation.get('source_engine'),
+                'status': observation.get('status'),
+                'site_name': observation.get('site_name'),
+                'category': observation.get('category'),
+            }
+            if allow_subject_value:
+                summary['subject_type'] = observation.get('subject_type')
+                summary['subject_value'] = observation.get('subject_value')
+                summary['source_url'] = observation.get('source_url')
+                summary['extra'] = observation.get('extra') or {}
+            lines.append('- ' + json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        lines.append('')
+
     # Bound cost and prevent an unexpectedly large model request.
     return '\n'.join(lines)[:100_000]
 
@@ -1498,7 +1529,13 @@ def synchronize_ai_evidence_proposals(
     return synchronized
 
 
-def build_reports(general_results, usernames, session_key):
+def build_reports(
+    general_results,
+    usernames,
+    session_key,
+    *,
+    collector_observations=None,
+):
     """Write per-username CSV/JSON/PDF/HTML reports + combined graph to disk.
 
     Shared by the background /search job and the live SSE /api/scan job, so
@@ -1597,6 +1634,13 @@ def build_reports(general_results, usernames, session_key):
         'usernames': usernames,
         'individual_reports': individual_reports,
         'found_count': found_count,
+        'collector_observations': list(collector_observations or []),
+        'collector_found_count': sum(
+            1
+            for observation in list(collector_observations or [])
+            if isinstance(observation, dict)
+            and str(observation.get('status') or '').casefold() == 'registered'
+        ),
     }
 
 
@@ -1656,6 +1700,10 @@ def parse_investigation_submission(form):
             form,
             profile_url_resolver=resolve_profile_url_identifiers,
         )
+        if plan.get('enable_user_scanner_email') and not user_scanner_available():
+            raise InvestigationInputError(
+                'User Scanner email checks are unavailable in this deployment.'
+            )
         return search_usernames(plan), plan
 
     # Backward compatibility for the documented /api/scan username payload.
@@ -1667,6 +1715,7 @@ def parse_investigation_submission(form):
         'processing_mode': 'independent',
         'generate_name_variants': False,
         'allow_ai_context': False,
+        'enable_user_scanner_email': False,
         'subject_label': usernames[0],
         'identifiers': [
             {'type': 'username', 'value': username} for username in usernames
@@ -1750,6 +1799,7 @@ def hydrate_persistent_options(options):
 
 
 async def _stream_search(job, usernames, options, cancellation_check=None):
+    """Orchestrate case-scoped collectors while retaining native evidence."""
     q = job['queue']
     general_results = []
     for username in usernames:
@@ -1792,6 +1842,53 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
             if notify.results:
                 general_results.append((username.strip(), 'username', notify.results))
             q.put({'type': 'error', 'message': str(e), 'username': username.strip()})
+
+    observations = []
+    investigation_plan = options.get('investigation_spec') or {}
+    for email in user_scanner_email_targets(investigation_plan):
+        if job['cancelled'] or (cancellation_check and cancellation_check()):
+            break
+        q.put(
+            {
+                'type': 'collector_started',
+                'collector': 'user-scanner',
+                'target_type': 'email',
+            }
+        )
+        try:
+            collected = await run_user_scanner_email(
+                email,
+                cancellation_check=lambda: (
+                    bool(job.get('cancelled'))
+                    or bool(cancellation_check and cancellation_check())
+                ),
+            )
+            observations.extend(collected)
+            q.put(
+                {
+                    'type': 'collector_completed',
+                    'collector': 'user-scanner',
+                    'observations': len(collected),
+                    'found': sum(
+                        1
+                        for item in collected
+                        if str(item.get('status') or '').casefold() == 'registered'
+                    ),
+                }
+            )
+        except asyncio.CancelledError:
+            q.put({'type': 'stopped', 'collector': 'user-scanner'})
+            break
+        except Exception as exc:
+            logging.exception('User Scanner email collection failed')
+            q.put(
+                {
+                    'type': 'collector_error',
+                    'collector': 'user-scanner',
+                    'message': str(exc),
+                }
+            )
+    job['collector_observations'] = observations
     return general_results
 
 
@@ -1802,6 +1899,7 @@ def finalize_stream_job(
     started_at,
     event_sink,
     *,
+    collector_observations=None,
     cancelled=False,
     interrupted=False,
 ):
@@ -1810,7 +1908,14 @@ def finalize_stream_job(
     terminal_status = 'failed'
     if general_results:
         try:
-            result = build_reports(general_results, usernames, job_id)
+            report_kwargs = (
+                {'collector_observations': collector_observations}
+                if collector_observations
+                else {}
+            )
+            result = build_reports(
+                general_results, usernames, job_id, **report_kwargs
+            )
             result['started_at'] = started_at
             if cancelled or interrupted:
                 result['collection_status'] = (
@@ -1890,6 +1995,7 @@ def run_stream_job(job_id, usernames, options):
         general_results,
         started_at,
         job['queue'],
+        collector_observations=job.get('collector_observations'),
         cancelled=bool(job.get('cancelled')),
     )
 
@@ -1946,6 +2052,7 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         general_results,
         started_at,
         sink,
+        collector_observations=runtime_job.get('collector_observations'),
         cancelled=store.is_cancel_requested(job_id) and not shutdown_requested,
         interrupted=shutdown_requested,
     )
@@ -2553,6 +2660,9 @@ def live_results(job_id):
         job_id=job_id,
         done_redirect=done_redirect,
         completed_found_count=(result or {}).get('found_count', 0),
+        completed_registration_count=(result or {}).get(
+            'collector_found_count', 0
+        ),
     )
 
 
