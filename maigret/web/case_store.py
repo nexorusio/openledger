@@ -28,6 +28,7 @@ from sqlalchemy import (
     create_engine,
     delete,
     event,
+    func,
     insert,
     or_,
     select,
@@ -46,6 +47,7 @@ from maigret.web.external_evidence import (
     normalize_policy_context,
     normalize_source_id,
     stable_fingerprint,
+    validate_locator_authority,
 )
 
 metadata = MetaData()
@@ -1121,7 +1123,9 @@ class CaseStore:
         with self.engine.begin() as connection:
             receipt = (
                 connection.execute(
-                    select(query_receipts).where(query_receipts.c.id == receipt_id)
+                    select(query_receipts)
+                    .where(query_receipts.c.id == receipt_id)
+                    .with_for_update()
                 )
                 .mappings()
                 .first()
@@ -1155,6 +1159,7 @@ class CaseStore:
                 raise ExternalEvidenceValidationError(
                     "Evidence authority does not match the registered source"
                 )
+            validate_locator_authority(evidence["locator"], source["authority"])
             classification_ceiling = receipt["policy_context"][
                 "classification_ceiling"
             ]
@@ -1162,6 +1167,11 @@ class CaseStore:
                 raise ExternalEvidenceValidationError(
                     "Evidence classification does not match the authorized ceiling"
                 )
+            stored_evidence = {
+                key: value
+                for key, value in evidence.items()
+                if key != "schema_version"
+            }
             existing = (
                 connection.execute(
                     select(external_evidence_records).where(
@@ -1177,23 +1187,28 @@ class CaseStore:
                 .first()
             )
             if existing:
-                immutable = {
-                    "content_hash": evidence["content_hash"],
-                    "locator": evidence["locator"],
-                    "record_type": evidence["record_type"],
+                timestamp_fields = {"observed_at", "valid_from", "valid_to"}
+                existing_version = {
+                    key: (
+                        _as_iso(existing[key])
+                        if key in timestamp_fields
+                        else existing[key]
+                    )
+                    for key in stored_evidence
                 }
-                if any(existing[key] != value for key, value in immutable.items()):
+                incoming_version = {
+                    key: _as_iso(value) if key in timestamp_fields else value
+                    for key, value in stored_evidence.items()
+                }
+                if stable_fingerprint(existing_version) != stable_fingerprint(
+                    incoming_version
+                ):
                     raise ExternalEvidenceValidationError(
                         "External source versions are immutable"
                     )
                 evidence_id = str(existing["id"])
             else:
                 evidence_id = str(uuid.uuid4())
-                stored_evidence = {
-                    key: value
-                    for key, value in evidence.items()
-                    if key != "schema_version"
-                }
                 connection.execute(
                     insert(external_evidence_records).values(
                         id=evidence_id,
@@ -1208,6 +1223,22 @@ class CaseStore:
                 )
             )
             if not linked:
+                result_count = receipt["result_count"]
+                if result_count is None:
+                    raise ExternalEvidenceValidationError(
+                        "Completed query receipt must declare a result count"
+                    )
+                attached_count = connection.scalar(
+                    select(func.count())
+                    .select_from(external_evidence_receipts)
+                    .where(
+                        external_evidence_receipts.c.query_receipt_id == receipt_id
+                    )
+                )
+                if int(attached_count or 0) >= int(result_count):
+                    raise ExternalEvidenceValidationError(
+                        "Query receipt result count does not allow another evidence record"
+                    )
                 connection.execute(
                     insert(external_evidence_receipts).values(
                         evidence_id=evidence_id,

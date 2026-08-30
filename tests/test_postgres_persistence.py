@@ -6,6 +6,7 @@ import pytest
 from sqlalchemy import text
 
 from maigret.web.case_store import CaseStore
+from maigret.web.external_evidence import ExternalEvidenceValidationError
 
 POSTGRES_URL = os.getenv("OPENLEDGER_TEST_POSTGRES_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -70,3 +71,89 @@ def test_postgres_allows_only_one_investigation_worker_lock(postgres_store):
     assert replacement_lock is not None
     replacement_lock.close()
     competing_store.dispose()
+
+
+def test_postgres_enforces_external_evidence_receipt_and_immutability_guards(
+    postgres_store,
+):
+    job_id = postgres_store.create_investigation(["alice"], {})
+    case_id = postgres_store.get_job(job_id)["case_id"]
+    postgres_store.register_data_source(
+        "client.datamart",
+        name="Client governed datamart",
+        source_type="datamart",
+        authority="client-alpha",
+        default_classification="restricted",
+    )
+    receipt_id = postgres_store.create_query_receipt(
+        case_id,
+        "client.datamart",
+        requested_by="analyst-7",
+        purpose="Corroborate the assigned case",
+        query_document={"record_ids": ["record-42"]},
+        policy_context={
+            "principal_id": "analyst-7",
+            "purpose": "Corroborate the assigned case",
+            "authority": "client-alpha",
+            "classification_ceiling": "restricted",
+        },
+    )
+    postgres_store.complete_query_receipt(receipt_id, 1)
+    envelope = {
+        "schema_version": 1,
+        "source_id": "client.datamart",
+        "source_record_id": "record-42",
+        "source_version": "v1",
+        "record_type": "identity.observation",
+        "content_hash": f"sha256:{'b' * 64}",
+        "observed_at": "2026-08-30T12:00:00Z",
+        "handling": {
+            "classification": "restricted",
+            "authority": "client-alpha",
+        },
+        "locator": {"uri": "datamart://client-alpha/record-42/v1"},
+        "attributes": {"source_table": "identity_observations"},
+        "preview": "Redacted preview",
+    }
+
+    evidence_id = postgres_store.attach_external_evidence(
+        case_id,
+        receipt_id,
+        envelope,
+        attached_by="analyst-7",
+    )
+    assert evidence_id == postgres_store.attach_external_evidence(
+        case_id,
+        receipt_id,
+        envelope,
+        attached_by="analyst-7",
+    )
+    with pytest.raises(ExternalEvidenceValidationError, match="immutable"):
+        postgres_store.attach_external_evidence(
+            case_id,
+            receipt_id,
+            {**envelope, "preview": "Conflicting preview"},
+            attached_by="analyst-7",
+        )
+    with pytest.raises(ExternalEvidenceValidationError, match="locator authority"):
+        postgres_store.attach_external_evidence(
+            case_id,
+            receipt_id,
+            {
+                **envelope,
+                "source_record_id": "record-43",
+                "locator": {"uri": "datamart://another-client/record-43/v1"},
+            },
+            attached_by="analyst-7",
+        )
+    with pytest.raises(ExternalEvidenceValidationError, match="result count"):
+        postgres_store.attach_external_evidence(
+            case_id,
+            receipt_id,
+            {
+                **envelope,
+                "source_record_id": "record-43",
+                "locator": {"uri": "datamart://client-alpha/record-43/v1"},
+            },
+            attached_by="analyst-7",
+        )

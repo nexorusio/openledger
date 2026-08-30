@@ -76,10 +76,25 @@ def test_external_evidence_contract_rejects_unsafe_payloads(overrides, message):
 
 
 def test_bounded_documents_reject_credentials_and_resource_exhaustion_values():
-    with pytest.raises(ExternalEvidenceValidationError, match="credential field"):
-        normalize_bounded_document(
-            {"nested": {"client_secret": "do-not-store"}}, "document"
-        )
+    for credential_key in (
+        "client_secret",
+        "clientSecret",
+        "apiKey",
+        "APIKey",
+        "db_password",
+        "serviceApiKeyValue",
+        "authorizationHeader",
+    ):
+        with pytest.raises(
+            ExternalEvidenceValidationError,
+            match="credential field",
+        ):
+            normalize_bounded_document(
+                {"nested": {credential_key: "do-not-store"}}, "document"
+            )
+    assert normalize_bounded_document(
+        {"secretary_name": "Not a credential key"}, "document"
+    ) == {"secretary_name": "Not a credential key"}
     with pytest.raises(ExternalEvidenceValidationError, match="non-finite"):
         normalize_bounded_document({"score": math.inf}, "document")
     with pytest.raises(ExternalEvidenceValidationError, match="maximum depth"):
@@ -89,3 +104,20 @@ def test_bounded_documents_reject_credentials_and_resource_exhaustion_values():
         )
     with pytest.raises(ExternalEvidenceValidationError, match="control characters"):
         normalize_bounded_document({"value": "safe\x00unsafe"}, "document")
+
+
+@pytest.mark.parametrize("invalid_value", [None, [], "", 0, False])
+@pytest.mark.parametrize("field_name", ["validity", "attributes"])
+def test_external_evidence_rejects_explicit_non_object_optional_fields(
+    field_name, invalid_value
+):
+    with pytest.raises(ExternalEvidenceValidationError, match=field_name):
+        normalize_external_evidence(evidence_envelope(**{field_name: invalid_value}))
+
+
+@pytest.mark.parametrize("invalid_value", [[], "", 0, False])
+def test_external_evidence_rejects_falsey_non_timestamp_validity_values(
+    invalid_value,
+):
+    with pytest.raises(ExternalEvidenceValidationError, match="validity.from"):
+        normalize_external_evidence(evidence_envelope(validity={"from": invalid_value}))

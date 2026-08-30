@@ -1,7 +1,11 @@
 import pytest
+from sqlalchemy import delete
 
-from maigret.web.case_store import CaseStore
+from maigret.web.case_store import CaseStore, claim_observations
 from maigret.web.external_evidence import ExternalEvidenceValidationError
+from migrations.versions.e91b7a4c2d6f_backfill_claim_observations import (
+    _backfill_claim_observations,
+)
 
 
 @pytest.fixture
@@ -74,7 +78,7 @@ def register_source(store):
     )
 
 
-def create_completed_receipt(store, case_id):
+def create_completed_receipt(store, case_id, *, result_count=1):
     receipt_id = store.create_query_receipt(
         case_id,
         "client.datamart",
@@ -88,7 +92,7 @@ def create_completed_receipt(store, case_id):
             "classification_ceiling": "restricted",
         },
     )
-    store.complete_query_receipt(receipt_id, 1)
+    store.complete_query_receipt(receipt_id, result_count)
     return receipt_id
 
 
@@ -127,6 +131,26 @@ def test_external_evidence_is_case_scoped_idempotent_and_immutable(store):
             envelope(content_hash=f"sha256:{'c' * 64}"),
             attached_by="analyst-7",
         )
+    for conflicting_fields in (
+        {"observed_at": "2026-08-30T12:00:01Z"},
+        {"validity": {"from": "2026-01-01T00:00:00Z"}},
+        {
+            "handling": {
+                "classification": "restricted",
+                "authority": "client-alpha",
+                "policy_tags": ["different-policy"],
+            }
+        },
+        {"attributes": {"source_table": "different_table"}},
+        {"preview": "A different retained preview"},
+    ):
+        with pytest.raises(ExternalEvidenceValidationError, match="immutable"):
+            store.attach_external_evidence(
+                case_id,
+                receipt_id,
+                envelope(**conflicting_fields),
+                attached_by="analyst-7",
+            )
     with pytest.raises(ExternalEvidenceValidationError, match="classification"):
         store.attach_external_evidence(
             case_id,
@@ -137,6 +161,54 @@ def test_external_evidence_is_case_scoped_idempotent_and_immutable(store):
                     "classification": "secret",
                     "authority": "client-alpha",
                 },
+            ),
+            attached_by="analyst-7",
+        )
+    with pytest.raises(ExternalEvidenceValidationError, match="locator authority"):
+        store.attach_external_evidence(
+            case_id,
+            receipt_id,
+            envelope(
+                source_record_id="record-43",
+                locator={"uri": "datamart://another-client/record-43/v1"},
+            ),
+            attached_by="analyst-7",
+        )
+
+
+def test_query_receipt_result_count_bounds_distinct_evidence_links(store):
+    _, case_id, _ = create_case_with_claim(store)
+    register_source(store)
+
+    empty_receipt_id = create_completed_receipt(store, case_id, result_count=0)
+    with pytest.raises(ExternalEvidenceValidationError, match="result count"):
+        store.attach_external_evidence(
+            case_id,
+            empty_receipt_id,
+            envelope(),
+            attached_by="analyst-7",
+        )
+
+    receipt_id = create_completed_receipt(store, case_id, result_count=1)
+    evidence_id = store.attach_external_evidence(
+        case_id,
+        receipt_id,
+        envelope(),
+        attached_by="analyst-7",
+    )
+    assert evidence_id == store.attach_external_evidence(
+        case_id,
+        receipt_id,
+        envelope(),
+        attached_by="analyst-7",
+    )
+    with pytest.raises(ExternalEvidenceValidationError, match="result count"):
+        store.attach_external_evidence(
+            case_id,
+            receipt_id,
+            envelope(
+                source_record_id="record-43",
+                locator={"uri": "datamart://client-alpha/record-43/v1"},
             ),
             attached_by="analyst-7",
         )
@@ -226,3 +298,24 @@ def test_cross_case_receipts_and_claim_provenance_are_rejected(store):
             source_engine="maigret",
             native_status="observed",
         )
+
+
+def test_lineage_migration_backfills_retained_claim_provenance_idempotently(store):
+    job_id, _, claim_id = create_case_with_claim(store)
+    with store.engine.begin() as connection:
+        connection.execute(
+            delete(claim_observations).where(
+                claim_observations.c.claim_id == claim_id
+            )
+        )
+        _backfill_claim_observations(connection)
+        _backfill_claim_observations(connection)
+
+    lineage = store.get_claim_lineage(claim_id)
+    assert len(lineage) == 1
+    assert lineage[0]["provenance_type"] == "investigation_job"
+    assert lineage[0]["provenance_id"] == job_id
+    assert lineage[0]["job_id"] == job_id
+    assert lineage[0]["source_engine"] == "openledger_profile_discovery"
+    assert lineage[0]["native_status"] == "historical_claim"
+    assert lineage[0]["details"]["backfilled"] is True
