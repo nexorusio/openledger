@@ -124,6 +124,23 @@ names. Preserve the tool name, record URL, record identifier, collection time,
 and original value in evidence. Tool confidence must be translated through a
 documented source-specific policy; it must not be treated as identity certainty.
 
+The existing Maigret path uses the public, MIT-licensed `socid-extractor`
+library only against profile responses Maigret has already fetched. OpenLedger
+does not enable its optional AI fallback, private parser pack, hosted API, or an
+authenticated-cookie requirement. Normalized biography, contact, and location
+values follow the ordinary pending-claim path. A reviewed allowlist of stable
+account identifiers becomes pending `platform_identifier` claims; arbitrary
+fields ending in `_id` are not promoted. Public links extracted from a profile
+become capped-confidence `linked_profile_lead` claims and require independent
+review. Neither field participates in the shared-relationship projection.
+
+Volatile account state such as creation date, verification/private flags, and
+follower/following counts remains time-stamped evidence on the corresponding
+`social_account` claim. A changed count creates a new evidence observation, not
+a new account claim, and never changes an existing analyst decision. This keeps
+account continuity, identity attribution, and changing platform metadata as
+three distinct propositions.
+
 The initial User Scanner integration is deliberately narrower than the tool's
 full capability. It runs email-registration checks only after explicit case
 opt-in, only in one-subject mode, and always with notification-producing and

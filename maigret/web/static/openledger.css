@@ -2469,6 +2469,37 @@ textarea.form-control.compact-textarea {
     margin-top: 2px;
 }
 
+.claim-identifier {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 3px;
+}
+
+.claim-identifier span {
+    color: var(--ol-muted);
+    font-size: 0.78rem;
+}
+
+.claim-identifier code {
+    max-width: 100%;
+    padding: 2px 5px;
+    overflow-wrap: anywhere;
+    color: var(--ol-text);
+    border: 1px solid var(--ol-border);
+    background: var(--ol-surface);
+}
+
+.claim-context-note {
+    display: block;
+    max-width: 720px;
+    margin-top: 5px;
+    color: var(--ol-muted);
+    font-size: 0.76rem;
+    line-height: 1.4;
+}
+
 .claim-badges {
     flex: 0 0 auto;
     gap: 6px;
@@ -2524,6 +2555,40 @@ textarea.form-control.compact-textarea {
     margin-top: 3px;
     color: var(--ol-text-soft);
     line-height: 1.45;
+}
+
+.account-metadata-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 6px;
+    max-width: 720px;
+    margin: 8px 0 0;
+}
+
+.account-metadata-list div {
+    min-width: 0;
+    padding: 6px 8px;
+    border: 1px solid var(--ol-border);
+    background: var(--ol-surface);
+}
+
+.account-metadata-list dt,
+.account-metadata-list dd {
+    margin: 0;
+}
+
+.account-metadata-list dt {
+    color: var(--ol-muted);
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.account-metadata-list dd {
+    margin-top: 2px;
+    overflow-wrap: anywhere;
+    color: var(--ol-text);
+    font-size: 0.78rem;
 }
 
 .claim-review-form {

@@ -1634,6 +1634,16 @@ class CaseStore:
                         observed_at=now,
                     )
                 )
+            observation_details = {
+                "claim_fingerprint": candidate["fingerprint"],
+                "evidence_fingerprints": [
+                    evidence["fingerprint"] for evidence in candidate["evidence"]
+                ],
+            }
+            if isinstance(candidate.get("observation_details"), dict):
+                observation_details["observation"] = dict(
+                    candidate["observation_details"]
+                )
             CaseStore._record_claim_observation_with_connection(
                 connection,
                 claim_id=claim_id,
@@ -1645,12 +1655,7 @@ class CaseStore:
                 source_record_id=candidate.get("source_record_id"),
                 confidence=candidate.get("confidence"),
                 native_status=candidate.get("native_status", "observed"),
-                details={
-                    "claim_fingerprint": candidate["fingerprint"],
-                    "evidence_fingerprints": [
-                        evidence["fingerprint"] for evidence in candidate["evidence"]
-                    ],
-                },
+                details=observation_details,
                 now=now,
             )
             synchronized += 1

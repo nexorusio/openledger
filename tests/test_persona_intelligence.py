@@ -44,10 +44,128 @@ def test_grouped_form_keeps_requested_empty_categories_visible():
     }
     assert fields["full_name"] == []
     assert fields["social_account"] == []
+    assert fields["platform_identifier"] == []
+    assert fields["linked_profile_lead"] == []
     assert fields["company_ownership"] == []
     assert fields["financial_profile"] == []
     assert fields["vehicle_ownership"] == []
     assert fields["criminal_record"] == []
+
+
+def test_socid_account_intelligence_is_bounded_and_keeps_metadata_as_evidence():
+    report = {
+        "username": "alice",
+        "claimed_profiles": [
+            {
+                "site_name": "Example Social",
+                "url": "https://social.example.test/alice",
+                "confidence": "strong",
+                "evidence": {
+                    "_extractor": "example_profile",
+                    "uid": 123456,
+                    "tiktok_id": "account-9001",
+                    "country_id": "must-not-be-promoted",
+                    "created_at": "2020-01-02 03:04:05",
+                    "is_verified": "False",
+                    "is_private": "True",
+                    "follower_count": "1,234",
+                    "following_count": "1.2K",
+                    "website": "https://alice.example.test",
+                    "links": (
+                        "['https://social.example.test/alice/', "
+                        "'https://alice.example.test', "
+                        "'https://linked.example.test/alice', "
+                        "'https://linked.example.test/alice', "
+                        "'https://127.0.0.1/private', "
+                        "'https://user:secret@host.example.test/alice', "
+                        "'javascript:alert(1)']"
+                    ),
+                },
+            }
+        ],
+    }
+
+    claims = extract_persona_claims(report)
+    by_field = {}
+    for claim in claims:
+        by_field.setdefault(claim["field_name"], []).append(claim)
+
+    assert set(by_field) == {
+        "social_account",
+        "platform_identifier",
+        "linked_profile_lead",
+        "website",
+    }
+    account = by_field["social_account"][0]
+    assert account["evidence"][0]["details"] == {
+        "investigated_username": "alice",
+        "account_metadata": {
+            "created_at": "2020-01-02 03:04:05",
+            "is_verified": False,
+            "is_private": True,
+            "follower_count": 1234,
+        },
+        "extractor": "example_profile",
+    }
+    assert account["observation_details"] == {
+        "account_metadata": {
+            "created_at": "2020-01-02 03:04:05",
+            "is_verified": False,
+            "is_private": True,
+            "follower_count": 1234,
+        },
+        "extractor": "example_profile",
+    }
+    identifiers = by_field["platform_identifier"]
+    assert {
+        (claim["value"]["identifier_type"], claim["value"]["identifier"])
+        for claim in identifiers
+    } == {("uid", "123456"), ("tiktok_id", "account-9001")}
+    assert all(claim["confidence"] == 80 for claim in identifiers)
+    assert by_field["linked_profile_lead"][0]["value"] == (
+        "https://linked.example.test/alice"
+    )
+    assert by_field["linked_profile_lead"][0]["confidence"] == 50
+    assert by_field["website"][0]["value"] == "https://alice.example.test"
+
+
+def test_platform_identifier_fingerprint_survives_username_and_url_change():
+    first = extract_persona_claims(
+        {
+            "username": "old-name",
+            "claimed_profiles": [
+                {
+                    "site_name": "Example Social",
+                    "url": "https://social.example.test/old-name",
+                    "confidence": "moderate",
+                    "evidence": {"uid": "stable-123"},
+                }
+            ],
+        }
+    )
+    renamed = extract_persona_claims(
+        {
+            "username": "new-name",
+            "claimed_profiles": [
+                {
+                    "site_name": "example social",
+                    "url": "https://social.example.test/new-name",
+                    "confidence": "moderate",
+                    "evidence": {"uid": "stable-123"},
+                }
+            ],
+        }
+    )
+
+    first_identifier = next(
+        claim for claim in first if claim["field_name"] == "platform_identifier"
+    )
+    renamed_identifier = next(
+        claim for claim in renamed if claim["field_name"] == "platform_identifier"
+    )
+    assert first_identifier["fingerprint"] == renamed_identifier["fingerprint"]
+    assert first_identifier["value"]["platform"] == "Example Social"
+    assert renamed_identifier["value"]["platform"] == "example social"
 
 
 def test_ai_proposals_require_known_user_cited_url_and_public_field():

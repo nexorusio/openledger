@@ -825,6 +825,67 @@ def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
     store.dispose()
 
 
+def test_persona_renders_reviewable_socid_account_intelligence(
+    client, web_app, monkeypatch, tmp_path
+):
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'socid-persona.db'}", create_schema=True
+    )
+    monkeypatch.setattr(web_app, 'case_store', store)
+    try:
+        job_id = store.create_investigation(['alice'], {})
+        store.claim_next('worker:test')
+        result = {
+            'status': 'completed',
+            'usernames': ['alice'],
+            'individual_reports': [
+                {
+                    'username': 'alice',
+                    'claimed_profiles': [
+                        {
+                            'site_name': 'Example Social',
+                            'url': 'https://social.example.test/alice',
+                            'confidence': 'strong',
+                            'evidence': {
+                                '_extractor': 'example_profile',
+                                'uid': 'stable-123',
+                                'bio': '<script>alert("unsafe")</script>',
+                                'is_verified': 'True',
+                                'follower_count': '321',
+                                'links': [
+                                    'https://linked.example.test/alice',
+                                    'javascript:alert(1)',
+                                ],
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+        store.finish(job_id, result)
+        store.sync_persona_claims(job_id, result)
+        persona_id = store.get_case(store.get_job(job_id)['case_id'])['personas'][
+            0
+        ]['id']
+
+        response = client.get(f'/personas/{persona_id}')
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert 'stable-123' in body
+        assert 'Account-continuity evidence only' in body
+        assert 'https://linked.example.test/alice' in body
+        assert 'Unverified pivot' in body
+        assert 'Parsed by example_profile' in body
+        assert 'Verified account' in body
+        assert 'Followers' in body
+        assert '<dd>321</dd>' in body
+        assert '<script>alert("unsafe")</script>' not in body
+        assert '&lt;script&gt;alert' in body
+        assert 'href="javascript:alert(1)"' not in body
+    finally:
+        store.dispose()
+
+
 def test_ai_assessment_survives_structured_proposal_failure(
     client, web_app, monkeypatch, tmp_path
 ):
