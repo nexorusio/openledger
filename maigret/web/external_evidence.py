@@ -43,10 +43,8 @@ _SECRET_KEYS = {
 _SECRET_KEY_TOKEN_SEQUENCES = tuple(
     tuple(secret_key.split("_")) for secret_key in _SECRET_KEYS
 )
-_COMPACT_MULTI_TOKEN_SECRET_KEYS = {
-    "".join(tokens)
-    for tokens in _SECRET_KEY_TOKEN_SEQUENCES
-    if len(tokens) > 1
+_COMPACT_SECRET_KEYS = {
+    "".join(tokens) for tokens in _SECRET_KEY_TOKEN_SEQUENCES
 }
 
 
@@ -131,7 +129,7 @@ def _secret_key(key: str) -> bool:
         compact == secret
         or compact.startswith(secret)
         or compact.endswith(secret)
-        for secret in _COMPACT_MULTI_TOKEN_SECRET_KEYS
+        for secret in _COMPACT_SECRET_KEYS
     )
 
 

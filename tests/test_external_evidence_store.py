@@ -301,21 +301,23 @@ def test_cross_case_receipts_and_claim_provenance_are_rejected(store):
 
 
 def test_lineage_migration_backfills_retained_claim_provenance_idempotently(store):
-    job_id, _, claim_id = create_case_with_claim(store)
+    retained_claims = [create_case_with_claim(store) for _ in range(3)]
+    claim_ids = [claim_id for _, _, claim_id in retained_claims]
     with store.engine.begin() as connection:
         connection.execute(
             delete(claim_observations).where(
-                claim_observations.c.claim_id == claim_id
+                claim_observations.c.claim_id.in_(claim_ids)
             )
         )
-        _backfill_claim_observations(connection)
-        _backfill_claim_observations(connection)
+        _backfill_claim_observations(connection, batch_size=2)
+        _backfill_claim_observations(connection, batch_size=2)
 
-    lineage = store.get_claim_lineage(claim_id)
-    assert len(lineage) == 1
-    assert lineage[0]["provenance_type"] == "investigation_job"
-    assert lineage[0]["provenance_id"] == job_id
-    assert lineage[0]["job_id"] == job_id
-    assert lineage[0]["source_engine"] == "openledger_profile_discovery"
-    assert lineage[0]["native_status"] == "historical_claim"
-    assert lineage[0]["details"]["backfilled"] is True
+    for job_id, _, claim_id in retained_claims:
+        lineage = store.get_claim_lineage(claim_id)
+        assert len(lineage) == 1
+        assert lineage[0]["provenance_type"] == "investigation_job"
+        assert lineage[0]["provenance_id"] == job_id
+        assert lineage[0]["job_id"] == job_id
+        assert lineage[0]["source_engine"] == "openledger_profile_discovery"
+        assert lineage[0]["native_status"] == "historical_claim"
+        assert lineage[0]["details"]["backfilled"] is True

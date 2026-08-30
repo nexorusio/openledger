@@ -23,6 +23,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 json_document = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
 _BACKFILL_NAMESPACE = uuid.UUID("21f664a5-5ee8-423f-aa85-aa3380f3a481")
+_BACKFILL_BATCH_SIZE = 1_000
 
 persona_claims = sa.table(
     "persona_claims",
@@ -62,67 +63,86 @@ def _stable_fingerprint(value: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _backfill_claim_observations(connection: sa.Connection) -> None:
-    retained_claims = list(
-        connection.execute(
-            sa.select(persona_claims).where(
-                persona_claims.c.source_job_id.is_not(None)
+def _backfill_claim_observations(
+    connection: sa.Connection,
+    *,
+    batch_size: int = _BACKFILL_BATCH_SIZE,
+) -> None:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    last_claim_id: str | None = None
+    while True:
+        retained_claim_query = sa.select(persona_claims).where(
+            persona_claims.c.source_job_id.is_not(None)
+        )
+        if last_claim_id is not None:
+            retained_claim_query = retained_claim_query.where(
+                persona_claims.c.id > last_claim_id
             )
-        ).mappings()
-    )
-    existing_provenance = set(
-        connection.execute(
-            sa.select(
-                claim_observations.c.claim_id,
-                claim_observations.c.provenance_id,
-            ).where(
-                claim_observations.c.provenance_type == "investigation_job"
-            )
-        ).tuples()
-    )
-    for claim in retained_claims:
-        provenance_key = (claim["id"], claim["source_job_id"])
-        if provenance_key in existing_provenance:
-            continue
-        details = {
-            "backfilled": True,
-            "claim_fingerprint": claim["fingerprint"],
-        }
-        fingerprint = _stable_fingerprint(
-            {
-                "provenance_type": "investigation_job",
-                "provenance_id": claim["source_job_id"],
-                "source_engine": claim["source_engine"],
-                "source_record_id": None,
-                "confidence": claim["confidence"],
-                "native_status": "historical_claim",
-                "details": details,
+        retained_claims = list(
+            connection.execute(
+                retained_claim_query.order_by(persona_claims.c.id).limit(batch_size)
+            ).mappings()
+        )
+        if not retained_claims:
+            return
+        claim_ids = [claim["id"] for claim in retained_claims]
+        existing_provenance = set(
+            connection.execute(
+                sa.select(
+                    claim_observations.c.claim_id,
+                    claim_observations.c.provenance_id,
+                ).where(
+                    claim_observations.c.provenance_type == "investigation_job",
+                    claim_observations.c.claim_id.in_(claim_ids),
+                )
+            ).tuples()
+        )
+        observation_rows = []
+        for claim in retained_claims:
+            provenance_key = (claim["id"], claim["source_job_id"])
+            if provenance_key in existing_provenance:
+                continue
+            details = {
+                "backfilled": True,
+                "claim_fingerprint": claim["fingerprint"],
             }
-        )
-        observation_id = str(
-            uuid.uuid5(
-                _BACKFILL_NAMESPACE,
-                f"{claim['id']}:{fingerprint}",
+            fingerprint = _stable_fingerprint(
+                {
+                    "provenance_type": "investigation_job",
+                    "provenance_id": claim["source_job_id"],
+                    "source_engine": claim["source_engine"],
+                    "source_record_id": None,
+                    "confidence": claim["confidence"],
+                    "native_status": "historical_claim",
+                    "details": details,
+                }
             )
-        )
-        connection.execute(
-            sa.insert(claim_observations).values(
-                id=observation_id,
-                claim_id=claim["id"],
-                provenance_type="investigation_job",
-                provenance_id=claim["source_job_id"],
-                job_id=claim["source_job_id"],
-                external_evidence_id=None,
-                source_engine=claim["source_engine"],
-                source_record_id=None,
-                confidence=claim["confidence"],
-                native_status="historical_claim",
-                details=details,
-                fingerprint=fingerprint,
-                observed_at=claim["last_seen_at"],
+            observation_rows.append(
+                {
+                    "id": str(
+                        uuid.uuid5(
+                            _BACKFILL_NAMESPACE,
+                            f"{claim['id']}:{fingerprint}",
+                        )
+                    ),
+                    "claim_id": claim["id"],
+                    "provenance_type": "investigation_job",
+                    "provenance_id": claim["source_job_id"],
+                    "job_id": claim["source_job_id"],
+                    "external_evidence_id": None,
+                    "source_engine": claim["source_engine"],
+                    "source_record_id": None,
+                    "confidence": claim["confidence"],
+                    "native_status": "historical_claim",
+                    "details": details,
+                    "fingerprint": fingerprint,
+                    "observed_at": claim["last_seen_at"],
+                }
             )
-        )
-        existing_provenance.add(provenance_key)
+        if observation_rows:
+            connection.execute(sa.insert(claim_observations), observation_rows)
+        last_claim_id = retained_claims[-1]["id"]
 
 
 def upgrade() -> None:
