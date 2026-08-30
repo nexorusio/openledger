@@ -4,14 +4,18 @@ Provides AI-powered analysis of search results using OpenAI-compatible APIs.
 """
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
 import sys
 import threading
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
+
+DEFAULT_AI_API_BASE_URL = "https://api.openai.com/v1"
+_LOOPBACK_AI_HOSTS = {"localhost", "127.0.0.1", "::1"}
 
 AI_EVIDENCE_FIELDS = (
     "summary",
@@ -72,6 +76,88 @@ AI_EVIDENCE_SCHEMA = {
 
 class AIEnrichmentContractError(RuntimeError):
     """The enrichment response did not contain the required cited research."""
+
+
+def validate_ai_api_base_url(
+    api_base_url: str,
+    *,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
+) -> str:
+    """Return a canonical, explicitly authorized OpenAI-compatible API base.
+
+    The web application defaults to OpenAI's fixed HTTPS origin. Alternative
+    providers require an explicit server-side opt-in; private-network providers
+    require a second opt-in. This prevents an accidentally attacker-controlled
+    value from turning the API key and investigation evidence into an SSRF or
+    secret-exfiltration primitive while retaining deliberate local deployments.
+    """
+    if not isinstance(api_base_url, str) or not api_base_url.strip():
+        raise ValueError("AI API base URL is required")
+    candidate = api_base_url.strip().rstrip("/")
+    parsed = urlsplit(candidate)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError("AI API base URL must be an HTTP(S) origin without credentials")
+
+    hostname = parsed.hostname.casefold().rstrip(".")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("AI API base URL contains an invalid port") from exc
+
+    canonical_netloc = hostname
+    if ":" in hostname and not hostname.startswith("["):
+        canonical_netloc = f"[{hostname}]"
+    if port is not None:
+        canonical_netloc = f"{canonical_netloc}:{port}"
+    canonical = urlunsplit(
+        (parsed.scheme.casefold(), canonical_netloc, parsed.path.rstrip("/"), "", "")
+    )
+
+    if canonical == DEFAULT_AI_API_BASE_URL:
+        return canonical
+    if not allow_custom_endpoint:
+        raise ValueError(
+            "Custom AI API endpoints require explicit server authorization"
+        )
+
+    is_loopback = hostname in _LOOPBACK_AI_HOSTS
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None:
+        is_loopback = address.is_loopback
+        if not address.is_global and not is_loopback and not allow_private_endpoint:
+            raise ValueError(
+                "Private or special-purpose AI API addresses require explicit authorization"
+            )
+
+    if parsed.scheme != "https" and not is_loopback:
+        raise ValueError("Custom AI API endpoints must use HTTPS")
+    return canonical
+
+
+def _ai_api_url(
+    api_base_url: str,
+    resource: str,
+    *,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
+) -> str:
+    base = validate_ai_api_base_url(
+        api_base_url,
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
+    return f"{base}/{resource.lstrip('/')}"
 
 
 def _openledger_label(text: str) -> str:
@@ -149,8 +235,10 @@ async def _check_response(resp):
     if resp.status == 429:
         raise RuntimeError("OpenAI API rate limit exceeded (HTTP 429)")
     if resp.status != 200:
-        body = await resp.text()
-        raise RuntimeError(f"OpenAI API error (HTTP {resp.status}): {body[:500]}")
+        # Consume the response for connection reuse, but do not propagate a
+        # remote error body into browser messages, persisted jobs, or logs.
+        await resp.read()
+        raise RuntimeError(f"OpenAI API error (HTTP {resp.status})")
 
 
 async def _stream_response(resp, spinner, first_token):
@@ -185,7 +273,9 @@ async def get_ai_analysis(
     api_key: str,
     markdown_report: str,
     model: str = "gpt-4o",
-    api_base_url: str = "https://api.openai.com/v1",
+    api_base_url: str = DEFAULT_AI_API_BASE_URL,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
 ) -> str:
     """Send the markdown report to an OpenAI-compatible API and return the analysis.
 
@@ -194,7 +284,12 @@ async def get_ai_analysis(
     """
     system_prompt = load_ai_prompt()
 
-    url = f"{api_base_url.rstrip('/')}/chat/completions"
+    url = _ai_api_url(
+        api_base_url,
+        "chat/completions",
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -235,8 +330,10 @@ async def get_ai_analysis_text(
     api_key: str,
     markdown_report: str,
     model: str = "gpt-4o",
-    api_base_url: str = "https://api.openai.com/v1",
+    api_base_url: str = DEFAULT_AI_API_BASE_URL,
     timeout_seconds: int = 180,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
 ) -> str:
     """Return an AI analysis without writing model output to server logs.
 
@@ -245,7 +342,12 @@ async def get_ai_analysis_text(
     because investigation results may contain sensitive personal data.
     """
     system_prompt = load_ai_prompt()
-    url = f"{api_base_url.rstrip('/')}/chat/completions"
+    url = _ai_api_url(
+        api_base_url,
+        "chat/completions",
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -379,16 +481,23 @@ async def get_enriched_ai_analysis(
     api_key: str,
     investigation_evidence: str,
     model: str = "gpt-5.4",
-    api_base_url: str = "https://api.openai.com/v1",
+    api_base_url: str = DEFAULT_AI_API_BASE_URL,
     timeout_seconds: int = 240,
     web_search_enabled: bool = True,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
 ):
     """Analyze extracted evidence, optionally enriching it with cited web search.
 
     The Responses API is used so web-derived claims retain source annotations.
     No investigation content or model output is written to server logs here.
     """
-    url = f"{api_base_url.rstrip('/')}/responses"
+    url = _ai_api_url(
+        api_base_url,
+        "responses",
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -426,8 +535,10 @@ async def get_ai_evidence_proposals(
     analysis: str,
     sources,
     model: str = "gpt-5.4",
-    api_base_url: str = "https://api.openai.com/v1",
+    api_base_url: str = DEFAULT_AI_API_BASE_URL,
     timeout_seconds: int = 180,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
 ):
     """Convert a cited assessment into schema-constrained evidence proposals.
 
@@ -446,7 +557,12 @@ async def get_ai_evidence_proposals(
     if not source_catalog:
         return []
 
-    url = f"{api_base_url.rstrip('/')}/responses"
+    url = _ai_api_url(
+        api_base_url,
+        "responses",
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
     headers = {
         "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
@@ -501,11 +617,18 @@ as verified facts."""
 async def validate_openai_connection(
     api_key: str,
     model: str,
-    api_base_url: str = "https://api.openai.com/v1",
+    api_base_url: str = DEFAULT_AI_API_BASE_URL,
     timeout_seconds: int = 20,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
 ) -> str:
     """Verify a server-side OpenAI key and model without generating content."""
-    url = f"{api_base_url.rstrip('/')}/models/{model}"
+    url = _ai_api_url(
+        api_base_url,
+        f"models/{model}",
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
     headers = {"Authorization": f"Bearer {api_key}"}
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
 

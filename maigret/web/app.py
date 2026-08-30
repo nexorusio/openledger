@@ -28,11 +28,12 @@ from datetime import datetime, timedelta
 from functools import lru_cache
 from threading import Lock, Thread
 from typing import Any, Dict
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 import maigret
 import maigret.settings
 from maigret.ai import (
     AIEnrichmentContractError,
+    DEFAULT_AI_API_BASE_URL,
     get_ai_evidence_proposals,
     get_enriched_ai_analysis,
     validate_openai_connection,
@@ -306,6 +307,46 @@ PASSWORD_HASH_ITERATIONS = 600_000
 PASSWORD_MIN_LENGTH = 12
 LOGIN_ATTEMPT_LIMIT = 8
 LOGIN_ATTEMPT_WINDOW_SECONDS = 15 * 60
+LOG_CONTROL_CHARACTER_PATTERN = re.compile(r'[\x00-\x1f\x7f]+')
+
+
+def safe_log_value(value: Any, *, limit: int = 500) -> str:
+    """Bound untrusted log fields and prevent forged multi-line entries."""
+    collapsed = LOG_CONTROL_CHARACTER_PATTERN.sub(' ', str(value or ''))
+    return ' '.join(collapsed.split())[:limit]
+
+
+def record_internal_error(public_message: str, error: Exception, **context) -> str:
+    """Log one sanitized diagnostic and return a non-sensitive client message."""
+    reference = secrets.token_hex(6)
+    context_text = ' '.join(
+        f'{safe_log_value(key, limit=60)}={safe_log_value(value, limit=160)}'
+        for key, value in sorted(context.items())
+    )
+    logging.error(
+        '%s [error_ref=%s error_type=%s detail=%s%s]',
+        public_message,
+        reference,
+        type(error).__name__,
+        safe_log_value(error),
+        f' {context_text}' if context_text else '',
+    )
+    return f'{public_message}. Reference: {reference}.'
+
+
+def ai_endpoint_options() -> Dict[str, Any]:
+    """Resolve server-authorized AI endpoint controls for outbound requests."""
+    return {
+        'api_base_url': os.getenv(
+            'OPENAI_API_BASE_URL', DEFAULT_AI_API_BASE_URL
+        ),
+        'allow_custom_endpoint': os.getenv(
+            'OPENLEDGER_ALLOW_CUSTOM_AI_ENDPOINT', 'false'
+        ).casefold() in {'true', '1', 'yes'},
+        'allow_private_endpoint': os.getenv(
+            'OPENLEDGER_ALLOW_PRIVATE_AI_ENDPOINT', 'false'
+        ).casefold() in {'true', '1', 'yes'},
+    }
 
 
 def load_settings():
@@ -315,8 +356,10 @@ def load_settings():
         try:
             with open(path, encoding='utf-8') as f:
                 settings.update(json.load(f))
-        except (json.JSONDecodeError, OSError) as e:
-            logging.error(f"Failed to load settings from {path}: {e}")
+        except (json.JSONDecodeError, OSError) as error:
+            record_internal_error(
+                'Failed to load settings', error, settings_file=path
+            )
     return settings
 
 
@@ -396,8 +439,8 @@ def load_auth_credentials():
             return normalize_auth_credentials(json.load(auth_file))
     except FileNotFoundError:
         return None
-    except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
-        logging.error('Failed to load the authentication file: %s', exc)
+    except (json.JSONDecodeError, OSError, TypeError, ValueError) as error:
+        record_internal_error('Failed to load the authentication file', error)
         return None
 
 
@@ -472,10 +515,13 @@ def safe_next_path(candidate: str) -> str:
     """Allow only same-origin absolute paths after login."""
     if not candidate:
         return url_for('index')
-    parsed = urlsplit(candidate)
-    if parsed.scheme or parsed.netloc or not parsed.path.startswith('/'):
+    decoded = unquote(str(candidate))
+    if '\\' in decoded or LOG_CONTROL_CHARACTER_PATTERN.search(decoded):
         return url_for('index')
-    if parsed.path.startswith('//'):
+    if decoded.startswith('//'):
+        return url_for('index')
+    parsed = urlsplit(decoded)
+    if parsed.scheme or parsed.netloc or not parsed.path.startswith('/'):
         return url_for('index')
     return parsed.path + (f'?{parsed.query}' if parsed.query else '')
 
@@ -491,8 +537,8 @@ def get_openai_api_key():
                     return key
         except FileNotFoundError:
             pass
-        except OSError as exc:
-            logging.error("Failed to read the OpenAI key file: %s", exc)
+        except OSError as error:
+            record_internal_error('Failed to read the OpenAI key file', error)
     return os.getenv('OPENAI_API_KEY', '').strip()
 
 
@@ -693,8 +739,9 @@ async def maigret_search(username, options, query_notify=None):
                 for m in cf_bypass_config["modules"]
             )
             logger.info(
-                f"Cloudflare webgate active: triggers={cf_bypass_config['trigger_protection']}, "
-                f"modules=[{modules_summary}]"
+                'Cloudflare webgate active: triggers=%s modules=%s',
+                safe_log_value(cf_bypass_config['trigger_protection']),
+                safe_log_value(modules_summary),
             )
 
         db = MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"])
@@ -706,7 +753,11 @@ async def maigret_search(username, options, query_notify=None):
         tags = options.get('tags', [])
         excluded_tags = options.get('excluded_tags', [])
         site_list = options.get('site_list', [])
-        logger.info(f"Filtering sites by tags: {tags}, excluded: {excluded_tags}")
+        logger.info(
+            'Filtering sites by tags=%s excluded=%s',
+            safe_log_value(tags),
+            safe_log_value(excluded_tags),
+        )
 
         sites = select_sites_for_search(
             db,
@@ -717,7 +768,7 @@ async def maigret_search(username, options, query_notify=None):
             site_list=site_list,
         )
 
-        logger.info(f"Found {len(sites)} sites matching the tag criteria")
+        logger.info('Found %d sites matching the tag criteria', len(sites))
 
         if query_notify is not None and hasattr(query_notify, 'set_total'):
             query_notify.set_total(len(sites))
@@ -744,8 +795,10 @@ async def maigret_search(username, options, query_notify=None):
             cloudflare_bypass=cf_bypass_config,
         )
         return results
-    except Exception as e:
-        logger.error(f"Error during search: {str(e)}")
+    except Exception as error:
+        record_internal_error(
+            'Investigation search failed', error, username=username
+        )
         raise
 
 
@@ -755,8 +808,10 @@ async def search_multiple_usernames(usernames, options):
         try:
             search_results = await maigret_search(username.strip(), options)
             results.append((username.strip(), 'username', search_results))
-        except Exception as e:
-            logging.error(f"Error searching username {username}: {str(e)}")
+        except Exception as error:
+            record_internal_error(
+                'Username search failed', error, username=username
+            )
     return results
 
 
@@ -936,15 +991,21 @@ def record_job_result(session_key: str, result: Dict[str, Any]):
         if normalized.get('status') == 'completed':
             try:
                 case_store.sync_persona_claims(session_key, normalized)
-            except Exception:
-                logging.exception(
-                    'Failed to synchronize persona claims for %s', session_key
+            except Exception as error:
+                record_internal_error(
+                    'Failed to synchronize persona claims',
+                    error,
+                    session=session_key,
                 )
     job_results[session_key] = normalized
     try:
         persist_job_result(session_key, normalized)
-    except (OSError, TypeError, ValueError):
-        logging.exception('Failed to persist investigation metadata for %s', session_key)
+    except (OSError, TypeError, ValueError) as error:
+        record_internal_error(
+            'Failed to persist investigation metadata',
+            error,
+            session=session_key,
+        )
     return normalized
 
 
@@ -965,7 +1026,9 @@ def load_persisted_job_result(session_folder: str):
         return None
     except (AttributeError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
         logging.warning(
-            'Ignoring invalid investigation metadata in %s: %s', session_folder, exc
+            'Ignoring invalid investigation metadata in %s: %s',
+            safe_log_value(session_folder),
+            safe_log_value(exc),
         )
         return None
 
@@ -977,8 +1040,10 @@ def refresh_job_results_from_disk():
         entries = list(os.scandir(reports_root))
     except FileNotFoundError:
         return 0
-    except OSError as exc:
-        logging.warning('Could not read persisted investigation history: %s', exc)
+    except OSError as error:
+        record_internal_error(
+            'Could not read persisted investigation history', error
+        )
         return 0
 
     loaded_count = 0
@@ -997,10 +1062,11 @@ def refresh_job_results_from_disk():
                 case_store.import_legacy_result(session_key, result)
                 if result.get('status') == 'completed':
                     case_store.sync_persona_claims(session_key, result)
-            except Exception:
-                logging.exception(
-                    'Failed to index legacy investigation %s in the case store',
-                    session_key,
+            except Exception as error:
+                record_internal_error(
+                    'Failed to index legacy investigation in the case store',
+                    error,
+                    session=session_key,
                 )
     return loaded_count
 
@@ -1053,35 +1119,56 @@ def delete_persisted_investigation(session_folder: str) -> bool:
         raise ValueError('Only terminal investigations can be deleted')
 
     reports_root = os.path.realpath(app.config['REPORTS_FOLDER'])
-    session_path = os.path.realpath(os.path.join(reports_root, session_folder))
-    if os.path.commonpath([reports_root, session_path]) != reports_root:
-        raise ValueError('Invalid report session path')
-    if session_path == reports_root:
-        raise ValueError('Refusing to delete the reports root')
+    session_path = None
+    try:
+        with os.scandir(reports_root) as entries:
+            for entry in entries:
+                if entry.name != session_folder:
+                    continue
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    raise ValueError('Invalid report session directory')
+                candidate = os.path.realpath(entry.path)
+                if (
+                    os.path.commonpath([reports_root, candidate]) != reports_root
+                    or candidate == reports_root
+                ):
+                    raise ValueError('Invalid report session path')
+                session_path = candidate
+                break
+    except FileNotFoundError:
+        pass
 
-    tombstone_path = f'{session_path}.deleting-{uuid.uuid4().hex}'
+    tombstone_path = (
+        f'{session_path}.deleting-{uuid.uuid4().hex}' if session_path else None
+    )
     moved_to_tombstone = False
     with metadata_lock:
         try:
-            if os.path.isdir(session_path):
+            if session_path and tombstone_path:
                 os.replace(session_path, tombstone_path)
                 moved_to_tombstone = True
             if case_store is not None and stored:
                 case_store.delete_job(session_key)
         except Exception:
-            if moved_to_tombstone and not os.path.exists(session_path):
+            if (
+                moved_to_tombstone
+                and session_path
+                and tombstone_path
+                and not os.path.exists(session_path)
+            ):
                 os.replace(tombstone_path, session_path)
             raise
         job_results.pop(session_key, None)
         background_jobs.pop(session_key, None)
         analysis_locks.pop(session_folder, None)
-    if moved_to_tombstone:
+    if moved_to_tombstone and tombstone_path:
         try:
             shutil.rmtree(tombstone_path)
-        except OSError:
-            logging.exception(
-                'Investigation metadata was deleted, but artifact cleanup failed: %s',
-                tombstone_path,
+        except OSError as error:
+            record_internal_error(
+                'Investigation artifact cleanup failed',
+                error,
+                path=tombstone_path,
             )
     return True
 
@@ -1322,7 +1409,9 @@ def login():
         valid = False
     if not valid:
         record_login_failure(attempt_key)
-        logging.warning('Rejected OpenLedger login from %s', attempt_key)
+        logging.warning(
+            'Rejected OpenLedger login from %s', safe_log_value(attempt_key)
+        )
         flash('Invalid username or password.', 'danger')
         return redirect(url_for('login', next=next_path))
 
@@ -1656,11 +1745,13 @@ def process_search_task(usernames, options, timestamp):
         )
         result = build_reports(general_results, usernames, timestamp)
 
-    except Exception as e:
-        logging.error(f"Error in search task for timestamp {timestamp}: {str(e)}")
+    except Exception as error:
+        public_error = record_internal_error(
+            'Investigation processing failed', error, session=timestamp
+        )
         result = {
             'status': 'failed',
-            'error': str(e),
+            'error': public_error,
             'usernames': usernames,
         }
     finally:
@@ -1838,10 +1929,19 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 general_results.append((username.strip(), 'username', notify.results))
             q.put({'type': 'stopped', 'username': username.strip()})
             break
-        except Exception as e:
+        except Exception as error:
             if notify.results:
                 general_results.append((username.strip(), 'username', notify.results))
-            q.put({'type': 'error', 'message': str(e), 'username': username.strip()})
+            public_error = record_internal_error(
+                'Username collection failed', error, username=username
+            )
+            q.put(
+                {
+                    'type': 'error',
+                    'message': public_error,
+                    'username': username.strip(),
+                }
+            )
 
     observations = []
     investigation_plan = options.get('investigation_spec') or {}
@@ -1879,13 +1979,17 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
         except asyncio.CancelledError:
             q.put({'type': 'stopped', 'collector': 'user-scanner'})
             break
-        except Exception as exc:
-            logging.exception('User Scanner email collection failed')
+        except Exception as error:
+            public_error = record_internal_error(
+                'User Scanner email collection failed',
+                error,
+                target_type='email',
+            )
             q.put(
                 {
                     'type': 'collector_error',
                     'collector': 'user-scanner',
-                    'message': str(exc),
+                    'message': public_error,
                 }
             )
     job['collector_observations'] = observations
@@ -1931,13 +2035,15 @@ def finalize_stream_job(
             if cancelled or interrupted:
                 done_event['status'] = 'partial'
             done_event['redirect'] = f"/results/search_{job_id}"
-        except Exception as e:
-            logging.error(f"Error building reports for live scan {job_id}: {str(e)}")
+        except Exception as error:
+            public_error = record_internal_error(
+                'Investigation report generation failed', error, session=job_id
+            )
             record_job_result(
                 job_id,
                 {
                     'status': 'failed',
-                    'error': str(e),
+                    'error': public_error,
                     'usernames': usernames,
                     'started_at': started_at,
                 },
@@ -1982,8 +2088,11 @@ def run_stream_job(job_id, usernames, options):
         general_results = loop.run_until_complete(
             _stream_search(job, usernames, options)
         )
-    except Exception as e:
-        job['queue'].put({'type': 'error', 'message': str(e)})
+    except Exception as error:
+        public_error = record_internal_error(
+            'Live investigation failed', error, session=job_id
+        )
+        job['queue'].put({'type': 'error', 'message': public_error})
     finally:
         loop.close()
 
@@ -2040,9 +2149,11 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
                 ),
             )
         )
-    except Exception as exc:
-        logging.exception('Persistent investigation %s failed', job_id)
-        sink.put({'type': 'error', 'message': str(exc)})
+    except Exception as error:
+        public_error = record_internal_error(
+            'Persistent investigation failed', error, session=job_id
+        )
+        sink.put({'type': 'error', 'message': public_error})
     finally:
         loop.close()
     shutdown_requested = bool(shutdown_check and shutdown_check())
@@ -2239,8 +2350,8 @@ def healthz():
     if case_store is not None:
         try:
             case_store.ping()
-        except Exception:
-            logging.exception('Database health check failed')
+        except Exception as error:
+            record_internal_error('Database health check failed', error)
             return {'status': 'degraded', 'database': 'unavailable'}, 503
         return {'status': 'ok', 'database': 'connected'}
     return {'status': 'ok'}
@@ -2312,13 +2423,11 @@ def openai_settings_update():
             validate_openai_connection(
                 api_key=candidate_key,
                 model=model,
-                api_base_url=os.getenv(
-                    'OPENAI_API_BASE_URL', 'https://api.openai.com/v1'
-                ),
+                **ai_endpoint_options(),
             )
         )
-    except Exception:
-        logging.exception('OpenAI connection verification failed')
+    except Exception as error:
+        record_internal_error('OpenAI connection verification failed', error)
         flash(
             'OpenAI verification failed. Check the API key, model access, and '
             'server logs.',
@@ -2557,7 +2666,9 @@ def review_persona_claim(claim_id):
                     timeout_seconds=app.config['GEOCODER_TIMEOUT_SECONDS'],
                 )
             except GeocodingError as error:
-                logging.warning("Approved-place geocoding failed: %s", error)
+                logging.warning(
+                    'Approved-place geocoding failed: %s', safe_log_value(error)
+                )
                 geocoding_warning = (
                     'The record was approved, but OpenLedger could not generate '
                     'its map center. You can add coordinates by amending the record.'
@@ -2606,8 +2717,10 @@ def delete_history_entry(session_folder):
         return redirect(url_for('history'))
     try:
         deleted = delete_persisted_investigation(session_folder)
-    except (OSError, ValueError):
-        logging.exception('Failed to delete investigation %s', session_folder)
+    except (OSError, ValueError) as error:
+        record_internal_error(
+            'Failed to delete investigation', error, session=session_folder
+        )
         flash('The investigation could not be deleted.', 'danger')
         return redirect(url_for('history'))
 
@@ -2680,8 +2793,10 @@ def search():
 
     options = parse_search_options(request.form, investigation_plan)
     logging.info(
-        f"Starting search for usernames: {usernames} with tags: {options['tags']}, "
-        f"excluded: {options['excluded_tags']}"
+        'Starting search for usernames=%s tags=%s excluded=%s',
+        safe_log_value(usernames),
+        safe_log_value(options['tags']),
+        safe_log_value(options['excluded_tags']),
     )
 
     # Start background job
@@ -2698,7 +2813,7 @@ def search():
 
 @app.route('/status/<timestamp>')
 def status(timestamp):
-    logging.info(f"Status check for timestamp: {timestamp}")
+    logging.info('Status check for timestamp=%s', safe_log_value(timestamp))
 
     # A completed job can be reopened after a process or container restart even
     # though its transient background thread entry no longer exists.
@@ -2716,7 +2831,7 @@ def status(timestamp):
             flash(f'Search failed: {error_msg}', 'danger')
             return redirect(url_for('history'))
         flash('Invalid search session.', 'danger')
-        logging.error(f"Invalid search session: {timestamp}")
+        logging.error('Invalid search session: %s', safe_log_value(timestamp))
         return redirect(url_for('index'))
 
     # Check if job is completed
@@ -2724,7 +2839,10 @@ def status(timestamp):
         result = job_results.get(timestamp)
         if not result:
             flash('No results found for this search session.', 'warning')
-            logging.error(f"No results found for completed session: {timestamp}")
+            logging.error(
+                'No results found for completed session: %s',
+                safe_log_value(timestamp),
+            )
             return redirect(url_for('index'))
 
         if result['status'] == 'completed':
@@ -2733,7 +2851,11 @@ def status(timestamp):
         else:
             error_msg = result.get('error', 'Unknown error occurred.')
             flash(f'Search failed: {error_msg}', 'danger')
-            logging.error(f"Search failed for session {timestamp}: {error_msg}")
+            logging.error(
+                'Search failed for session=%s error=%s',
+                safe_log_value(timestamp),
+                safe_log_value(error_msg),
+            )
             return redirect(url_for('index'))
 
     # If job is still running, show a status page
@@ -2746,7 +2868,10 @@ def results(session_id):
 
     if not result_data:
         flash('No results found for this session ID.', 'danger')
-        logging.error(f"Results for session {session_id} not found in job_results.")
+        logging.error(
+            'Results for session %s not found in job_results.',
+            safe_log_value(session_id),
+        )
         return redirect(url_for('index'))
 
     result_case = None
@@ -2835,18 +2960,16 @@ def analyze_session(session_id):
             'openai_model',
             os.getenv('OPENAI_MODEL', DEFAULT_SETTINGS['openai_model']),
         )
-        api_base_url = os.getenv(
-            'OPENAI_API_BASE_URL', 'https://api.openai.com/v1'
-        )
+        endpoint_options = ai_endpoint_options()
         enriched = asyncio.run(
             get_enriched_ai_analysis(
                 api_key=api_key,
                 investigation_evidence=markdown_report,
                 model=model,
-                api_base_url=api_base_url,
                 web_search_enabled=bool(
                     ai_settings.get('ai_web_enrichment', True)
                 ),
+                **endpoint_options,
             )
         )
         analysis = enriched['analysis']
@@ -2862,14 +2985,15 @@ def analyze_session(session_id):
                         analysis=analysis,
                         sources=sources,
                         model=model,
-                        api_base_url=api_base_url,
+                        **endpoint_options,
                     )
                 )
-            except Exception:
+            except Exception as error:
                 proposal_error = True
-                logging.exception(
-                    'AI evidence proposal extraction failed for session %s',
-                    session_id,
+                record_internal_error(
+                    'AI evidence proposal extraction failed',
+                    error,
+                    session=session_id,
                 )
         proposal_sync = synchronize_ai_evidence_proposals(
             session_id,
@@ -2912,9 +3036,9 @@ def analyze_session(session_id):
             'proposal_diagnostics': proposal_sync['diagnostics'],
             'cached': False,
         }
-    except AIEnrichmentContractError:
-        logging.exception(
-            'Cited AI enrichment contract failed for session %s', session_id
+    except AIEnrichmentContractError as error:
+        record_internal_error(
+            'Cited AI enrichment contract failed', error, session=session_id
         )
         return {
             'error': (
@@ -2922,8 +3046,8 @@ def analyze_session(session_id):
                 'No assessment or Persona proposals were saved; retry the analysis.'
             )
         }, 502
-    except Exception:
-        logging.exception('AI analysis failed for session %s', session_id)
+    except Exception as error:
+        record_internal_error('AI analysis failed', error, session=session_id)
         return {
             'error': 'AI analysis failed. Check the OpenLedger server logs.'
         }, 502
@@ -2941,8 +3065,10 @@ def download_report(filename):
         return send_from_directory(reports_root, filename)
     except NotFound:
         return "File not found", 404
-    except Exception as e:
-        logging.error(f"Error serving file {filename}: {str(e)}")
+    except Exception as error:
+        record_internal_error(
+            'Error serving report file', error, filename=filename
+        )
         return "File not found", 404
 
 

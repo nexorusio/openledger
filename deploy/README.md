@@ -93,6 +93,15 @@ never returned to the browser or written to the ordinary web settings file.
 
 Never put the API key in GitHub, screenshots, or support messages.
 
+The web deployment accepts only the fixed OpenAI HTTPS endpoint by default. To
+use another operator-controlled OpenAI-compatible endpoint, set
+`OPENLEDGER_ALLOW_CUSTOM_AI_ENDPOINT=true` with `OPENAI_API_BASE_URL` in
+`deploy/.env`. Private or special-purpose IP endpoints require the additional
+`OPENLEDGER_ALLOW_PRIVATE_AI_ENDPOINT=true` opt-in. Keep both controls disabled
+unless the destination is deliberately administered and trusted: requests carry
+the API key and investigation evidence. Plain HTTP is accepted only for a
+loopback endpoint.
+
 AI assessments use extracted public-profile fields rather than only site names
 and URLs. When **cited public-web research** is enabled, OpenLedger uses the
 OpenAI Responses web-search tool to corroborate the strongest identity cluster
