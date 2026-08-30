@@ -464,6 +464,8 @@ def test_results_report_links_open_in_new_tab(client, web_app, monkeypatch):
     results_resp = client.get(status_resp.location)
     body = results_resp.get_data(as_text=True)
 
+    assert 'class="analysis-disclaimer"' in body
+
     for label in ('CSV Report', 'JSON Report', 'PDF Report', 'HTML Report'):
         # crude but effective: the link and its target="_blank" must appear
         # within the same <a> tag, not just somewhere on the page.
@@ -1616,6 +1618,8 @@ def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     body = resp.get_data(as_text=True)
     assert 'name="timeout"' in body
     assert 'id="connections"' in body
+    assert 'class="connection-form"' in body
+    assert 'class="security-callout connection-security"' in body
     assert 'name="openai_api_key"' in body
     assert '<select class="form-select" id="openai-model"' in body
     assert 'value="gpt-5.6-sol"' in body
@@ -1631,6 +1635,28 @@ def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     font_response = client.get('/static/alliance-no2-regular.otf')
     assert font_response.status_code == 200
     assert font_response.data.startswith(b'OTTO')
+
+
+def test_shared_responsive_css_covers_workspace_page_families(client):
+    css_response = client.get('/static/openledger.css')
+    assert css_response.status_code == 200
+    css = css_response.get_data(as_text=True)
+
+    for breakpoint in ('1279px', '1099px', '991px', '767px', '575px'):
+        assert f'@media (max-width: {breakpoint})' in css
+
+    for selector in (
+        '.settings-layout',
+        '.connection-card',
+        '.panel-header',
+        '.page-heading',
+        '.profile-link',
+        '.persona-layout',
+        '.relationship-layout',
+        '.relationship-toolbar',
+        '.security-page-grid',
+    ):
+        assert selector in css
 
 
 def test_openai_settings_rejects_unlisted_model(client, web_app, monkeypatch):
