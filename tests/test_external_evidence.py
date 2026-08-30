@@ -83,6 +83,8 @@ def test_bounded_documents_reject_credentials_and_resource_exhaustion_values():
         "APIKey",
         "db_password",
         "dbpassword",
+        "dbpasswordvalue",
+        "mysecretvalue",
         "passwordvalue",
         "secretvalue",
         "serviceApiKeyValue",

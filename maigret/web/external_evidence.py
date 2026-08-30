@@ -125,12 +125,7 @@ def _secret_key(key: str) -> bool:
         ):
             return True
     compact = "".join(tokens)
-    return any(
-        compact == secret
-        or compact.startswith(secret)
-        or compact.endswith(secret)
-        for secret in _COMPACT_SECRET_KEYS
-    )
+    return any(secret in compact for secret in _COMPACT_SECRET_KEYS)
 
 
 def _bounded_json_value(value: Any, path: str, depth: int) -> Any:
