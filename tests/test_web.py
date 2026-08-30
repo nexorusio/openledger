@@ -1718,11 +1718,107 @@ def test_shared_responsive_css_covers_workspace_page_families(client):
         '.page-heading',
         '.profile-link',
         '.persona-layout',
-        '.relationship-layout',
-        '.relationship-toolbar',
+        '.relationship-workspace-grid',
+        '.relationship-scope-bar',
         '.security-page-grid',
     ):
         assert selector in css
+
+
+def test_relationship_ui_is_read_only_and_preserves_exact_approved_evidence(
+    client, web_app, monkeypatch, tmp_path
+):
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'relationships.db'}", create_schema=True
+    )
+    monkeypatch.setattr(web_app, 'case_store', store)
+    try:
+        job_id = store.create_investigation(['alice', 'bob'], {})
+        store.claim_next('worker:relationship-test')
+        result = {
+            'status': 'completed',
+            'session_folder': f'search_{job_id}',
+            'usernames': ['alice', 'bob'],
+            'individual_reports': [
+                {
+                    'username': username,
+                    'claimed_profiles': [{
+                        'site_name': 'Example',
+                        'url': f'https://example.test/{username}',
+                        'confidence': 'strong',
+                        'evidence': {
+                            'location': 'Jakarta, Indonesia',
+                            'email': 'shared@example.test',
+                        },
+                    }],
+                }
+                for username in ('alice', 'bob')
+            ],
+        }
+        store.finish(job_id, result)
+        store.sync_persona_claims(job_id, result)
+        case = store.get_case(store.get_job(job_id)['case_id'])
+        persona_ids = [persona['id'] for persona in case['personas']]
+        for persona_id in persona_ids:
+            location = next(
+                claim
+                for claim in store.get_persona(persona_id)['claims']
+                if claim['field_name'] == 'current_location'
+            )
+            store.review_claim(location['id'], 'approved', 'analyst')
+
+        graph_before = store.build_relationship_graph(case['id'])
+        personas_before = {
+            persona_id: store.get_persona(persona_id)
+            for persona_id in persona_ids
+        }
+        assert graph_before['stats']['field_counts'] == {'current_location': 1}
+
+        response = client.get(
+            f"/relationships?mode=shared&case_id={case['id']}"
+            '&layout=hierarchical&focus=2&view=table&hide=persona:unknown'
+        )
+        assert response.status_code == 200
+        body = response.get_data(as_text=True)
+        assert 'relationship-workspace-grid' in body
+        assert 'data-relationship-focus="1"' in body
+        assert 'data-relationship-focus="2"' in body
+        assert 'relationshipTableView' in body
+        assert '/static/vendor/vis-network-10.1.1.min.js' in body
+        assert '/static/relationships.js' in body
+        assert 'https://unpkg.com/vis-network' not in body
+        assert 'Jakarta, Indonesia' in body
+        assert 'shared@example.test' not in body
+
+        mutation_response = client.post(
+            '/relationships', data={'action': 'create-edge'}
+        )
+        assert mutation_response.status_code == 405
+        assert store.build_relationship_graph(case['id']) == graph_before
+        assert {
+            persona_id: store.get_persona(persona_id)
+            for persona_id in persona_ids
+        } == personas_before
+    finally:
+        store.dispose()
+
+
+def test_relationship_module_has_no_server_mutation_transport(client):
+    response = client.get('/static/relationships.js')
+    assert response.status_code == 200
+    module = response.get_data(as_text=True)
+
+    assert 'data-relationship-focus' in module
+    assert "layout === 'hierarchical'" in module
+    assert "layout === 'concentric'" in module
+    assert 'manuallyHiddenNodes' in module
+    network_write_apis = ('fetch(', 'XMLHttpRequest', 'sendBeacon(', '.submit(')
+    for network_write_api in network_write_apis:
+        assert network_write_api not in module
+
+    dependency = client.get('/static/vendor/vis-network-10.1.1.min.js')
+    assert dependency.status_code == 200
+    assert len(dependency.data) > 600_000
 
 
 def test_openai_settings_rejects_unlisted_model(client, web_app, monkeypatch):
