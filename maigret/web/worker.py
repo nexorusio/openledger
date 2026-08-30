@@ -9,7 +9,7 @@ import socket
 import threading
 import uuid
 
-from maigret.web.app import case_store, run_persistent_job
+from maigret.web.app import case_store, record_internal_error, run_persistent_job
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -60,13 +60,17 @@ def run() -> int:
                     job,
                     shutdown_check=stopping.is_set,
                 )
-            except Exception as exc:
-                logger.exception("Investigation %s crashed", job["job_id"])
+            except Exception as error:
+                public_error = record_internal_error(
+                    "Investigation worker crashed",
+                    error,
+                    session=job["job_id"],
+                )
                 case_store.finish(
                     job["job_id"],
                     {
                         "status": "failed",
-                        "error": str(exc),
+                        "error": public_error,
                         "usernames": job["usernames"],
                     },
                 )

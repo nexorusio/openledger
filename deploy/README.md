@@ -93,6 +93,15 @@ never returned to the browser or written to the ordinary web settings file.
 
 Never put the API key in GitHub, screenshots, or support messages.
 
+The web deployment accepts only the fixed OpenAI HTTPS endpoint by default. To
+use another operator-controlled OpenAI-compatible endpoint, set
+`OPENLEDGER_ALLOW_CUSTOM_AI_ENDPOINT=true` with `OPENAI_API_BASE_URL` in
+`deploy/.env`. Private or special-purpose IP endpoints require the additional
+`OPENLEDGER_ALLOW_PRIVATE_AI_ENDPOINT=true` opt-in. Keep both controls disabled
+unless the destination is deliberately administered and trusted: requests carry
+the API key and investigation evidence. Plain HTTP is accepted only for a
+loopback endpoint.
+
 AI assessments use extracted public-profile fields rather than only site names
 and URLs. When **cited public-web research** is enabled, OpenLedger uses the
 OpenAI Responses web-search tool to corroborate the strongest identity cluster
@@ -138,6 +147,12 @@ The application and worker run as unprivileged UID/GID 10001. Docker excludes
 the entire `runtime/` directory and deployment environment files from the image
 build context so credentials, reports, and database dumps cannot be copied into
 an image layer.
+
+The generated discovery graph is the only report permitted to render in a
+same-origin iframe. Its path is strictly allowlisted and the iframe is sandboxed
+to scripts without same-origin DOM access. All other application pages and
+reports retain `DENY`/`frame-ancestors 'none'` anti-framing controls. Flask owns
+this route-specific policy so the reverse proxy must not replace it globally.
 
 Deleting an investigation from History permanently removes its metadata,
 reports, graph, and cached AI assessment from the mounted runtime directory.
