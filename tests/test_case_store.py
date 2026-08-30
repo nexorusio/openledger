@@ -848,6 +848,119 @@ def test_relationship_graph_uses_only_exact_shared_approved_claims(store):
     assert suppressed["edges"] == []
 
 
+def test_case_timeline_projects_existing_audit_records_without_new_state(store):
+    job_id = store.create_investigation(["alice"], {})
+    store.claim_next("worker:timeline-test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {
+                            "_extractor": "example_profile",
+                            "created_at": "2020-01-02 03:04:05",
+                            "is_verified": "true",
+                            "follower_count": "321",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    assert store.sync_persona_claims(job_id, result) == 1
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    claim = store.get_persona(persona_id)["claims"][0]
+    store.review_claim(
+        claim["id"],
+        "approved",
+        "analyst",
+        "Matched the cited public profile",
+    )
+
+    timeline = store.build_case_timeline(case["id"])
+
+    assert timeline["case_id"] == case["id"]
+    assert timeline["stats"] == {
+        "displayed_count": 4,
+        "investigation_count": 2,
+        "evidence_count": 1,
+        "review_count": 1,
+        "truncated": False,
+        "limit": 300,
+    }
+    assert {event["event_type"] for event in timeline["events"]} == {
+        "investigation",
+        "evidence",
+        "review",
+    }
+    evidence_event = next(
+        event for event in timeline["events"] if event["event_type"] == "evidence"
+    )
+    assert evidence_event["persona"]["id"] == persona_id
+    assert evidence_event["claim"]["id"] == claim["id"]
+    assert evidence_event["account_metadata"] == {
+        "created_at": "2020-01-02 03:04:05",
+        "is_verified": True,
+        "follower_count": 321,
+    }
+    assert evidence_event["extractor"] == "example_profile"
+    review_event = next(
+        event for event in timeline["events"] if event["event_type"] == "review"
+    )
+    assert review_event["decision"] == "approved"
+    assert review_event["note"] == "Matched the cited public profile"
+    assert [event["timestamp"] for event in timeline["events"]] == sorted(
+        (event["timestamp"] for event in timeline["events"]), reverse=True
+    )
+
+    persona_evidence = store.build_case_timeline(
+        case["id"],
+        persona_id=persona_id,
+        event_type="evidence",
+        order="oldest",
+    )
+    assert persona_evidence["selected_persona"]["id"] == persona_id
+    assert [event["event_type"] for event in persona_evidence["events"]] == [
+        "evidence"
+    ]
+
+
+def test_case_timeline_enforces_case_boundary_and_bounded_results(store):
+    first_job_id = store.create_investigation(["alice"], {})
+    first_case_id = store.get_job(first_job_id)["case_id"]
+    foreign_job_id = store.create_investigation(["bob"], {})
+    foreign_job = store.get_job(foreign_job_id)
+    foreign_persona_id = store.get_case(foreign_job["case_id"])["personas"][0][
+        "id"
+    ]
+
+    with pytest.raises(ValueError, match="does not belong"):
+        store.build_case_timeline(
+            first_case_id,
+            persona_id=foreign_persona_id,
+        )
+
+    bounded = store.build_case_timeline(first_case_id, limit=1)
+    assert bounded["stats"]["displayed_count"] == 1
+    assert bounded["stats"]["truncated"] is False
+    assert all(
+        event.get("job_id") != foreign_job_id for event in bounded["events"]
+    )
+
+    with pytest.raises(ValueError, match="event type"):
+        store.build_case_timeline(first_case_id, event_type="untrusted")
+    with pytest.raises(ValueError, match="order"):
+        store.build_case_timeline(first_case_id, order="sideways")
+
+
 def test_grouped_identifier_variants_feed_one_reviewable_persona(store):
     options = {
         "investigation_spec": {

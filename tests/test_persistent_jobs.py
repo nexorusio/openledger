@@ -297,6 +297,107 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "Relationships" in persona_page
 
 
+def test_case_timeline_renders_bounded_provenance_and_escapes_evidence(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:timeline-test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {
+                            "_extractor": "example_profile",
+                            "fullname": '<script>alert("timeline")</script>',
+                            "created_at": "2020-01-02 03:04:05",
+                            "follower_count": "321",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    full_name = next(
+        claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    persistent_store.review_claim(
+        full_name["id"],
+        "uncertain",
+        "analyst",
+        '<img src=x onerror="alert(1)">',
+    )
+
+    case_page = client.get(f'/cases/{case["id"]}').get_data(as_text=True)
+    persona_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    assert f'/cases/{case["id"]}/timeline' in case_page
+    assert f'/cases/{case["id"]}/timeline?persona_id={persona_id}' in persona_page
+
+    response = client.get(f'/cases/{case["id"]}/timeline')
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert "Recorded chronology, not inferred behavior" in body
+    assert "Investigation started" in body
+    assert "Investigation completed" in body
+    assert "Evidence observed" in body
+    assert "Claim marked uncertain" in body
+    assert "Source-reported account creation" in body
+    assert "2020-01-02 03:04:05" in body
+    assert "example_profile" in body
+    assert '<script>alert("timeline")</script>' not in body
+    assert "&lt;script&gt;alert" in body
+    assert '<img src=x onerror="alert(1)">' not in body
+    assert "&lt;img src=x onerror=&#34;alert(1)&#34;&gt;" in body
+
+    before = persistent_store.build_case_timeline(case["id"])
+    mutation = client.post(
+        f'/cases/{case["id"]}/timeline', data={"action": "rewrite"}
+    )
+    assert mutation.status_code == 405
+    assert persistent_store.build_case_timeline(case["id"]) == before
+
+    filtered = client.get(
+        f'/cases/{case["id"]}/timeline'
+        f"?persona_id={persona_id}&event_type=review&order=oldest"
+    ).get_data(as_text=True)
+    assert "Claim marked uncertain" in filtered
+    assert "Investigation started" not in filtered
+    assert "multi-subject investigation events are excluded" in filtered
+
+
+def test_case_timeline_rejects_persona_from_another_case(client, persistent_store):
+    first_job_id = persistent_store.create_investigation(["alice"], {})
+    first_case_id = persistent_store.get_job(first_job_id)["case_id"]
+    foreign_job_id = persistent_store.create_investigation(["bob"], {})
+    foreign_case = persistent_store.get_case(
+        persistent_store.get_job(foreign_job_id)["case_id"]
+    )
+    foreign_persona_id = foreign_case["personas"][0]["id"]
+
+    response = client.get(
+        f"/cases/{first_case_id}/timeline?persona_id={foreign_persona_id}"
+    )
+
+    assert response.status_code == 302
+    assert response.location.endswith(f"/cases/{first_case_id}/timeline")
+    followed = client.get(response.location).get_data(as_text=True)
+    assert "bob" not in followed
+
+
 def test_claim_review_requires_csrf_and_records_operator_decision(
     client, persistent_store
 ):

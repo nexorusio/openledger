@@ -1932,6 +1932,8 @@ def test_shared_responsive_css_covers_workspace_page_families(client):
         '.page-heading',
         '.profile-link',
         '.persona-layout',
+        '.timeline-toolbar',
+        '.case-timeline-list',
         '.relationship-workspace-grid',
         '.relationship-scope-bar',
         '.security-page-grid',

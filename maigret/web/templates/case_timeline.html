@@ -1,0 +1,176 @@
+{% extends "base.html" %}
+
+{% block title %}Evidence timeline | {{ case.title }} | OpenLedger{% endblock %}
+{% block breadcrumb %}Case evidence timeline{% endblock %}
+
+{% block content %}
+<section class="page-heading timeline-page-heading">
+    <div>
+        <p class="eyebrow">Case audit projection</p>
+        <h1>Evidence timeline</h1>
+        <p class="page-description">{{ case.title }} · Investigation lifecycle, evidence observations, and analyst decisions in one chronological view.</p>
+    </div>
+    <div class="heading-actions">
+        <a href="{{ url_for('case_workspace', case_id=case.id) }}" class="btn btn-outline-secondary">Open case</a>
+        <a href="{{ url_for('relationships_workspace', case_id=case.id) }}" class="btn btn-outline-secondary"><i data-lucide="share-2"></i> Relationships</a>
+    </div>
+</section>
+
+<section class="timeline-policy" aria-label="Timeline interpretation policy">
+    <i data-lucide="shield-check"></i>
+    <div>
+        <strong>Recorded chronology, not inferred behavior</strong>
+        <span>The event time is when OpenLedger recorded a collection, observation, or review. Source-supplied dates such as account creation remain labelled metadata inside the evidence event and are not promoted into verified activity.</span>
+    </div>
+</section>
+
+<form method="GET" action="{{ url_for('case_timeline_workspace', case_id=case.id) }}" class="panel-card timeline-toolbar" aria-label="Timeline filters">
+    <label>
+        <span>Persona</span>
+        <select name="persona_id" class="form-select">
+            <option value="">Entire case</option>
+            {% for persona in case.personas %}
+            <option value="{{ persona.id }}" {{ 'selected' if persona.id == selected_persona_id }}>{{ persona.display_name }}</option>
+            {% endfor %}
+        </select>
+    </label>
+    <label>
+        <span>Event type</span>
+        <select name="event_type" class="form-select">
+            <option value="all" {{ 'selected' if event_type == 'all' }}>All recorded events</option>
+            <option value="investigation" {{ 'selected' if event_type == 'investigation' }}>Investigation lifecycle</option>
+            <option value="evidence" {{ 'selected' if event_type == 'evidence' }}>Evidence observations</option>
+            <option value="review" {{ 'selected' if event_type == 'review' }}>Analyst decisions</option>
+        </select>
+    </label>
+    <label>
+        <span>Order</span>
+        <select name="order" class="form-select">
+            <option value="newest" {{ 'selected' if order == 'newest' }}>Newest first</option>
+            <option value="oldest" {{ 'selected' if order == 'oldest' }}>Oldest first</option>
+        </select>
+    </label>
+    <div class="timeline-toolbar-actions">
+        <button type="submit" class="btn btn-primary">Apply filters</button>
+        {% if selected_persona_id or event_type != 'all' or order != 'newest' %}
+        <a href="{{ url_for('case_timeline_workspace', case_id=case.id) }}" class="btn btn-outline-secondary">Reset</a>
+        {% endif %}
+    </div>
+</form>
+
+{% if selected_persona_id %}
+<p class="timeline-filter-note"><i data-lucide="info"></i> Persona filtering shows only evidence and review events tied directly to that Persona. Case-level multi-subject investigation events are excluded to avoid unsupported attribution.</p>
+{% endif %}
+
+<section class="timeline-kpis" aria-label="Displayed timeline counts">
+    <article><span>Displayed</span><strong>{{ timeline.stats.displayed_count }}</strong><small>bounded records</small></article>
+    <article><span>Evidence</span><strong>{{ timeline.stats.evidence_count }}</strong><small>observations</small></article>
+    <article><span>Reviews</span><strong>{{ timeline.stats.review_count }}</strong><small>analyst decisions</small></article>
+    <article><span>Investigations</span><strong>{{ timeline.stats.investigation_count }}</strong><small>lifecycle events</small></article>
+</section>
+
+<section class="panel-card timeline-panel">
+    <header class="panel-header">
+        <div>
+            <h2>{{ timeline.selected_persona.display_name if timeline.selected_persona else 'Entire case' }}</h2>
+            <p>Every item links back to its governed Persona context where one exists.</p>
+        </div>
+        <span class="badge-soft">{{ order | title }}</span>
+    </header>
+    <div class="panel-body timeline-panel-body">
+        {% if timeline.events %}
+        <ol class="case-timeline-list">
+            {% for event in timeline.events %}
+            <li class="timeline-event event-{{ event.event_type }}">
+                <time datetime="{{ event.timestamp }}" class="timeline-time">
+                    <strong>{{ event.timestamp[:10] }}</strong>
+                    <span>{{ event.timestamp[11:19] }} UTC</span>
+                </time>
+                <span class="timeline-marker" aria-hidden="true">
+                    {% if event.event_type == 'investigation' %}<i data-lucide="scan-search"></i>
+                    {% elif event.event_type == 'evidence' %}<i data-lucide="file-search-2"></i>
+                    {% else %}<i data-lucide="badge-check"></i>{% endif %}
+                </span>
+                <article class="timeline-card">
+                    <header>
+                        <div>
+                            <span class="timeline-type">{{ event.event_type }}</span>
+                            <h3>{{ event.title }}</h3>
+                        </div>
+                        {% if event.event_type == 'review' %}
+                        <span class="review-badge {{ event.decision }}">{{ event.decision | title }}</span>
+                        {% elif event.event_type == 'evidence' %}
+                        <span class="review-badge {{ event.claim.review_status }}" title="Current claim status">Now {{ event.claim.review_status | title }}</span>
+                        {% else %}
+                        <span class="badge-soft {{ 'success' if event.status == 'completed' else 'warning' if event.status in ('failed', 'cancelled', 'interrupted') else '' }}">{{ event.status | replace('_', ' ') | title }}</span>
+                        {% endif %}
+                    </header>
+
+                    {% if event.event_type == 'investigation' %}
+                    <dl class="timeline-detail-grid">
+                        <div><dt>Job</dt><dd><code>{{ event.job_id }}</code></dd></div>
+                        <div><dt>Kind</dt><dd>{{ event.job_kind | replace('_', ' ') | title }}</dd></div>
+                        <div class="timeline-detail-wide"><dt>Identifiers checked</dt><dd>{{ event.usernames | join(', ') if event.usernames else 'None recorded' }}</dd></div>
+                    </dl>
+                    {% else %}
+                    <div class="timeline-claim">
+                        <div>
+                            <span>{{ event.claim.field_name | replace('_', ' ') | title }}</span>
+                            <strong>{{ event.claim.display_value }}</strong>
+                        </div>
+                        <a href="{{ url_for('persona_workspace', persona_id=event.persona.id) }}">{{ event.persona.display_name }} <i data-lucide="arrow-up-right"></i></a>
+                    </div>
+                    {% endif %}
+
+                    {% if event.event_type == 'evidence' %}
+                    <dl class="timeline-detail-grid">
+                        <div><dt>Source engine</dt><dd>{{ event.source_engine }}</dd></div>
+                        <div><dt>Native status</dt><dd>{{ event.status | replace('_', ' ') | title }}</dd></div>
+                        <div><dt>Confidence</dt><dd>{{ event.confidence ~ '%' if event.confidence is not none else 'Not supplied' }}</dd></div>
+                        <div><dt>Provenance</dt><dd>{{ event.provenance_type | replace('_', ' ') | title }}</dd></div>
+                        {% if event.extractor %}<div><dt>Parser</dt><dd>{{ event.extractor }}</dd></div>{% endif %}
+                        <div class="timeline-detail-wide"><dt>Provenance record</dt><dd><code>{{ event.provenance_id }}</code></dd></div>
+                    </dl>
+                    {% if event.account_metadata %}
+                    {% set metadata_labels = {
+                        'created_at': 'Source-reported account creation',
+                        'updated_at': 'Source-reported profile update',
+                        'latest_activity_at': 'Source-reported latest activity',
+                        'is_verified': 'Verified flag',
+                        'is_private': 'Private flag',
+                        'follower_count': 'Followers',
+                        'following_count': 'Following'
+                    } %}
+                    <div class="timeline-metadata">
+                        <span>Metadata captured with this observation</span>
+                        <dl>
+                            {% for metadata_key, metadata_value in event.account_metadata.items() %}
+                            <div><dt>{{ metadata_labels[metadata_key] }}</dt><dd>{% if metadata_value is sameas true %}Yes{% elif metadata_value is sameas false %}No{% else %}{{ metadata_value }}{% endif %}</dd></div>
+                            {% endfor %}
+                        </dl>
+                    </div>
+                    {% endif %}
+                    {% elif event.event_type == 'review' %}
+                    <dl class="timeline-detail-grid">
+                        <div><dt>Reviewer</dt><dd>{{ event.reviewer }}</dd></div>
+                        <div><dt>Decision</dt><dd>{{ event.decision | title }}</dd></div>
+                        {% if event.note %}<div class="timeline-detail-wide"><dt>Analyst note</dt><dd>{{ event.note }}</dd></div>{% endif %}
+                    </dl>
+                    {% endif %}
+                </article>
+            </li>
+            {% endfor %}
+        </ol>
+        {% else %}
+        <div class="empty-state compact">
+            <span class="empty-state-icon"><i data-lucide="list-x"></i></span>
+            <h2>No events match these filters</h2>
+            <p>Reset the timeline filters or run and review an investigation.</p>
+        </div>
+        {% endif %}
+    </div>
+    {% if timeline.stats.truncated %}
+    <footer class="timeline-limit-note">Showing the first {{ timeline.stats.limit }} matching events. Narrow the Persona or event-type filter to inspect a smaller evidence set.</footer>
+    {% endif %}
+</section>
+{% endblock %}

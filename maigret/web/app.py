@@ -2499,6 +2499,42 @@ def case_workspace(case_id):
     return render_template('case.html', case=case)
 
 
+@app.route('/cases/<case_id>/timeline')
+def case_timeline_workspace(case_id):
+    if case_store is None:
+        flash('The case timeline requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    case = case_store.get_case(case_id)
+    if not case:
+        flash('That case does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    selected_persona_id = request.args.get('persona_id', '').strip()
+    known_persona_ids = {persona['id'] for persona in case['personas']}
+    if selected_persona_id and selected_persona_id not in known_persona_ids:
+        flash('That persona does not belong to this case.', 'warning')
+        return redirect(url_for('case_timeline_workspace', case_id=case_id))
+    event_type = request.args.get('event_type', 'all').strip().casefold()
+    if event_type not in {'all', 'investigation', 'evidence', 'review'}:
+        event_type = 'all'
+    order = request.args.get('order', 'newest').strip().casefold()
+    if order not in {'newest', 'oldest'}:
+        order = 'newest'
+    timeline = case_store.build_case_timeline(
+        case_id,
+        persona_id=selected_persona_id or None,
+        event_type=event_type,
+        order=order,
+    )
+    return render_template(
+        'case_timeline.html',
+        case=case,
+        timeline=timeline,
+        selected_persona_id=selected_persona_id,
+        event_type=event_type,
+        order=order,
+    )
+
+
 @app.route('/personas/<persona_id>')
 def persona_workspace(persona_id):
     if case_store is None:

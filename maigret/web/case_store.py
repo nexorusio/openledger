@@ -930,6 +930,342 @@ class CaseStore:
             "jobs": [self._serialize_job(row) for row in job_rows],
         }
 
+    def build_case_timeline(
+        self,
+        case_id: str,
+        *,
+        persona_id: Optional[str] = None,
+        event_type: str = "all",
+        order: str = "newest",
+        limit: int = 300,
+    ) -> Optional[Dict[str, Any]]:
+        """Project existing case records into a bounded, read-only audit timeline."""
+        event_type = str(event_type or "all").strip().casefold()
+        if event_type not in {"all", "investigation", "evidence", "review"}:
+            raise ValueError("Invalid timeline event type")
+        order = str(order or "newest").strip().casefold()
+        if order not in {"newest", "oldest"}:
+            raise ValueError("Invalid timeline order")
+        bounded_limit = min(max(1, int(limit)), 500)
+        query_limit = bounded_limit + 1
+        descending = order == "newest"
+        timeline_events: list[Dict[str, Any]] = []
+
+        with self.engine.connect() as connection:
+            case_row = (
+                connection.execute(
+                    select(cases.c.id, cases.c.title).where(cases.c.id == case_id)
+                )
+                .mappings()
+                .first()
+            )
+            if not case_row:
+                return None
+
+            selected_persona = None
+            if persona_id:
+                selected_persona = (
+                    connection.execute(
+                        select(personas.c.id, personas.c.display_name).where(
+                            personas.c.id == persona_id,
+                            personas.c.case_id == case_id,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if not selected_persona:
+                    raise ValueError("Persona does not belong to this case")
+
+            # Investigation events remain case-level. They are deliberately
+            # excluded from a Persona-filtered view because a multi-subject job
+            # cannot be attributed to one Persona without inference.
+            if not persona_id and event_type in {"all", "investigation"}:
+                latest_job_time = func.coalesce(
+                    investigation_jobs.c.completed_at,
+                    investigation_jobs.c.started_at,
+                    investigation_jobs.c.created_at,
+                )
+                job_order = (
+                    latest_job_time.desc()
+                    if descending
+                    else investigation_jobs.c.created_at.asc()
+                )
+                job_rows = list(
+                    connection.execute(
+                        select(
+                            investigation_jobs.c.id,
+                            investigation_jobs.c.kind,
+                            investigation_jobs.c.status,
+                            investigation_jobs.c.usernames,
+                            investigation_jobs.c.created_at,
+                            investigation_jobs.c.started_at,
+                            investigation_jobs.c.completed_at,
+                        )
+                        .where(investigation_jobs.c.case_id == case_id)
+                        .order_by(job_order, investigation_jobs.c.id)
+                        .limit(query_limit)
+                    ).mappings()
+                )
+                for row in job_rows:
+                    start_time = row["started_at"] or row["created_at"]
+                    start_kind = (
+                        "investigation_started"
+                        if row["started_at"]
+                        else "investigation_queued"
+                    )
+                    timeline_events.append(
+                        {
+                            "id": f"job:{row['id']}:start",
+                            "timestamp": _as_iso(start_time),
+                            "sequence": 0,
+                            "event_type": "investigation",
+                            "kind": start_kind,
+                            "title": (
+                                "Investigation started"
+                                if row["started_at"]
+                                else "Investigation queued"
+                            ),
+                            "job_id": str(row["id"]),
+                            "job_kind": str(row["kind"]),
+                            "status": "running" if row["started_at"] else "queued",
+                            "usernames": [
+                                str(username)[:500]
+                                for username in list(row["usernames"] or [])[:20]
+                            ],
+                            "persona": None,
+                            "claim": None,
+                        }
+                    )
+                    if row["completed_at"]:
+                        status = str(row["status"])
+                        timeline_events.append(
+                            {
+                                "id": f"job:{row['id']}:outcome",
+                                "timestamp": _as_iso(row["completed_at"]),
+                                "sequence": 3,
+                                "event_type": "investigation",
+                                "kind": f"investigation_{status}",
+                                "title": f"Investigation {status.replace('_', ' ')}",
+                                "job_id": str(row["id"]),
+                                "job_kind": str(row["kind"]),
+                                "status": status,
+                                "usernames": [
+                                    str(username)[:500]
+                                    for username in list(row["usernames"] or [])[:20]
+                                ],
+                                "persona": None,
+                                "claim": None,
+                            }
+                        )
+
+            if event_type in {"all", "evidence"}:
+                observation_statement = (
+                    select(
+                        claim_observations.c.id,
+                        claim_observations.c.provenance_type,
+                        claim_observations.c.provenance_id,
+                        claim_observations.c.job_id,
+                        claim_observations.c.external_evidence_id,
+                        claim_observations.c.source_engine,
+                        claim_observations.c.source_record_id,
+                        claim_observations.c.confidence,
+                        claim_observations.c.native_status,
+                        claim_observations.c.details,
+                        claim_observations.c.observed_at,
+                        persona_claims.c.id.label("claim_id"),
+                        persona_claims.c.field_name,
+                        persona_claims.c.display_value,
+                        persona_claims.c.review_status,
+                        personas.c.id.label("persona_id"),
+                        personas.c.display_name.label("persona_name"),
+                    )
+                    .select_from(
+                        claim_observations.join(
+                            persona_claims,
+                            persona_claims.c.id == claim_observations.c.claim_id,
+                        ).join(personas, personas.c.id == persona_claims.c.persona_id)
+                    )
+                    .where(personas.c.case_id == case_id)
+                )
+                if persona_id:
+                    observation_statement = observation_statement.where(
+                        personas.c.id == persona_id
+                    )
+                observation_order = (
+                    claim_observations.c.observed_at.desc()
+                    if descending
+                    else claim_observations.c.observed_at.asc()
+                )
+                observation_rows = list(
+                    connection.execute(
+                        observation_statement.order_by(
+                            observation_order, claim_observations.c.id
+                        ).limit(query_limit)
+                    ).mappings()
+                )
+                for row in observation_rows:
+                    details = dict(row["details"] or {})
+                    observation_details = details.get("observation")
+                    if not isinstance(observation_details, dict):
+                        observation_details = {}
+                    raw_metadata = observation_details.get("account_metadata")
+                    if not isinstance(raw_metadata, dict):
+                        raw_metadata = {}
+                    account_metadata = {
+                        key: raw_metadata[key]
+                        for key in (
+                            "created_at",
+                            "updated_at",
+                            "latest_activity_at",
+                            "is_verified",
+                            "is_private",
+                            "follower_count",
+                            "following_count",
+                        )
+                        if key in raw_metadata
+                        and isinstance(raw_metadata[key], (str, int, bool))
+                    }
+                    extractor = observation_details.get("extractor")
+                    extractor = (
+                        str(extractor)[:100]
+                        if isinstance(extractor, (str, int))
+                        else None
+                    )
+                    timeline_events.append(
+                        {
+                            "id": f"observation:{row['id']}",
+                            "timestamp": _as_iso(row["observed_at"]),
+                            "sequence": 1,
+                            "event_type": "evidence",
+                            "kind": "claim_observed",
+                            "title": "Evidence observed",
+                            "job_id": row["job_id"],
+                            "status": str(row["native_status"]),
+                            "source_engine": str(row["source_engine"]),
+                            "source_record_id": row["source_record_id"],
+                            "confidence": row["confidence"],
+                            "provenance_type": str(row["provenance_type"]),
+                            "provenance_id": str(row["provenance_id"]),
+                            "external_evidence_id": row["external_evidence_id"],
+                            "account_metadata": account_metadata,
+                            "extractor": extractor,
+                            "persona": {
+                                "id": str(row["persona_id"]),
+                                "display_name": str(row["persona_name"]),
+                            },
+                            "claim": {
+                                "id": str(row["claim_id"]),
+                                "field_name": str(row["field_name"]),
+                                "display_value": str(row["display_value"]),
+                                "review_status": str(row["review_status"]),
+                            },
+                        }
+                    )
+
+            if event_type in {"all", "review"}:
+                review_statement = (
+                    select(
+                        claim_reviews.c.id,
+                        claim_reviews.c.decision,
+                        claim_reviews.c.reviewer,
+                        claim_reviews.c.note,
+                        claim_reviews.c.created_at,
+                        persona_claims.c.id.label("claim_id"),
+                        persona_claims.c.field_name,
+                        persona_claims.c.display_value,
+                        persona_claims.c.review_status,
+                        personas.c.id.label("persona_id"),
+                        personas.c.display_name.label("persona_name"),
+                    )
+                    .select_from(
+                        claim_reviews.join(
+                            persona_claims,
+                            persona_claims.c.id == claim_reviews.c.claim_id,
+                        ).join(personas, personas.c.id == persona_claims.c.persona_id)
+                    )
+                    .where(personas.c.case_id == case_id)
+                )
+                if persona_id:
+                    review_statement = review_statement.where(
+                        personas.c.id == persona_id
+                    )
+                review_order = (
+                    claim_reviews.c.created_at.desc()
+                    if descending
+                    else claim_reviews.c.created_at.asc()
+                )
+                review_rows = list(
+                    connection.execute(
+                        review_statement.order_by(
+                            review_order, claim_reviews.c.id
+                        ).limit(query_limit)
+                    ).mappings()
+                )
+                for row in review_rows:
+                    decision = str(row["decision"])
+                    timeline_events.append(
+                        {
+                            "id": f"review:{row['id']}",
+                            "timestamp": _as_iso(row["created_at"]),
+                            "sequence": 2,
+                            "event_type": "review",
+                            "kind": "claim_reviewed",
+                            "title": f"Claim marked {decision}",
+                            "decision": decision,
+                            "reviewer": str(row["reviewer"]),
+                            "note": row["note"],
+                            "persona": {
+                                "id": str(row["persona_id"]),
+                                "display_name": str(row["persona_name"]),
+                            },
+                            "claim": {
+                                "id": str(row["claim_id"]),
+                                "field_name": str(row["field_name"]),
+                                "display_value": str(row["display_value"]),
+                                "review_status": str(row["review_status"]),
+                            },
+                        }
+                    )
+
+        timeline_events.sort(
+            key=lambda item: (
+                item["timestamp"] or "",
+                int(item["sequence"]),
+                item["id"],
+            ),
+            reverse=descending,
+        )
+        truncated = len(timeline_events) > bounded_limit
+        timeline_events = timeline_events[:bounded_limit]
+        for item in timeline_events:
+            item.pop("sequence", None)
+        return {
+            "case_id": str(case_row["id"]),
+            "case_title": str(case_row["title"]),
+            "selected_persona": (
+                dict(selected_persona) if selected_persona is not None else None
+            ),
+            "event_type": event_type,
+            "order": order,
+            "events": timeline_events,
+            "stats": {
+                "displayed_count": len(timeline_events),
+                "investigation_count": sum(
+                    item["event_type"] == "investigation"
+                    for item in timeline_events
+                ),
+                "evidence_count": sum(
+                    item["event_type"] == "evidence" for item in timeline_events
+                ),
+                "review_count": sum(
+                    item["event_type"] == "review" for item in timeline_events
+                ),
+                "truncated": truncated,
+                "limit": bounded_limit,
+            },
+        }
+
     def register_data_source(
         self,
         source_id: str,
