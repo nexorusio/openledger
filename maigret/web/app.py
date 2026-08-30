@@ -57,9 +57,22 @@ from maigret.web.investigation_input import (
 from maigret.web.persona_intelligence import group_claims
 
 app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
-# Use environment variable for secret key, generate random one if not set
-app.secret_key = os.getenv('FLASK_SECRET_KEY', os.urandom(24).hex())
+try:
+    trusted_proxy_hops = int(os.getenv('OPENLEDGER_PROXY_HOPS', '0'))
+except ValueError as error:
+    raise RuntimeError('OPENLEDGER_PROXY_HOPS must be an integer') from error
+if trusted_proxy_hops not in {0, 1, 2}:
+    raise RuntimeError('OPENLEDGER_PROXY_HOPS must be 0, 1, or 2')
+if trusted_proxy_hops:
+    app.wsgi_app = ProxyFix(
+        app.wsgi_app,
+        x_for=trusted_proxy_hops,
+        x_proto=trusted_proxy_hops,
+        x_host=trusted_proxy_hops,
+    )
+
+configured_secret_key = os.getenv('FLASK_SECRET_KEY', '').strip()
+app.secret_key = configured_secret_key or os.urandom(24).hex()
 app.config.update(
     SESSION_COOKIE_NAME='openledger_session',
     SESSION_COOKIE_HTTPONLY=True,
@@ -67,6 +80,9 @@ app.config.update(
     SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE', 'false').lower()
     in ('true', '1', 'yes'),
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+    MAX_FORM_MEMORY_SIZE=256 * 1024,
+    MAX_FORM_PARTS=100,
 )
 
 # add background job tracking
@@ -204,6 +220,18 @@ app.config["AUTH_REQUIRED"] = os.getenv("AUTH_REQUIRED", "false").lower() in (
     "1",
     "yes",
 )
+trusted_hosts = [
+    value.strip()
+    for value in os.getenv("OPENLEDGER_TRUSTED_HOSTS", "").split(",")
+    if value.strip()
+]
+app.config["TRUSTED_HOSTS"] = trusted_hosts or None
+if app.config["AUTH_REQUIRED"] and not configured_secret_key:
+    raise RuntimeError("FLASK_SECRET_KEY is required when authentication is enabled")
+if app.config["AUTH_REQUIRED"] and not app.config["SESSION_COOKIE_SECURE"]:
+    raise RuntimeError(
+        "SESSION_COOKIE_SECURE must be enabled when authentication is required"
+    )
 app.config["DATABASE_URL"] = database_url_from_environment()
 
 # DATABASE_URL is deliberately optional outside production. This keeps the
@@ -1182,6 +1210,40 @@ def protect_sensitive_responses(response):
     ):
         response.headers['Cache-Control'] = 'no-store'
         response.headers['Pragma'] = 'no-cache'
+    response.headers.setdefault('X-Content-Type-Options', 'nosniff')
+    response.headers.setdefault('X-Frame-Options', 'DENY')
+    response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    response.headers.setdefault(
+        'Permissions-Policy',
+        'camera=(), microphone=(), geolocation=(), usb=()',
+    )
+    response.headers.setdefault('Cross-Origin-Opener-Policy', 'same-origin')
+    response.headers.setdefault('Cross-Origin-Resource-Policy', 'same-origin')
+    response.headers.setdefault('X-Permitted-Cross-Domain-Policies', 'none')
+    response.headers.setdefault('X-Robots-Tag', 'noindex, nofollow, noarchive')
+    response.headers.setdefault(
+        'Content-Security-Policy',
+        "; ".join(
+            (
+                "default-src 'self'",
+                "base-uri 'self'",
+                "object-src 'none'",
+                "frame-ancestors 'none'",
+                "form-action 'self'",
+                "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com",
+                "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com",
+                "img-src 'self' data: https:",
+                "font-src 'self' data: https://cdn.jsdelivr.net",
+                "connect-src 'self'",
+                "frame-src 'none'",
+            )
+        ),
+    )
+    if request.is_secure:
+        response.headers.setdefault(
+            'Strict-Transport-Security',
+            'max-age=31536000; includeSubDomains',
+        )
     return response
 
 

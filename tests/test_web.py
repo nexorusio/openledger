@@ -83,6 +83,30 @@ def test_index_renders(client):
     assert 'Nexorus, urban planning' not in body
 
 
+def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
+    response = client.get('/')
+
+    assert response.headers['X-Content-Type-Options'] == 'nosniff'
+    assert response.headers['X-Frame-Options'] == 'DENY'
+    assert response.headers['Referrer-Policy'] == 'no-referrer'
+    assert response.headers['Cross-Origin-Opener-Policy'] == 'same-origin'
+    assert response.headers['Cross-Origin-Resource-Policy'] == 'same-origin'
+    assert response.headers['X-Robots-Tag'] == 'noindex, nofollow, noarchive'
+    policy = response.headers['Content-Security-Policy']
+    assert "default-src 'self'" in policy
+    assert "frame-ancestors 'none'" in policy
+    assert "object-src 'none'" in policy
+
+
+def test_untrusted_host_is_rejected(client, web_app):
+    web_app.app.config['TRUSTED_HOSTS'] = ['openledger.example']
+    try:
+        response = client.get('/', headers={'Host': 'attacker.example'})
+        assert response.status_code == 400
+    finally:
+        web_app.app.config['TRUSTED_HOSTS'] = None
+
+
 def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
     assessed_folder = tmp_path / 'search_assessed'
     assessed_folder.mkdir()

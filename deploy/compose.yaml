@@ -61,6 +61,8 @@ services:
       PORT: 5000
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:?FLASK_SECRET_KEY is required}
       SESSION_COOKIE_SECURE: "true"
+      OPENLEDGER_PROXY_HOPS: "1"
+      OPENLEDGER_TRUSTED_HOSTS: "${DOMAIN},127.0.0.1,localhost,app"
       WEB_SETTINGS_FILE: /app/web_settings.json
       AUTH_REQUIRED: "true"
       AUTH_FILE: /app/runtime/secrets/auth.json
