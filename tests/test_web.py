@@ -1458,6 +1458,48 @@ def test_ai_markdown_includes_only_explicitly_approved_operator_context(web_app)
     assert 'jati@example.com' not in withheld
 
 
+def test_ai_markdown_uses_user_scanner_evidence_without_leaking_withheld_email(web_app):
+    result = {
+        'individual_reports': [],
+        'collector_observations': [
+            {
+                'source_engine': 'user_scanner_email',
+                'subject_type': 'email',
+                'subject_value': 'alice@example.test',
+                'status': 'Registered',
+                'site_name': 'Gravatar',
+                'category': 'social',
+                'source_url': 'https://gravatar.com/alice@example.test',
+                'extra': {
+                    'username': 'alice',
+                    'lookup_email': 'alice@example.test',
+                },
+            }
+        ],
+        'options': {
+            'investigation_spec': {
+                'allow_ai_context': False,
+                'identifiers': [
+                    {'type': 'username', 'value': 'alice'},
+                    {'type': 'email', 'value': 'alice@example.test'},
+                ],
+            }
+        },
+    }
+
+    withheld = web_app.build_ai_markdown(result)
+    result['options']['investigation_spec']['allow_ai_context'] = True
+    approved = web_app.build_ai_markdown(result)
+
+    assert 'Additional collector evidence' in withheld
+    assert 'Gravatar' in withheld
+    assert 'alice@example.test' not in withheld
+    assert 'lookup_email' not in withheld
+    assert 'source_url' not in withheld
+    assert 'alice@example.test' in approved
+    assert 'lookup_email' in approved
+
+
 @pytest.mark.parametrize(
     'relative_path',
     [

@@ -108,6 +108,43 @@ def test_context_only_submission_requires_a_searchable_account_candidate():
         )
 
 
+def test_user_scanner_email_collection_is_explicit_and_requires_grouping():
+    plan = build_investigation_plan(
+        {
+            "identifier_type": ["username", "email"],
+            "identifier_value": ["alice", "alice@example.test"],
+            "processing_mode": "same_subject",
+            "enable_user_scanner_email": "on",
+        }
+    )
+
+    assert plan["enable_user_scanner_email"] is True
+
+    with pytest.raises(InvestigationInputError, match="One subject"):
+        build_investigation_plan(
+            {
+                "identifier_type": ["username", "email"],
+                "identifier_value": ["alice", "alice@example.test"],
+                "processing_mode": "independent",
+                "enable_user_scanner_email": "on",
+            }
+        )
+
+    with pytest.raises(InvestigationInputError, match="one email"):
+        build_investigation_plan(
+            {
+                "identifier_type": ["username", "email", "email"],
+                "identifier_value": [
+                    "alice",
+                    "alice@example.test",
+                    "alias@example.test",
+                ],
+                "processing_mode": "same_subject",
+                "enable_user_scanner_email": "on",
+            }
+        )
+
+
 def test_ai_context_requires_explicit_consent():
     base = {
         "identifier_type": ["username", "full_name"],

@@ -234,6 +234,12 @@ def build_investigation_plan(
         raise InvestigationInputError("Select a valid identifier processing mode.")
     generate_variants = "generate_name_variants" in form
     allow_ai_context = "allow_ai_context" in form
+    enable_user_scanner_email = "enable_user_scanner_email" in form
+    if enable_user_scanner_email and processing_mode != "same_subject":
+        raise InvestigationInputError(
+            "User Scanner email evidence requires One subject mode so observations "
+            "cannot be attached to the wrong Persona."
+        )
     tags = parse_source_tags(form, "tags")
     excluded_tags = parse_source_tags(form, "excluded_tags")
     if set(tags).intersection(excluded_tags):
@@ -296,6 +302,19 @@ def build_investigation_plan(
             "retained as context and are not sent to the username scanner."
         )
 
+    email_identifier_count = sum(
+        identifier["type"] == "email" for identifier in identifiers
+    )
+    if enable_user_scanner_email and email_identifier_count == 0:
+        raise InvestigationInputError(
+            "Add an email identifier before enabling User Scanner email checks."
+        )
+    if enable_user_scanner_email and email_identifier_count > 1:
+        raise InvestigationInputError(
+            "The initial User Scanner integration accepts one email per "
+            "investigation. Run additional addresses as separate cases."
+        )
+
     full_name = next(
         (
             identifier["value"]
@@ -310,6 +329,7 @@ def build_investigation_plan(
         "processing_mode": processing_mode,
         "generate_name_variants": generate_variants,
         "allow_ai_context": allow_ai_context,
+        "enable_user_scanner_email": enable_user_scanner_email,
         "subject_label": subject_label,
         "identifiers": identifiers,
         "tags": tags,
