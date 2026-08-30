@@ -242,6 +242,28 @@ Rejected, pending, and uncertain claims do not enter the default relationship
 projection. Rejected claims are retained so an analyst can reverse a decision
 without losing provenance.
 
+## Case timeline projection
+
+The case evidence timeline is a bounded, read-only projection of records already
+owned by PostgreSQL. It merges three existing event classes without adding a
+timeline table or a second audit system:
+
+- investigation queue/start and terminal timestamps from investigation jobs;
+- immutable claim-observation timestamps and provenance;
+- append-only analyst review decisions and notes.
+
+Persona filtering includes only claim observations and reviews tied directly to
+that Persona. It excludes case-level investigation lifecycle events because a
+multi-subject collection job cannot be attributed to one Persona without an
+additional reviewed binding. The projection is capped and supports only exact
+event-type, Persona, and sort-order filters.
+
+The primary event timestamp means when OpenLedger recorded the lifecycle event,
+observation, or decision. Dates supplied by a public profile parser—such as
+account creation, profile update, or latest activity—remain labelled metadata
+inside that observation. They are not promoted into the primary chronology and
+must not be interpreted as verified real-world behavior.
+
 ## Location privacy
 
 Leaflet renders only approved location claims with coordinates. When an analyst

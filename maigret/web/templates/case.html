@@ -10,7 +10,10 @@
         <h1>{{ case.title }}</h1>
         <p class="page-description">Durable investigation activity and the personas created from its collected evidence.</p>
     </div>
-    <a href="{{ url_for('cases_workspace') }}" class="btn btn-outline-secondary">All cases</a>
+    <div class="heading-actions">
+        <a href="{{ url_for('case_timeline_workspace', case_id=case.id) }}" class="btn btn-outline-secondary"><i data-lucide="list-tree"></i> Evidence timeline</a>
+        <a href="{{ url_for('cases_workspace') }}" class="btn btn-outline-secondary">All cases</a>
+    </div>
 </section>
 
 <section class="metric-grid" aria-label="Case summary">

@@ -45,8 +45,8 @@
                     <span>Investigation history</span>
                 </a>
                 <a href="{{ url_for('cases_workspace') }}"
-                   class="sidebar-link {{ 'active' if request.endpoint in ('cases_workspace', 'case_workspace', 'persona_workspace') }}"
-                   {{ 'aria-current=page' if request.endpoint in ('cases_workspace', 'case_workspace', 'persona_workspace') }}>
+                   class="sidebar-link {{ 'active' if request.endpoint in ('cases_workspace', 'case_workspace', 'case_timeline_workspace', 'persona_workspace') }}"
+                   {{ 'aria-current=page' if request.endpoint in ('cases_workspace', 'case_workspace', 'case_timeline_workspace', 'persona_workspace') }}>
                     <i data-lucide="folder-search-2"></i>
                     <span>Cases & personas</span>
                 </a>
