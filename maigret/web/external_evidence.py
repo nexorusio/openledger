@@ -40,6 +40,12 @@ _SECRET_KEYS = {
     "secret",
     "session_token",
 }
+_SECRET_KEY_TOKEN_SEQUENCES = tuple(
+    tuple(secret_key.split("_")) for secret_key in _SECRET_KEYS
+)
+_COMPACT_SECRET_KEYS = {
+    "".join(tokens) for tokens in _SECRET_KEY_TOKEN_SEQUENCES
+}
 
 
 class ExternalEvidenceValidationError(ValueError):
@@ -107,8 +113,19 @@ def parse_external_timestamp(value: Any, field_name: str) -> datetime:
 
 
 def _secret_key(key: str) -> bool:
-    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
-    return normalized in _SECRET_KEYS
+    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
+    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
+    normalized = re.sub(r"[^a-z0-9]+", "_", separated.casefold()).strip("_")
+    tokens = tuple(token for token in normalized.split("_") if token)
+    for secret_tokens in _SECRET_KEY_TOKEN_SEQUENCES:
+        width = len(secret_tokens)
+        if any(
+            tokens[index : index + width] == secret_tokens
+            for index in range(len(tokens) - width + 1)
+        ):
+            return True
+    compact = "".join(tokens)
+    return any(secret in compact for secret in _COMPACT_SECRET_KEYS)
 
 
 def _bounded_json_value(value: Any, path: str, depth: int) -> Any:
@@ -192,6 +209,19 @@ def normalize_locator(value: Any) -> Dict[str, str]:
             "Datamart evidence locator requires an authority"
         )
     return {"uri": uri}
+
+
+def validate_locator_authority(locator: Dict[str, str], authority: Any) -> None:
+    """Bind governed locator namespaces to the registered source authority."""
+    expected = bounded_text(authority, "source.authority", max_chars=200)
+    parsed = urlsplit(locator["uri"])
+    if (
+        parsed.scheme.casefold() in {"datamart", "evidence"}
+        and parsed.netloc.casefold() != expected.casefold()
+    ):
+        raise ExternalEvidenceValidationError(
+            "Evidence locator authority does not match the registered source"
+        )
 
 
 def normalize_handling(value: Any) -> Dict[str, Any]:
@@ -280,17 +310,17 @@ def normalize_external_evidence(payload: Any) -> Dict[str, Any]:
     if not SHA256_PATTERN.fullmatch(content_hash):
         raise ExternalEvidenceValidationError("content_hash must be sha256:<64 lowercase hex>")
 
-    validity = payload.get("validity") or {}
+    validity = payload["validity"] if "validity" in payload else {}
     if not isinstance(validity, dict) or set(validity) - {"from", "to"}:
         raise ExternalEvidenceValidationError("validity may contain only from and to")
     valid_from = (
         parse_external_timestamp(validity["from"], "validity.from")
-        if validity.get("from")
+        if validity.get("from") is not None
         else None
     )
     valid_to = (
         parse_external_timestamp(validity["to"], "validity.to")
-        if validity.get("to")
+        if validity.get("to") is not None
         else None
     )
     if valid_from and valid_to and valid_from > valid_to:
@@ -316,7 +346,10 @@ def normalize_external_evidence(payload: Any) -> Dict[str, Any]:
         "valid_to": valid_to,
         "handling": normalize_handling(payload.get("handling")),
         "locator": normalize_locator(payload.get("locator")),
-        "attributes": normalize_bounded_document(payload.get("attributes") or {}, "attributes"),
+        "attributes": normalize_bounded_document(
+            payload["attributes"] if "attributes" in payload else {},
+            "attributes",
+        ),
         "preview": bounded_text(
             payload.get("preview", ""),
             "preview",
