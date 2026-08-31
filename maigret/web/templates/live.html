@@ -27,6 +27,7 @@
         <div class="live-stat"><span>Sources checked</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
         <div class="live-stat"><span>Profiles found</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
         <div class="live-stat"><span>Email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
+        <div class="live-stat"><span>GitHub profiles enriched</span><strong id="stat-github-enriched">{{ completed_github_enrichment_count }}</strong></div>
         <div class="live-stat"><span>Graph status</span><strong>Streaming</strong></div>
     </div>
     <div class="progress mb-3" style="height: 8px;">
@@ -45,10 +46,12 @@
     const csrfToken = {{ csrf_token|tojson }};
     const completedFoundCount = {{ completed_found_count|tojson }};
     const completedRegistrationCount = {{ completed_registration_count|tojson }};
+    const completedGithubEnrichmentCount = {{ completed_github_enrichment_count|tojson }};
 
     let nodes = null, edges = null, network = null;
     let foundCount = doneRedirect ? completedFoundCount : 0;
     let registrationCount = doneRedirect ? completedRegistrationCount : 0;
+    let githubEnrichmentCount = doneRedirect ? completedGithubEnrichmentCount : 0;
 
     function ensureGraph() {
         if (network) return;
@@ -124,7 +127,8 @@
     }
 
     function completionText() {
-        return 'Completed — ' + foundCount + ' accounts and ' + registrationCount
+        return 'Completed — ' + foundCount + ' accounts, ' + githubEnrichmentCount
+            + ' GitHub profiles enriched, and ' + registrationCount
             + ' email registrations found.';
     }
 
@@ -154,18 +158,29 @@
             document.getElementById('stat-found').textContent = foundCount;
             addFound(ev);
         } else if (ev.type === 'collector_started') {
-            statusEl.textContent = 'Checking email registrations with User Scanner (silent modules only)…';
+            statusEl.textContent = ev.collector === 'github-public-profile'
+                ? 'Enriching claimed GitHub user profiles through the public API…'
+                : 'Checking email registrations with User Scanner (silent modules only)…';
             const bar = document.getElementById('live-progress');
             bar.style.width = '100%';
             bar.classList.add('progress-bar-striped', 'progress-bar-animated');
         } else if (ev.type === 'collector_completed') {
-            registrationCount += Number(ev.found || 0);
-            document.getElementById('stat-registrations').textContent = registrationCount;
+            if (ev.collector === 'github-public-profile') {
+                githubEnrichmentCount += Number(ev.found || 0);
+                document.getElementById('stat-github-enriched').textContent = githubEnrichmentCount;
+            } else {
+                registrationCount += Number(ev.found || 0);
+                document.getElementById('stat-registrations').textContent = registrationCount;
+            }
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
-            statusEl.textContent = 'Email evidence collected. Finalizing the investigation…';
+            statusEl.textContent = ev.collector === 'github-public-profile'
+                ? 'GitHub evidence collected. Continuing the investigation…'
+                : 'Email evidence collected. Finalizing the investigation…';
         } else if (ev.type === 'collector_error') {
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
-            statusEl.textContent = 'Email evidence was unavailable; finalizing profile findings…';
+            statusEl.textContent = ev.collector === 'github-public-profile'
+                ? 'One GitHub profile could not be enriched; continuing with saved findings…'
+                : 'Email evidence was unavailable; finalizing profile findings…';
         } else if (ev.type === 'stopped') {
             statusEl.textContent = 'Stopped.';
         } else if (ev.type === 'error') {

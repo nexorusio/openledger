@@ -2291,7 +2291,10 @@ class CaseStore:
 
     def sync_persona_claims(self, job_id: str, result: Dict[str, Any]) -> int:
         """Upsert deterministic claims while preserving every human decision."""
-        from maigret.web.collector_adapters import extract_user_scanner_claims
+        from maigret.web.collector_adapters import (
+            extract_github_profile_claims,
+            extract_user_scanner_claims,
+        )
         from maigret.web.persona_intelligence import extract_persona_claims
 
         now = utcnow()
@@ -2345,16 +2348,51 @@ class CaseStore:
                     candidates=extract_persona_claims(report),
                     now=now,
                 )
+            collector_observations = [
+                observation
+                for observation in result.get("collector_observations") or []
+                if isinstance(observation, dict)
+            ]
             if grouped_persona_id:
                 synchronized += self._upsert_persona_candidates(
                     connection,
                     persona_id=grouped_persona_id,
                     job_id=job_id,
                     candidates=extract_user_scanner_claims(
-                        result.get("collector_observations") or []
+                        collector_observations
                     ),
                     now=now,
                 )
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=grouped_persona_id,
+                    job_id=job_id,
+                    candidates=extract_github_profile_claims(
+                        collector_observations
+                    ),
+                    now=now,
+                )
+            else:
+                observations_by_username: Dict[str, list] = {}
+                for observation in collector_observations:
+                    username_key = str(
+                        observation.get("subject_value") or ""
+                    ).strip().casefold()
+                    if username_key:
+                        observations_by_username.setdefault(username_key, []).append(
+                            observation
+                        )
+                for username_key, observations in observations_by_username.items():
+                    persona_id = personas_by_name.get(username_key)
+                    if not persona_id:
+                        continue
+                    synchronized += self._upsert_persona_candidates(
+                        connection,
+                        persona_id=persona_id,
+                        job_id=job_id,
+                        candidates=extract_github_profile_claims(observations),
+                        now=now,
+                    )
             connection.execute(
                 update(cases).where(cases.c.id == case_id).values(updated_at=now)
             )

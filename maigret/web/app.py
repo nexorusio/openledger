@@ -52,6 +52,8 @@ from maigret.web.case_store import (
     database_url_from_environment,
 )
 from maigret.web.collector_adapters import (
+    github_profile_targets,
+    run_github_public_profile,
     run_user_scanner_email,
     user_scanner_available,
     user_scanner_email_targets,
@@ -1973,6 +1975,19 @@ def build_reports(
             if isinstance(observation, dict)
             and str(observation.get('status') or '').casefold() == 'registered'
         ),
+        'collector_registration_count': sum(
+            1
+            for observation in list(collector_observations or [])
+            if isinstance(observation, dict)
+            and str(observation.get('status') or '').casefold() == 'registered'
+        ),
+        'github_enrichment_count': sum(
+            1
+            for observation in list(collector_observations or [])
+            if isinstance(observation, dict)
+            and observation.get('source_engine') == 'github_public_profile'
+            and str(observation.get('status') or '').casefold() == 'observed'
+        ),
     }
 
 
@@ -2050,6 +2065,7 @@ def parse_investigation_submission(form):
         'generate_name_variants': False,
         'allow_ai_context': False,
         'enable_user_scanner_email': False,
+        'enable_github_profile_enrichment': False,
         'subject_label': usernames[0],
         'identifiers': [
             {'type': 'username', 'value': username} for username in usernames
@@ -2188,6 +2204,64 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
 
     observations = []
     investigation_plan = options.get('investigation_spec') or {}
+    github_targets = github_profile_targets(general_results, investigation_plan)
+    if github_targets and not (
+        job['cancelled'] or (cancellation_check and cancellation_check())
+    ):
+        q.put(
+            {
+                'type': 'collector_started',
+                'collector': 'github-public-profile',
+                'target_type': 'claimed_profile',
+                'targets': len(github_targets),
+            }
+        )
+        github_observation_count = 0
+        github_collection_stopped = False
+        for target in github_targets:
+            if job['cancelled'] or (cancellation_check and cancellation_check()):
+                q.put({'type': 'stopped', 'collector': 'github-public-profile'})
+                github_collection_stopped = True
+                break
+            try:
+                observation = await run_github_public_profile(target)
+                observations.append(observation)
+                if str(observation.get('status') or '').casefold() == 'observed':
+                    github_observation_count += 1
+                if str(observation.get('status') or '').casefold() == 'rate_limited':
+                    break
+            except asyncio.CancelledError:
+                q.put({'type': 'stopped', 'collector': 'github-public-profile'})
+                github_collection_stopped = True
+                break
+            except Exception as error:
+                public_error = record_internal_error(
+                    'GitHub public-profile enrichment failed',
+                    error,
+                    username=target.get('investigated_username'),
+                )
+                q.put(
+                    {
+                        'type': 'collector_error',
+                        'collector': 'github-public-profile',
+                        'message': public_error,
+                    }
+                )
+        if not github_collection_stopped:
+            q.put(
+                {
+                    'type': 'collector_completed',
+                    'collector': 'github-public-profile',
+                    'observations': len(
+                        [
+                            item
+                            for item in observations
+                            if item.get('source_engine') == 'github_public_profile'
+                        ]
+                    ),
+                    'found': github_observation_count,
+                }
+            )
     for email in user_scanner_email_targets(investigation_plan):
         if job['cancelled'] or (cancellation_check and cancellation_check()):
             break
@@ -3233,7 +3307,11 @@ def live_results(job_id):
         done_redirect=done_redirect,
         completed_found_count=(result or {}).get('found_count', 0),
         completed_registration_count=(result or {}).get(
-            'collector_found_count', 0
+            'collector_registration_count',
+            (result or {}).get('collector_found_count', 0),
+        ),
+        completed_github_enrichment_count=(result or {}).get(
+            'github_enrichment_count', 0
         ),
     )
 

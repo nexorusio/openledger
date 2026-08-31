@@ -519,6 +519,79 @@ def test_user_scanner_observations_share_the_canonical_claim_and_evidence_store(
     assert lineage[0]["source_record_id"].startswith("user_scanner_email:")
 
 
+def test_github_enrichment_binds_only_to_its_persona_and_stays_pending(store):
+    job_id = store.create_investigation(
+        ["alice", "bob"],
+        {
+            "investigation_spec": {
+                "processing_mode": "independent",
+                "enable_github_profile_enrichment": True,
+            }
+        },
+    )
+    store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice", "bob"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 1,
+        "individual_reports": [],
+        "collector_observations": [
+            {
+                "source_engine": "github_public_profile",
+                "subject_type": "username",
+                "subject_value": "alice",
+                "status": "observed",
+                "site_name": "GitHub",
+                "category": "developer",
+                "source_url": "https://github.com/alice",
+                "source_record_id": "github-user:12345",
+                "extra": {
+                    "api_version": "2026-03-10",
+                    "github_id": 12345,
+                    "login": "alice",
+                    "account_type": "User",
+                    "name": "Alice Example",
+                    "bio": "Public-interest technologist",
+                    "created_at": "2012-01-02T03:04:05Z",
+                    "followers": 12,
+                },
+                "media": {},
+            }
+        ],
+    }
+    store.finish(job_id, result)
+
+    assert store.sync_persona_claims(job_id, result) == 4
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    personas = {
+        persona["display_name"]: store.get_persona(persona["id"])
+        for persona in case["personas"]
+    }
+    assert personas["bob"]["claims"] == []
+    assert {claim["field_name"] for claim in personas["alice"]["claims"]} == {
+        "social_account",
+        "platform_identifier",
+        "full_name",
+        "summary",
+    }
+    assert all(
+        claim["review_status"] == "pending" for claim in personas["alice"]["claims"]
+    )
+    assert "followers" not in {
+        claim["field_name"] for claim in personas["alice"]["claims"]
+    }
+    identifier = next(
+        claim
+        for claim in personas["alice"]["claims"]
+        if claim["field_name"] == "platform_identifier"
+    )
+    lineage = store.get_claim_lineage(identifier["id"])
+    assert lineage[0]["source_engine"] == "github_public_profile"
+    assert lineage[0]["source_record_id"] == "github-user:12345"
+
+
 def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store):
     job_id = store.create_investigation(["alice"], {})
     store.claim_next("worker:test")

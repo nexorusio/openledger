@@ -1,5 +1,7 @@
 # OpenLedger case intelligence architecture
 
+OSINT collector admission, runtime limits, and update governance are documented in [Governed OSINT source maintenance](osint-source-maintenance.md). Curated sources reuse the existing worker, PostgreSQL evidence lineage, and pending Persona review boundary; catalogs such as OSINT Framework are not runtime platforms.
+
 ## Decision
 
 PostgreSQL is the canonical record for cases, personas, investigation jobs,
