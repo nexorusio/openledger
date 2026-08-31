@@ -8,7 +8,7 @@
     <div>
         <p class="eyebrow">Account protection</p>
         <h1>Password & security</h1>
-        <p class="page-description">Manage the operator password protecting this OpenLedger workspace.</p>
+        <p class="page-description">Manage your password{% if current_role == 'admin' %} and analyst access{% endif %}.</p>
     </div>
     <span class="badge-soft success"><i data-lucide="shield-check"></i> Application login enabled</span>
 </section>
@@ -48,6 +48,55 @@
             <button type="submit" class="btn btn-primary px-4">Update password</button>
         </div>
     </form>
+
+    {% if current_role == 'admin' %}
+    <section class="panel-card mt-4">
+        <header class="panel-header">
+            <div>
+                <h2>Analyst access</h2>
+                <p>Analysts can use every investigation workspace, but cannot open Settings or manage users.</p>
+            </div>
+            <span class="badge-soft"><i data-lucide="users-round"></i> {{ analysts | length }} analysts</span>
+        </header>
+        <div class="panel-body">
+            <form method="POST" action="{{ url_for('add_analyst') }}" class="analyst-create-grid">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <div>
+                    <label for="analyst-username" class="form-label">Username</label>
+                    <input type="text" class="form-control" id="analyst-username" name="username"
+                           pattern="[A-Za-z0-9_.-]{1,64}" maxlength="64" autocomplete="off" required>
+                </div>
+                <div>
+                    <label for="analyst-password" class="form-label">Temporary password</label>
+                    <input type="password" class="form-control" id="analyst-password" name="password"
+                           minlength="12" autocomplete="new-password" required>
+                </div>
+                <div>
+                    <label for="analyst-confirm-password" class="form-label">Confirm password</label>
+                    <input type="password" class="form-control" id="analyst-confirm-password" name="confirm_password"
+                           minlength="12" autocomplete="new-password" required>
+                </div>
+                <button type="submit" class="btn btn-primary">Add analyst</button>
+            </form>
+
+            <div class="analyst-list mt-4">
+                {% for analyst in analysts %}
+                <div class="analyst-row">
+                    <span class="persona-summary-icon"><i data-lucide="user-round"></i></span>
+                    <span><strong>{{ analyst.username }}</strong><small>Analyst</small></span>
+                    <form method="POST" action="{{ url_for('remove_analyst', username=analyst.username) }}">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" class="btn btn-sm btn-outline-danger"
+                                onclick="return confirm('Remove analyst {{ analyst.username }}?')">Remove</button>
+                    </form>
+                </div>
+                {% else %}
+                <p class="form-text mb-0">No analyst accounts have been added.</p>
+                {% endfor %}
+            </div>
+        </div>
+    </section>
+    {% endif %}
 
 </div>
 {% endblock %}

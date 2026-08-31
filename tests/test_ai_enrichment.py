@@ -9,6 +9,8 @@ from maigret.ai import (
     _parse_responses_analysis,
     _parse_structured_response,
     get_ai_evidence_proposals,
+    get_case_chat_claim_proposals,
+    get_case_chat_response,
     get_enriched_ai_analysis,
     validate_ai_api_base_url,
 )
@@ -222,6 +224,79 @@ def test_enriched_analysis_request_requires_web_search_when_enabled(monkeypatch)
     assert captured["payload"]["tool_choice"] == "required"
 
 
+def test_case_chat_request_sends_bounded_case_memory_and_requires_cited_research(
+    monkeypatch,
+):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "output": [
+                    {"type": "web_search_call", "status": "completed"},
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "Case answer with cited corroboration.",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "url": "https://example.test/source",
+                                        "title": "Source",
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def post(self, url, *, json, headers):
+            captured.update(url=url, payload=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai.aiohttp, "ClientSession", FakeSession)
+    result = asyncio.run(
+        get_case_chat_response(
+            api_key="test-key",
+            case_context={"id": "case-1", "personas": []},
+            conversation=[
+                {"role": "user", "author": "analyst", "content": "Earlier question"}
+            ],
+            user_message="Research this subject",
+            model="gpt-5.6-terra",
+            web_search_enabled=True,
+        )
+    )
+
+    assert result["sources"][0]["url"] == "https://example.test/source"
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert captured["payload"]["tools"] == [{"type": "web_search"}]
+    assert captured["payload"]["tool_choice"] == "required"
+    assert "Earlier question" in captured["payload"]["input"]
+    assert "Research this subject" in captured["payload"]["input"]
+
+
 def test_structured_proposal_response_requires_json_object_with_list():
     payload = {
         "output": [
@@ -314,4 +389,65 @@ def test_evidence_proposal_request_uses_strict_schema_without_web_search(monkeyp
     assert {"latitude", "longitude", "coordinate_precision"}.issubset(
         proposal_schema["required"]
     )
+    assert "tools" not in captured["payload"]
+
+
+def test_case_chat_proposal_request_supports_user_and_web_evidence_without_browsing(
+    monkeypatch,
+):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": '{"proposals":[]}'}
+                        ],
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def post(self, url, *, json, headers):
+            captured.update(url=url, payload=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai.aiohttp, "ClientSession", FakeSession)
+    proposals = asyncio.run(
+        get_case_chat_claim_proposals(
+            api_key="test-key",
+            target_persona="alice",
+            user_message="Alice works at Acme Labs.",
+            assistant_answer="This remains unverified.",
+            sources=[],
+            model="gpt-5.6-terra",
+        )
+    )
+
+    assert proposals == []
+    proposal_schema = captured["payload"]["text"]["format"]["schema"]
+    evidence_basis = proposal_schema["properties"]["proposals"]["items"][
+        "properties"
+    ]["evidence_basis"]
+    assert set(evidence_basis["enum"]) == {"user_statement", "public_web"}
     assert "tools" not in captured["payload"]

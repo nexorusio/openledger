@@ -20,7 +20,18 @@ import sys
 
 try:
     with open(sys.argv[1], encoding='utf-8') as auth_file:
-        print(json.load(auth_file).get('username', ''))
+        payload = json.load(auth_file)
+        if payload.get('schema_version') == 1:
+            print(payload.get('username', ''))
+        else:
+            print(next(
+                (
+                    user.get('username', '')
+                    for user in payload.get('users', [])
+                    if user.get('role') == 'admin'
+                ),
+                '',
+            ))
 except (OSError, ValueError, TypeError):
     print('')
 PY

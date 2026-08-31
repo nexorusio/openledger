@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+
+{% block title %}Case chat · {{ case.title }} | OpenLedger{% endblock %}
+{% block breadcrumb %}Case chat{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Persistent case assistant</p>
+        <h1>{{ case.title }}</h1>
+        <p class="page-description">Ask questions, evaluate supplied information, research the public web, and create reviewable Persona proposals.</p>
+    </div>
+    <div class="heading-actions">
+        <a href="{{ url_for('case_workspace', case_id=case.id) }}" class="btn btn-outline-secondary"><i data-lucide="folder-search-2"></i> Case workspace</a>
+    </div>
+</section>
+
+<section class="case-chat-governance" aria-label="Case chat controls">
+    <span><i data-lucide="database"></i><strong>Durable memory</strong> Every message remains with this case.</span>
+    <span><i data-lucide="globe-2"></i><strong>Cited research</strong> Internet findings require public sources.</span>
+    <span><i data-lucide="shield-check"></i><strong>Human review</strong> Chat cannot approve Persona facts.</span>
+</section>
+
+<div class="case-chat-shell"
+     id="caseChat"
+     data-endpoint="{{ url_for('case_chat_message', case_id=case.id) }}"
+     data-csrf-token="{{ csrf_token }}">
+    <section class="panel-card case-chat-panel">
+        <div class="case-chat-thread" id="caseChatThread" aria-live="polite">
+            {% for message in messages %}
+            <article class="case-chat-message {{ message.role }}" data-message-id="{{ message.id }}">
+                <header>
+                    <span class="case-chat-avatar"><i data-lucide="{{ 'sparkles' if message.role == 'assistant' else 'user-round' }}"></i></span>
+                    <span>
+                        <strong>{{ message.author }}</strong>
+                        <small>{{ message.created_at }}</small>
+                    </span>
+                    {% if message.research_enabled %}<span class="badge-soft">Public-web research</span>{% endif %}
+                </header>
+                <div class="case-chat-message-content">{{ message.content }}</div>
+                {% if message.sources %}
+                <div class="case-chat-sources">
+                    <strong>Sources</strong>
+                    <ol>
+                        {% for source in message.sources %}
+                        <li><a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title }}</a></li>
+                        {% endfor %}
+                    </ol>
+                </div>
+                {% endif %}
+                {% if message.proposals.status == 'pending_review' %}
+                <div class="case-chat-proposal-note">
+                    <i data-lucide="clipboard-check"></i>
+                    {{ message.proposals.count }} Persona proposal{{ '' if message.proposals.count == 1 else 's' }} sent to pending review.
+                </div>
+                {% elif message.proposals.status == 'unavailable' %}
+                <div class="case-chat-proposal-note warning">
+                    <i data-lucide="triangle-alert"></i> The answer was saved, but Persona proposal extraction was unavailable.
+                </div>
+                {% endif %}
+            </article>
+            {% else %}
+            <div class="case-chat-empty" id="caseChatEmpty">
+                <span><i data-lucide="messages-square"></i></span>
+                <h2>Start with the case record</h2>
+                <p>Ask for a summary, compare evidence, identify gaps, evaluate information you provide, or enable cited public-web research.</p>
+            </div>
+            {% endfor %}
+        </div>
+
+        <form class="case-chat-composer" id="caseChatForm">
+            <label for="caseChatMessage" class="visually-hidden">Message</label>
+            <textarea id="caseChatMessage" class="form-control" maxlength="12000" rows="4"
+                      placeholder="Ask OpenLedger to analyze this case…" required></textarea>
+            <div class="case-chat-options">
+                <div class="case-chat-target">
+                    <label for="caseChatPersona">Target Persona</label>
+                    <select id="caseChatPersona" class="form-select">
+                        <option value="">No specific Persona</option>
+                        {% for persona in case.personas %}
+                        <option value="{{ persona.id }}">{{ persona.display_name }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="caseChatResearch">
+                    <span class="form-check-label">Research public web</span>
+                </label>
+                <label class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="caseChatPropose">
+                    <span class="form-check-label">Propose supported facts</span>
+                </label>
+                <button type="submit" class="btn btn-primary" id="caseChatSubmit" {{ '' if ai_enabled else 'disabled' }}>
+                    <i data-lucide="send"></i> Send
+                </button>
+            </div>
+            <p class="case-chat-composer-note">
+                {% if ai_enabled %}
+                “Propose supported facts” requires a target Persona. Proposals remain pending until reviewed in the Persona workspace.
+                {% elif current_role == 'admin' %}
+                Connect OpenAI in <a href="{{ url_for('settings_update', section='connections') }}">Settings</a> to enable case chat.
+                {% else %}
+                Ask an administrator to connect OpenAI before using case chat.
+                {% endif %}
+            </p>
+            <div class="case-chat-error" id="caseChatError" role="alert" hidden></div>
+        </form>
+    </section>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='case-chat.js') }}"></script>
+{% endblock %}

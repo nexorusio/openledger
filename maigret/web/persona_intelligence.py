@@ -733,6 +733,177 @@ def extract_ai_persona_claims(
     return candidates
 
 
+def extract_case_chat_persona_claims(
+    raw_proposals: Any,
+    *,
+    sources: Iterable[Dict[str, Any]],
+    target_persona: str,
+    model: str,
+    user_message: str,
+    user_message_id: str,
+    assistant_message_id: str,
+    provided_by: str,
+    diagnostics: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Validate chat-derived findings without allowing inference to become fact."""
+    if diagnostics is not None:
+        diagnostics.clear()
+        diagnostics.update(received=0, accepted=0, rejected={})
+
+    def reject(reason: str) -> None:
+        if diagnostics is None:
+            return
+        rejected = diagnostics["rejected"]
+        rejected[reason] = int(rejected.get(reason, 0)) + 1
+
+    if not isinstance(raw_proposals, list):
+        return []
+    proposals = [item for item in raw_proposals[:100] if isinstance(item, dict)]
+    if diagnostics is not None:
+        diagnostics["received"] = min(len(raw_proposals), 100)
+        diagnostics["rejected"]["invalid_record"] = min(
+            len(raw_proposals), 100
+        ) - len(proposals)
+
+    public_proposals = []
+    user_proposals = []
+    for proposal in proposals:
+        basis = str(proposal.get("evidence_basis") or "").strip().casefold()
+        if basis == "public_web":
+            public_proposals.append({**proposal, "username": target_persona})
+        elif basis == "user_statement":
+            user_proposals.append(proposal)
+        else:
+            reject("unsupported_evidence_basis")
+
+    public_diagnostics: Dict[str, Any] = {}
+    public_candidates = extract_ai_persona_claims(
+        public_proposals,
+        sources=sources,
+        usernames=[target_persona],
+        model=model,
+        diagnostics=public_diagnostics,
+    )
+    for reason, count in public_diagnostics.get("rejected", {}).items():
+        for _ in range(int(count)):
+            reject(reason)
+    for candidate in public_candidates:
+        candidate["source_engine"] = "openai_case_chat_research"
+        candidate["evidence_basis"] = "public_web"
+        candidate["provenance_message_id"] = assistant_message_id
+        for evidence in candidate["evidence"]:
+            evidence["details"].update(
+                {
+                    "case_chat_user_message_id": user_message_id,
+                    "case_chat_assistant_message_id": assistant_message_id,
+                }
+            )
+            evidence["fingerprint"] = evidence_fingerprint(
+                {
+                    "evidence_type": evidence["evidence_type"],
+                    "source_name": evidence["source_name"],
+                    "source_url": evidence["source_url"],
+                    "details": evidence["details"],
+                }
+            )
+
+    candidates = list(public_candidates)
+    seen = {
+        (candidate["fingerprint"], candidate["evidence"][0]["fingerprint"])
+        for candidate in candidates
+    }
+    normalized_user_message = " ".join(str(user_message or "").split()).casefold()
+    allowed_user_fields = AI_PROPOSAL_FIELDS - {"summary"}
+    for raw in user_proposals:
+        field_name = str(raw.get("field_name") or "").strip()
+        if field_name not in allowed_user_fields:
+            reject("unsupported_user_statement_field")
+            continue
+        value = str(raw.get("value") or "").strip()
+        if not value:
+            reject("empty_value")
+            continue
+        value = value[: AI_FIELD_LIMITS[field_name]]
+        if field_name in {"social_account", "website", "photograph"}:
+            value = _public_url(value)
+            if not value:
+                reject("invalid_public_url")
+                continue
+        else:
+            value = " ".join(value.split())
+        if value.casefold() not in normalized_user_message:
+            reject("not_explicitly_user_provided")
+            continue
+        if any(
+            raw.get(key) is not None
+            for key in ("latitude", "longitude", "coordinate_precision")
+        ):
+            reject("user_statement_coordinates_not_allowed")
+            continue
+        try:
+            confidence = int(str(raw.get("confidence") or ""))
+        except (TypeError, ValueError):
+            reject("invalid_confidence")
+            continue
+        if confidence < 20:
+            reject("low_confidence")
+            continue
+        confidence = min(confidence, 50)
+        reason = " ".join(str(raw.get("reason") or "").split())[:1000]
+        if not reason:
+            reject("missing_reason")
+            continue
+        stored_value: Any = value
+        if field_name == "social_account":
+            hostname = urlparse(value).hostname or "Public account"
+            stored_value = {
+                "platform": hostname.removeprefix("www.")[:300],
+                "url": value,
+                "username": target_persona[:500],
+            }
+        fingerprint = claim_fingerprint(field_name, stored_value)
+        evidence: Dict[str, Any] = {
+            "evidence_type": "analyst_provided_context",
+            "source_name": f"Case chat · {provided_by}"[:300],
+            "source_url": "",
+            "details": {
+                "target_persona": target_persona[:500],
+                "proposal_reason": reason,
+                "model": str(model).strip()[:100],
+                "provided_by": str(provided_by).strip()[:200],
+                "case_chat_user_message_id": user_message_id,
+                "case_chat_assistant_message_id": assistant_message_id,
+                "human_review_required": True,
+                "unverified_user_statement": True,
+            },
+        }
+        evidence["fingerprint"] = evidence_fingerprint(evidence)
+        deduplication_key = (fingerprint, evidence["fingerprint"])
+        if deduplication_key in seen:
+            reject("duplicate_proposal")
+            continue
+        seen.add(deduplication_key)
+        candidates.append(
+            {
+                "field_name": field_name,
+                "value": stored_value,
+                "display_value": _display_value(stored_value),
+                "normalized_value": _normalized_value(stored_value),
+                "confidence": confidence,
+                "fingerprint": fingerprint,
+                "source_engine": "case_chat_user_statement",
+                "evidence_basis": "user_statement",
+                "provenance_message_id": user_message_id,
+                "latitude": None,
+                "longitude": None,
+                "evidence": [evidence],
+            }
+        )
+    if diagnostics is not None:
+        diagnostics["accepted"] = len(candidates)
+    return candidates
+
+
 def group_claims(claims: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return the fixed persona form, including empty evidence categories."""
     by_field: Dict[str, List[Dict[str, Any]]] = {}

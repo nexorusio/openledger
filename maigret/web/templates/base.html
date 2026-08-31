@@ -45,8 +45,8 @@
                     <span>Investigation history</span>
                 </a>
                 <a href="{{ url_for('cases_workspace') }}"
-                   class="sidebar-link {{ 'active' if request.endpoint in ('cases_workspace', 'case_workspace', 'case_timeline_workspace', 'persona_workspace') }}"
-                   {{ 'aria-current=page' if request.endpoint in ('cases_workspace', 'case_workspace', 'case_timeline_workspace', 'persona_workspace') }}>
+                   class="sidebar-link {{ 'active' if request.endpoint in ('cases_workspace', 'case_workspace', 'case_timeline_workspace', 'case_chat_workspace', 'persona_workspace') }}"
+                   {{ 'aria-current=page' if request.endpoint in ('cases_workspace', 'case_workspace', 'case_timeline_workspace', 'case_chat_workspace', 'persona_workspace') }}>
                     <i data-lucide="folder-search-2"></i>
                     <span>Cases & personas</span>
                 </a>
@@ -58,12 +58,14 @@
                 </a>
 
                 <p class="nav-section-label system-label">System</p>
+                {% if current_role == 'admin' %}
                 <a href="{{ url_for('settings_update') }}"
                    class="sidebar-link {{ 'active' if request.endpoint in ('settings_update', 'openai_settings_update') }}"
                    {{ 'aria-current=page' if request.endpoint in ('settings_update', 'openai_settings_update') }}>
                     <i data-lucide="settings-2"></i>
                     <span>Settings</span>
                 </a>
+                {% endif %}
                 <a href="{{ url_for('security_settings') }}"
                    class="sidebar-link {{ 'active' if request.endpoint == 'security_settings' }}"
                    {{ 'aria-current=page' if request.endpoint == 'security_settings' }}>
@@ -96,7 +98,7 @@
                     {% if current_user %}
                     <span class="topbar-profile" aria-label="Signed in as {{ current_user }}">
                         <span class="topbar-avatar"><i data-lucide="user-round"></i></span>
-                        <strong>{{ current_user }}</strong>
+                        <span><strong>{{ current_user }}</strong><small>{{ current_role | title }}</small></span>
                     </span>
                     <form method="POST" action="{{ url_for('logout') }}" class="topbar-logout-form">
                         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

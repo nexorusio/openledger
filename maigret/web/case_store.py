@@ -8,7 +8,7 @@ import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Optional
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from sqlalchemy import (
     JSON,
@@ -235,6 +235,42 @@ Index(
     investigation_events.c.id,
 )
 
+case_chat_messages = Table(
+    "case_chat_messages",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "case_id",
+        String(36),
+        ForeignKey("cases.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "persona_id",
+        String(36),
+        ForeignKey("personas.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    Column("role", String(16), nullable=False),
+    Column("author", String(200), nullable=False),
+    Column("content", Text, nullable=False),
+    Column("research_enabled", Boolean, nullable=False, server_default="false"),
+    Column("sources", json_document, nullable=False),
+    Column("proposals", json_document, nullable=False),
+    Column("model", String(100), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "role IN ('user', 'assistant')",
+        name="ck_case_chat_messages_role",
+    ),
+)
+Index(
+    "ix_case_chat_messages_case_created",
+    case_chat_messages.c.case_id,
+    case_chat_messages.c.created_at,
+)
+Index("ix_case_chat_messages_persona", case_chat_messages.c.persona_id)
+
 data_sources = Table(
     "data_sources",
     metadata,
@@ -374,6 +410,12 @@ claim_observations = Table(
         ForeignKey("external_evidence_records.id", ondelete="SET NULL"),
         nullable=True,
     ),
+    Column(
+        "chat_message_id",
+        String(36),
+        ForeignKey("case_chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
     Column("source_engine", String(100), nullable=False),
     Column("source_record_id", String(500), nullable=True),
     Column("confidence", Integer, nullable=True),
@@ -382,7 +424,8 @@ claim_observations = Table(
     Column("fingerprint", String(64), nullable=False),
     Column("observed_at", DateTime(timezone=True), nullable=False),
     CheckConstraint(
-        "provenance_type IN ('investigation_job', 'external_evidence')",
+        "provenance_type IN ('investigation_job', 'external_evidence', "
+        "'case_chat_message')",
         name="ck_claim_observations_provenance_type",
     ),
     CheckConstraint(
@@ -393,6 +436,7 @@ claim_observations = Table(
 )
 Index("ix_claim_observations_claim_observed", claim_observations.c.claim_id, claim_observations.c.observed_at)
 Index("ix_claim_observations_provenance", claim_observations.c.provenance_type, claim_observations.c.provenance_id)
+Index("ix_claim_observations_chat_message", claim_observations.c.chat_message_id)
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
@@ -430,6 +474,34 @@ def _as_iso(value: Optional[datetime]) -> Optional[str]:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _bounded_chat_sources(value: Any) -> list[Dict[str, str]]:
+    """Retain only bounded, public HTTP(S) citations on chat messages."""
+    if not isinstance(value, list):
+        return []
+    sources: list[Dict[str, str]] = []
+    seen = set()
+    for item in value[:100]:
+        if not isinstance(item, dict):
+            continue
+        candidate = str(item.get("url") or "").strip()[:2000]
+        try:
+            parsed = urlsplit(candidate)
+        except ValueError:
+            continue
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or candidate in seen
+        ):
+            continue
+        seen.add(candidate)
+        title = " ".join(str(item.get("title") or parsed.netloc).split())[:300]
+        sources.append({"title": title or parsed.netloc, "url": candidate})
+    return sources
 
 
 class WorkerLock:
@@ -928,6 +1000,204 @@ class CaseStore:
                 for row in persona_rows
             ],
             "jobs": [self._serialize_job(row) for row in job_rows],
+        }
+
+    def append_case_chat_message(
+        self,
+        case_id: str,
+        *,
+        role: str,
+        author: str,
+        content: str,
+        persona_id: Optional[str] = None,
+        research_enabled: bool = False,
+        sources: Optional[list[Dict[str, Any]]] = None,
+        proposals: Optional[Dict[str, Any]] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Append one durable case-scoped conversation message."""
+        normalized_role = str(role or "").strip().casefold()
+        if normalized_role not in {"user", "assistant"}:
+            raise ValueError("Invalid chat message role")
+        normalized_author = " ".join(str(author or "").split())[:200]
+        if not normalized_author:
+            raise ValueError("A chat message author is required")
+        normalized_content = str(content or "").strip()
+        content_limit = 12_000 if normalized_role == "user" else 50_000
+        if not normalized_content:
+            raise ValueError("A chat message cannot be empty")
+        if len(normalized_content) > content_limit:
+            raise ValueError(
+                f"Chat message exceeds the {content_limit:,}-character limit"
+            )
+        normalized_model = " ".join(str(model or "").split())[:100] or None
+        normalized_sources = _bounded_chat_sources(sources or [])
+        normalized_proposals = normalize_bounded_document(
+            proposals or {}, "proposals"
+        )
+        now = utcnow()
+        message_id = str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            if not connection.scalar(select(cases.c.id).where(cases.c.id == case_id)):
+                raise KeyError(case_id)
+            if persona_id:
+                persona_case_id = connection.scalar(
+                    select(personas.c.case_id).where(personas.c.id == persona_id)
+                )
+                if not persona_case_id:
+                    raise KeyError(persona_id)
+                if persona_case_id != case_id:
+                    raise ValueError("Persona does not belong to this case")
+            connection.execute(
+                insert(case_chat_messages).values(
+                    id=message_id,
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    role=normalized_role,
+                    author=normalized_author,
+                    content=normalized_content,
+                    research_enabled=bool(research_enabled),
+                    sources=normalized_sources,
+                    proposals=normalized_proposals,
+                    model=normalized_model,
+                    created_at=now,
+                )
+            )
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(updated_at=now)
+            )
+        return {
+            "id": message_id,
+            "case_id": case_id,
+            "persona_id": persona_id,
+            "role": normalized_role,
+            "author": normalized_author,
+            "content": normalized_content,
+            "research_enabled": bool(research_enabled),
+            "sources": normalized_sources,
+            "proposals": normalized_proposals,
+            "model": normalized_model,
+            "created_at": _as_iso(now),
+        }
+
+    def update_case_chat_message_proposals(
+        self, message_id: str, proposals: Dict[str, Any]
+    ) -> None:
+        normalized = normalize_bounded_document(proposals or {}, "proposals")
+        with self.engine.begin() as connection:
+            updated = connection.execute(
+                update(case_chat_messages)
+                .where(
+                    case_chat_messages.c.id == message_id,
+                    case_chat_messages.c.role == "assistant",
+                )
+                .values(proposals=normalized)
+            )
+            if updated.rowcount != 1:
+                raise KeyError(message_id)
+
+    def list_case_chat_messages(
+        self, case_id: str, *, limit: int = 200
+    ) -> list[Dict[str, Any]]:
+        bounded_limit = min(max(1, int(limit)), 500)
+        with self.engine.connect() as connection:
+            rows = list(
+                connection.execute(
+                    select(case_chat_messages)
+                    .where(case_chat_messages.c.case_id == case_id)
+                    .order_by(
+                        case_chat_messages.c.created_at.desc(),
+                        case_chat_messages.c.id.desc(),
+                    )
+                    .limit(bounded_limit)
+                ).mappings()
+            )
+        rows.reverse()
+        return [self._serialize_case_chat_message(row) for row in rows]
+
+    def get_case_chat_context(
+        self, case_id: str, *, claim_limit: int = 500
+    ) -> Optional[Dict[str, Any]]:
+        """Return bounded case evidence for a model prompt, with review labels."""
+        bounded_limit = min(max(1, int(claim_limit)), 1000)
+        with self.engine.connect() as connection:
+            case_row = (
+                connection.execute(
+                    select(cases.c.id, cases.c.title, cases.c.status).where(
+                        cases.c.id == case_id
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if not case_row:
+                return None
+            persona_rows = list(
+                connection.execute(
+                    select(personas)
+                    .where(personas.c.case_id == case_id)
+                    .order_by(personas.c.created_at)
+                ).mappings()
+            )
+            persona_ids = [row["id"] for row in persona_rows]
+            claim_rows = (
+                list(
+                    connection.execute(
+                        select(persona_claims)
+                        .where(persona_claims.c.persona_id.in_(persona_ids))
+                        .order_by(
+                            persona_claims.c.persona_id,
+                            persona_claims.c.field_name,
+                            persona_claims.c.confidence.desc(),
+                        )
+                        .limit(bounded_limit + 1)
+                    ).mappings()
+                )
+                if persona_ids
+                else []
+            )
+        claims_by_persona: Dict[str, list] = {}
+        for claim in claim_rows[:bounded_limit]:
+            claims_by_persona.setdefault(str(claim["persona_id"]), []).append(
+                {
+                    "id": str(claim["id"]),
+                    "field_name": str(claim["field_name"]),
+                    "display_value": str(claim["display_value"])[:4000],
+                    "confidence": int(claim["confidence"]),
+                    "review_status": str(claim["review_status"]),
+                    "source_engine": str(claim["source_engine"]),
+                    "last_seen_at": _as_iso(claim["last_seen_at"]),
+                }
+            )
+        return {
+            "id": str(case_row["id"]),
+            "title": str(case_row["title"]),
+            "status": str(case_row["status"]),
+            "truncated_claim_count": max(0, len(claim_rows) - bounded_limit),
+            "personas": [
+                {
+                    "id": str(row["id"]),
+                    "display_name": str(row["display_name"]),
+                    "claims": claims_by_persona.get(str(row["id"]), []),
+                }
+                for row in persona_rows
+            ],
+        }
+
+    @staticmethod
+    def _serialize_case_chat_message(row) -> Dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "case_id": str(row["case_id"]),
+            "persona_id": str(row["persona_id"]) if row["persona_id"] else None,
+            "role": str(row["role"]),
+            "author": str(row["author"]),
+            "content": str(row["content"]),
+            "research_enabled": bool(row["research_enabled"]),
+            "sources": list(row["sources"] or []),
+            "proposals": dict(row["proposals"] or {}),
+            "model": str(row["model"]) if row["model"] else None,
+            "created_at": _as_iso(row["created_at"]),
         }
 
     def build_case_timeline(
@@ -1632,12 +1902,14 @@ class CaseStore:
         native_status: str,
         job_id: Optional[str] = None,
         external_evidence_id: Optional[str] = None,
+        chat_message_id: Optional[str] = None,
         source_record_id: Optional[str] = None,
         confidence: Optional[int] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> str:
         """Append idempotent provenance without overwriting claim history."""
-        if (job_id is None) == (external_evidence_id is None):
+        provenance_values = (job_id, external_evidence_id, chat_message_id)
+        if sum(value is not None for value in provenance_values) != 1:
             raise ExternalEvidenceValidationError(
                 "Provide exactly one provenance record"
             )
@@ -1653,7 +1925,7 @@ class CaseStore:
             )
             if not claim_case_id:
                 raise KeyError(claim_id)
-            provenance_id = str(job_id or external_evidence_id)
+            provenance_id = str(job_id or external_evidence_id or chat_message_id)
             if job_id:
                 provenance_case_id = connection.scalar(
                     select(investigation_jobs.c.case_id).where(
@@ -1661,13 +1933,20 @@ class CaseStore:
                     )
                 )
                 provenance_type = "investigation_job"
-            else:
+            elif external_evidence_id:
                 provenance_case_id = connection.scalar(
                     select(external_evidence_records.c.case_id).where(
                         external_evidence_records.c.id == external_evidence_id
                     )
                 )
                 provenance_type = "external_evidence"
+            else:
+                provenance_case_id = connection.scalar(
+                    select(case_chat_messages.c.case_id).where(
+                        case_chat_messages.c.id == chat_message_id
+                    )
+                )
+                provenance_type = "case_chat_message"
             if not provenance_case_id:
                 raise KeyError(provenance_id)
             if provenance_case_id != claim_case_id:
@@ -1681,6 +1960,7 @@ class CaseStore:
                 provenance_id=provenance_id,
                 job_id=job_id,
                 external_evidence_id=external_evidence_id,
+                chat_message_id=chat_message_id,
                 source_engine=source_engine,
                 source_record_id=source_record_id,
                 confidence=confidence,
@@ -1712,6 +1992,7 @@ class CaseStore:
         provenance_id: str,
         job_id: Optional[str],
         external_evidence_id: Optional[str],
+        chat_message_id: Optional[str],
         source_engine: str,
         source_record_id: Optional[str],
         confidence: Optional[int],
@@ -1760,6 +2041,7 @@ class CaseStore:
                 provenance_id=provenance_id,
                 job_id=job_id,
                 external_evidence_id=external_evidence_id,
+                chat_message_id=chat_message_id,
                 source_engine=engine,
                 source_record_id=record_id,
                 confidence=normalized_confidence,
@@ -1864,7 +2146,10 @@ class CaseStore:
         connection: Connection,
         *,
         persona_id: str,
-        job_id: str,
+        job_id: Optional[str],
+        provenance_type: str = "investigation_job",
+        provenance_id: Optional[str] = None,
+        chat_message_id: Optional[str] = None,
         candidates: Iterable[Dict[str, Any]],
         now: datetime,
     ) -> int:
@@ -1897,7 +2182,12 @@ class CaseStore:
                 claim_id = existing["id"]
                 confidence = int(existing["confidence"])
                 if (
-                    candidate.get("source_engine") != "openai_web_research"
+                    candidate.get("source_engine")
+                    not in {
+                        "openai_web_research",
+                        "openai_case_chat_research",
+                        "case_chat_user_statement",
+                    }
                     or existing["review_status"] == "pending"
                 ):
                     confidence = max(confidence, int(candidate["confidence"]))
@@ -1906,10 +2196,11 @@ class CaseStore:
                     "display_value": candidate["display_value"],
                     "normalized_value": candidate["normalized_value"],
                     "confidence": confidence,
-                    "source_job_id": job_id,
                     "last_seen_at": now,
                     "updated_at": now,
                 }
+                if job_id is not None:
+                    updated_values["source_job_id"] = job_id
                 if (
                     existing["review_status"] == "pending"
                     and existing["latitude"] is None
@@ -1983,10 +2274,11 @@ class CaseStore:
             CaseStore._record_claim_observation_with_connection(
                 connection,
                 claim_id=claim_id,
-                provenance_type="investigation_job",
-                provenance_id=job_id,
+                provenance_type=provenance_type,
+                provenance_id=str(provenance_id or job_id or chat_message_id),
                 job_id=job_id,
                 external_evidence_id=None,
+                chat_message_id=chat_message_id,
                 source_engine=candidate["source_engine"],
                 source_record_id=candidate.get("source_record_id"),
                 confidence=candidate.get("confidence"),
@@ -2164,6 +2456,68 @@ class CaseStore:
             "case_id": str(case_id),
             "proposals": accepted_proposals,
             "diagnostics": diagnostics,
+        }
+
+    def sync_case_chat_persona_claims(
+        self,
+        case_id: str,
+        persona_id: str,
+        candidates: Iterable[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Persist validated chat findings as pending, provenance-linked claims."""
+        now = utcnow()
+        synchronized = 0
+        accepted = []
+        with self.engine.begin() as connection:
+            persona_case_id = connection.scalar(
+                select(personas.c.case_id).where(personas.c.id == persona_id)
+            )
+            if not persona_case_id:
+                raise KeyError(persona_id)
+            if persona_case_id != case_id:
+                raise ValueError("Persona does not belong to this case")
+            for candidate in list(candidates)[:100]:
+                message_id = str(candidate.get("provenance_message_id") or "")
+                message_case_id = connection.scalar(
+                    select(case_chat_messages.c.case_id).where(
+                        case_chat_messages.c.id == message_id
+                    )
+                )
+                if not message_case_id:
+                    raise KeyError(message_id)
+                if message_case_id != case_id:
+                    raise ValueError("Chat message does not belong to this case")
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=persona_id,
+                    job_id=None,
+                    provenance_type="case_chat_message",
+                    provenance_id=message_id,
+                    chat_message_id=message_id,
+                    candidates=[candidate],
+                    now=now,
+                )
+                accepted.append(
+                    {
+                        "field_name": str(candidate.get("field_name") or "")[:64],
+                        "display_value": str(
+                            candidate.get("display_value") or ""
+                        )[:4000],
+                        "confidence": int(candidate.get("confidence") or 0),
+                        "evidence_basis": str(
+                            candidate.get("evidence_basis") or ""
+                        )[:32],
+                    }
+                )
+            if synchronized:
+                connection.execute(
+                    update(cases).where(cases.c.id == case_id).values(updated_at=now)
+                )
+        return {
+            "count": synchronized,
+            "case_id": case_id,
+            "persona_id": persona_id,
+            "proposals": accepted,
         }
 
     def review_claim(

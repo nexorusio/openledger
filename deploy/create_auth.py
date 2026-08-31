@@ -10,10 +10,43 @@ import secrets
 import sys
 import uuid
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 ITERATIONS = 600_000
 MIN_PASSWORD_LENGTH = 12
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def load_existing_users(auth_path: str) -> list[dict]:
+    try:
+        with open(auth_path, encoding="utf-8") as auth_file:
+            payload = json.load(auth_file)
+    except FileNotFoundError:
+        return []
+    except (OSError, TypeError, ValueError):
+        raise ValueError("The existing authentication file is invalid.")
+    if payload.get("schema_version") == 1:
+        username = payload.get("username")
+        password = payload.get("password")
+        revision = payload.get("revision")
+        if (
+            not isinstance(username, str)
+            or not USERNAME_PATTERN.fullmatch(username)
+            or not isinstance(password, dict)
+            or not isinstance(revision, str)
+        ):
+            raise ValueError("The existing authentication file is invalid.")
+        return [
+            {
+                "username": username,
+                "role": "admin",
+                "revision": revision,
+                "password": password,
+            }
+        ]
+    users = payload.get("users")
+    if payload.get("schema_version") != SCHEMA_VERSION or not isinstance(users, list):
+        raise ValueError("The existing authentication file is invalid.")
+    return users
 
 
 def main() -> int:
@@ -36,16 +69,36 @@ def main() -> int:
 
     salt = secrets.token_bytes(32)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, ITERATIONS)
+    password_record = {
+        "algorithm": "pbkdf2_sha256",
+        "iterations": ITERATIONS,
+        "salt": base64.b64encode(salt).decode("ascii"),
+        "digest": base64.b64encode(digest).decode("ascii"),
+    }
+    try:
+        existing_users = load_existing_users(auth_path)
+    except ValueError as error:
+        print(str(error), file=sys.stderr)
+        return 2
+    replacement = {
+        "username": username,
+        "role": "admin",
+        "revision": secrets.token_urlsafe(24),
+        "password": password_record,
+    }
+    # This utility resets the single administrator account. Preserve analyst
+    # accounts, but never leave an older administrator credential active.
+    users = [
+        user
+        for user in existing_users
+        if user.get("role") == "analyst"
+        and str(user.get("username") or "").casefold() != username.casefold()
+    ]
+    users.insert(0, replacement)
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "username": username,
         "revision": secrets.token_urlsafe(24),
-        "password": {
-            "algorithm": "pbkdf2_sha256",
-            "iterations": ITERATIONS,
-            "salt": base64.b64encode(salt).decode("ascii"),
-            "digest": base64.b64encode(digest).decode("ascii"),
-        },
+        "users": users,
     }
 
     auth_directory = os.path.dirname(auth_path)

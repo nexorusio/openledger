@@ -52,6 +52,7 @@ def web_app(tmp_path):
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
     web_app_module.analysis_locks.clear()
+    web_app_module.case_chat_locks.clear()
     web_app_module.live_jobs.clear()
     web_app_module.login_attempts.clear()
 
@@ -60,6 +61,7 @@ def web_app(tmp_path):
     web_app_module.background_jobs.clear()
     web_app_module.job_results.clear()
     web_app_module.analysis_locks.clear()
+    web_app_module.case_chat_locks.clear()
     web_app_module.live_jobs.clear()
     web_app_module.login_attempts.clear()
     web_app_module.app.config['AUTH_REQUIRED'] = False
@@ -489,12 +491,98 @@ def test_password_change_is_protected_and_invalidates_other_sessions(web_app):
     auth_path = web_app.app.config['AUTH_FILE']
     assert os.stat(auth_path).st_mode & 0o777 == 0o600
     credentials = web_app.load_auth_credentials()
+    current_user = web_app.find_auth_user(credentials, 'operator')
     assert web_app.verify_password(
-        'a-new-long-operator-password', credentials['password']
+        'a-new-long-operator-password', current_user['password']
     )
     assert not web_app.verify_password(
-        'correct-horse-battery-staple', credentials['password']
+        'correct-horse-battery-staple', current_user['password']
     )
+
+
+def test_admin_manages_analysts_and_analyst_cannot_access_settings(web_app):
+    web_app.app.config['AUTH_REQUIRED'] = True
+    web_app.save_auth_credentials('admin', 'correct-horse-battery-staple')
+    admin_client = web_app.app.test_client()
+    analyst_client = web_app.app.test_client()
+
+    admin_client.get('/login')
+    admin_login = admin_client.post(
+        '/login',
+        data={
+            'csrf_token': _csrf_token(admin_client),
+            'username': 'admin',
+            'password': 'correct-horse-battery-staple',
+        },
+    )
+    assert admin_login.status_code == 302
+    added = admin_client.post(
+        '/security/analysts',
+        data={
+            'csrf_token': _csrf_token(admin_client),
+            'username': 'field.analyst',
+            'password': 'analyst-password-long',
+            'confirm_password': 'analyst-password-long',
+        },
+        follow_redirects=True,
+    )
+    assert added.status_code == 200
+    assert 'field.analyst' in added.get_data(as_text=True)
+
+    analyst_client.get('/login')
+    analyst_login = analyst_client.post(
+        '/login',
+        data={
+            'csrf_token': _csrf_token(analyst_client),
+            'username': 'field.analyst',
+            'password': 'analyst-password-long',
+        },
+    )
+    assert analyst_login.status_code == 302
+    settings = analyst_client.get('/settings')
+    assert settings.status_code == 403
+    assert 'Administrator access required' in settings.get_data(as_text=True)
+    history = analyst_client.get('/history')
+    assert history.status_code == 200
+    assert '>Settings<' not in history.get_data(as_text=True)
+    security = analyst_client.get('/security')
+    assert security.status_code == 200
+    assert 'Change password' in security.get_data(as_text=True)
+    assert 'Analyst access' not in security.get_data(as_text=True)
+
+    removed = admin_client.post(
+        '/security/analysts/field.analyst/delete',
+        data={'csrf_token': _csrf_token(admin_client)},
+        follow_redirects=True,
+    )
+    assert removed.status_code == 200
+    assert 'field.analyst removed' in removed.get_data(as_text=True)
+    assert analyst_client.get('/history').location.startswith('/login')
+
+
+def test_legacy_single_user_auth_is_loaded_as_admin(web_app):
+    legacy_revision = 'legacy-revision-value-1234'
+    auth_path = web_app.app.config['AUTH_FILE']
+    os.makedirs(os.path.dirname(auth_path), exist_ok=True)
+    with open(auth_path, 'w', encoding='utf-8') as auth_file:
+        json.dump(
+            {
+                'schema_version': 1,
+                'username': 'legacy-admin',
+                'revision': legacy_revision,
+                'password': web_app.build_password_record(
+                    'correct-horse-battery-staple'
+                ),
+            },
+            auth_file,
+        )
+
+    credentials = web_app.load_auth_credentials()
+    legacy_user = web_app.find_auth_user(credentials, 'legacy-admin')
+
+    assert credentials['schema_version'] == 2
+    assert legacy_user['role'] == 'admin'
+    assert legacy_user['revision'] == legacy_revision
 
 
 def test_logout_requires_csrf_and_ends_session(client, web_app):
@@ -823,6 +911,95 @@ def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
     )
     assert refreshed_claim['review_status'] == 'rejected'
     store.dispose()
+
+
+def test_case_chat_persists_memory_research_and_pending_persona_proposals(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'case-chat.db'}", create_schema=True
+    )
+    monkeypatch.setattr(web_app, 'case_store', store)
+    try:
+        job_id = store.create_investigation(['alice'], {})
+        case = store.get_case(store.get_job(job_id)['case_id'])
+        persona_id = case['personas'][0]['id']
+
+        async def fake_chat_response(**kwargs):
+            assert kwargs['web_search_enabled'] is True
+            assert kwargs['case_context']['id'] == case['id']
+            return {
+                'analysis': 'Stored evidence is limited. The cited biography identifies Alice.',
+                'sources': [
+                    {
+                        'title': 'Official biography',
+                        'url': 'https://example.test/alice',
+                    }
+                ],
+            }
+
+        async def fake_chat_proposals(**kwargs):
+            assert kwargs['target_persona'] == 'alice'
+            return [
+                {
+                    'field_name': 'company',
+                    'value': 'Acme Labs',
+                    'confidence': 90,
+                    'evidence_basis': 'user_statement',
+                    'source_url': None,
+                    'source_title': None,
+                    'reason': 'The analyst explicitly supplied the employer.',
+                    'latitude': None,
+                    'longitude': None,
+                    'coordinate_precision': None,
+                }
+            ]
+
+        monkeypatch.setattr(web_app, 'get_case_chat_response', fake_chat_response)
+        monkeypatch.setattr(
+            web_app, 'get_case_chat_claim_proposals', fake_chat_proposals
+        )
+        with client.session_transaction() as browser_session:
+            browser_session['csrf_token'] = 'test-csrf'
+            browser_session['username'] = 'field.analyst'
+
+        response = client.post(
+            f"/api/cases/{case['id']}/chat",
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+            json={
+                'message': 'Alice works at Acme Labs.',
+                'persona_id': persona_id,
+                'research_enabled': True,
+                'propose_to_persona': True,
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload['assistant_message']['sources'][0]['title'] == (
+            'Official biography'
+        )
+        assert payload['proposal_summary']['status'] == 'pending_review'
+        assert payload['proposal_summary']['count'] == 1
+        messages = store.list_case_chat_messages(case['id'])
+        assert [message['role'] for message in messages] == ['user', 'assistant']
+        assert messages[1]['proposals']['count'] == 1
+        persona = store.get_persona(persona_id)
+        company = next(
+            claim for claim in persona['claims'] if claim['field_name'] == 'company'
+        )
+        assert company['review_status'] == 'pending'
+        assert company['confidence'] == 50
+
+        page = client.get(f"/cases/{case['id']}/chat")
+        assert page.status_code == 200
+        body = page.get_data(as_text=True)
+        assert 'Alice works at Acme Labs.' in body
+        assert 'Official biography' in body
+        assert '1 Persona proposal' in body
+    finally:
+        store.dispose()
 
 
 def test_persona_renders_reviewable_socid_account_intelligence(
@@ -1934,6 +2111,9 @@ def test_shared_responsive_css_covers_workspace_page_families(client):
         '.persona-layout',
         '.timeline-toolbar',
         '.case-timeline-list',
+        '.case-chat-shell',
+        '.case-chat-options',
+        '.analyst-create-grid',
         '.relationship-workspace-grid',
         '.relationship-scope-bar',
         '.security-page-grid',

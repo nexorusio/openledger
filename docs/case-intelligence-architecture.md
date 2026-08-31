@@ -218,6 +218,33 @@ the map only with the analyst's location decision. The UI exposes assessment,
 citation, structured-proposal, and validation-rejection counts so a narrative
 assessment cannot be mistaken for successful Persona extraction.
 
+## Persistent case chat
+
+Case chat is stored in PostgreSQL as an append-only conversation owned by one
+case. OpenLedger does not rely on provider-side conversation state: each request
+receives a bounded projection of the case record and recent retained messages,
+while the complete message history remains in the case database. This preserves
+durability without introducing another memory service or vector database.
+
+An analyst may use case evidence only, explicitly enable hosted public-web
+research, and optionally target one Persona for proposed updates. Research mode
+requires URL citations in the same response. The answer, model, sources, actor,
+target Persona, and research choice are stored together. The assistant must
+distinguish approved case evidence, pending or uncertain records, user-supplied
+context, cited public sources, and analytical inference.
+
+Persona updates use a separate strict extraction pass and server validation:
+
+- cited public-web findings must use an exact URL returned by that chat turn;
+- user-statement findings must be explicit text from the analyst's message,
+  remain unverified, and are capped at 50 confidence;
+- extrapolations, hypotheses, and model-only values never become claims;
+- the existing public-biographical allowlist and sensitive-field exclusions
+  remain in force;
+- every accepted proposal is pending and links its claim observation to the
+  originating chat message; and
+- chat can never approve, reject, or otherwise make a claim canonical.
+
 ## Relationship projection
 
 The Relationships workspace separates two graph contracts. **Persona evidence**
@@ -287,8 +314,6 @@ map tile requests reveal query or viewed-area information to their providers.
   classifications or case permissions.
 - Add probabilistic entity resolution only after labeled analyst decisions can
   be used to measure false merges and false splits.
-- Persist AI conversations with claim/evidence citations as a separate case
-  artifact; never use chat text as a canonical claim.
 - Add follower, mention, reply, transaction, communication, or co-location
   edges only when their source-specific observation and review contracts exist.
 - Consider a dedicated graph database only when PostgreSQL projections cannot
