@@ -47,6 +47,7 @@ from maigret.sites import MaigretDatabase
 from maigret.report import generate_report_context
 from maigret.utils import is_country_tag
 from maigret.web.case_store import (
+    ActiveInvestigationError,
     TERMINAL_STATUSES,
     CaseStore,
     database_url_from_environment,
@@ -117,6 +118,7 @@ login_attempts: Dict[str, Any] = {}
 # Live progress remains in one supervised Gunicorn process and is intentionally
 # transient. Terminal results are persisted separately beside their reports.
 live_jobs: Dict[str, Any] = {}
+PERSISTENT_CANCEL_POLL_SECONDS = 0.25
 
 
 class StreamNotify:
@@ -1361,6 +1363,78 @@ def delete_persisted_investigation(session_folder: str) -> bool:
     return True
 
 
+def delete_persisted_case(case_id: str) -> bool:
+    """Delete one terminal case and its report directories as one operation."""
+    if case_store is None:
+        return False
+    stored_case = case_store.get_case(case_id)
+    if not stored_case:
+        return False
+    jobs = list(stored_case.get('jobs') or [])
+    if any(job.get('status') not in TERMINAL_STATUSES for job in jobs):
+        raise ActiveInvestigationError(
+            'Cases with active investigations cannot be deleted'
+        )
+
+    session_keys = {
+        str(job.get('job_id') or '')
+        for job in jobs
+        if str(job.get('job_id') or '')
+    }
+    session_folders = {f'search_{session_key}' for session_key in session_keys}
+    reports_root = os.path.realpath(app.config['REPORTS_FOLDER'])
+    report_paths = []
+    try:
+        with os.scandir(reports_root) as entries:
+            for entry in entries:
+                if entry.name not in session_folders:
+                    continue
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    raise ValueError('Invalid report session directory')
+                candidate = os.path.realpath(entry.path)
+                if (
+                    os.path.commonpath([reports_root, candidate]) != reports_root
+                    or candidate == reports_root
+                ):
+                    raise ValueError('Invalid report session path')
+                report_paths.append(candidate)
+    except FileNotFoundError:
+        pass
+
+    tombstones = [
+        (path, f'{path}.deleting-{uuid.uuid4().hex}') for path in report_paths
+    ]
+    moved_tombstones = []
+    with metadata_lock:
+        try:
+            for source_path, tombstone_path in tombstones:
+                os.replace(source_path, tombstone_path)
+                moved_tombstones.append((source_path, tombstone_path))
+            if not case_store.delete_case(case_id):
+                raise KeyError(case_id)
+        except Exception:
+            for source_path, tombstone_path in reversed(moved_tombstones):
+                if os.path.exists(tombstone_path) and not os.path.exists(source_path):
+                    os.replace(tombstone_path, source_path)
+            raise
+        for session_key in session_keys:
+            job_results.pop(session_key, None)
+            background_jobs.pop(session_key, None)
+            analysis_locks.pop(f'search_{session_key}', None)
+        case_chat_locks.pop(case_id, None)
+
+    for _source_path, tombstone_path in moved_tombstones:
+        try:
+            shutil.rmtree(tombstone_path)
+        except OSError as error:
+            record_internal_error(
+                'Case artifact cleanup failed',
+                error,
+                path=tombstone_path,
+            )
+    return True
+
+
 # Rebuild the terminal result index when Flask is imported by Gunicorn. Routes
 # also perform targeted lazy recovery so alternate report paths used in tests or
 # embedded deployments remain supported.
@@ -2163,6 +2237,9 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     """Orchestrate case-scoped collectors while retaining native evidence."""
     q = job['queue']
     general_results = []
+    # Keep the partial collection reachable by the worker even if cancellation
+    # lands between collector-specific exception handlers.
+    job['general_results'] = general_results
     for username in usernames:
         if job['cancelled'] or (cancellation_check and cancellation_check()):
             q.put({'type': 'stopped', 'username': username.strip()})
@@ -2214,6 +2291,7 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
             )
 
     observations = []
+    job['collector_observations'] = observations
     investigation_plan = options.get('investigation_spec') or {}
     github_targets = github_profile_targets(general_results, investigation_plan)
     if github_targets and not (
@@ -2563,6 +2641,24 @@ class PersistentEventSink:
         self.store.append_event(self.job_id, event)
 
 
+async def watch_persistent_job_stop(
+    store: CaseStore,
+    job_id: str,
+    stream_task,
+    runtime_job: Dict[str, Any],
+    shutdown_check=None,
+):
+    """Actively interrupt an in-flight collector after a durable stop request."""
+    while not stream_task.done():
+        cancel_requested = store.is_cancel_requested(job_id)
+        shutdown_requested = bool(shutdown_check and shutdown_check())
+        if cancel_requested or shutdown_requested:
+            runtime_job['cancelled'] = cancel_requested and not shutdown_requested
+            stream_task.cancel()
+            return
+        await asyncio.sleep(PERSISTENT_CANCEL_POLL_SECONDS)
+
+
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
     """Execute a claimed database job independently from any browser request."""
     job_id = job['job_id']
@@ -2580,8 +2676,10 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
     asyncio.set_event_loop(loop)
     runtime_job['loop'] = loop
     general_results = []
+    stream_task = None
+    stop_watcher = None
     try:
-        general_results = loop.run_until_complete(
+        stream_task = loop.create_task(
             _stream_search(
                 runtime_job,
                 usernames,
@@ -2592,12 +2690,30 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
                 ),
             )
         )
+        stop_watcher = loop.create_task(
+            watch_persistent_job_stop(
+                store,
+                job_id,
+                stream_task,
+                runtime_job,
+                shutdown_check=shutdown_check,
+            )
+        )
+        general_results = loop.run_until_complete(stream_task)
+    except asyncio.CancelledError:
+        general_results = list(runtime_job.get('general_results') or [])
     except Exception as error:
         public_error = record_internal_error(
             'Persistent investigation failed', error, session=job_id
         )
         sink.put({'type': 'error', 'message': public_error})
     finally:
+        if stop_watcher is not None and not stop_watcher.done():
+            stop_watcher.cancel()
+        if stop_watcher is not None:
+            loop.run_until_complete(
+                asyncio.gather(stop_watcher, return_exceptions=True)
+            )
         loop.close()
     shutdown_requested = bool(shutdown_check and shutdown_check())
     finalize_stream_job(
@@ -2924,6 +3040,39 @@ def case_workspace(case_id):
         flash('That case does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
     return render_template('case.html', case=case)
+
+
+@app.route('/cases/<case_id>/delete', methods=['POST'])
+def delete_case_workspace(case_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    if case_store is None:
+        flash('The case workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    try:
+        deleted = delete_persisted_case(case_id)
+    except ActiveInvestigationError:
+        flash(
+            'Stop the active investigation and wait for it to finish stopping '
+            'before deleting this case.',
+            'warning',
+        )
+        return redirect(url_for('case_workspace', case_id=case_id))
+    except (KeyError, OSError, ValueError) as error:
+        record_internal_error('Failed to delete case', error, case_id=case_id)
+        flash('The case could not be deleted.', 'danger')
+        return redirect(url_for('case_workspace', case_id=case_id))
+
+    if deleted:
+        flash(
+            'Case, investigations, reports, chat, Personas, and evidence were '
+            'permanently deleted.',
+            'success',
+        )
+    else:
+        flash('That case no longer exists.', 'info')
+    return redirect(url_for('cases_workspace'))
 
 
 @app.route('/cases/<case_id>/chat')

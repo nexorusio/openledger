@@ -73,6 +73,22 @@ def test_postgres_allows_only_one_investigation_worker_lock(postgres_store):
     competing_store.dispose()
 
 
+def test_postgres_case_delete_requires_terminal_jobs_and_cascades(postgres_store):
+    job_id = postgres_store.create_investigation(["alice"], {})
+    case_id = postgres_store.get_job(job_id)["case_id"]
+    with pytest.raises(ValueError, match="active investigations"):
+        postgres_store.delete_case(case_id)
+
+    job = postgres_store.claim_next("worker:integration")
+    postgres_store.finish(
+        job_id,
+        {"status": "cancelled", "usernames": job["usernames"]},
+    )
+    assert postgres_store.delete_case(case_id) is True
+    assert postgres_store.get_case(case_id) is None
+    assert postgres_store.get_job(job_id) is None
+
+
 def test_postgres_enforces_external_evidence_receipt_and_immutability_guards(
     postgres_store,
 ):

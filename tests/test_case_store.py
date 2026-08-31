@@ -102,6 +102,37 @@ def test_active_job_cannot_be_deleted(store):
         store.delete_job(job_id)
 
 
+def test_terminal_case_and_all_of_its_jobs_can_be_deleted(store):
+    first_job_id = store.create_investigation(["alice"], {})
+    first_job = store.claim_next("worker:test")
+    store.finish(
+        first_job_id,
+        {"status": "cancelled", "usernames": first_job["usernames"]},
+    )
+    case = store.get_case(first_job["case_id"])
+    second_job_id = store.repeat_persona_investigation(case["personas"][0]["id"])
+    second_job = store.claim_next("worker:test")
+    store.finish(
+        second_job_id,
+        {"status": "cancelled", "usernames": second_job["usernames"]},
+    )
+
+    assert store.delete_case(case["id"]) is True
+    assert store.get_case(case["id"]) is None
+    assert store.get_job(first_job_id) is None
+    assert store.get_job(second_job_id) is None
+
+
+def test_case_with_active_investigation_cannot_be_deleted(store):
+    job_id = store.create_investigation(["alice"], {})
+    case_id = store.get_job(job_id)["case_id"]
+
+    with pytest.raises(ValueError, match="active investigations"):
+        store.delete_case(case_id)
+
+    assert store.get_case(case_id) is not None
+
+
 def test_case_chat_is_durable_and_persona_proposals_retain_message_provenance(store):
     job_id = store.create_investigation(["alice"], {})
     case = store.get_case(store.get_job(job_id)["case_id"])

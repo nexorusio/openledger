@@ -444,6 +444,10 @@ ACTIVE_STATUSES = {"queued", "running", "cancel_requested"}
 WORKER_LOCK_KEY = 5714024849188199506
 
 
+class ActiveInvestigationError(ValueError):
+    """Raised when destructive case changes race an active investigation."""
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -3065,6 +3069,30 @@ class CaseStore:
                 )
             else:
                 connection.execute(delete(cases).where(cases.c.id == row["case_id"]))
+        return True
+
+    def delete_case(self, case_id: str) -> bool:
+        """Delete a case atomically once none of its investigations are active."""
+        with self.engine.begin() as connection:
+            statement = select(cases.c.id).where(cases.c.id == case_id)
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            stored_case_id = connection.scalar(statement)
+            if not stored_case_id:
+                return False
+            active_job = connection.scalar(
+                select(investigation_jobs.c.id)
+                .where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                )
+                .limit(1)
+            )
+            if active_job:
+                raise ActiveInvestigationError(
+                    "Cases with active investigations cannot be deleted"
+                )
+            connection.execute(delete(cases).where(cases.c.id == case_id))
         return True
 
     @staticmethod
