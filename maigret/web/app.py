@@ -52,9 +52,12 @@ from maigret.web.case_store import (
     database_url_from_environment,
 )
 from maigret.web.collector_adapters import (
+    claimed_profile_url_targets,
     github_profile_targets,
     run_github_public_profile,
+    run_unfurl_url_analysis,
     run_user_scanner_email,
+    run_wayback_capture_index,
     user_scanner_available,
     user_scanner_email_targets,
 )
@@ -1988,6 +1991,13 @@ def build_reports(
             and observation.get('source_engine') == 'github_public_profile'
             and str(observation.get('status') or '').casefold() == 'observed'
         ),
+        'archived_profile_count': sum(
+            1
+            for observation in list(collector_observations or [])
+            if isinstance(observation, dict)
+            and observation.get('source_engine') == 'wayback_cdx'
+            and str(observation.get('status') or '').casefold() == 'archived'
+        ),
     }
 
 
@@ -2066,6 +2076,7 @@ def parse_investigation_submission(form):
         'allow_ai_context': False,
         'enable_user_scanner_email': False,
         'enable_github_profile_enrichment': False,
+        'enable_archived_url_evidence': False,
         'subject_label': usernames[0],
         'identifiers': [
             {'type': 'username', 'value': username} for username in usernames
@@ -2262,6 +2273,121 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                     'found': github_observation_count,
                 }
             )
+    profile_url_targets = claimed_profile_url_targets(
+        general_results, investigation_plan
+    )
+    if profile_url_targets and not (
+        job['cancelled'] or (cancellation_check and cancellation_check())
+    ):
+        q.put(
+            {
+                'type': 'collector_started',
+                'collector': 'unfurl-url-analysis',
+                'target_type': 'claimed_profile',
+                'targets': len(profile_url_targets),
+            }
+        )
+        unfurl_observation_count = 0
+        unfurl_collection_stopped = False
+        for target in profile_url_targets:
+            if job['cancelled'] or (cancellation_check and cancellation_check()):
+                q.put({'type': 'stopped', 'collector': 'unfurl-url-analysis'})
+                unfurl_collection_stopped = True
+                break
+            try:
+                observation = await run_unfurl_url_analysis(target)
+                observations.append(observation)
+                if str(observation.get('status') or '').casefold() == 'analyzed':
+                    unfurl_observation_count += 1
+            except asyncio.CancelledError:
+                q.put({'type': 'stopped', 'collector': 'unfurl-url-analysis'})
+                unfurl_collection_stopped = True
+                break
+            except Exception as error:
+                public_error = record_internal_error(
+                    'Offline Unfurl URL analysis failed',
+                    error,
+                    username=target.get('investigated_username'),
+                )
+                q.put(
+                    {
+                        'type': 'collector_error',
+                        'collector': 'unfurl-url-analysis',
+                        'message': public_error,
+                    }
+                )
+        if not unfurl_collection_stopped:
+            q.put(
+                {
+                    'type': 'collector_completed',
+                    'collector': 'unfurl-url-analysis',
+                    'observations': unfurl_observation_count,
+                    'found': unfurl_observation_count,
+                }
+            )
+
+        if not (
+            unfurl_collection_stopped
+            or job['cancelled']
+            or (cancellation_check and cancellation_check())
+        ):
+            q.put(
+                {
+                    'type': 'collector_started',
+                    'collector': 'wayback-cdx',
+                    'target_type': 'claimed_profile',
+                    'targets': len(profile_url_targets),
+                }
+            )
+            archived_profile_count = 0
+            wayback_collection_stopped = False
+            for target in profile_url_targets:
+                if job['cancelled'] or (
+                    cancellation_check and cancellation_check()
+                ):
+                    q.put({'type': 'stopped', 'collector': 'wayback-cdx'})
+                    wayback_collection_stopped = True
+                    break
+                try:
+                    observation = await run_wayback_capture_index(target)
+                    observations.append(observation)
+                    status = str(observation.get('status') or '').casefold()
+                    if status == 'archived':
+                        archived_profile_count += 1
+                    if status == 'rate_limited':
+                        break
+                except asyncio.CancelledError:
+                    q.put({'type': 'stopped', 'collector': 'wayback-cdx'})
+                    wayback_collection_stopped = True
+                    break
+                except Exception as error:
+                    public_error = record_internal_error(
+                        'Wayback CDX archival metadata collection failed',
+                        error,
+                        username=target.get('investigated_username'),
+                    )
+                    q.put(
+                        {
+                            'type': 'collector_error',
+                            'collector': 'wayback-cdx',
+                            'message': public_error,
+                        }
+                    )
+            if not wayback_collection_stopped:
+                q.put(
+                    {
+                        'type': 'collector_completed',
+                        'collector': 'wayback-cdx',
+                        'observations': len(
+                            [
+                                item
+                                for item in observations
+                                if item.get('source_engine') == 'wayback_cdx'
+                            ]
+                        ),
+                        'found': archived_profile_count,
+                    }
+                )
     for email in user_scanner_email_targets(investigation_plan):
         if job['cancelled'] or (cancellation_check and cancellation_check()):
             break
@@ -3312,6 +3438,9 @@ def live_results(job_id):
         ),
         completed_github_enrichment_count=(result or {}).get(
             'github_enrichment_count', 0
+        ),
+        completed_archived_profile_count=(result or {}).get(
+            'archived_profile_count', 0
         ),
     )
 

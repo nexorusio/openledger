@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import sys
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -24,7 +25,6 @@ REQUIRED_SOURCE_KEYS = {
     "catalog_reference",
     "official_documentation",
     "usage_terms",
-    "endpoint_origin",
     "api_version",
     "network_classification",
     "access",
@@ -99,19 +99,14 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
             in {"native_public_api", "bundled_cli", "bundled_library"},
             f"{source_id}: unsupported integration mode",
         )
-        for key in (
-            "catalog_reference",
-            "official_documentation",
-            "usage_terms",
-            "endpoint_origin",
-        ):
+        for key in ("catalog_reference", "official_documentation", "usage_terms"):
             _require(
                 str(source.get(key) or "").startswith("https://"),
                 f"{source_id}: {key} must be an HTTPS URL",
             )
         _require(
-            source["network_classification"] == "fixed_public_api",
-            f"{source_id}: unexpected network classification",
+            bool(str(source.get("api_version") or "").strip()),
+            f"{source_id}: api_version must be recorded",
         )
         access = source["access"]
         _require(isinstance(access, dict), f"{source_id}: access must be an object")
@@ -146,14 +141,6 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
         _require(
             guardrails.get("automatic_approval_allowed") is False,
             f"{source_id}: automatic approval must remain disabled",
-        )
-        _require(
-            guardrails.get("fixed_network_origin") is True,
-            f"{source_id}: fixed network origin must be required",
-        )
-        _require(
-            guardrails.get("redirects_allowed") is False,
-            f"{source_id}: redirects must remain disabled",
         )
         timeout = guardrails.get("timeout_seconds")
         response_cap = guardrails.get("maximum_response_bytes")
@@ -190,11 +177,49 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
         _require(
             today <= due_by, f"{source_id}: source review is overdue since {due_by}"
         )
-        if source["integration_mode"] != "native_public_api":
+        if source["integration_mode"] == "native_public_api":
+            _require(
+                str(source.get("endpoint_origin") or "").startswith("https://"),
+                f"{source_id}: endpoint_origin must be an HTTPS URL",
+            )
+            _require(
+                source["network_classification"] == "fixed_public_api",
+                f"{source_id}: unexpected network classification",
+            )
+            _require(
+                guardrails.get("fixed_network_origin") is True,
+                f"{source_id}: fixed network origin must be required",
+            )
+            _require(
+                guardrails.get("redirects_allowed") is False,
+                f"{source_id}: redirects must remain disabled",
+            )
+        else:
+            _require(
+                source["network_classification"] == "offline_local",
+                f"{source_id}: bundled source must remain offline",
+            )
             repository = str(source.get("upstream_repository") or "")
             _require(
                 repository.startswith("https://"),
                 f"{source_id}: repository-backed source needs an HTTPS upstream",
+            )
+            _require(
+                bool(str(source.get("license") or "").strip()),
+                f"{source_id}: repository-backed source needs a recorded license",
+            )
+            _require(
+                re.fullmatch(r"[0-9a-f]{40}", str(source.get("pinned_commit") or ""))
+                is not None,
+                f"{source_id}: bundled source must pin an immutable commit",
+            )
+            _require(
+                guardrails.get("network_access_allowed") is False,
+                f"{source_id}: bundled runtime network access must be disabled",
+            )
+            _require(
+                guardrails.get("remote_lookups_allowed") is False,
+                f"{source_id}: bundled remote lookups must be disabled",
             )
             last_activity = _date(
                 maintenance.get("last_upstream_activity_at"),
@@ -246,6 +271,58 @@ def live_github_contract(source: dict) -> None:
     )
 
 
+def live_wayback_contract(source: dict) -> None:
+    target = source["maintenance"].get("live_contract_target")
+    _require(
+        isinstance(target, str) and target.startswith("https://"),
+        "Wayback live contract target is missing",
+    )
+    endpoint = source["endpoint_origin"]
+    _require(endpoint == "https://web.archive.org", "Wayback endpoint origin changed")
+    query = urlencode(
+        [
+            ("url", target),
+            ("output", "json"),
+            ("fl", "timestamp,original,statuscode,mimetype,digest"),
+            ("filter", "statuscode:200"),
+            ("filter", "mimetype:text/html"),
+            ("collapse", "digest"),
+            ("matchType", "exact"),
+            ("limit", "-1"),
+        ]
+    )
+    request = Request(
+        f"{endpoint}/cdx/search/cdx?{query}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "OpenLedger-OSINT-Contract-Audit",
+        },
+    )
+    opener = build_opener(NoRedirectHandler())
+    try:
+        with opener.open(request, timeout=20) as response:
+            payload = response.read(1_000_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(f"Wayback live contract request failed: {error}") from error
+    _require(len(payload) <= 1_000_000, "Wayback live contract response was oversized")
+    try:
+        rows = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Wayback live contract returned invalid JSON") from error
+    _require(isinstance(rows, list) and len(rows) >= 2, "Wayback returned no rows")
+    _require(
+        rows[0] == ["timestamp", "original", "statuscode", "mimetype", "digest"],
+        "Wayback CDX field contract changed",
+    )
+    _require(
+        isinstance(rows[1], list)
+        and len(rows[1]) == 5
+        and rows[1][2] == "200"
+        and rows[1][3] == "text/html",
+        "Wayback CDX row contract changed",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -255,12 +332,9 @@ def main() -> int:
     try:
         registry = load_and_validate_registry()
         if args.live:
-            github_source = next(
-                source
-                for source in registry["sources"]
-                if source["id"] == "github_public_profile"
-            )
-            live_github_contract(github_source)
+            sources_by_id = {source["id"]: source for source in registry["sources"]}
+            live_github_contract(sources_by_id["github_public_profile"])
+            live_wayback_contract(sources_by_id["wayback_cdx"])
     except (OSError, ValueError, RuntimeError, StopIteration) as error:
         print(f"OSINT source audit failed: {error}", file=sys.stderr)
         return 1

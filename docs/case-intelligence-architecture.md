@@ -164,6 +164,14 @@ archive. A fork synchronization does not change the running collector until a
 separate OpenLedger pull request updates that pin and passes the OpenLedger
 regression and image-build gates.
 
+The optional claimed-URL evidence slice follows the same ownership boundary.
+Unfurl runs offline in a dependency-isolated subprocess and emits bounded URL
+structure. Wayback receives only the same exact public claimed URL and returns
+bounded CDX capture metadata; OpenLedger never downloads the archived page in
+this slice. Both sources attach labelled evidence to the already-discovered
+`social_account` claim. URL structure and historical capture presence do not
+create a new identity fact or increase confidence in Persona ownership.
+
 ### Internal data source
 
 Use a service account with least-privilege, read-only access. The adapter should

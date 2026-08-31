@@ -7,13 +7,22 @@ from maigret.web.collector_adapters import (
     GITHUB_API_BASE_URL,
     GITHUB_API_VERSION,
     GITHUB_ENGINE,
+    UNFURL_ENGINE,
+    UNFURL_VERSION,
     USER_SCANNER_ENGINE,
+    WAYBACK_API_BASE_URL,
+    WAYBACK_ENGINE,
+    claimed_profile_url_targets,
     extract_github_profile_claims,
+    extract_profile_url_evidence_claims,
     extract_user_scanner_claims,
     github_profile_targets,
     normalize_github_public_profile,
+    normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
+    normalize_wayback_capture_index,
     run_github_public_profile,
+    run_wayback_capture_index,
     user_scanner_email_targets,
 )
 
@@ -26,6 +35,18 @@ def _claimed_github(username="alice", url="https://github.com/alice"):
         status=MaigretCheckStatus.CLAIMED,
     )
     return (username, "username", {"GitHub": {"status": result, "url_user": url}})
+
+
+def _claimed_profile(
+    username="alice", site_name="Example Social", url="https://social.example/alice"
+):
+    result = MaigretCheckResult(
+        username=username,
+        site_name=site_name,
+        site_url_user=url,
+        status=MaigretCheckStatus.CLAIMED,
+    )
+    return (username, "username", {site_name: {"status": result, "url_user": url}})
 
 
 def _github_profile(**overrides):
@@ -305,3 +326,135 @@ async def test_github_rate_limit_becomes_a_bounded_diagnostic():
     assert observation["status"] == "rate_limited"
     assert observation["extra"]["rate_limit_remaining"] == "0"
     assert extract_github_profile_claims([observation]) == []
+
+
+def test_profile_url_evidence_targets_require_opt_in_native_claim_and_safe_url():
+    plan = {"enable_archived_url_evidence": True}
+    results = [
+        _claimed_profile(),
+        _claimed_profile("bob", "Other", "https://other.example/bob"),
+        _claimed_profile("mallory", "Unsafe", "https://example.test/u?token=secret"),
+        _claimed_profile("eve", "Unsafe", "https://example.test/u?apiKey=secret"),
+    ]
+
+    assert claimed_profile_url_targets(results, {}) == []
+    assert claimed_profile_url_targets(results, plan) == [
+        {
+            "investigated_username": "alice",
+            "site_name": "Example Social",
+            "profile_url": "https://social.example/alice",
+        },
+        {
+            "investigated_username": "bob",
+            "site_name": "Other",
+            "profile_url": "https://other.example/bob",
+        },
+    ]
+
+
+def _url_target():
+    return {
+        "investigated_username": "alice",
+        "site_name": "Example Social",
+        "profile_url": "https://social.example/alice",
+    }
+
+
+def test_unfurl_analysis_is_offline_bounded_and_structural_only():
+    observation = normalize_unfurl_url_analysis(
+        _url_target(),
+        {
+            "schema_version": 1,
+            "engine": "dfir-unfurl",
+            "version": UNFURL_VERSION,
+            "remote_lookups": False,
+            "nodes": [
+                {
+                    "id": 1,
+                    "data_type": "url",
+                    "key": None,
+                    "value": "https://social.example/alice",
+                    "parent_id": None,
+                },
+                {
+                    "id": 2,
+                    "data_type": "url.query.pair",
+                    "key": "access_token",
+                    "value": "must-not-survive",
+                    "parent_id": 1,
+                },
+            ],
+        },
+    )
+
+    assert observation["source_engine"] == UNFURL_ENGINE
+    assert observation["status"] == "analyzed"
+    assert observation["extra"]["remote_lookups"] is False
+    assert observation["extra"]["nodes"][1]["value"] == "[redacted]"
+    candidate = extract_profile_url_evidence_claims([observation])[0]
+    assert candidate["field_name"] == "social_account"
+    assert candidate["confidence"] == 25
+    details = candidate["evidence"][0]["details"]
+    assert details["structural_analysis_only"] is True
+    assert details["does_not_establish_ownership"] is True
+
+
+def _wayback_rows(original="https://social.example/alice"):
+    return [
+        ["timestamp", "original", "statuscode", "mimetype", "digest"],
+        ["20240102030405", original, "200", "text/html", "DIGESTONE"],
+        ["20260304050607", original, "200", "text/html", "DIGESTTWO"],
+    ]
+
+
+def test_wayback_capture_metadata_becomes_evidence_not_an_identity_fact():
+    observation = normalize_wayback_capture_index(
+        _url_target(), _wayback_rows("https://SOCIAL.EXAMPLE/alice")
+    )
+    candidates = extract_profile_url_evidence_claims([observation])
+
+    assert observation["source_engine"] == WAYBACK_ENGINE
+    assert observation["status"] == "archived"
+    assert observation["extra"]["sampled_capture_count"] == 2
+    assert observation["extra"]["archived_page_content_fetched"] is False
+    assert len(candidates) == 1
+    assert candidates[0]["field_name"] == "social_account"
+    assert candidates[0]["value"]["url"] == "https://social.example/alice"
+    assert candidates[0]["confidence"] == 25
+    details = candidates[0]["evidence"][0]["details"]
+    assert details["historical_presence_only"] is True
+    assert details["does_not_establish_ownership"] is True
+
+
+def test_wayback_empty_result_is_a_diagnostic_and_mismatched_rows_are_rejected():
+    diagnostic = normalize_wayback_capture_index(_url_target(), [])
+    assert diagnostic["status"] == "not_archived"
+    assert extract_profile_url_evidence_claims([diagnostic]) == []
+
+    with pytest.raises(ValueError, match="no valid exact capture"):
+        normalize_wayback_capture_index(
+            _url_target(), _wayback_rows("https://evil.example/alice")
+        )
+
+
+@pytest.mark.asyncio
+async def test_wayback_request_is_fixed_exact_bounded_and_has_no_redirects():
+    calls = []
+    response = _FakeResponse(status=200, body=json.dumps(_wayback_rows()).encode())
+
+    observation = await run_wayback_capture_index(
+        _url_target(),
+        session_factory=lambda **options: _FakeSession(response, calls, **options),
+    )
+
+    session_options = calls[0][1]
+    request_options = calls[1][1]
+    assert "Authorization" not in session_options["headers"]
+    assert request_options["url"] == WAYBACK_API_BASE_URL
+    assert request_options["allow_redirects"] is False
+    params = request_options["params"]
+    assert ("url", "https://social.example/alice") in params
+    assert ("matchType", "exact") in params
+    assert ("limit", "-10") in params
+    assert ("filter", "statuscode:200") in params
+    assert observation["status"] == "archived"

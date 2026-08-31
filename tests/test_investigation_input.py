@@ -170,6 +170,21 @@ def test_github_profile_enrichment_is_explicit_and_available_in_both_modes():
     )
 
 
+def test_archived_url_evidence_requires_explicit_opt_in():
+    base = {
+        "identifier_type": ["username"],
+        "identifier_value": ["alice"],
+    }
+
+    assert build_investigation_plan(base)["enable_archived_url_evidence"] is False
+    assert (
+        build_investigation_plan({**base, "enable_archived_url_evidence": "on"})[
+            "enable_archived_url_evidence"
+        ]
+        is True
+    )
+
+
 def test_ai_context_requires_explicit_consent():
     base = {
         "identifier_type": ["username", "full_name"],

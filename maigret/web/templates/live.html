@@ -28,6 +28,7 @@
         <div class="live-stat"><span>Profiles found</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
         <div class="live-stat"><span>Email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
         <div class="live-stat"><span>GitHub profiles enriched</span><strong id="stat-github-enriched">{{ completed_github_enrichment_count }}</strong></div>
+        <div class="live-stat"><span>Archived profile URLs</span><strong id="stat-archived-profiles">{{ completed_archived_profile_count }}</strong></div>
         <div class="live-stat"><span>Graph status</span><strong>Streaming</strong></div>
     </div>
     <div class="progress mb-3" style="height: 8px;">
@@ -47,11 +48,13 @@
     const completedFoundCount = {{ completed_found_count|tojson }};
     const completedRegistrationCount = {{ completed_registration_count|tojson }};
     const completedGithubEnrichmentCount = {{ completed_github_enrichment_count|tojson }};
+    const completedArchivedProfileCount = {{ completed_archived_profile_count|tojson }};
 
     let nodes = null, edges = null, network = null;
     let foundCount = doneRedirect ? completedFoundCount : 0;
     let registrationCount = doneRedirect ? completedRegistrationCount : 0;
     let githubEnrichmentCount = doneRedirect ? completedGithubEnrichmentCount : 0;
+    let archivedProfileCount = doneRedirect ? completedArchivedProfileCount : 0;
 
     function ensureGraph() {
         if (network) return;
@@ -128,7 +131,8 @@
 
     function completionText() {
         return 'Completed — ' + foundCount + ' accounts, ' + githubEnrichmentCount
-            + ' GitHub profiles enriched, and ' + registrationCount
+            + ' GitHub profiles enriched, ' + archivedProfileCount
+            + ' archived profile URLs, and ' + registrationCount
             + ' email registrations found.';
     }
 
@@ -158,9 +162,13 @@
             document.getElementById('stat-found').textContent = foundCount;
             addFound(ev);
         } else if (ev.type === 'collector_started') {
-            statusEl.textContent = ev.collector === 'github-public-profile'
-                ? 'Enriching claimed GitHub user profiles through the public API…'
-                : 'Checking email registrations with User Scanner (silent modules only)…';
+            const startedMessages = {
+                'github-public-profile': 'Enriching claimed GitHub user profiles through the public API…',
+                'unfurl-url-analysis': 'Decomposing claimed profile URLs offline with Unfurl…',
+                'wayback-cdx': 'Checking exact claimed profile URLs in the Wayback capture index…',
+                'user-scanner': 'Checking email registrations with User Scanner (silent modules only)…',
+            };
+            statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
             const bar = document.getElementById('live-progress');
             bar.style.width = '100%';
             bar.classList.add('progress-bar-striped', 'progress-bar-animated');
@@ -168,19 +176,30 @@
             if (ev.collector === 'github-public-profile') {
                 githubEnrichmentCount += Number(ev.found || 0);
                 document.getElementById('stat-github-enriched').textContent = githubEnrichmentCount;
-            } else {
+            } else if (ev.collector === 'wayback-cdx') {
+                archivedProfileCount += Number(ev.found || 0);
+                document.getElementById('stat-archived-profiles').textContent = archivedProfileCount;
+            } else if (ev.collector === 'user-scanner') {
                 registrationCount += Number(ev.found || 0);
                 document.getElementById('stat-registrations').textContent = registrationCount;
             }
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
-            statusEl.textContent = ev.collector === 'github-public-profile'
-                ? 'GitHub evidence collected. Continuing the investigation…'
-                : 'Email evidence collected. Finalizing the investigation…';
+            const completedMessages = {
+                'github-public-profile': 'GitHub evidence collected. Continuing the investigation…',
+                'unfurl-url-analysis': 'Offline URL analysis collected. Checking archive metadata…',
+                'wayback-cdx': 'Archive evidence collected. Continuing the investigation…',
+                'user-scanner': 'Email evidence collected. Finalizing the investigation…',
+            };
+            statusEl.textContent = completedMessages[ev.collector] || 'Additional evidence collected.';
         } else if (ev.type === 'collector_error') {
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
-            statusEl.textContent = ev.collector === 'github-public-profile'
-                ? 'One GitHub profile could not be enriched; continuing with saved findings…'
-                : 'Email evidence was unavailable; finalizing profile findings…';
+            const errorMessages = {
+                'github-public-profile': 'One GitHub profile could not be enriched; continuing with saved findings…',
+                'unfurl-url-analysis': 'One profile URL could not be decomposed; continuing with archive checks…',
+                'wayback-cdx': 'One archive lookup was unavailable; continuing with saved findings…',
+                'user-scanner': 'Email evidence was unavailable; finalizing profile findings…',
+            };
+            statusEl.textContent = errorMessages[ev.collector] || 'One evidence source was unavailable; continuing…';
         } else if (ev.type === 'stopped') {
             statusEl.textContent = 'Stopped.';
         } else if (ev.type === 'error') {

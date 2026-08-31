@@ -69,6 +69,109 @@
         "live_contract_target": "octocat",
         "owner": "OpenLedger maintainers"
       }
+    },
+    {
+      "id": "unfurl_url_analysis",
+      "display_name": "Unfurl deterministic URL analysis",
+      "status": "active",
+      "capability": "offline_claimed_profile_url_decomposition",
+      "integration_mode": "bundled_cli",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://github.com/RyanDFIR/unfurl",
+      "usage_terms": "https://github.com/RyanDFIR/unfurl/blob/main/LICENSE",
+      "upstream_repository": "https://github.com/RyanDFIR/unfurl",
+      "license": "Apache-2.0",
+      "api_version": "20260405",
+      "pinned_commit": "a21ef7ce1896bd8db17aeeb990911877ab839dbe",
+      "network_classification": "offline_local",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "claimed_profile_url",
+        "accepted_target": "exact_public_profile_claimed_by_native_discovery",
+        "maximum_targets_per_investigation": 20
+      },
+      "guardrails": {
+        "network_access_allowed": false,
+        "remote_lookups_allowed": false,
+        "timeout_seconds": 20,
+        "maximum_response_bytes": 1000000,
+        "maximum_nodes_per_target": 80,
+        "dependency_isolated_virtual_environment": true,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": [
+        "social_account:evidence_only"
+      ],
+      "observation_only_fields": [
+        "url_components",
+        "decoded_nodes",
+        "unfurl_version",
+        "unfurl_commit",
+        "remote_lookups"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "last_upstream_activity_at": "2026-08-23",
+        "owner": "OpenLedger maintainers"
+      }
+    },
+    {
+      "id": "wayback_cdx",
+      "display_name": "Internet Archive Wayback CDX",
+      "status": "active",
+      "capability": "exact_url_capture_metadata",
+      "integration_mode": "native_public_api",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://archive.org/help/wayback_api.php",
+      "usage_terms": "https://archive.org/about/terms.php",
+      "endpoint_origin": "https://web.archive.org",
+      "api_version": "unversioned-cdx",
+      "network_classification": "fixed_public_api",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "claimed_profile_url",
+        "accepted_target": "exact_public_profile_claimed_by_native_discovery",
+        "maximum_targets_per_investigation": 20
+      },
+      "guardrails": {
+        "fixed_network_origin": true,
+        "redirects_allowed": false,
+        "timeout_seconds": 20,
+        "maximum_response_bytes": 1000000,
+        "match_type": "exact",
+        "maximum_capture_rows_per_target": 10,
+        "archived_page_content_fetched": false,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": [
+        "social_account:evidence_only"
+      ],
+      "observation_only_fields": [
+        "sampled_capture_count",
+        "oldest_sampled_capture_at",
+        "latest_sampled_capture_at",
+        "capture_replay_urls",
+        "digest"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "live_contract_target": "https://example.com/",
+        "owner": "OpenLedger maintainers"
+      }
     }
   ]
 }

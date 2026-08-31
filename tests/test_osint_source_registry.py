@@ -16,7 +16,7 @@ def test_osint_source_registry_passes_static_governance_audit():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Validated 1 governed OSINT source" in result.stdout
+    assert "Validated 3 governed OSINT source" in result.stdout
 
 
 def test_github_contract_matches_runtime_limits_and_review_boundary():
@@ -53,3 +53,25 @@ def test_osint_source_audit_never_auto_updates_or_auto_merges():
     assert "schedule:" in workflow
     assert "git push" not in workflow
     assert "gh pr merge" not in workflow
+
+
+def test_unfurl_and_wayback_contracts_are_offline_or_fixed_origin_and_reviewed():
+    with open(
+        os.path.join(ROOT, "config", "osint-sources.json"), encoding="utf-8"
+    ) as registry_file:
+        sources = {
+            source["id"]: source for source in json.load(registry_file)["sources"]
+        }
+
+    unfurl = sources["unfurl_url_analysis"]
+    assert unfurl["access"]["genuinely_free"] is True
+    assert unfurl["network_classification"] == "offline_local"
+    assert unfurl["guardrails"]["network_access_allowed"] is False
+    assert unfurl["guardrails"]["remote_lookups_allowed"] is False
+    assert len(unfurl["pinned_commit"]) == 40
+
+    wayback = sources["wayback_cdx"]
+    assert wayback["endpoint_origin"] == "https://web.archive.org"
+    assert wayback["guardrails"]["match_type"] == "exact"
+    assert wayback["guardrails"]["archived_page_content_fetched"] is False
+    assert wayback["guardrails"]["automatic_approval_allowed"] is False

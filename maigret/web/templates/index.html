@@ -121,6 +121,11 @@
                         <label class="form-check-label" for="enable-github-profile-enrichment">Enrich claimed GitHub user profiles</label>
                         <div class="form-text">Off by default. Contacts GitHub's public API only after OpenLedger finds a claimed GitHub account. Public profile fields become pending Persona evidence and are never approved automatically.</div>
                     </div>
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="enable-archived-url-evidence" name="enable_archived_url_evidence">
+                        <label class="form-check-label" for="enable-archived-url-evidence">Analyze and check archives for claimed profile URLs</label>
+                        <div class="form-text">Off by default. Decomposes exact claimed URLs locally with Unfurl, then sends those public URLs to the Internet Archive's Wayback CDX API for bounded capture metadata. Archived pages are not downloaded; all evidence stays pending for human review.</div>
+                    </div>
                 </fieldset>
 
                 <fieldset class="investigation-section">
