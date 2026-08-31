@@ -6,6 +6,16 @@
     font-display: swap;
 }
 
+.affiliation-investigation-action { margin-top: .75rem; display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
+.affiliation-investigation-action small { color: var(--text-muted); }
+.affiliation-case-body { display: grid; gap: 1rem; }
+.affiliation-candidate-list { display: grid; gap: .75rem; }
+.affiliation-candidate { border: 1px solid var(--border-color); border-radius: .75rem; padding: .9rem; display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+.affiliation-candidate span { display: grid; gap: .2rem; }
+.affiliation-candidate small { color: var(--text-muted); }
+.affiliation-entity-summary { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
+.affiliation-source-links { display: grid; gap: .4rem; text-align: right; }
+
 :root {
     --ol-accent: #0f8b8d;
     --ol-accent-strong: #087274;

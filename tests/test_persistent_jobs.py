@@ -279,7 +279,7 @@ def test_terminal_case_can_be_deleted_with_all_report_artifacts(
 
     response = client.post(
         f"/cases/{case_id}/delete",
-        data={"csrf_token": "delete-case-csrf"},
+        data={"csrf_token": "delete-case-csrf", "confirmation_name": "alice"},
         follow_redirects=True,
     )
 
@@ -301,7 +301,7 @@ def test_active_case_delete_is_refused_without_losing_data(
 
     response = client.post(
         f"/cases/{case_id}/delete",
-        data={"csrf_token": "delete-case-csrf"},
+        data={"csrf_token": "delete-case-csrf", "confirmation_name": "alice"},
         follow_redirects=True,
     )
 
@@ -309,6 +309,23 @@ def test_active_case_delete_is_refused_without_losing_data(
     assert "Stop the active investigation" in response.get_data(as_text=True)
     assert persistent_store.get_case(case_id) is not None
     assert persistent_store.get_job(job_id) is not None
+
+
+def test_case_delete_requires_the_exact_case_name(client, persistent_store):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    persistent_store.finish(job_id, {"status": "cancelled", "usernames": ["alice"]})
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "delete-case-csrf"
+
+    response = client.post(
+        f'/cases/{job["case_id"]}/delete',
+        data={"csrf_token": "delete-case-csrf", "confirmation_name": "Alice"},
+        follow_redirects=True,
+    )
+
+    assert "Type the exact case name" in response.get_data(as_text=True)
+    assert persistent_store.get_case(job["case_id"]) is not None
 
 
 def test_case_delete_requires_csrf(client, persistent_store):
@@ -425,6 +442,8 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "Open structured profile" in case_page
     assert f"/personas/{persona_id}" in case_page
     assert "Delete case" in case_page
+    assert 'name="confirmation_name"' in case_page
+    assert 'data-case-title="alice"' in case_page
 
     persona_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
     assert "Alice Example" in persona_page
@@ -896,3 +915,59 @@ def test_relationship_workspace_renders_shared_approved_attributes(
     assert "Review status remains visible" in persona_page
     assert "/static/vendor/vis-network-10.1.1.min.js" in persona_page
     assert "/static/relationships.js" in persona_page
+
+
+def _affiliation_worker_observation():
+    return {
+        "source_engine": "wikidata_affiliation",
+        "source_record_id": "wikidata-organization:Q95",
+        "status": "observed",
+        "reason": "Explicit public statements.",
+        "organization_candidates": [],
+        "organization": {
+            "id": "Q95", "label": "Example Organization", "description": "Example",
+            "url": "https://www.wikidata.org/wiki/Q95", "official_websites": ["https://example.org"],
+        },
+        "people": [{
+            "id": "Q1001", "label": "Alice Example", "url": "https://www.wikidata.org/wiki/Q1001",
+            "relations": [{"property_id": "P108", "label": "employer", "direction": "person_to_organization"}],
+        }],
+    }
+
+
+def test_affiliation_worker_persists_pending_people(web_app, persistent_store, monkeypatch):
+    job_id = persistent_store.create_affiliation_investigation("Example Organization")
+    job = persistent_store.claim_next("worker:affiliation")
+
+    async def fake_discovery(*_args, **_kwargs):
+        return _affiliation_worker_observation()
+
+    monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", fake_discovery)
+    web_app.run_persistent_job(persistent_store, job)
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["affiliated_person_count"] == 1
+    persona = persistent_store.get_persona(persistent_store.get_case(job["case_id"])["personas"][0]["id"])
+    assert all(claim["review_status"] == "pending" for claim in persona["claims"])
+    assert persistent_store.get_events(job_id)[-1]["event"]["redirect"] == f"/cases/{job['case_id']}"
+
+
+def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
+    source_job_id = persistent_store.create_investigation(["alice"], {})
+    source_job = persistent_store.claim_next("worker:source")
+    result = {"status": "completed", "usernames": ["alice"], "individual_reports": [{"username": "alice", "claimed_profiles": [{"site_name": "Example", "url": "https://example.test/alice", "confidence": "strong", "evidence": {"company": "Example Organization"}}]}]}
+    persistent_store.finish(source_job_id, result)
+    persistent_store.sync_persona_claims(source_job_id, result)
+    source_case = persistent_store.get_case(source_job["case_id"])
+    persona = persistent_store.get_persona(source_case["personas"][0]["id"])
+    company = next(claim for claim in persona["claims"] if claim["field_name"] == "company")
+    assert "Open affiliation case" not in client.get(f"/personas/{persona['id']}").get_data(as_text=True)
+    persistent_store.review_claim(company["id"], "approved", "analyst")
+    assert "Open affiliation case" in client.get(f"/personas/{persona['id']}").get_data(as_text=True)
+    with client.session_transaction() as session:
+        session["csrf_token"] = "affiliation-csrf"
+    response = client.post(f"/claims/{company['id']}/investigate-affiliation", data={"csrf_token": "affiliation-csrf"})
+    job_id = response.location.rsplit("/", 1)[-1]
+    affiliation_job = persistent_store.get_job(job_id)
+    assert affiliation_job["kind"] == "affiliation"
+    assert persistent_store.get_case(affiliation_job["case_id"])["personas"] == []

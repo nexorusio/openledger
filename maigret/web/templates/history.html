@@ -75,7 +75,7 @@
                         {% if result.case_id %}
                         <a href="{{ url_for('case_workspace', case_id=result.case_id) }}" class="btn btn-sm btn-outline-secondary">Case</a>
                         {% endif %}
-                        {% if result.status == 'completed' %}
+                        {% if result.status == 'completed' and result.kind != 'affiliation' %}
                         <a href="{{ url_for('results', session_id=result.session_folder) }}" class="btn btn-sm btn-outline-secondary">Open findings</a>
                         {% elif result.status in ('queued', 'running', 'cancel_requested') %}
                         <a href="{{ url_for('live_results', job_id=result.job_id) }}" class="btn btn-sm btn-outline-secondary">Open live progress</a>
@@ -83,9 +83,10 @@
                         {% if result.status in ('completed', 'failed', 'cancelled', 'interrupted') %}
                         <form method="POST"
                               action="{{ url_for('delete_history_entry', session_folder=result.session_folder) }}"
-                              class="d-inline"
-                              onsubmit="return confirm('Permanently delete this investigation and all of its reports? This cannot be undone.');">
+                              class="d-inline{% if result.case_title %} case-delete-form{% endif %}"
+                              {% if result.case_title %}data-case-title="{{ result.case_title }}"{% else %}onsubmit="return confirm('Permanently delete this investigation and all of its reports? This cannot be undone.');"{% endif %}>
                             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            {% if result.case_title %}<input type="hidden" name="confirmation_name" value="">{% endif %}
                             <button type="submit" class="btn btn-sm btn-outline-danger">
                                 <i data-lucide="trash-2"></i>
                                 Delete

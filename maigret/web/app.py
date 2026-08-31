@@ -59,6 +59,7 @@ from maigret.web.collector_adapters import (
     run_unfurl_url_analysis,
     run_user_scanner_email,
     run_wayback_capture_index,
+    run_wikidata_affiliation_discovery,
     user_scanner_available,
     user_scanner_email_targets,
 )
@@ -1290,7 +1291,9 @@ def find_result_by_session(session_id: str):
     return result if result.get('status') == 'completed' else None
 
 
-def delete_persisted_investigation(session_folder: str) -> bool:
+def delete_persisted_investigation(
+    session_folder: str, *, confirmation_name: Optional[str] = None
+) -> bool:
     """Delete one terminal investigation and all report artifacts safely."""
     if not isinstance(session_folder, str) or not SESSION_FOLDER_PATTERN.fullmatch(
         session_folder
@@ -1339,7 +1342,7 @@ def delete_persisted_investigation(session_folder: str) -> bool:
                 os.replace(session_path, tombstone_path)
                 moved_to_tombstone = True
             if case_store is not None and stored:
-                case_store.delete_job(session_key)
+                case_store.delete_job(session_key, confirmation_name=confirmation_name)
         except Exception:
             if (
                 moved_to_tombstone
@@ -1364,7 +1367,9 @@ def delete_persisted_investigation(session_folder: str) -> bool:
     return True
 
 
-def delete_persisted_case(case_id: str) -> bool:
+def delete_persisted_case(
+    case_id: str, *, confirmation_name: Optional[str] = None
+) -> bool:
     """Delete one terminal case and its report directories as one operation."""
     if case_store is None:
         return False
@@ -1411,7 +1416,9 @@ def delete_persisted_case(case_id: str) -> bool:
             for source_path, tombstone_path in tombstones:
                 os.replace(source_path, tombstone_path)
                 moved_tombstones.append((source_path, tombstone_path))
-            if not case_store.delete_case(case_id):
+            if not case_store.delete_case(
+                case_id, confirmation_name=confirmation_name
+            ):
                 raise KeyError(case_id)
         except Exception:
             for source_path, tombstone_path in reversed(moved_tombstones):
@@ -2660,8 +2667,108 @@ async def watch_persistent_job_stop(
         await asyncio.sleep(PERSISTENT_CANCEL_POLL_SECONDS)
 
 
+def run_persistent_affiliation_job(
+    store: CaseStore, job: Dict[str, Any], shutdown_check=None
+):
+    job_id, case_id = job['job_id'], job['case_id']
+    specification = (job.get('options') or {}).get('investigation_spec') or {}
+    affiliation_name = str(specification.get('affiliation_name') or '').strip()
+    selected_entity_id = str(specification.get('wikidata_entity_id') or '').strip() or None
+    sink = PersistentEventSink(store, job_id)
+    sink.put({'type': 'collector_started', 'collector': 'wikidata-affiliation', 'target_type': 'affiliation', 'targets': 1})
+    runtime_job = {'cancelled': False}
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    task = loop.create_task(
+        run_wikidata_affiliation_discovery(
+            affiliation_name, selected_entity_id=selected_entity_id
+        )
+    )
+    watcher = loop.create_task(
+        watch_persistent_job_stop(
+            store, job_id, task, runtime_job, shutdown_check=shutdown_check
+        )
+    )
+    observation = None
+    source_message = ''
+    try:
+        observation = loop.run_until_complete(task)
+    except asyncio.CancelledError:
+        pass
+    except Exception as error:
+        source_message = record_internal_error(
+            'Wikidata affiliation source failed', error, session=job_id
+        )
+    finally:
+        if not watcher.done():
+            watcher.cancel()
+        loop.run_until_complete(asyncio.gather(watcher, return_exceptions=True))
+        loop.close()
+
+    shutdown_requested = bool(shutdown_check and shutdown_check())
+    cancel_requested = store.is_cancel_requested(job_id)
+    if shutdown_requested or cancel_requested:
+        status = 'interrupted' if shutdown_requested else 'cancelled'
+        store.finish(
+            job_id,
+            {
+                'status': status,
+                'error': 'The affiliation investigation was stopped.',
+                'usernames': [],
+                'discovery_status': status,
+            },
+        )
+        sink.put({'type': 'done', 'status': status})
+        return
+    if observation is None:
+        result = {
+            'status': 'completed',
+            'usernames': [],
+            'discovery_status': 'unavailable',
+            'source_message': source_message or 'Wikidata was unavailable.',
+            'organization_candidates': [],
+            'organization': None,
+            'affiliated_person_count': 0,
+            'claim_proposal_count': 0,
+        }
+        store.finish(job_id, result)
+        sink.put({'type': 'collector_error', 'collector': 'wikidata-affiliation', 'message': result['source_message']})
+        sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
+        return
+    synchronized = {'personas': 0, 'claims': 0}
+    if observation.get('status') == 'observed':
+        synchronized = store.sync_affiliation_discovery(job_id, observation)
+        organization = observation.get('organization') or {}
+        sink.put(
+            {'type': 'affiliation_entity', 'entity_id': organization.get('id'),
+             'label': organization.get('label'), 'url': organization.get('url')}
+        )
+        for person in list(observation.get('people') or [])[:50]:
+            if isinstance(person, dict):
+                sink.put({'type': 'affiliated_person', 'entity_id': person.get('id'), 'label': person.get('label'), 'url': person.get('url')})
+    result = {
+        'status': 'completed',
+        'usernames': [],
+        'discovery_status': observation.get('status'),
+        'source_message': str(observation.get('reason') or '')[:1000],
+        'organization_candidates': list(observation.get('organization_candidates') or [])[:5],
+        'organization': observation.get('organization'),
+        'affiliated_person_count': len(observation.get('people') or []),
+        'persona_proposal_count': synchronized['personas'],
+        'claim_proposal_count': synchronized['claims'],
+        'source_engine': observation.get('source_engine'),
+        'source_record_id': observation.get('source_record_id'),
+    }
+    store.finish(job_id, result)
+    event_type = 'collector_completed' if observation.get('status') in {'observed', 'needs_selection'} else 'collector_error'
+    sink.put({'type': event_type, 'collector': 'wikidata-affiliation', 'observations': 1, 'found': result['affiliated_person_count'], 'message': result['source_message']})
+    sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
+
+
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
     """Execute a claimed database job independently from any browser request."""
+    if job.get('kind') == 'affiliation':
+        return run_persistent_affiliation_job(store, job, shutdown_check=shutdown_check)
     job_id = job['job_id']
     usernames = job['usernames']
     options = hydrate_persistent_options(job['options'])
@@ -2804,9 +2911,9 @@ def scan_stream(job_id):
                                     'type': 'done',
                                     'status': current['status'],
                                     'redirect': (
-                                        f"/results/{current['session_folder']}"
-                                        if current['status'] == 'completed'
-                                        else None
+                                        f"/cases/{current['case_id']}"
+                                        if current.get('kind') == 'affiliation' and current['status'] == 'completed'
+                                        else (f"/results/{current['session_folder']}" if current['status'] == 'completed' else None)
                                     ),
                                 }
                             )
@@ -3051,8 +3158,18 @@ def delete_case_workspace(case_id):
     if case_store is None:
         flash('The case workspace requires persistent storage.', 'warning')
         return redirect(url_for('history'))
+    stored_case = case_store.get_case(case_id)
+    if not stored_case:
+        flash('That case no longer exists.', 'info')
+        return redirect(url_for('cases_workspace'))
+    confirmation_name = str(request.form.get('confirmation_name') or '')
+    if confirmation_name != stored_case['title']:
+        flash('Case deletion cancelled. Type the exact case name to confirm.', 'warning')
+        return redirect(url_for('case_workspace', case_id=case_id))
     try:
-        deleted = delete_persisted_case(case_id)
+        deleted = delete_persisted_case(
+            case_id, confirmation_name=confirmation_name
+        )
     except ActiveInvestigationError:
         flash(
             'Stop the active investigation and wait for it to finish stopping '
@@ -3452,6 +3569,51 @@ def refresh_persona(persona_id):
     return redirect(url_for('live_results', job_id=job_id))
 
 
+@app.route('/claims/<claim_id>/investigate-affiliation', methods=['POST'])
+def investigate_affiliation_claim(claim_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    if case_store is None:
+        flash('Affiliation investigations require persistent storage.', 'warning')
+        return redirect(url_for('cases_workspace'))
+    claim = case_store.get_claim(claim_id)
+    if not claim:
+        flash('That affiliation record no longer exists.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    if claim['field_name'] != 'company' or claim['review_status'] != 'approved':
+        flash('Only an analyst-approved affiliation can open a new affiliation case.', 'warning')
+        return redirect(url_for('persona_workspace', persona_id=claim['persona_id']))
+    try:
+        job_id = case_store.create_affiliation_investigation(
+            claim['display_value'], source_claim_id=claim_id
+        )
+    except ValueError as error:
+        flash(str(error), 'danger')
+        return redirect(url_for('persona_workspace', persona_id=claim['persona_id']))
+    flash('Affiliation case opened. Every finding will require review.', 'success')
+    return redirect(url_for('live_results', job_id=job_id))
+
+
+@app.route('/cases/<case_id>/affiliation/select', methods=['POST'])
+def select_affiliation_entity(case_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('case_workspace', case_id=case_id))
+    if case_store is None:
+        flash('Affiliation investigations require persistent storage.', 'warning')
+        return redirect(url_for('cases_workspace'))
+    try:
+        job_id = case_store.queue_affiliation_entity(case_id, request.form.get('entity_id', ''))
+    except KeyError:
+        flash('That affiliation case no longer exists.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    except ValueError as error:
+        flash(str(error), 'warning')
+        return redirect(url_for('case_workspace', case_id=case_id))
+    return redirect(url_for('live_results', job_id=job_id))
+
+
 @app.route('/claims/<claim_id>/review', methods=['POST'])
 def review_persona_claim(claim_id):
     persona_id = request.form.get('persona_id', '')
@@ -3530,8 +3692,19 @@ def delete_history_entry(session_folder):
     if not is_valid_csrf(request.form.get('csrf_token')):
         flash('Your history session expired. Please try again.', 'danger')
         return redirect(url_for('history'))
+    confirmation_name = None
+    if case_store is not None and SESSION_FOLDER_PATTERN.fullmatch(session_folder):
+        stored_job = case_store.get_job(session_folder.removeprefix('search_'))
+        stored_case = case_store.get_case(stored_job['case_id']) if stored_job else None
+        if stored_case:
+            confirmation_name = str(request.form.get('confirmation_name') or '')
+            if confirmation_name != stored_case['title']:
+                flash('Investigation deletion cancelled. Type the exact case name to confirm.', 'warning')
+                return redirect(url_for('history'))
     try:
-        deleted = delete_persisted_investigation(session_folder)
+        deleted = delete_persisted_investigation(
+            session_folder, confirmation_name=confirmation_name
+        )
     except (OSError, ValueError) as error:
         record_internal_error(
             'Failed to delete investigation', error, session=session_folder
@@ -3581,11 +3754,16 @@ def live_results(job_id):
     done_redirect = None
     result = result or stored_job
     if result and result.get('status') == 'completed':
-        done_redirect = url_for('results', session_id=result['session_folder'])
+        done_redirect = (
+            url_for('case_workspace', case_id=result['case_id'])
+            if result.get('kind') == 'affiliation'
+            else url_for('results', session_id=result['session_folder'])
+        )
 
     return render_template(
         'live.html',
         job_id=job_id,
+        job_kind=(result or {}).get('kind', 'live'),
         done_redirect=done_redirect,
         completed_found_count=(result or {}).get('found_count', 0),
         completed_registration_count=(result or {}).get(
@@ -3598,6 +3776,7 @@ def live_results(job_id):
         completed_archived_profile_count=(result or {}).get(
             'archived_profile_count', 0
         ),
+        completed_affiliated_person_count=(result or {}).get('affiliated_person_count', 0),
     )
 
 

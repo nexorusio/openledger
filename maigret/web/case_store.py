@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Optional
@@ -652,6 +653,125 @@ class CaseStore:
         self.append_event(job_id, {"type": "queued", "usernames": normalized})
         return job_id
 
+    def create_affiliation_investigation(
+        self, affiliation_name: str, *, source_claim_id: Optional[str] = None
+    ) -> str:
+        from maigret.web.collector_adapters import normalize_affiliation_name
+
+        affiliation_name = normalize_affiliation_name(affiliation_name)
+        source_claim_id = str(source_claim_id or "").strip() or None
+        if source_claim_id and len(source_claim_id) > 100:
+            raise ValueError("Invalid source claim identifier")
+        now = utcnow()
+        case_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
+        specification = {
+            "schema_version": 1,
+            "investigation_type": "affiliation",
+            "affiliation_name": affiliation_name,
+            "source_claim_id": source_claim_id,
+        }
+        with self.engine.begin() as connection:
+            connection.execute(
+                insert(cases).values(
+                    id=case_id,
+                    title=f"Affiliation: {affiliation_name}"[:500],
+                    status="open",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            connection.execute(
+                insert(investigation_jobs).values(
+                    id=job_id,
+                    case_id=case_id,
+                    kind="affiliation",
+                    status="queued",
+                    usernames=[],
+                    options={"investigation_spec": specification},
+                    progress={"checked": 0, "total": 2, "found": 0},
+                    result=None,
+                    error=None,
+                    cancel_requested=False,
+                    attempts=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+        self.append_event(
+            job_id,
+            {"type": "queued", "target_type": "affiliation", "affiliation": affiliation_name},
+        )
+        return job_id
+
+    def queue_affiliation_entity(self, case_id: str, entity_id: str) -> str:
+        entity_id = str(entity_id or "").strip().upper()
+        if not re.fullmatch(r"Q[1-9][0-9]{0,19}", entity_id):
+            raise ValueError("Select a valid Wikidata organization")
+        now, job_id = utcnow(), str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            case_statement = select(cases.c.id).where(cases.c.id == case_id)
+            if self.engine.dialect.name == "postgresql":
+                case_statement = case_statement.with_for_update()
+            if not connection.execute(case_statement).first():
+                raise KeyError(case_id)
+            if connection.scalar(
+                select(investigation_jobs.c.id).where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                ).limit(1)
+            ):
+                raise ValueError("This case already has an active investigation")
+            prior_jobs = connection.execute(
+                select(investigation_jobs.c.result, investigation_jobs.c.options)
+                .where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.kind == "affiliation",
+                    investigation_jobs.c.status == "completed",
+                )
+                .order_by(investigation_jobs.c.created_at.desc())
+                .limit(10)
+            ).mappings()
+            candidate = None
+            affiliation_name = ""
+            source_claim_id = None
+            for prior in prior_jobs:
+                spec = dict(prior["options"] or {}).get("investigation_spec") or {}
+                affiliation_name = affiliation_name or str(spec.get("affiliation_name") or "")
+                source_claim_id = source_claim_id or spec.get("source_claim_id")
+                for item in list(dict(prior["result"] or {}).get("organization_candidates") or [])[:5]:
+                    if isinstance(item, dict) and str(item.get("id") or "").upper() == entity_id:
+                        candidate = item
+                        break
+                if candidate:
+                    break
+            if not candidate or not affiliation_name:
+                raise ValueError("The selected organization is not a stored candidate for this case")
+            selected_label = " ".join(str(candidate.get("label") or affiliation_name).split())[:500]
+            specification = {
+                "schema_version": 1,
+                "investigation_type": "affiliation",
+                "affiliation_name": affiliation_name[:500],
+                "source_claim_id": source_claim_id,
+                "wikidata_entity_id": entity_id,
+                "selected_entity_label": selected_label,
+            }
+            connection.execute(
+                insert(investigation_jobs).values(
+                    id=job_id, case_id=case_id, kind="affiliation", status="queued",
+                    usernames=[], options={"investigation_spec": specification},
+                    progress={"checked": 1, "total": 2, "found": 0}, result=None,
+                    error=None, cancel_requested=False, attempts=0,
+                    created_at=now, updated_at=now,
+                )
+            )
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(
+                    title=f"Affiliation: {selected_label}"[:500], updated_at=now
+                )
+            )
+        self.append_event(job_id, {"type": "queued", "target_type": "wikidata_entity", "entity_id": entity_id})
+        return job_id
+
     def repeat_persona_investigation(self, persona_id: str) -> str:
         """Queue a fresh collection for one existing persona in the same case."""
         now = utcnow()
@@ -916,7 +1036,8 @@ class CaseStore:
     def list_jobs(self, limit: int = 500):
         with self.engine.connect() as connection:
             rows = connection.execute(
-                select(investigation_jobs)
+                select(investigation_jobs, cases.c.title.label("case_title"))
+                .join(cases, cases.c.id == investigation_jobs.c.case_id)
                 .order_by(investigation_jobs.c.created_at.desc())
                 .limit(min(max(1, int(limit)), 2000))
             ).mappings()
@@ -2293,6 +2414,72 @@ class CaseStore:
             synchronized += 1
         return synchronized
 
+    def sync_affiliation_discovery(
+        self, job_id: str, observation: Dict[str, Any]
+    ) -> Dict[str, int]:
+        from maigret.web.collector_adapters import (
+            WIKIDATA_ENGINE,
+            extract_wikidata_affiliation_people,
+        )
+
+        people = extract_wikidata_affiliation_people(observation)
+        if not people:
+            return {"personas": 0, "claims": 0}
+        organization = observation.get("organization")
+        if not isinstance(organization, dict):
+            raise ValueError("Affiliation discovery is missing its organization")
+        organization_label = " ".join(str(organization.get("label") or "").split())[:500]
+        now = utcnow()
+        synchronized = inserted_personas = 0
+        with self.engine.begin() as connection:
+            statement = select(investigation_jobs.c.case_id, investigation_jobs.c.kind).where(
+                investigation_jobs.c.id == job_id
+            )
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            job = connection.execute(statement).mappings().first()
+            if not job:
+                raise KeyError(job_id)
+            if job["kind"] != "affiliation":
+                raise ValueError("Only affiliation jobs can synchronize this evidence")
+            case_id = str(job["case_id"])
+            personas_by_id = {}
+            rows = connection.execute(
+                select(personas.c.id, persona_claims.c.value)
+                .join(persona_claims, persona_claims.c.persona_id == personas.c.id)
+                .where(
+                    personas.c.case_id == case_id,
+                    persona_claims.c.field_name == "platform_identifier",
+                    persona_claims.c.source_engine == WIKIDATA_ENGINE,
+                )
+            ).mappings()
+            for row in rows:
+                value = row["value"]
+                if isinstance(value, dict) and value.get("identifier_type") == "wikidata_item_id":
+                    personas_by_id[str(value.get("identifier") or "").upper()] = str(row["id"])
+            for person in people:
+                persona_id = personas_by_id.get(person["wikidata_id"])
+                if not persona_id:
+                    persona_id = str(uuid.uuid4())
+                    connection.execute(
+                        insert(personas).values(
+                            id=persona_id, case_id=case_id,
+                            display_name=person["display_name"], created_at=now,
+                        )
+                    )
+                    personas_by_id[person["wikidata_id"]] = persona_id
+                    inserted_personas += 1
+                synchronized += self._upsert_persona_candidates(
+                    connection, persona_id=persona_id, job_id=job_id,
+                    candidates=person["claims"], now=now,
+                )
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(
+                    title=f"Affiliation: {organization_label}"[:500], updated_at=now
+                )
+            )
+        return {"personas": inserted_personas, "claims": synchronized}
+
     def sync_persona_claims(self, job_id: str, result: Dict[str, Any]) -> int:
         """Upsert deterministic claims while preserving every human decision."""
         from maigret.web.collector_adapters import (
@@ -3048,14 +3235,23 @@ class CaseStore:
             )
         return int(result.rowcount or 0)
 
-    def delete_job(self, job_id: str) -> bool:
+    def delete_job(
+        self, job_id: str, *, confirmation_name: Optional[str] = None
+    ) -> bool:
         with self.engine.begin() as connection:
-            row = (
-                connection.execute(
-                    select(
-                        investigation_jobs.c.case_id, investigation_jobs.c.status
-                    ).where(investigation_jobs.c.id == job_id)
+            statement = (
+                select(
+                    investigation_jobs.c.case_id,
+                    investigation_jobs.c.status,
+                    cases.c.title.label("case_title"),
                 )
+                .join(cases, cases.c.id == investigation_jobs.c.case_id)
+                .where(investigation_jobs.c.id == job_id)
+            )
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            row = (
+                connection.execute(statement)
                 .mappings()
                 .first()
             )
@@ -3063,6 +3259,8 @@ class CaseStore:
                 return False
             if row["status"] not in TERMINAL_STATUSES:
                 raise ValueError("Active investigations cannot be deleted")
+            if confirmation_name is not None and confirmation_name != row["case_title"]:
+                raise ValueError("Case name confirmation does not match")
             sibling_job = connection.scalar(
                 select(investigation_jobs.c.id)
                 .where(
@@ -3084,15 +3282,22 @@ class CaseStore:
                 connection.execute(delete(cases).where(cases.c.id == row["case_id"]))
         return True
 
-    def delete_case(self, case_id: str) -> bool:
+    def delete_case(
+        self, case_id: str, *, confirmation_name: Optional[str] = None
+    ) -> bool:
         """Delete a case atomically once none of its investigations are active."""
         with self.engine.begin() as connection:
-            statement = select(cases.c.id).where(cases.c.id == case_id)
+            statement = select(cases.c.id, cases.c.title).where(cases.c.id == case_id)
             if self.engine.dialect.name == "postgresql":
                 statement = statement.with_for_update()
-            stored_case_id = connection.scalar(statement)
-            if not stored_case_id:
+            stored_case = connection.execute(statement).mappings().first()
+            if not stored_case:
                 return False
+            if (
+                confirmation_name is not None
+                and confirmation_name != stored_case["title"]
+            ):
+                raise ValueError("Case name confirmation does not match")
             active_job = connection.scalar(
                 select(investigation_jobs.c.id)
                 .where(
@@ -3114,6 +3319,7 @@ class CaseStore:
         payload = {
             "job_id": row["id"],
             "case_id": row["case_id"],
+            "case_title": row.get("case_title"),
             "kind": row["kind"],
             "status": row["status"],
             "usernames": list(row["usernames"] or []),

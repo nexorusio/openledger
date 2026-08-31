@@ -16,9 +16,10 @@
         <a href="{{ url_for('cases_workspace') }}" class="btn btn-outline-secondary">All cases</a>
         <form method="POST"
               action="{{ url_for('delete_case_workspace', case_id=case.id) }}"
-              class="d-inline"
-              onsubmit="return confirm('Permanently delete this case, every investigation, report, chat message, Persona, and evidence record? This cannot be undone.');">
+              class="d-inline case-delete-form"
+              data-case-title="{{ case.title }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="confirmation_name" value="">
             <button type="submit" class="btn btn-outline-danger"><i data-lucide="trash-2"></i> Delete case</button>
         </form>
     </div>
@@ -52,7 +53,43 @@
 </section>
 
 {% set latest_spec = case.jobs[0].options.investigation_spec if case.jobs and case.jobs[0].options and case.jobs[0].options.investigation_spec else none %}
-{% if latest_spec %}
+{% set affiliation_job = case.jobs[0] if case.jobs and case.jobs[0].kind == 'affiliation' else none %}
+{% if affiliation_job %}
+<section class="panel-card affiliation-case-card">
+    <header class="panel-header">
+        <div><h2>Affiliation discovery</h2><p>Wikidata resolves the organization, its official website and explicit public affiliation statements. Every claim requires analyst review.</p></div>
+        <span class="badge-soft {{ 'success' if affiliation_job.discovery_status == 'observed' else 'warning' }}">{{ affiliation_job.discovery_status | default(affiliation_job.status, true) | replace('_', ' ') | title }}</span>
+    </header>
+    <div class="panel-body affiliation-case-body">
+        {% if affiliation_job.discovery_status == 'needs_selection' %}
+        <strong>Select the correct organization</strong>
+        <p class="form-text">People extraction is paused until you choose one stored Wikidata candidate.</p>
+        <div class="affiliation-candidate-list">
+            {% for candidate in affiliation_job.organization_candidates %}
+            <form method="POST" action="{{ url_for('select_affiliation_entity', case_id=case.id) }}" class="affiliation-candidate">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="entity_id" value="{{ candidate.id }}">
+                <span><strong>{{ candidate.label }}</strong><small>{{ candidate.description or 'No description available' }} · {{ candidate.id }}</small></span>
+                <button type="submit" class="btn btn-sm btn-outline-secondary">Use this organization</button>
+            </form>
+            {% endfor %}
+        </div>
+        {% elif affiliation_job.organization %}
+        <div class="affiliation-entity-summary">
+            <div><span class="eyebrow">Resolved public entity</span><h3>{{ affiliation_job.organization.label }}</h3><p>{{ affiliation_job.organization.description }}</p></div>
+            <div class="affiliation-source-links">
+                <a href="{{ affiliation_job.organization.url }}" target="_blank" rel="noopener noreferrer">Open Wikidata entity</a>
+                {% for website in affiliation_job.organization.official_websites %}<a href="{{ website }}" target="_blank" rel="noopener noreferrer">Official website{{ ' ' ~ loop.index if loop.length > 1 else '' }}</a>{% endfor %}
+            </div>
+        </div>
+        <div class="persona-status-strip"><span><strong>{{ affiliation_job.affiliated_person_count | default(0) }}</strong> people observed</span><span><strong>{{ affiliation_job.claim_proposal_count | default(0) }}</strong> pending claims</span><span><strong>0</strong> automatically approved</span></div>
+        <p class="form-text mb-0">Statements may be current or historical. Approving shared affiliation claims can add relationship leads; it does not prove a personal relationship.</p>
+        {% elif affiliation_job.status in ('queued', 'running', 'cancel_requested') %}
+        <p class="form-text mb-0">Organization discovery is running in the existing OpenLedger worker.</p>
+        {% else %}<p class="form-text mb-0">{{ affiliation_job.source_message or 'No usable organization evidence was returned.' }}</p>{% endif %}
+    </div>
+</section>
+{% elif latest_spec %}
 <section class="panel-card case-scope-card">
     <header class="panel-header">
         <div>
@@ -127,8 +164,10 @@
                             <td>{{ job.started_at or job.created_at }}</td>
                             <td><span class="badge-soft {{ 'success' if job.status == 'completed' else 'warning' if job.status in ('failed', 'cancelled', 'interrupted') else '' }}">{{ job.status | replace('_', ' ') | title }}</span></td>
                             <td class="text-end">
-                                {% if job.status == 'completed' %}
+                                {% if job.status == 'completed' and job.kind != 'affiliation' %}
                                 <a href="{{ url_for('results', session_id=job.session_folder) }}" class="btn btn-sm btn-outline-secondary">Findings</a>
+                                {% elif job.status == 'completed' and job.kind == 'affiliation' %}
+                                <a href="{{ url_for('case_timeline_workspace', case_id=case.id) }}" class="btn btn-sm btn-outline-secondary">Evidence timeline</a>
                                 {% elif job.status in ('queued', 'running', 'cancel_requested') %}
                                 <a href="{{ url_for('live_results', job_id=job.job_id) }}" class="btn btn-sm btn-outline-secondary">Progress</a>
                                 {% endif %}

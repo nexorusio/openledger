@@ -116,6 +116,13 @@
     </form>
     {% if claim.review_status == 'approved' %}</details>{% endif %}
     {% if claim.reviewed_by %}<small class="review-meta">Last reviewed by {{ claim.reviewed_by }} · {{ claim.reviewed_at }}</small>{% endif %}
+    {% if claim.field_name == 'company' and claim.review_status == 'approved' %}
+    <form method="POST" action="{{ url_for('investigate_affiliation_claim', claim_id=claim.id) }}" class="affiliation-investigation-action">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="building-2"></i> Open affiliation case</button>
+        <small>Find its official website and explicitly affiliated people. New claims remain pending.</small>
+    </form>
+    {% endif %}
 </article>
 {% endmacro %}
 

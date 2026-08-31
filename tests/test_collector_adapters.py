@@ -12,17 +12,25 @@ from maigret.web.collector_adapters import (
     USER_SCANNER_ENGINE,
     WAYBACK_API_BASE_URL,
     WAYBACK_ENGINE,
+    WIKIDATA_ENGINE,
+    WIKIDATA_API_URL,
+    WIKIDATA_QUERY_URL,
     claimed_profile_url_targets,
     extract_github_profile_claims,
     extract_profile_url_evidence_claims,
     extract_user_scanner_claims,
+    extract_wikidata_affiliation_people,
     github_profile_targets,
     normalize_github_public_profile,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
     normalize_wayback_capture_index,
+    normalize_wikidata_affiliated_people,
+    normalize_wikidata_entity_candidates,
+    normalize_wikidata_organization,
     run_github_public_profile,
     run_wayback_capture_index,
+    run_wikidata_affiliation_discovery,
     user_scanner_email_targets,
 )
 
@@ -458,3 +466,89 @@ async def test_wayback_request_is_fixed_exact_bounded_and_has_no_redirects():
     assert ("limit", "-10") in params
     assert ("filter", "statuscode:200") in params
     assert observation["status"] == "archived"
+
+
+def _wikidata_search():
+    return {"search": [{"id": "Q95", "label": "Example Organization", "description": "Example", "match": {"text": "Example Organization"}}]}
+
+
+def _wikidata_organization():
+    return {"entities": {"Q95": {"labels": {"en": {"value": "Example Organization"}}, "descriptions": {"en": {"value": "Example"}}, "claims": {"P856": [{"mainsnak": {"datavalue": {"value": "https://example.org"}}}]}}}}
+
+
+def _wikidata_people():
+    return {"results": {"bindings": [{
+        "person": {"type": "uri", "value": "http://www.wikidata.org/entity/Q1001"},
+        "personLabel": {"type": "literal", "value": "Alice Example"},
+        "personDescription": {"type": "literal", "value": "Example person"},
+        "property": {"type": "uri", "value": "http://www.wikidata.org/prop/direct/P108"},
+        "direction": {"type": "literal", "value": "person_to_organization"},
+    }]}}
+
+
+def test_wikidata_affiliation_values_are_bounded_pending_claim_inputs():
+    candidates = normalize_wikidata_entity_candidates("Example Organization", _wikidata_search())
+    assert candidates[0]["exact_match"] is True
+    organization = normalize_wikidata_organization("Q95", _wikidata_organization())
+    people = normalize_wikidata_affiliated_people(_wikidata_people())
+    proposals = extract_wikidata_affiliation_people({
+        "source_engine": WIKIDATA_ENGINE, "status": "observed",
+        "organization": organization, "people": people,
+    })
+    assert organization["official_websites"] == ["https://example.org"]
+    assert {claim["field_name"] for claim in proposals[0]["claims"]} == {"full_name", "company", "platform_identifier"}
+    assert all(claim["evidence"][0]["details"]["human_review_required"] is True for claim in proposals[0]["claims"])
+
+
+def test_wikidata_affiliation_rejects_malformed_binding_and_relation_documents():
+    payload = _wikidata_people()
+    payload["results"]["bindings"][0]["personLabel"] = "unexpected scalar"
+    assert normalize_wikidata_affiliated_people(payload) == []
+
+    organization = normalize_wikidata_organization("Q95", _wikidata_organization())
+    people = _wikidata_people()
+    normalized_people = normalize_wikidata_affiliated_people(people)
+    normalized_people[0]["relations"][0]["direction"] = "unexpected"
+    assert extract_wikidata_affiliation_people({
+        "source_engine": WIKIDATA_ENGINE,
+        "status": "observed",
+        "organization": organization,
+        "people": normalized_people,
+    }) == []
+
+
+class _FakeSequenceSession:
+    def __init__(self, responses, calls, **options):
+        self.responses = list(responses)
+        self.calls = calls
+        calls.append(("session", options))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+    def get(self, url, **options):
+        self.calls.append(("get", {"url": url, **options}))
+        return self.responses.pop(0)
+
+
+@pytest.mark.asyncio
+async def test_wikidata_runtime_uses_only_fixed_bounded_endpoints():
+    calls = []
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(_wikidata_search()).encode()),
+        _FakeResponse(status=200, body=json.dumps(_wikidata_organization()).encode()),
+        _FakeResponse(status=200, body=json.dumps(_wikidata_people()).encode()),
+    ]
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Organization",
+        session_factory=lambda **options: _FakeSequenceSession(responses, calls, **options),
+    )
+    assert observation["status"] == "observed"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert [item["url"] for item in requests] == [WIKIDATA_API_URL, WIKIDATA_API_URL, WIKIDATA_QUERY_URL]
+    assert all(item["allow_redirects"] is False for item in requests)
+    assert "Authorization" not in calls[0][1]["headers"]
+    assert "LIMIT 50" in requests[-1]["params"]["query"]

@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlparse
@@ -50,6 +51,33 @@ WAYBACK_TIMEOUT_SECONDS = 20
 WAYBACK_MAX_RESPONSE_BYTES = 1_000_000
 WAYBACK_MAX_CAPTURES = 10
 MAX_PROFILE_URL_EVIDENCE_TARGETS = 20
+
+WIKIDATA_ENGINE = "wikidata_affiliation"
+WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
+WIKIDATA_QUERY_URL = "https://query.wikidata.org/sparql"
+WIKIDATA_TIMEOUT_SECONDS = 30
+WIKIDATA_MAX_RESPONSE_BYTES = 1_000_000
+MAX_WIKIDATA_ENTITY_CANDIDATES = 5
+MAX_WIKIDATA_AFFILIATED_PEOPLE = 50
+
+_WIKIDATA_ID_PATTERN = re.compile(r"^Q[1-9][0-9]{0,19}$")
+_WIKIDATA_ENTITY_URL_PATTERN = re.compile(
+    r"^https?://www\.wikidata\.org/entity/(Q[1-9][0-9]{0,19})$"
+)
+_WIKIDATA_PROPERTY_URL_PATTERN = re.compile(
+    r"^https?://www\.wikidata\.org/prop/direct/(P[1-9][0-9]{0,9})$"
+)
+_WIKIDATA_RELATIONSHIPS = {
+    "P69": "educated at",
+    "P108": "employer",
+    "P463": "member of",
+    "P1416": "affiliation",
+    "P112": "founded by",
+    "P169": "chief executive officer",
+    "P488": "chairperson",
+    "P1037": "director or manager",
+    "P3320": "board member",
+}
 
 _GITHUB_LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _X_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,15}$")
@@ -176,6 +204,468 @@ def _bounded_mapping(value: Any, *, limit: int = 40) -> Dict[str, Any]:
 
 def _bounded_text(value: Any, *, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def normalize_affiliation_name(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = " ".join(normalized.split())
+    if not 2 <= len(normalized) <= 500:
+        raise ValueError("Affiliation names must contain between 2 and 500 characters")
+    if any(ord(character) < 32 for character in normalized):
+        raise ValueError("Affiliation names cannot contain control characters")
+    return normalized
+
+
+def _affiliation_identity(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    return " ".join(normalized.split()).casefold()
+
+
+def _wikidata_item_url(entity_id: Any) -> str:
+    entity_id = str(entity_id or "").strip().upper()
+    if not _WIKIDATA_ID_PATTERN.fullmatch(entity_id):
+        return ""
+    return f"https://www.wikidata.org/wiki/{entity_id}"
+
+
+def normalize_wikidata_entity_candidates(
+    affiliation_name: str, raw_payload: Any
+) -> List[Dict[str, Any]]:
+    query_identity = _affiliation_identity(affiliation_name)
+    if not isinstance(raw_payload, dict) or not isinstance(
+        raw_payload.get("search"), list
+    ):
+        raise ValueError("Wikidata entity search returned an invalid document")
+    candidates = []
+    seen = set()
+    for raw in raw_payload["search"][:MAX_WIKIDATA_ENTITY_CANDIDATES]:
+        if not isinstance(raw, dict):
+            continue
+        entity_id = str(raw.get("id") or "").strip().upper()
+        label = _bounded_text(raw.get("label"), limit=500)
+        if (
+            not _WIKIDATA_ID_PATTERN.fullmatch(entity_id)
+            or entity_id in seen
+            or not label
+        ):
+            continue
+        match = raw.get("match") if isinstance(raw.get("match"), dict) else {}
+        matched_text = _bounded_text(match.get("text"), limit=500)
+        exact_label = _affiliation_identity(label) == query_identity
+        exact_alias = bool(
+            matched_text and _affiliation_identity(matched_text) == query_identity
+        )
+        seen.add(entity_id)
+        candidates.append(
+            {
+                "id": entity_id,
+                "label": label,
+                "description": _bounded_text(raw.get("description"), limit=1000),
+                "url": _wikidata_item_url(entity_id),
+                "exact_match": exact_label or exact_alias,
+                "match_type": (
+                    "label" if exact_label else "alias" if exact_alias else "related"
+                ),
+            }
+        )
+    return candidates
+
+
+def _wikidata_claim_values(entity: Dict[str, Any], property_id: str) -> List[Any]:
+    claims = entity.get("claims") if isinstance(entity.get("claims"), dict) else {}
+    output = []
+    for statement in list(claims.get(property_id) or [])[:100]:
+        if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
+            continue
+        mainsnak = statement.get("mainsnak")
+        datavalue = mainsnak.get("datavalue") if isinstance(mainsnak, dict) else None
+        value = datavalue.get("value") if isinstance(datavalue, dict) else None
+        if value is not None:
+            output.append(value)
+    return output
+
+
+def _wikidata_language_value(entity: Dict[str, Any], field: str, limit: int) -> str:
+    values = entity.get(field) if isinstance(entity.get(field), dict) else {}
+    preferred = values.get("en") if isinstance(values.get("en"), dict) else None
+    if preferred:
+        return _bounded_text(preferred.get("value"), limit=limit)
+    for item in values.values():
+        if isinstance(item, dict) and item.get("value"):
+            return _bounded_text(item.get("value"), limit=limit)
+    return ""
+
+
+def normalize_wikidata_organization(entity_id: str, payload: Any) -> Dict[str, Any]:
+    entity_id = str(entity_id or "").strip().upper()
+    entities = payload.get("entities") if isinstance(payload, dict) else None
+    entity = entities.get(entity_id) if isinstance(entities, dict) else None
+    if not _WIKIDATA_ID_PATTERN.fullmatch(entity_id) or not isinstance(entity, dict):
+        raise ValueError("The selected Wikidata organization is unavailable")
+    label = _wikidata_language_value(entity, "labels", 500)
+    if not label:
+        raise ValueError("The selected Wikidata organization has no usable label")
+    websites = []
+    for raw in _wikidata_claim_values(entity, "P856")[:20]:
+        value = _safe_public_url(raw)
+        if value and value not in websites:
+            websites.append(value)
+        if len(websites) >= 5:
+            break
+    instance_of = []
+    for raw in _wikidata_claim_values(entity, "P31"):
+        value = raw.get("id") if isinstance(raw, dict) else None
+        value = str(value or "").strip().upper()
+        if _WIKIDATA_ID_PATTERN.fullmatch(value) and value not in instance_of:
+            instance_of.append(value)
+    return {
+        "id": entity_id,
+        "label": label,
+        "description": _wikidata_language_value(entity, "descriptions", 1000),
+        "url": _wikidata_item_url(entity_id),
+        "official_websites": websites,
+        "instance_of": instance_of[:20],
+    }
+
+
+def _wikidata_binding_id(value: Any, pattern: re.Pattern[str]) -> str:
+    if not isinstance(value, dict) or value.get("type") != "uri":
+        return ""
+    match = pattern.fullmatch(str(value.get("value") or ""))
+    return match.group(1) if match else ""
+
+
+def _wikidata_binding_text(value: Any, *, limit: int) -> str:
+    if not isinstance(value, dict) or value.get("type") not in {"literal", "typed-literal"}:
+        return ""
+    return _bounded_text(value.get("value"), limit=limit)
+
+
+def normalize_wikidata_affiliated_people(payload: Any) -> List[Dict[str, Any]]:
+    results = payload.get("results") if isinstance(payload, dict) else None
+    bindings = results.get("bindings") if isinstance(results, dict) else None
+    if not isinstance(bindings, list):
+        raise ValueError("Wikidata affiliation query returned invalid bindings")
+    people: Dict[str, Dict[str, Any]] = {}
+    for binding in bindings[:MAX_WIKIDATA_AFFILIATED_PEOPLE]:
+        if not isinstance(binding, dict):
+            continue
+        person_id = _wikidata_binding_id(
+            binding.get("person"), _WIKIDATA_ENTITY_URL_PATTERN
+        )
+        property_id = _wikidata_binding_id(
+            binding.get("property"), _WIKIDATA_PROPERTY_URL_PATTERN
+        )
+        direction = _wikidata_binding_text(binding.get("direction"), limit=40)
+        label = _wikidata_binding_text(binding.get("personLabel"), limit=500)
+        if (
+            not person_id
+            or not label
+            or property_id not in _WIKIDATA_RELATIONSHIPS
+            or direction not in {"person_to_organization", "organization_to_person"}
+        ):
+            continue
+        person = people.setdefault(
+            person_id,
+            {
+                "id": person_id,
+                "label": label,
+                "description": _wikidata_binding_text(
+                    binding.get("personDescription"), limit=1000
+                ),
+                "url": _wikidata_item_url(person_id),
+                "relations": [],
+            },
+        )
+        relation = {
+            "property_id": property_id,
+            "label": _WIKIDATA_RELATIONSHIPS[property_id],
+            "direction": direction,
+        }
+        if relation not in person["relations"]:
+            person["relations"].append(relation)
+    return list(people.values())[:MAX_WIKIDATA_AFFILIATED_PEOPLE]
+
+
+def _wikidata_people_query(entity_id: str) -> str:
+    if not _WIKIDATA_ID_PATTERN.fullmatch(entity_id):
+        raise ValueError("Invalid Wikidata organization identifier")
+    return f"""
+SELECT DISTINCT ?person ?personLabel ?personDescription ?property ?direction WHERE {{
+  {{
+    VALUES ?property {{ wdt:P69 wdt:P108 wdt:P463 wdt:P1416 }}
+    ?person ?property wd:{entity_id} .
+    BIND("person_to_organization" AS ?direction)
+  }} UNION {{
+    VALUES ?property {{ wdt:P112 wdt:P169 wdt:P488 wdt:P1037 wdt:P3320 }}
+    wd:{entity_id} ?property ?person .
+    BIND("organization_to_person" AS ?direction)
+  }}
+  ?person wdt:P31 wd:Q5 .
+  SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
+}}
+LIMIT {MAX_WIKIDATA_AFFILIATED_PEOPLE}
+""".strip()
+
+
+async def _bounded_wikidata_json(session: Any, url: str, *, params: Any):
+    async with session.get(url, params=params, allow_redirects=False) as response:
+        retry_after = str(response.headers.get("Retry-After") or "")[:40]
+        if response.status in {403, 429}:
+            return "rate_limited", None, retry_after
+        if response.status == 404:
+            return "not_found", None, retry_after
+        if response.status != 200:
+            raise RuntimeError(
+                f"Wikidata public service returned HTTP {int(response.status)}"
+            )
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError("Wikidata returned an invalid response length") from error
+            if declared_length < 0 or declared_length > WIKIDATA_MAX_RESPONSE_BYTES:
+                raise RuntimeError("Wikidata returned an oversized response")
+        body = await response.content.read(WIKIDATA_MAX_RESPONSE_BYTES + 1)
+        if len(body) > WIKIDATA_MAX_RESPONSE_BYTES:
+            raise RuntimeError("Wikidata returned an oversized response")
+    try:
+        return "ok", json.loads(body), retry_after
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Wikidata returned invalid JSON") from error
+
+
+def _wikidata_diagnostic(name: str, status: str, reason: str, candidates=None):
+    return {
+        "source_engine": WIKIDATA_ENGINE,
+        "subject_type": "affiliation",
+        "subject_value": name,
+        "status": status,
+        "source_url": "https://www.wikidata.org/",
+        "source_record_id": f"wikidata-search:{claim_fingerprint('company', name)}",
+        "reason": reason[:1000],
+        "organization_candidates": list(candidates or [])[:5],
+        "organization": None,
+        "people": [],
+        "extra": {"human_review_required": True, "automatic_approval_allowed": False},
+    }
+
+
+async def run_wikidata_affiliation_discovery(
+    affiliation_name: str,
+    *,
+    selected_entity_id: Optional[str] = None,
+    timeout_seconds: int = WIKIDATA_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    affiliation_name = normalize_affiliation_name(affiliation_name)
+    selected_entity_id = str(selected_entity_id or "").strip().upper()
+    if selected_entity_id and not _WIKIDATA_ID_PATTERN.fullmatch(selected_entity_id):
+        raise ValueError("Invalid selected Wikidata organization identifier")
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 45)))
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    candidates = []
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        if not selected_entity_id:
+            status, payload, _retry_after = await _bounded_wikidata_json(
+                session,
+                WIKIDATA_API_URL,
+                params={
+                    "action": "wbsearchentities",
+                    "search": affiliation_name,
+                    "language": "en",
+                    "uselang": "en",
+                    "type": "item",
+                    "limit": MAX_WIKIDATA_ENTITY_CANDIDATES,
+                    "format": "json",
+                    "formatversion": "2",
+                },
+            )
+            if status != "ok":
+                return _wikidata_diagnostic(
+                    affiliation_name, status, "Wikidata organization lookup was unavailable."
+                )
+            candidates = normalize_wikidata_entity_candidates(affiliation_name, payload)
+            exact = [candidate for candidate in candidates if candidate["exact_match"]]
+            if len(exact) != 1:
+                return _wikidata_diagnostic(
+                    affiliation_name,
+                    "needs_selection" if candidates else "not_found",
+                    (
+                        "Select the correct Wikidata organization before people are extracted."
+                        if candidates
+                        else "Wikidata returned no usable organization candidates."
+                    ),
+                    candidates,
+                )
+            selected_entity_id = exact[0]["id"]
+
+        status, payload, _retry_after = await _bounded_wikidata_json(
+            session,
+            WIKIDATA_API_URL,
+            params={
+                "action": "wbgetentities",
+                "ids": selected_entity_id,
+                "props": "labels|descriptions|claims",
+                "languages": "en",
+                "languagefallback": "1",
+                "format": "json",
+                "formatversion": "2",
+            },
+        )
+        if status != "ok":
+            return _wikidata_diagnostic(
+                affiliation_name, status, "The selected organization was unavailable.", candidates
+            )
+        organization = normalize_wikidata_organization(selected_entity_id, payload)
+        status, payload, _retry_after = await _bounded_wikidata_json(
+            session,
+            WIKIDATA_QUERY_URL,
+            params={"query": _wikidata_people_query(selected_entity_id), "format": "json"},
+        )
+        if status != "ok":
+            result = _wikidata_diagnostic(
+                affiliation_name,
+                status,
+                "The organization resolved, but affiliation relations were unavailable.",
+                candidates,
+            )
+            result["organization"] = organization
+            return result
+        people = normalize_wikidata_affiliated_people(payload)
+    return {
+        "source_engine": WIKIDATA_ENGINE,
+        "subject_type": "affiliation",
+        "subject_value": affiliation_name,
+        "status": "observed",
+        "source_url": organization["url"],
+        "source_record_id": f"wikidata-organization:{selected_entity_id}",
+        "reason": "Explicit public Wikidata affiliation statements.",
+        "organization_candidates": candidates,
+        "organization": organization,
+        "people": people,
+        "extra": {"human_review_required": True, "automatic_approval_allowed": False},
+    }
+
+
+def _wikidata_claim_candidate(field_name, value, confidence, person, organization, evidence_type, details):
+    evidence = {
+        "evidence_type": evidence_type,
+        "source_name": "Wikidata",
+        "source_url": person["url"],
+        "details": {
+            **details,
+            "person_wikidata_id": person["id"],
+            "organization_wikidata_id": organization["id"],
+            "organization_wikidata_url": organization["url"],
+            "official_organization_websites": organization.get("official_websites", [])[:5],
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+        },
+    }
+    display_value = (
+        str(value.get("identifier") or value.get("url") or "")
+        if isinstance(value, dict)
+        else _bounded_text(value, limit=4000)
+    )
+    normalized_value = (
+        json.dumps(value, sort_keys=True, ensure_ascii=False)
+        if isinstance(value, dict)
+        else display_value.casefold()
+    )
+    return {
+        "field_name": field_name,
+        "value": value,
+        "display_value": display_value,
+        "normalized_value": normalized_value,
+        "confidence": confidence,
+        "fingerprint": claim_fingerprint(field_name, value),
+        "source_engine": WIKIDATA_ENGINE,
+        "source_record_id": f"wikidata-person:{person['id']}",
+        "native_status": "observed",
+        "observation_details": {"relations": person.get("relations", [])[:10]},
+        "evidence": [dict(evidence, fingerprint=evidence_fingerprint(evidence))],
+    }
+
+
+def extract_wikidata_affiliation_people(observation: Any) -> List[Dict[str, Any]]:
+    if (
+        not isinstance(observation, dict)
+        or observation.get("source_engine") != WIKIDATA_ENGINE
+        or observation.get("status") != "observed"
+        or not isinstance(observation.get("organization"), dict)
+    ):
+        return []
+    organization = observation["organization"]
+    organization_id = str(organization.get("id") or "").strip().upper()
+    organization_label = _bounded_text(organization.get("label"), limit=500)
+    if (
+        not organization_label
+        or not _WIKIDATA_ID_PATTERN.fullmatch(organization_id)
+        or organization.get("url") != _wikidata_item_url(organization_id)
+    ):
+        return []
+    organization = {**organization, "id": organization_id, "label": organization_label}
+    output = []
+    seen = set()
+    for raw in list(observation.get("people") or [])[:MAX_WIKIDATA_AFFILIATED_PEOPLE]:
+        if not isinstance(raw, dict):
+            continue
+        person_id = str(raw.get("id") or "").strip().upper()
+        display_name = _bounded_text(raw.get("label"), limit=500)
+        relations = [
+            relation
+            for relation in list(raw.get("relations") or [])[:10]
+            if isinstance(relation, dict)
+            and relation.get("property_id") in _WIKIDATA_RELATIONSHIPS
+            and relation.get("direction")
+            in {"person_to_organization", "organization_to_person"}
+        ]
+        if (
+            not display_name
+            or not relations
+            or not _WIKIDATA_ID_PATTERN.fullmatch(person_id)
+            or person_id in seen
+            or _wikidata_item_url(person_id) != raw.get("url")
+        ):
+            continue
+        seen.add(person_id)
+        person = {**raw, "id": person_id, "label": display_name}
+        identifier = {
+            "platform": "Wikidata",
+            "identifier_type": "wikidata_item_id",
+            "identifier": person_id,
+        }
+        output.append(
+            {
+                "wikidata_id": person_id,
+                "display_name": display_name,
+                "claims": [
+                    _wikidata_claim_candidate(
+                        "full_name", display_name, 70, person, organization,
+                        "wikidata_entity_label", {"description": person.get("description", "")}
+                    ),
+                    _wikidata_claim_candidate(
+                        "company", organization_label, 65, person, organization,
+                        "wikidata_affiliation_statement",
+                        {"relations": relations, "relation_scope": "Explicit Wikidata statement; may be current or historical."},
+                    ),
+                    _wikidata_claim_candidate(
+                        "platform_identifier", identifier, 70, person, organization,
+                        "wikidata_entity_identifier", {"identifier_scope": "Public Wikidata entity identifier."}
+                    ),
+                ],
+            }
+        )
+    return output
 
 
 def _github_profile_login(value: Any) -> str:

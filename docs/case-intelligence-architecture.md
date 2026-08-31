@@ -266,6 +266,24 @@ Persona updates use a separate strict extraction pass and server validation:
   originating chat message; and
 - chat can never approve, reject, or otherwise make a claim canonical.
 
+## Affiliation-led cases
+
+An approved `company` claim can open a separate affiliation-led case. The
+workflow uses the existing PostgreSQL queue and worker. The governed
+`wikidata_affiliation` adapter resolves up to five label or alias candidates,
+reads the selected entity's official website (`P856`), and runs one bounded
+SPARQL query for at most fifty people connected by explicit employment,
+education, membership, affiliation, founder, executive, chair, director, or
+board-member statements. Ambiguous names pause for operator selection.
+
+Both endpoints are fixed Wikimedia origins with a thirty-second timeout,
+one-megabyte response cap, redirects disabled, no credentials, and an
+identifiable user agent. A source error degrades only this adapter. Every person
+enters as pending `full_name`, backward-compatible `company`, and Wikidata
+identifier claims retaining entity and relation lineage. Only analyst-approved
+shared affiliation claims can enter the existing Relationships projection, and
+they do not establish a personal relationship.
+
 ## Relationship projection
 
 The Relationships workspace separates two graph contracts. **Persona evidence**

@@ -67,5 +67,26 @@
         if (event.key === 'Escape') closeMobileSidebar();
     });
 
+    document.querySelectorAll('.case-delete-form').forEach(function (form) {
+        form.addEventListener('submit', function (event) {
+            const expected = form.dataset.caseTitle || '';
+            const typed = window.prompt(
+                'This deletion is permanent and cannot be undone.\n\n'
+                + 'Type the exact case name to continue:\n' + expected
+            );
+            if (typed === null || typed !== expected) {
+                event.preventDefault();
+                if (typed !== null) window.alert('The case name did not match. Nothing was deleted.');
+                return;
+            }
+            const confirmation = form.querySelector('input[name="confirmation_name"]');
+            if (!confirmation) {
+                event.preventDefault();
+                return;
+            }
+            confirmation.value = typed;
+        });
+    });
+
     if (window.lucide) window.lucide.createIcons({ attrs: { 'stroke-width': 1.8 } });
 })();

@@ -194,6 +194,18 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
                 guardrails.get("redirects_allowed") is False,
                 f"{source_id}: redirects must remain disabled",
             )
+            additional_origins = source.get("additional_endpoint_origins", [])
+            _require(
+                isinstance(additional_origins, list)
+                and all(str(origin).startswith("https://") for origin in additional_origins),
+                f"{source_id}: additional endpoint origins must be HTTPS URLs",
+            )
+            if additional_origins:
+                _require(
+                    guardrails.get("fixed_network_origins")
+                    == [source["endpoint_origin"], *additional_origins],
+                    f"{source_id}: every runtime origin must be statically fixed",
+                )
         else:
             _require(
                 source["network_classification"] == "offline_local",
@@ -323,6 +335,58 @@ def live_wayback_contract(source: dict) -> None:
     )
 
 
+def live_wikidata_contract(source: dict) -> None:
+    target = source["maintenance"].get("live_contract_target")
+    _require(
+        isinstance(target, str) and re.fullmatch(r"Q[1-9][0-9]{0,19}", target),
+        "Wikidata live contract target is missing",
+    )
+    _require(
+        source.get("additional_endpoint_origins") == ["https://query.wikidata.org"],
+        "Wikidata query origin changed",
+    )
+    opener = build_opener(NoRedirectHandler())
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "OpenLedger-OSINT-Contract-Audit/1.0 (+https://github.com/nexorusio/openledger)",
+    }
+    entity_query = urlencode(
+        {
+            "action": "wbgetentities",
+            "ids": target,
+            "props": "labels|claims",
+            "languages": "en",
+            "format": "json",
+            "formatversion": "2",
+        }
+    )
+    try:
+        with opener.open(
+            Request(f"https://www.wikidata.org/w/api.php?{entity_query}", headers=headers),
+            timeout=30,
+        ) as response:
+            payload = response.read(1_000_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(f"Wikidata entity contract request failed: {error}") from error
+    _require(len(payload) <= 1_000_000, "Wikidata entity response was oversized")
+    entity = (json.loads(payload).get("entities") or {}).get(target)
+    _require(isinstance(entity, dict), "Wikidata entity contract changed")
+
+    sparql = f"SELECT ?instance WHERE {{ wd:{target} wdt:P31 ?instance }} LIMIT 1"
+    query = urlencode({"query": sparql, "format": "json"})
+    try:
+        with opener.open(
+            Request(f"https://query.wikidata.org/sparql?{query}", headers=headers),
+            timeout=30,
+        ) as response:
+            payload = response.read(1_000_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(f"Wikidata query contract request failed: {error}") from error
+    _require(len(payload) <= 1_000_000, "Wikidata query response was oversized")
+    bindings = (json.loads(payload).get("results") or {}).get("bindings")
+    _require(isinstance(bindings, list) and bindings, "Wikidata query returned no relation")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -335,6 +399,7 @@ def main() -> int:
             sources_by_id = {source["id"]: source for source in registry["sources"]}
             live_github_contract(sources_by_id["github_public_profile"])
             live_wayback_contract(sources_by_id["wayback_cdx"])
+            live_wikidata_contract(sources_by_id["wikidata_affiliation"])
     except (OSError, ValueError, RuntimeError, StopIteration) as error:
         print(f"OSINT source audit failed: {error}", file=sys.stderr)
         return 1
