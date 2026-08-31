@@ -29,6 +29,13 @@ FROM base AS web
 # through a reviewed pin change, never by following a moving branch at build.
 ARG USER_SCANNER_ARCHIVE_URL="https://github.com/nexorusio/user-scanner/archive/6fcd9d677eb25601268ebab5bfb4ed27e00e1157.tar.gz"
 RUN python3 -m pip install --no-cache-dir "${USER_SCANNER_ARCHIVE_URL}"
+# Unfurl's maintained release requires Python 3.11+ and NetworkX 3, while Maigret
+# still supports Python 3.10 and NetworkX 2. Keep it in an immutable, dedicated
+# environment and cross the boundary only through the bounded JSON runner.
+ARG UNFURL_ARCHIVE_URL="https://github.com/RyanDFIR/unfurl/archive/a21ef7ce1896bd8db17aeeb990911877ab839dbe.tar.gz"
+RUN python3 -m venv /opt/openledger-unfurl && \
+    /opt/openledger-unfurl/bin/python -m pip install --no-cache-dir --upgrade pip && \
+    /opt/openledger-unfurl/bin/python -m pip install --no-cache-dir "${UNFURL_ARCHIVE_URL}"
 RUN pip install --no-cache-dir '.[pdf]' 'gunicorn>=23,<24'
 ENV PORT=5000
 ENV GUNICORN_THREADS=4

@@ -2293,6 +2293,7 @@ class CaseStore:
         """Upsert deterministic claims while preserving every human decision."""
         from maigret.web.collector_adapters import (
             extract_github_profile_claims,
+            extract_profile_url_evidence_claims,
             extract_user_scanner_claims,
         )
         from maigret.web.persona_intelligence import extract_persona_claims
@@ -2372,6 +2373,15 @@ class CaseStore:
                     ),
                     now=now,
                 )
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=grouped_persona_id,
+                    job_id=job_id,
+                    candidates=extract_profile_url_evidence_claims(
+                        collector_observations
+                    ),
+                    now=now,
+                )
             else:
                 observations_by_username: Dict[str, list] = {}
                 for observation in collector_observations:
@@ -2391,6 +2401,13 @@ class CaseStore:
                         persona_id=persona_id,
                         job_id=job_id,
                         candidates=extract_github_profile_claims(observations),
+                        now=now,
+                    )
+                    synchronized += self._upsert_persona_candidates(
+                        connection,
+                        persona_id=persona_id,
+                        job_id=job_id,
+                        candidates=extract_profile_url_evidence_claims(observations),
                         now=now,
                     )
             connection.execute(

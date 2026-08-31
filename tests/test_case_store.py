@@ -592,6 +592,117 @@ def test_github_enrichment_binds_only_to_its_persona_and_stays_pending(store):
     assert lineage[0]["source_record_id"] == "github-user:12345"
 
 
+def test_url_analysis_and_wayback_attach_evidence_without_new_identity_facts(store):
+    job_id = store.create_investigation(
+        ["alice"],
+        {
+            "investigation_spec": {
+                "processing_mode": "independent",
+                "enable_archived_url_evidence": True,
+            }
+        },
+    )
+    store.claim_next("worker:test")
+    profile_url = "https://social.example/alice"
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": profile_url,
+                        "confidence": "moderate",
+                        "evidence": {},
+                    }
+                ],
+            }
+        ],
+        "collector_observations": [
+            {
+                "source_engine": "unfurl_url_analysis",
+                "subject_type": "username",
+                "subject_value": "alice",
+                "status": "analyzed",
+                "site_name": "Example Social",
+                "category": "url_analysis",
+                "source_url": profile_url,
+                "source_record_id": "unfurl:record",
+                "extra": {
+                    "unfurl_version": "20260405",
+                    "remote_lookups": False,
+                    "nodes": [
+                        {
+                            "id": 1,
+                            "data_type": "url.hostname",
+                            "key": None,
+                            "value": "social.example",
+                            "parent_id": None,
+                        }
+                    ],
+                },
+            },
+            {
+                "source_engine": "wayback_cdx",
+                "subject_type": "username",
+                "subject_value": "alice",
+                "status": "archived",
+                "site_name": "Example Social",
+                "category": "archive",
+                "source_url": (
+                    "https://web.archive.org/web/20260304050607id_/"
+                    "https://social.example/alice"
+                ),
+                "source_record_id": "wayback:20260304050607:DIGEST",
+                "extra": {
+                    "queried_profile_url": profile_url,
+                    "sampled_capture_count": 1,
+                    "oldest_sampled_capture_at": "2026-03-04T05:06:07Z",
+                    "latest_sampled_capture_at": "2026-03-04T05:06:07Z",
+                    "captures": [
+                        {
+                            "original_url": profile_url,
+                            "replay_url": (
+                                "https://web.archive.org/web/20260304050607id_/"
+                                "https://social.example/alice"
+                            ),
+                        }
+                    ],
+                },
+            },
+        ],
+    }
+    store.finish(job_id, result)
+
+    assert store.sync_persona_claims(job_id, result) == 3
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    persona = store.get_persona(case["personas"][0]["id"])
+
+    assert len(persona["claims"]) == 1
+    account = persona["claims"][0]
+    assert account["field_name"] == "social_account"
+    assert account["review_status"] == "pending"
+    assert account["confidence"] == 65
+    evidence_types = {item["evidence_type"] for item in account["evidence"]}
+    assert evidence_types == {
+        "observed_profile",
+        "deterministic_url_analysis",
+        "wayback_capture_index",
+    }
+    assert {
+        item["source_engine"] for item in store.get_claim_lineage(account["id"])
+    } == {
+        "openledger_profile_discovery",
+        "unfurl_url_analysis",
+        "wayback_cdx",
+    }
+
+
 def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store):
     job_id = store.create_investigation(["alice"], {})
     store.claim_next("worker:test")

@@ -9,8 +9,9 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse
 
 import aiohttp
 
@@ -32,8 +33,53 @@ GITHUB_TIMEOUT_SECONDS = 15
 GITHUB_MAX_RESPONSE_BYTES = 1_000_000
 MAX_GITHUB_PROFILES_PER_JOB = 20
 
+UNFURL_ENGINE = "unfurl_url_analysis"
+UNFURL_VERSION = "20260405"
+UNFURL_PINNED_COMMIT = "a21ef7ce1896bd8db17aeeb990911877ab839dbe"
+UNFURL_TIMEOUT_SECONDS = 20
+UNFURL_MAX_OUTPUT_BYTES = 1_000_000
+UNFURL_MAX_NODES = 80
+UNFURL_PYTHON_EXECUTABLE = os.getenv(
+    "OPENLEDGER_UNFURL_PYTHON", "/opt/openledger-unfurl/bin/python"
+)
+UNFURL_RUNNER_PATH = os.path.join(os.path.dirname(__file__), "unfurl_runner.py")
+
+WAYBACK_ENGINE = "wayback_cdx"
+WAYBACK_API_BASE_URL = "https://web.archive.org/cdx/search/cdx"
+WAYBACK_TIMEOUT_SECONDS = 20
+WAYBACK_MAX_RESPONSE_BYTES = 1_000_000
+WAYBACK_MAX_CAPTURES = 10
+MAX_PROFILE_URL_EVIDENCE_TARGETS = 20
+
 _GITHUB_LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _X_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,15}$")
+_SENSITIVE_URL_KEY_PATTERN = re.compile(
+    r"(?:^|[_-])(?:access|api|auth|bearer|credential|jwt|key|pass|password|secret|"
+    r"session|signature|signed|token)(?:$|[_-])",
+    re.IGNORECASE,
+)
+_SENSITIVE_COMPACT_URL_KEYS = frozenset(
+    {
+        "accesstoken",
+        "apikey",
+        "authtoken",
+        "bearertoken",
+        "clientsecret",
+        "credential",
+        "jwt",
+        "passphrase",
+        "passwd",
+        "password",
+        "secret",
+        "sessionid",
+        "signature",
+        "token",
+    }
+)
+_UNFURL_DATA_TYPE_PATTERN = re.compile(r"^[A-Za-z0-9_.-]{1,100}$")
+_CDX_TIMESTAMP_PATTERN = re.compile(r"^\d{14}$")
+_CDX_DIGEST_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_WAYBACK_FIELDS = ["timestamp", "original", "statuscode", "mimetype", "digest"]
 
 
 def user_scanner_available() -> bool:
@@ -188,6 +234,584 @@ def github_profile_targets(
             if len(targets) >= MAX_GITHUB_PROFILES_PER_JOB:
                 return targets
     return targets
+
+
+def _is_sensitive_url_key(value: Any) -> bool:
+    key = str(value or "")
+    compact = re.sub(r"[^a-z0-9]", "", key.casefold())
+    return bool(
+        _SENSITIVE_URL_KEY_PATTERN.search(key)
+        or compact in _SENSITIVE_COMPACT_URL_KEYS
+    )
+
+
+def _url_has_sensitive_query_key(value: str) -> bool:
+    try:
+        parsed = urlparse(value)
+        return any(
+            _is_sensitive_url_key(key)
+            for key, _item in parse_qsl(parsed.query, keep_blank_values=True)
+        )
+    except (TypeError, ValueError):
+        return True
+
+
+def claimed_profile_url_targets(
+    general_results: Iterable[Any], plan: Any
+) -> List[Dict[str, str]]:
+    """Select exact public URLs already reported as claimed by native discovery."""
+    if not isinstance(plan, dict) or not plan.get("enable_archived_url_evidence"):
+        return []
+    targets: List[Dict[str, str]] = []
+    seen = set()
+    for item in general_results:
+        if not isinstance(item, (list, tuple)) or len(item) != 3:
+            continue
+        investigated_username, _identifier_type, results = item
+        if not isinstance(results, dict):
+            continue
+        username = str(investigated_username or "").strip()[:500]
+        if not username:
+            continue
+        for site_name, site_data in results.items():
+            if not isinstance(site_data, dict):
+                continue
+            status = site_data.get("status")
+            if getattr(status, "status", None) != MaigretCheckStatus.CLAIMED:
+                continue
+            profile_url = _safe_public_url(site_data.get("url_user"))
+            if not profile_url:
+                continue
+            try:
+                parsed = urlparse(profile_url)
+                port = parsed.port
+            except ValueError:
+                continue
+            # Fragments never reach an HTTP archive. Secret-shaped parameters are
+            # excluded from both the archive query and deterministic decomposition.
+            if parsed.fragment or port not in {None, 80, 443}:
+                continue
+            if _url_has_sensitive_query_key(profile_url):
+                continue
+            identity = profile_url.casefold()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            targets.append(
+                {
+                    "investigated_username": username,
+                    "site_name": _bounded_text(site_name, limit=300) or "Public source",
+                    "profile_url": profile_url,
+                }
+            )
+            if len(targets) >= MAX_PROFILE_URL_EVIDENCE_TARGETS:
+                return targets
+    return targets
+
+
+def _redact_unfurl_node(raw_node: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(raw_node, dict):
+        return None
+    data_type = _bounded_text(raw_node.get("data_type"), limit=100)
+    if not _UNFURL_DATA_TYPE_PATTERN.fullmatch(data_type):
+        return None
+    node_id = raw_node.get("id")
+    if isinstance(node_id, bool) or not isinstance(node_id, int) or node_id <= 0:
+        return None
+    key_value = raw_node.get("key")
+    key = _bounded_text(key_value, limit=100) if key_value is not None else ""
+    raw_value = raw_node.get("value")
+    if not isinstance(raw_value, (str, int, float, bool)) and raw_value is not None:
+        return None
+    value = _bounded_text(raw_value, limit=1000)
+    if _is_sensitive_url_key(key):
+        value = "[redacted]"
+    elif data_type == "url.query":
+        try:
+            names = [
+                _bounded_text(name, limit=100)
+                for name, _item in parse_qsl(value, keep_blank_values=True)
+            ]
+        except ValueError:
+            names = []
+        value = "query keys: " + ", ".join(name for name in names if name)
+    parent_id = raw_node.get("parent_id")
+    if isinstance(parent_id, list):
+        parent_id = [
+            item
+            for item in parent_id[:8]
+            if isinstance(item, int) and not isinstance(item, bool) and item > 0
+        ]
+    elif not (
+        isinstance(parent_id, int) and not isinstance(parent_id, bool) and parent_id > 0
+    ):
+        parent_id = None
+    return {
+        "id": node_id,
+        "data_type": data_type,
+        "key": key or None,
+        "value": value,
+        "parent_id": parent_id,
+    }
+
+
+def normalize_unfurl_url_analysis(
+    target: Dict[str, str], raw_envelope: Any
+) -> Dict[str, Any]:
+    """Validate a bounded offline Unfurl envelope for case evidence storage."""
+    profile_url = _safe_public_url(target.get("profile_url"))
+    if not profile_url or _url_has_sensitive_query_key(profile_url):
+        raise ValueError("Unfurl target is invalid")
+    if not isinstance(raw_envelope, dict):
+        raise ValueError("Unfurl returned a non-object result")
+    if (
+        raw_envelope.get("schema_version") != 1
+        or raw_envelope.get("engine") != "dfir-unfurl"
+        or raw_envelope.get("version") != UNFURL_VERSION
+        or raw_envelope.get("remote_lookups") is not False
+    ):
+        raise ValueError("Unfurl returned an unsupported or unsafe result contract")
+    raw_nodes = raw_envelope.get("nodes")
+    if not isinstance(raw_nodes, list):
+        raise ValueError("Unfurl returned invalid nodes")
+    nodes: List[Dict[str, Any]] = []
+    for raw_node in raw_nodes[:UNFURL_MAX_NODES]:
+        node = _redact_unfurl_node(raw_node)
+        if node:
+            nodes.append(node)
+    if not nodes:
+        raise ValueError("Unfurl returned no valid URL-analysis nodes")
+    return {
+        "source_engine": UNFURL_ENGINE,
+        "subject_type": "username",
+        "subject_value": _bounded_text(target.get("investigated_username"), limit=500),
+        "status": "analyzed",
+        "site_name": _bounded_text(target.get("site_name"), limit=300)
+        or "Public source",
+        "category": "url_analysis",
+        "source_url": profile_url,
+        "source_record_id": f"unfurl:{evidence_fingerprint({'url': profile_url})}",
+        "reason": (
+            "Offline deterministic URL decomposition; it does not establish account "
+            "ownership or independently verify the profile."
+        ),
+        "extra": {
+            "unfurl_version": UNFURL_VERSION,
+            "unfurl_commit": UNFURL_PINNED_COMMIT,
+            "remote_lookups": False,
+            "node_count": len(nodes),
+            "nodes": nodes,
+            "structural_analysis_only": True,
+            "human_review_required": True,
+        },
+        "media": {},
+    }
+
+
+async def run_unfurl_url_analysis(
+    target: Dict[str, str],
+    *,
+    timeout_seconds: int = UNFURL_TIMEOUT_SECONDS,
+    python_executable: str = UNFURL_PYTHON_EXECUTABLE,
+) -> Dict[str, Any]:
+    """Run pinned Unfurl offline in its dependency-isolated subprocess."""
+    profile_url = _safe_public_url(target.get("profile_url"))
+    if not profile_url or _url_has_sensitive_query_key(profile_url):
+        raise ValueError("Unfurl target is invalid")
+    environment = {
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "PATH": os.path.dirname(python_executable),
+        "UNFURL_REMOTE_LOOKUPS": "0",
+    }
+    process = await asyncio.create_subprocess_exec(
+        python_executable,
+        UNFURL_RUNNER_PATH,
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+        env=environment,
+    )
+    request_payload = json.dumps(
+        {"url": profile_url, "node_limit": UNFURL_MAX_NODES}
+    ).encode("utf-8")
+    communicate_task = asyncio.create_task(process.communicate(request_payload))
+    try:
+        stdout, stderr = await asyncio.wait_for(
+            communicate_task, timeout=max(1, min(int(timeout_seconds), 60))
+        )
+    except asyncio.TimeoutError:
+        await _stop_subprocess(process, communicate_task)
+        raise RuntimeError("Unfurl exceeded its analysis timeout") from None
+    except asyncio.CancelledError:
+        await _stop_subprocess(process, communicate_task)
+        raise
+    if process.returncode != 0:
+        diagnostic = stderr.decode("utf-8", errors="replace").strip()[-2000:]
+        raise RuntimeError(f"Unfurl failed: {diagnostic or 'unknown error'}")
+    if len(stdout) > UNFURL_MAX_OUTPUT_BYTES:
+        raise RuntimeError("Unfurl returned an oversized result")
+    try:
+        envelope = json.loads(stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Unfurl returned invalid JSON") from exc
+    return normalize_unfurl_url_analysis(target, envelope)
+
+
+def _archive_url_identity(value: Any) -> Optional[tuple]:
+    candidate = _safe_public_url(value)
+    if not candidate:
+        return None
+    try:
+        parsed = urlparse(candidate)
+        port = parsed.port
+    except ValueError:
+        return None
+    if port not in {None, 80, 443} or parsed.fragment:
+        return None
+    effective_port = port or (443 if parsed.scheme.casefold() == "https" else 80)
+    return (
+        parsed.hostname.casefold().rstrip("."),
+        effective_port,
+        parsed.path or "/",
+        parsed.params,
+        parsed.query,
+    )
+
+
+def _wayback_diagnostic_observation(
+    target: Dict[str, str], *, status: str, reason: str, retry_after: str = ""
+) -> Dict[str, Any]:
+    extra: Dict[str, Any] = {"query_match_type": "exact"}
+    if retry_after:
+        extra["retry_after"] = retry_after[:100]
+    return {
+        "source_engine": WAYBACK_ENGINE,
+        "subject_type": "username",
+        "subject_value": _bounded_text(target.get("investigated_username"), limit=500),
+        "status": status,
+        "site_name": _bounded_text(target.get("site_name"), limit=300)
+        or "Public source",
+        "category": "archive",
+        "source_url": _safe_public_url(target.get("profile_url")),
+        "reason": reason[:1000],
+        "extra": extra,
+        "media": {},
+    }
+
+
+def _cdx_timestamp_iso(timestamp: str) -> str:
+    try:
+        parsed = datetime.strptime(timestamp, "%Y%m%d%H%M%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise ValueError("Wayback returned an invalid capture timestamp") from exc
+    return parsed.isoformat().replace("+00:00", "Z")
+
+
+def _wayback_replay_url(value: Any) -> str:
+    candidate = _safe_public_url(value)
+    if not candidate:
+        return ""
+    try:
+        parsed = urlparse(candidate)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.casefold() != "https"
+        or parsed.hostname.casefold().rstrip(".") != "web.archive.org"
+        or port not in {None, 443}
+        or not parsed.path.startswith("/web/")
+    ):
+        return ""
+    return candidate
+
+
+def normalize_wayback_capture_index(
+    target: Dict[str, str], raw_rows: Any
+) -> Dict[str, Any]:
+    """Validate exact-match CDX rows without downloading archived page content."""
+    profile_url = _safe_public_url(target.get("profile_url"))
+    target_identity = _archive_url_identity(profile_url)
+    if not profile_url or not target_identity:
+        raise ValueError("Wayback target is invalid")
+    if not isinstance(raw_rows, list):
+        raise ValueError("Wayback returned a non-list result")
+    if not raw_rows:
+        return _wayback_diagnostic_observation(
+            target,
+            status="not_archived",
+            reason="No exact public HTML captures were returned by the Wayback CDX API.",
+        )
+    if raw_rows[0] != _WAYBACK_FIELDS:
+        raise ValueError("Wayback CDX response fields changed")
+    captures: List[Dict[str, str]] = []
+    seen = set()
+    for row in raw_rows[1 : WAYBACK_MAX_CAPTURES + 1]:
+        if not isinstance(row, list) or len(row) != len(_WAYBACK_FIELDS):
+            continue
+        timestamp, original, statuscode, mimetype, digest = [str(item) for item in row]
+        if (
+            not _CDX_TIMESTAMP_PATTERN.fullmatch(timestamp)
+            or statuscode != "200"
+            or mimetype.casefold() != "text/html"
+            or not _CDX_DIGEST_PATTERN.fullmatch(digest)
+            or _archive_url_identity(original) != target_identity
+        ):
+            continue
+        record_key = (timestamp, digest)
+        if record_key in seen:
+            continue
+        seen.add(record_key)
+        replay_url = _wayback_replay_url(
+            f"https://web.archive.org/web/{timestamp}id_/{original}"
+        )
+        if not replay_url:
+            continue
+        captures.append(
+            {
+                "captured_at": _cdx_timestamp_iso(timestamp),
+                "timestamp": timestamp,
+                "digest": digest,
+                "original_url": original[:2000],
+                "replay_url": replay_url,
+            }
+        )
+    if not captures:
+        raise ValueError("Wayback returned no valid exact capture rows")
+    captures.sort(key=lambda item: item["timestamp"])
+    latest = captures[-1]
+    return {
+        "source_engine": WAYBACK_ENGINE,
+        "subject_type": "username",
+        "subject_value": _bounded_text(target.get("investigated_username"), limit=500),
+        "status": "archived",
+        "site_name": _bounded_text(target.get("site_name"), limit=300)
+        or "Public source",
+        "category": "archive",
+        "source_url": latest["replay_url"],
+        "source_record_id": f"wayback:{latest['timestamp']}:{latest['digest']}",
+        "reason": (
+            "Exact-URL historical capture metadata; it supports historical URL "
+            "presence but does not establish account ownership."
+        ),
+        "extra": {
+            "queried_profile_url": profile_url,
+            "query_match_type": "exact",
+            "sample_direction": "latest",
+            "sampled_capture_count": len(captures),
+            "oldest_sampled_capture_at": captures[0]["captured_at"],
+            "latest_sampled_capture_at": latest["captured_at"],
+            "captures": captures,
+            "archived_page_content_fetched": False,
+            "historical_presence_only": True,
+            "human_review_required": True,
+        },
+        "media": {},
+    }
+
+
+async def run_wayback_capture_index(
+    target: Dict[str, str],
+    *,
+    timeout_seconds: int = WAYBACK_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Query bounded exact-match CDX metadata from a fixed public endpoint."""
+    profile_url = _safe_public_url(target.get("profile_url"))
+    if not profile_url or not _archive_url_identity(profile_url):
+        raise ValueError("Wayback target is invalid")
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "OpenLedger-OSINT-Enrichment",
+    }
+    params = [
+        ("url", profile_url),
+        ("output", "json"),
+        ("fl", ",".join(_WAYBACK_FIELDS)),
+        ("filter", "statuscode:200"),
+        ("filter", "mimetype:text/html"),
+        ("collapse", "digest"),
+        ("matchType", "exact"),
+        ("limit", f"-{WAYBACK_MAX_CAPTURES}"),
+    ]
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        async with session.get(
+            WAYBACK_API_BASE_URL, params=params, allow_redirects=False
+        ) as response:
+            retry_after = str(response.headers.get("Retry-After") or "")
+            if response.status in {403, 429}:
+                return _wayback_diagnostic_observation(
+                    target,
+                    status="rate_limited",
+                    reason=(
+                        "The Wayback CDX public API rate limit was reached; archival "
+                        "metadata collection was skipped."
+                    ),
+                    retry_after=retry_after,
+                )
+            if response.status == 404:
+                return _wayback_diagnostic_observation(
+                    target,
+                    status="not_archived",
+                    reason="No exact public HTML captures were found for this profile URL.",
+                )
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Wayback CDX public API returned HTTP {int(response.status)}"
+                )
+            content_length = response.headers.get("Content-Length")
+            if content_length:
+                try:
+                    if int(content_length) > WAYBACK_MAX_RESPONSE_BYTES:
+                        raise RuntimeError("Wayback returned an oversized response")
+                except ValueError:
+                    pass
+            body = await response.content.read(WAYBACK_MAX_RESPONSE_BYTES + 1)
+            if len(body) > WAYBACK_MAX_RESPONSE_BYTES:
+                raise RuntimeError("Wayback returned an oversized response")
+    try:
+        raw_rows = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Wayback returned invalid JSON") from exc
+    return normalize_wayback_capture_index(target, raw_rows)
+
+
+def _profile_url_evidence_claim(
+    observation: Dict[str, Any], *, evidence_type: str, source_name: str
+) -> Optional[Dict[str, Any]]:
+    source_engine = str(observation.get("source_engine") or "")
+    status = str(observation.get("status") or "").casefold()
+    if source_engine == UNFURL_ENGINE and status != "analyzed":
+        return None
+    if source_engine == WAYBACK_ENGINE and status != "archived":
+        return None
+    username = _bounded_text(observation.get("subject_value"), limit=500)
+    site_name = _bounded_text(observation.get("site_name"), limit=300)
+    extra = observation.get("extra")
+    if not username or not site_name or not isinstance(extra, dict):
+        return None
+    if source_engine == WAYBACK_ENGINE:
+        captures = extra.get("captures")
+        if not isinstance(captures, list) or not captures:
+            return None
+        # Bind evidence to the exact native-discovery URL. CDX may normalize URL
+        # spelling even when the exact resource identity is unchanged.
+        original_url = _safe_public_url(extra.get("queried_profile_url"))
+        if not original_url or not any(
+            isinstance(capture, dict)
+            and _archive_url_identity(capture.get("original_url"))
+            == _archive_url_identity(original_url)
+            for capture in captures[:WAYBACK_MAX_CAPTURES]
+        ):
+            return None
+        evidence_url = _wayback_replay_url(observation.get("source_url"))
+        sampled_capture_count = extra.get("sampled_capture_count")
+        if (
+            isinstance(sampled_capture_count, bool)
+            or not isinstance(sampled_capture_count, int)
+            or not 1 <= sampled_capture_count <= WAYBACK_MAX_CAPTURES
+        ):
+            sampled_capture_count = min(len(captures), WAYBACK_MAX_CAPTURES)
+        details = {
+            "query_match_type": "exact",
+            "sample_direction": "latest",
+            "sampled_capture_count": sampled_capture_count,
+            "oldest_sampled_capture_at": _bounded_text(
+                extra.get("oldest_sampled_capture_at"), limit=100
+            ),
+            "latest_sampled_capture_at": _bounded_text(
+                extra.get("latest_sampled_capture_at"), limit=100
+            ),
+            "capture_replay_urls": [
+                replay
+                for capture in captures[:WAYBACK_MAX_CAPTURES]
+                if isinstance(capture, dict)
+                and (replay := _wayback_replay_url(capture.get("replay_url")))
+            ],
+            "archived_page_content_fetched": False,
+            "historical_presence_only": True,
+            "does_not_establish_ownership": True,
+            "human_review_required": True,
+        }
+    else:
+        original_url = _safe_public_url(observation.get("source_url"))
+        evidence_url = original_url
+        raw_nodes = extra.get("nodes")
+        if not isinstance(raw_nodes, list):
+            return None
+        nodes = [
+            node
+            for raw_node in raw_nodes[:UNFURL_MAX_NODES]
+            if (node := _redact_unfurl_node(raw_node))
+        ]
+        if not nodes:
+            return None
+        details = {
+            "unfurl_version": UNFURL_VERSION,
+            "unfurl_commit": UNFURL_PINNED_COMMIT,
+            "remote_lookups": False,
+            "nodes": nodes[:UNFURL_MAX_NODES],
+            "structural_analysis_only": True,
+            "does_not_establish_ownership": True,
+            "human_review_required": True,
+        }
+    if not original_url or not evidence_url:
+        return None
+    value = {"platform": site_name, "url": original_url, "username": username}
+    evidence = {
+        "evidence_type": evidence_type,
+        "source_name": source_name,
+        "source_url": evidence_url,
+        "details": details,
+    }
+    return {
+        "field_name": "social_account",
+        "value": value,
+        "display_value": original_url,
+        "normalized_value": json.dumps(value, sort_keys=True, ensure_ascii=False)[
+            :4000
+        ],
+        # Neither URL structure nor an archive capture proves Persona ownership.
+        "confidence": 25,
+        "fingerprint": claim_fingerprint("social_account", value),
+        "source_engine": source_engine,
+        "source_record_id": str(observation.get("source_record_id") or "")[:500],
+        "native_status": status,
+        "observation_details": details,
+        "evidence": [dict(evidence, fingerprint=evidence_fingerprint(evidence))],
+    }
+
+
+def extract_profile_url_evidence_claims(
+    observations: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Attach URL analysis/archive evidence to existing pending social accounts."""
+    candidates: List[Dict[str, Any]] = []
+    for observation in observations:
+        if not isinstance(observation, dict):
+            continue
+        if observation.get("source_engine") == UNFURL_ENGINE:
+            candidate = _profile_url_evidence_claim(
+                observation,
+                evidence_type="deterministic_url_analysis",
+                source_name="Unfurl URL analysis",
+            )
+        elif observation.get("source_engine") == WAYBACK_ENGINE:
+            candidate = _profile_url_evidence_claim(
+                observation,
+                evidence_type="wayback_capture_index",
+                source_name="Internet Archive Wayback Machine",
+            )
+        else:
+            candidate = None
+        if candidate:
+            candidates.append(candidate)
+    return candidates
 
 
 def _github_diagnostic_observation(

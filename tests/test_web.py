@@ -81,6 +81,7 @@ def test_index_renders(client):
     assert '<form' in body
     assert 'Case source filters' in body
     assert 'name="enable_github_profile_enrichment"' in body
+    assert 'name="enable_archived_url_evidence"' in body
     assert 'e.g. John Doe' in body
     assert 'Jati Pratomo' not in body
     assert 'Nexorus, urban planning' not in body
@@ -1445,6 +1446,110 @@ def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
     assert result['collector_observations'][0]['source_record_id'] == (
         'github-user:12345'
     )
+
+
+def test_live_scan_analyzes_and_archives_only_native_claimed_profile_urls(
+    client, web_app, monkeypatch
+):
+    unfurl_targets = []
+    wayback_targets = []
+
+    async def fake_search(*args, **kwargs):
+        notify = kwargs['query_notify']
+        result = MaigretCheckResult(
+            username='alice',
+            site_name='Example Social',
+            site_url_user='https://social.example/alice',
+            status=MaigretCheckStatus.CLAIMED,
+            ids_data={},
+        )
+        notify.update(result)
+        return {
+            'Example Social': {
+                'status': result,
+                'url_user': result.site_url_user,
+            }
+        }
+
+    async def fake_unfurl(target):
+        unfurl_targets.append(target)
+        return {
+            'source_engine': 'unfurl_url_analysis',
+            'subject_type': 'username',
+            'subject_value': 'alice',
+            'status': 'analyzed',
+            'site_name': 'Example Social',
+            'category': 'url_analysis',
+            'source_url': 'https://social.example/alice',
+            'source_record_id': 'unfurl:record',
+            'extra': {'nodes': [], 'remote_lookups': False},
+            'media': {},
+        }
+
+    async def fake_wayback(target):
+        wayback_targets.append(target)
+        return {
+            'source_engine': 'wayback_cdx',
+            'subject_type': 'username',
+            'subject_value': 'alice',
+            'status': 'archived',
+            'site_name': 'Example Social',
+            'category': 'archive',
+            'source_url': (
+                'https://web.archive.org/web/20260304050607id_/'
+                'https://social.example/alice'
+            ),
+            'source_record_id': 'wayback:20260304050607:DIGEST',
+            'extra': {'sampled_capture_count': 1},
+            'media': {},
+        }
+
+    monkeypatch.setattr(maigret, 'search', fake_search)
+    monkeypatch.setattr(web_app, 'run_unfurl_url_analysis', fake_unfurl)
+    monkeypatch.setattr(web_app, 'run_wayback_capture_index', fake_wayback)
+    monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
+
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={
+            'identifier_type': 'username',
+            'identifier_value': 'alice',
+            'processing_mode': 'independent',
+            'enable_archived_url_evidence': 'on',
+        },
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
+    assert start.status_code == 200
+    job_id = start.get_json()['job_id']
+    body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
+    events = [
+        json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
+    ]
+
+    expected_target = {
+        'investigated_username': 'alice',
+        'site_name': 'Example Social',
+        'profile_url': 'https://social.example/alice',
+    }
+    assert unfurl_targets == [expected_target]
+    assert wayback_targets == [expected_target]
+    assert [
+        event['collector']
+        for event in events
+        if event.get('type') == 'collector_started'
+    ] == ['unfurl-url-analysis', 'wayback-cdx']
+    result = web_app.job_results[job_id]
+    assert result['archived_profile_count'] == 1
+    assert {item['source_engine'] for item in result['collector_observations']} == {
+        'unfurl_url_analysis',
+        'wayback_cdx',
+    }
 
 
 def test_live_scan_empty_username_rejected(client, web_app):

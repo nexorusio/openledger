@@ -19,6 +19,8 @@ case. It does not add a second login, project picker, database, or review queue.
 | Case, Persona, and investigation lifecycle | OpenLedger PostgreSQL |
 | Username collection | Maigret adapter |
 | Opt-in email-registration collection | User Scanner subprocess adapter |
+| Opt-in claimed-URL decomposition | Isolated offline Unfurl subprocess adapter |
+| Opt-in exact capture metadata | Wayback CDX adapter |
 | Native collector result artifact | `investigation_jobs.result` |
 | Normalized claims and source provenance | `persona_claims`, `claim_evidence`, and `claim_observations` |
 | Analyst decisions and audit history | `claim_reviews` |
@@ -113,11 +115,12 @@ The current durable lifecycle is:
 2. `maigret.web.worker.run` claims one durable job.
 3. `run_persistent_job` owns the event loop, cancellation, and terminal state.
 4. `_stream_search` orchestrates collector adapters: `maigret_search` for each
-   username, then the opt-in `run_user_scanner_email` adapter.
+   username, then the enabled GitHub, offline Unfurl, exact Wayback CDX, and User
+   Scanner adapters.
 5. `finalize_stream_job` builds one result artifact and persists it.
-6. `CaseStore.sync_persona_claims` normalizes Maigret and User Scanner evidence
-   into the same canonical tables and records every source-labelled observation
-   against its investigation job without changing prior analyst decisions.
+6. `CaseStore.sync_persona_claims` normalizes all collector evidence into the
+   same canonical tables and records every source-labelled observation against
+   its investigation job without changing prior analyst decisions.
 7. `CaseStore.build_persona_graph` and `CaseStore.build_relationship_graph`
    create read-only evidence and relationship projections.
 
