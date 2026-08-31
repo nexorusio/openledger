@@ -71,6 +71,7 @@ from maigret.web.investigation_input import (
 )
 from maigret.web.persona_intelligence import (
     extract_case_chat_persona_claims,
+    field_display_label,
     group_claims,
 )
 
@@ -3288,6 +3289,7 @@ def case_timeline_workspace(case_id):
         selected_persona_id=selected_persona_id,
         event_type=event_type,
         order=order,
+        field_display_label=field_display_label,
     )
 
 
@@ -3353,6 +3355,7 @@ def persona_workspace(persona_id):
         approved_photograph=approved_photograph,
         map_locations=map_locations,
         ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
+        field_display_label=field_display_label,
         map_tile_url=os.getenv(
             'OPENLEDGER_MAP_TILE_URL',
             'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -3409,6 +3412,9 @@ def relationships_workspace():
         }
     else:
         graph = case_store.build_relationship_graph(selected_case_id or None)
+    for edge in graph.get('edges', []):
+        if edge.get('field_name'):
+            edge['label'] = field_display_label(edge['field_name'])
     return render_template(
         'relationships.html',
         graph=graph,
@@ -3417,6 +3423,7 @@ def relationships_workspace():
         selected_case_id=selected_case_id,
         available_personas=available_personas,
         selected_persona_id=selected_persona_id,
+        field_display_label=field_display_label,
     )
 
 

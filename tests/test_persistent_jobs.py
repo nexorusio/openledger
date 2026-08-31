@@ -785,6 +785,10 @@ def test_approved_location_and_photo_render_in_persona_workspace(
     assert 'class="persona-photo-frame"' in page
     assert "Amend approved record" in page
     assert "AI evidence pipeline" in page
+    assert "Affiliations" in page
+    assert "Professional and corporate" not in page
+    assert "Organization, institution or company" in page
+    assert "OpenLedger does not infer a private or residential address" in page
 
 
 def test_approved_location_requires_saving_ai_map_center_before_mapping(

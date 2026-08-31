@@ -196,7 +196,7 @@
         <header class="panel-header">
             <div>
                 <h2>{{ group.title }}</h2>
-                <p>Approved information and evidence awaiting analyst review.</p>
+                <p>{{ group.description }}</p>
             </div>
         </header>
         <div class="panel-body persona-form">
@@ -207,7 +207,14 @@
                     {% if field.claims %}
                         {% for claim in field.claims %}{{ claim_record(claim, group.key) }}{% endfor %}
                     {% else %}
-                    <div class="empty-field">No evidence extracted.</div>
+                    <div class="empty-field">
+                        No evidence extracted.
+                        {% if field.key == 'address' %}
+                        OpenLedger does not infer a private or residential address.
+                        {% elif field.key == 'current_location' %}
+                        Email registration does not establish location; a public source must state a coarse place explicitly.
+                        {% endif %}
+                    </div>
                     {% endif %}
                 </div>
             </div>
@@ -246,7 +253,7 @@
             {% if review_claims %}
                 {% for claim in review_claims %}
                 <div class="review-queue-item" data-review-item="{{ claim.review_status }}">
-                    <div class="review-field-name">{{ claim.field_name | replace('_', ' ') | title }}</div>
+                    <div class="review-field-name">{{ field_display_label(claim.field_name) }}</div>
                     {{ claim_record(claim, 'review') }}
                 </div>
                 {% endfor %}

@@ -25,7 +25,12 @@
         return {background: '#26364a', border: '#8296ad', highlight: {background: '#344a64', border: '#d9e7f6'}};
     };
     const level = (node) => node.kind === 'persona' ? 0 : node.kind === 'source' ? 2 : 1;
-    const readable = (value) => String(value || '').replaceAll('_', ' ');
+    const fieldLabels = {
+        company: 'Organization, institution or company',
+        company_ownership: 'Ownership or leadership',
+        occupation: 'Role or occupation',
+    };
+    const readable = (value) => fieldLabels[value] || String(value || '').replaceAll('_', ' ');
     const baseEdgeColor = (opacity = 0.78) => ({color: '#536b83', highlight: '#30c7ca', hover: '#73a5d1', opacity});
 
     const originalNodes = graph.nodes.map((node) => ({

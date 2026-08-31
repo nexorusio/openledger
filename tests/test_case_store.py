@@ -326,6 +326,45 @@ def test_completed_findings_create_traceable_persona_claims(store):
     assert full_name["evidence"][0]["source_url"].startswith("https://")
 
 
+def test_same_subject_email_hint_is_a_pending_claim_not_an_approved_fact(store):
+    job_id = store.create_investigation(
+        ["alice"],
+        {
+            "investigation_spec": {
+                "processing_mode": "same_subject",
+                "identifiers": [
+                    {"type": "username", "value": "alice"},
+                    {"type": "email", "value": "alice@example.test"},
+                ],
+            }
+        },
+    )
+    store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "individual_reports": [],
+    }
+    store.finish(job_id, result)
+
+    assert store.sync_persona_claims(job_id, result) == 1
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    persona = store.get_persona(case["personas"][0]["id"])
+    assert len(persona["claims"]) == 1
+    email = persona["claims"][0]
+    assert email["field_name"] == "email"
+    assert email["display_value"] == "alice@example.test"
+    assert email["review_status"] == "pending"
+    assert email["source_engine"] == "investigation_input"
+    assert email["evidence"][0]["evidence_type"] == "operator_provided_identifier"
+
+    assert store.sync_persona_claims(job_id, result) == 1
+    persona = store.get_persona(persona["id"])
+    assert len(persona["claims"]) == 1
+    assert len(persona["claims"][0]["evidence"]) == 1
+
+
 def test_cited_ai_proposals_are_pending_idempotent_and_preserve_rejection(store):
     job_id = store.create_investigation(["alice"], {})
     store.claim_next("worker:test")

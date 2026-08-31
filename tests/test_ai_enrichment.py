@@ -389,6 +389,14 @@ def test_evidence_proposal_request_uses_strict_schema_without_web_search(monkeyp
     assert {"latitude", "longitude", "coordinate_precision"}.issubset(
         proposal_schema["required"]
     )
+    assert {"email", "phone", "address"}.issubset(
+        proposal_schema["properties"]["field_name"]["enum"]
+    )
+    normalized_instructions = " ".join(
+        captured["payload"]["instructions"].split()
+    )
+    assert "explicitly published" in normalized_instructions
+    assert "educational institution" in normalized_instructions
     assert "tools" not in captured["payload"]
 
 
