@@ -1,5 +1,6 @@
 from flask import (
     Flask,
+    jsonify,
     render_template,
     request,
     send_from_directory,
@@ -27,7 +28,7 @@ import uuid
 from datetime import datetime, timedelta
 from functools import lru_cache
 from threading import Lock, Thread
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
 import maigret
 import maigret.settings
@@ -35,6 +36,8 @@ from maigret.ai import (
     AIEnrichmentContractError,
     DEFAULT_AI_API_BASE_URL,
     get_ai_evidence_proposals,
+    get_case_chat_claim_proposals,
+    get_case_chat_response,
     get_enriched_ai_analysis,
     validate_openai_connection,
 )
@@ -60,7 +63,10 @@ from maigret.web.investigation_input import (
     public_ai_context,
     search_usernames,
 )
-from maigret.web.persona_intelligence import group_claims
+from maigret.web.persona_intelligence import (
+    extract_case_chat_persona_claims,
+    group_claims,
+)
 
 app = Flask(__name__)
 try:
@@ -95,6 +101,7 @@ app.config.update(
 background_jobs: Dict[str, Any] = {}
 job_results = {}
 analysis_locks: Dict[str, Any] = {}
+case_chat_locks: Dict[str, Any] = {}
 metadata_lock = Lock()
 auth_lock = Lock()
 login_attempts_lock = Lock()
@@ -304,7 +311,18 @@ EMBEDDED_GRAPH_PATH_PATTERN = re.compile(
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
 AI_ANALYSIS_SCHEMA_VERSION = 7
-AUTH_SCHEMA_VERSION = 1
+AUTH_SCHEMA_VERSION = 2
+LEGACY_AUTH_SCHEMA_VERSION = 1
+AUTH_ROLES = frozenset({'admin', 'analyst'})
+MAX_AUTH_USERS = 100
+ADMIN_ONLY_ENDPOINTS = frozenset(
+    {
+        'settings_update',
+        'openai_settings_update',
+        'add_analyst',
+        'remove_analyst',
+    }
+)
 PASSWORD_HASH_NAME = 'sha256'
 PASSWORD_HASH_ITERATIONS = 600_000
 PASSWORD_MIN_LENGTH = 12
@@ -321,18 +339,13 @@ def safe_log_value(value: Any, *, limit: int = 500) -> str:
 
 def record_internal_error(public_message: str, error: Exception, **context) -> str:
     """Log one sanitized diagnostic and return a non-sensitive client message."""
+    del context  # Never place request-derived identifiers in application logs.
     reference = secrets.token_hex(6)
-    context_text = ' '.join(
-        f'{safe_log_value(key, limit=60)}={safe_log_value(value, limit=160)}'
-        for key, value in sorted(context.items())
-    )
     logging.error(
-        '%s [error_ref=%s error_type=%s detail=%s%s]',
-        public_message,
+        '%s [error_ref=%s error_type=%s]',
+        safe_log_value(public_message, limit=200),
         reference,
-        type(error).__name__,
-        safe_log_value(error),
-        f' {context_text}' if context_text else '',
+        safe_log_value(type(error).__name__, limit=100),
     )
     return f'{public_message}. Reference: {reference}.'
 
@@ -414,25 +427,82 @@ def verify_password(password: str, password_record: Dict[str, Any]) -> bool:
 
 
 def normalize_auth_credentials(payload: Dict[str, Any]) -> Dict[str, Any]:
-    if (
-        not isinstance(payload, dict)
-        or payload.get('schema_version') != AUTH_SCHEMA_VERSION
-    ):
+    if not isinstance(payload, dict):
         raise ValueError('Unsupported authentication file')
-    username = payload.get('username')
-    password_record = payload.get('password')
+    schema_version = payload.get('schema_version')
+    if schema_version == LEGACY_AUTH_SCHEMA_VERSION:
+        username = payload.get('username')
+        password_record = payload.get('password')
+        revision = payload.get('revision')
+        if (
+            not isinstance(username, str)
+            or not AUTH_USERNAME_PATTERN.fullmatch(username)
+        ):
+            raise ValueError('Invalid authentication username')
+        if not isinstance(password_record, dict):
+            raise ValueError('Invalid authentication password record')
+        if not isinstance(revision, str) or len(revision) < 16:
+            raise ValueError('Invalid authentication revision')
+        return {
+            'schema_version': AUTH_SCHEMA_VERSION,
+            'revision': revision,
+            'users': [
+                {
+                    'username': username,
+                    'role': 'admin',
+                    'revision': revision,
+                    'password': password_record,
+                }
+            ],
+        }
+    if schema_version != AUTH_SCHEMA_VERSION:
+        raise ValueError('Unsupported authentication file')
     revision = payload.get('revision')
-    if not isinstance(username, str) or not AUTH_USERNAME_PATTERN.fullmatch(username):
-        raise ValueError('Invalid authentication username')
-    if not isinstance(password_record, dict):
-        raise ValueError('Invalid authentication password record')
+    raw_users = payload.get('users')
     if not isinstance(revision, str) or len(revision) < 16:
         raise ValueError('Invalid authentication revision')
+    if (
+        not isinstance(raw_users, list)
+        or not raw_users
+        or len(raw_users) > MAX_AUTH_USERS
+    ):
+        raise ValueError('Invalid authentication user list')
+    users = []
+    seen_usernames = set()
+    for raw_user in raw_users:
+        if not isinstance(raw_user, dict):
+            raise ValueError('Invalid authentication user')
+        username = raw_user.get('username')
+        role = raw_user.get('role')
+        user_revision = raw_user.get('revision')
+        password_record = raw_user.get('password')
+        if (
+            not isinstance(username, str)
+            or not AUTH_USERNAME_PATTERN.fullmatch(username)
+            or username.casefold() in seen_usernames
+        ):
+            raise ValueError('Invalid authentication username')
+        if role not in AUTH_ROLES:
+            raise ValueError('Invalid authentication role')
+        if not isinstance(user_revision, str) or len(user_revision) < 16:
+            raise ValueError('Invalid authentication revision')
+        if not isinstance(password_record, dict):
+            raise ValueError('Invalid authentication password record')
+        seen_usernames.add(username.casefold())
+        users.append(
+            {
+                'username': username,
+                'role': role,
+                'revision': user_revision,
+                'password': password_record,
+            }
+        )
+    if not any(user['role'] == 'admin' for user in users):
+        raise ValueError('Authentication requires an administrator')
     return {
         'schema_version': AUTH_SCHEMA_VERSION,
-        'username': username,
         'revision': revision,
-        'password': password_record,
+        'users': users,
     }
 
 
@@ -447,16 +517,9 @@ def load_auth_credentials():
         return None
 
 
-def save_auth_credentials(username: str, password: str):
-    """Atomically persist application credentials with mode 600."""
-    if not AUTH_USERNAME_PATTERN.fullmatch(username):
-        raise ValueError('Invalid authentication username')
-    payload = {
-        'schema_version': AUTH_SCHEMA_VERSION,
-        'username': username,
-        'revision': secrets.token_urlsafe(24),
-        'password': build_password_record(password),
-    }
+def save_auth_document(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Atomically persist a normalized authentication document with mode 600."""
+    payload = normalize_auth_credentials(payload)
     auth_path = os.path.abspath(app.config['AUTH_FILE'])
     auth_directory = os.path.dirname(auth_path)
     os.makedirs(auth_directory, mode=0o700, exist_ok=True)
@@ -484,6 +547,115 @@ def save_auth_credentials(username: str, password: str):
                 pass
             raise
     return payload
+
+
+def save_auth_credentials(username: str, password: str):
+    """Create the initial administrator credential document."""
+    if not AUTH_USERNAME_PATTERN.fullmatch(username):
+        raise ValueError('Invalid authentication username')
+    revision = secrets.token_urlsafe(24)
+    payload = {
+        'schema_version': AUTH_SCHEMA_VERSION,
+        'revision': secrets.token_urlsafe(24),
+        'users': [
+            {
+                'username': username,
+                'role': 'admin',
+                'revision': revision,
+                'password': build_password_record(password),
+            }
+        ],
+    }
+    return save_auth_document(payload)
+
+
+def find_auth_user(credentials: Optional[Dict[str, Any]], username: str):
+    if not credentials:
+        return None
+    candidate = str(username or '')
+    for user in credentials.get('users', []):
+        if hmac.compare_digest(candidate, user['username']):
+            return user
+    return None
+
+
+def update_auth_password(username: str, password: str) -> Dict[str, Any]:
+    credentials = load_auth_credentials()
+    user = find_auth_user(credentials, username)
+    if not credentials or not user:
+        raise KeyError(username)
+    updated_users = []
+    updated_user = None
+    for existing in credentials['users']:
+        if existing['username'] == user['username']:
+            updated_user = {
+                **existing,
+                'password': build_password_record(password),
+                'revision': secrets.token_urlsafe(24),
+            }
+            updated_users.append(updated_user)
+        else:
+            updated_users.append(existing)
+    save_auth_document(
+        {
+            **credentials,
+            'revision': secrets.token_urlsafe(24),
+            'users': updated_users,
+        }
+    )
+    return updated_user
+
+
+def add_analyst_credentials(username: str, password: str) -> Dict[str, Any]:
+    if not AUTH_USERNAME_PATTERN.fullmatch(username):
+        raise ValueError('Invalid authentication username')
+    credentials = load_auth_credentials()
+    if not credentials:
+        raise RuntimeError('Authentication is not configured on this server.')
+    if len(credentials['users']) >= MAX_AUTH_USERS:
+        raise ValueError('The maximum number of users has been reached')
+    if any(
+        existing['username'].casefold() == username.casefold()
+        for existing in credentials['users']
+    ):
+        raise ValueError('That username already exists')
+    analyst = {
+        'username': username,
+        'role': 'analyst',
+        'revision': secrets.token_urlsafe(24),
+        'password': build_password_record(password),
+    }
+    save_auth_document(
+        {
+            **credentials,
+            'revision': secrets.token_urlsafe(24),
+            'users': [*credentials['users'], analyst],
+        }
+    )
+    return analyst
+
+
+def remove_analyst_credentials(username: str) -> bool:
+    credentials = load_auth_credentials()
+    if not credentials:
+        return False
+    user = find_auth_user(credentials, username)
+    if not user:
+        return False
+    if user['role'] != 'analyst':
+        raise ValueError('Administrator accounts cannot be removed here')
+    save_auth_document(
+        {
+            **credentials,
+            'revision': secrets.token_urlsafe(24),
+            'users': [
+                existing
+                for existing in credentials['users']
+                if existing['username'] != user['username']
+            ],
+        }
+    )
+    return True
 
 
 def login_attempt_key() -> str:
@@ -644,6 +816,13 @@ def parse_settings_form(form):
     }
 
 
+def current_auth_role() -> str:
+    if not app.config.get('AUTH_REQUIRED'):
+        return 'admin'
+    role = str(session.get('role') or '').strip().casefold()
+    return role if role in AUTH_ROLES else ''
+
+
 @app.context_processor
 def inject_settings():
     return {
@@ -651,6 +830,7 @@ def inject_settings():
         'openai_connected': bool(get_openai_api_key()),
         'csrf_token': get_csrf_token(),
         'current_user': session.get('username'),
+        'current_role': current_auth_role(),
         'openai_analysis_models': OPENAI_ANALYSIS_MODELS,
         'user_scanner_available': user_scanner_available(),
     }
@@ -1313,9 +1493,15 @@ def require_application_login():
         return None
     if session.get('authenticated') is True:
         credentials = load_auth_credentials()
-        if credentials and hmac.compare_digest(
-            session.get('auth_revision', ''), credentials['revision']
+        user = find_auth_user(credentials, session.get('username', ''))
+        if user and hmac.compare_digest(
+            session.get('auth_revision', ''), user['revision']
         ):
+            session['role'] = user['role']
+            if request.endpoint in ADMIN_ONLY_ENDPOINTS and user['role'] != 'admin':
+                if request.path.startswith('/api/'):
+                    return {'error': 'Administrator access required.'}, 403
+                return render_template('forbidden.html'), 403
             return None
         session.clear()
     if request.path.startswith('/api/'):
@@ -1413,16 +1599,8 @@ def login():
 
     submitted_username = request.form.get('username', '').strip()
     submitted_password = request.form.get('password', '')
-    if credentials:
-        username_matches = hmac.compare_digest(
-            submitted_username, credentials['username']
-        )
-        password_matches = verify_password(
-            submitted_password, credentials['password']
-        )
-        valid = username_matches and password_matches
-    else:
-        valid = False
+    user = find_auth_user(credentials, submitted_username)
+    valid = bool(user and verify_password(submitted_password, user['password']))
     if not valid:
         record_login_failure(attempt_key)
         logging.warning(
@@ -1435,8 +1613,9 @@ def login():
     session.clear()
     session.permanent = True
     session['authenticated'] = True
-    session['username'] = credentials['username']
-    session['auth_revision'] = credentials['revision']
+    session['username'] = user['username']
+    session['role'] = user['role']
+    session['auth_revision'] = user['revision']
     session['csrf_token'] = secrets.token_urlsafe(32)
     return redirect(next_path)
 
@@ -1452,24 +1631,37 @@ def logout():
 @app.route('/security', methods=['GET', 'POST'])
 def security_settings():
     credentials = load_auth_credentials()
+    current_username = session.get('username')
+    current_user_record = find_auth_user(credentials, current_username)
     if request.method == 'GET':
         return render_template(
             'security.html',
             auth_configured=credentials is not None,
-            auth_username=(credentials or {}).get('username', ''),
+            auth_username=(current_user_record or {}).get(
+                'username', current_username or ''
+            ),
+            analysts=(
+                [
+                    user
+                    for user in (credentials or {}).get('users', [])
+                    if user['role'] == 'analyst'
+                ]
+                if current_auth_role() == 'admin'
+                else []
+            ),
         )
 
     if not is_valid_csrf(request.form.get('csrf_token')):
         flash('Your security session expired. Please try again.', 'danger')
         return redirect(url_for('security_settings'))
-    if not credentials:
+    if not credentials or not current_user_record:
         flash('Authentication is not configured on this server.', 'danger')
         return redirect(url_for('security_settings'))
 
     current_password = request.form.get('current_password', '')
     new_password = request.form.get('new_password', '')
     confirm_password = request.form.get('confirm_password', '')
-    if not verify_password(current_password, credentials['password']):
+    if not verify_password(current_password, current_user_record['password']):
         flash('The current password is incorrect.', 'danger')
         return redirect(url_for('security_settings'))
     if len(new_password) < PASSWORD_MIN_LENGTH:
@@ -1482,16 +1674,51 @@ def security_settings():
     if new_password != confirm_password:
         flash('The new passwords do not match.', 'danger')
         return redirect(url_for('security_settings'))
-    if verify_password(new_password, credentials['password']):
+    if verify_password(new_password, current_user_record['password']):
         flash('Choose a password different from the current password.', 'danger')
         return redirect(url_for('security_settings'))
 
-    updated_credentials = save_auth_credentials(
-        credentials['username'], new_password
-    )
-    session['auth_revision'] = updated_credentials['revision']
+    updated_user = update_auth_password(current_user_record['username'], new_password)
+    session['auth_revision'] = updated_user['revision']
     session['csrf_token'] = secrets.token_urlsafe(32)
     flash('Password changed successfully.', 'success')
+    return redirect(url_for('security_settings'))
+
+
+@app.route('/security/analysts', methods=['POST'])
+def add_analyst():
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your security session expired. Please try again.', 'danger')
+        return redirect(url_for('security_settings'))
+    username = request.form.get('username', '').strip()
+    password = request.form.get('password', '')
+    confirm_password = request.form.get('confirm_password', '')
+    if password != confirm_password:
+        flash('The analyst passwords do not match.', 'danger')
+        return redirect(url_for('security_settings'))
+    try:
+        add_analyst_credentials(username, password)
+    except (RuntimeError, ValueError) as error:
+        flash(str(error), 'danger')
+        return redirect(url_for('security_settings'))
+    flash(f'Analyst {username} added.', 'success')
+    return redirect(url_for('security_settings'))
+
+
+@app.route('/security/analysts/<username>/delete', methods=['POST'])
+def remove_analyst(username):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your security session expired. Please try again.', 'danger')
+        return redirect(url_for('security_settings'))
+    try:
+        removed = remove_analyst_credentials(username)
+    except ValueError as error:
+        flash(str(error), 'danger')
+        return redirect(url_for('security_settings'))
+    if removed:
+        flash(f'Analyst {username} removed. Their sessions are now invalid.', 'success')
+    else:
+        flash('That analyst no longer exists.', 'warning')
     return redirect(url_for('security_settings'))
 
 
@@ -2497,6 +2724,186 @@ def case_workspace(case_id):
         flash('That case does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
     return render_template('case.html', case=case)
+
+
+@app.route('/cases/<case_id>/chat')
+def case_chat_workspace(case_id):
+    if case_store is None:
+        flash('Case chat requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    case = case_store.get_case(case_id)
+    if not case:
+        flash('That case does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    return render_template(
+        'case_chat.html',
+        case=case,
+        messages=case_store.list_case_chat_messages(case_id, limit=500),
+        ai_enabled=bool(get_openai_api_key()),
+    )
+
+
+@app.route('/api/cases/<case_id>/chat', methods=['POST'])
+def case_chat_message(case_id):
+    if not is_valid_csrf(request.headers.get('X-OpenLedger-CSRF', '')):
+        return {'error': 'Invalid request token. Refresh the case chat.'}, 403
+    if case_store is None:
+        return {'error': 'Case chat requires persistent storage.'}, 503
+    api_key = get_openai_api_key()
+    if not api_key:
+        return {'error': 'AI analysis is not configured on the server.'}, 503
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {'error': 'A JSON chat request is required.'}, 400
+    message = str(payload.get('message') or '').strip()
+    if not message:
+        return {'error': 'Write a message before sending.'}, 400
+    if len(message) > 12_000:
+        return {'error': 'Chat messages are limited to 12,000 characters.'}, 400
+    research_enabled = payload.get('research_enabled') is True
+    propose_to_persona = payload.get('propose_to_persona') is True
+    persona_id = str(payload.get('persona_id') or '').strip() or None
+    case = case_store.get_case(case_id)
+    if not case:
+        return {'error': 'That case does not exist.'}, 404
+    personas_by_id = {persona['id']: persona for persona in case['personas']}
+    if persona_id and persona_id not in personas_by_id:
+        return {'error': 'That Persona does not belong to this case.'}, 400
+    if propose_to_persona and not persona_id:
+        return {
+            'error': 'Choose a target Persona before proposing new information.'
+        }, 400
+
+    lock = case_chat_locks.setdefault(case_id, Lock())
+    if not lock.acquire(blocking=False):
+        return {'error': 'A case-chat response is already being generated.'}, 409
+
+    actor = session.get('username') or 'local-operator'
+    try:
+        conversation = case_store.list_case_chat_messages(case_id, limit=30)
+        case_context = case_store.get_case_chat_context(case_id)
+        if not case_context:
+            return {'error': 'That case does not exist.'}, 404
+        user_record = case_store.append_case_chat_message(
+            case_id,
+            role='user',
+            author=actor,
+            content=message,
+            persona_id=persona_id,
+            research_enabled=research_enabled,
+        )
+        ai_settings = load_settings()
+        model = ai_settings.get(
+            'openai_model',
+            os.getenv('OPENAI_MODEL', DEFAULT_SETTINGS['openai_model']),
+        )
+        response = asyncio.run(
+            get_case_chat_response(
+                api_key=api_key,
+                case_context=case_context,
+                conversation=conversation,
+                user_message=message,
+                model=model,
+                web_search_enabled=research_enabled,
+                **ai_endpoint_options(),
+            )
+        )
+        answer = response['analysis']
+        sources = response.get('sources', [])
+        initial_proposal_status = (
+            {'status': 'processing', 'count': 0}
+            if propose_to_persona
+            else {'status': 'not_requested', 'count': 0}
+        )
+        assistant_record = case_store.append_case_chat_message(
+            case_id,
+            role='assistant',
+            author='OpenLedger AI',
+            content=answer,
+            persona_id=persona_id,
+            research_enabled=research_enabled,
+            sources=sources,
+            proposals=initial_proposal_status,
+            model=model,
+        )
+        proposal_summary = initial_proposal_status
+        if propose_to_persona:
+            try:
+                raw_proposals = asyncio.run(
+                    get_case_chat_claim_proposals(
+                        api_key=api_key,
+                        target_persona=personas_by_id[persona_id]['display_name'],
+                        user_message=message,
+                        assistant_answer=answer,
+                        sources=sources,
+                        model=model,
+                        **ai_endpoint_options(),
+                    )
+                )
+                diagnostics: Dict[str, Any] = {}
+                candidates = extract_case_chat_persona_claims(
+                    raw_proposals,
+                    sources=sources,
+                    target_persona=personas_by_id[persona_id]['display_name'],
+                    model=model,
+                    user_message=message,
+                    user_message_id=user_record['id'],
+                    assistant_message_id=assistant_record['id'],
+                    provided_by=actor,
+                    diagnostics=diagnostics,
+                )
+                synchronized = case_store.sync_case_chat_persona_claims(
+                    case_id,
+                    persona_id,
+                    candidates,
+                )
+                proposal_summary = {
+                    'status': 'pending_review',
+                    'count': synchronized['count'],
+                    'persona_id': persona_id,
+                    'diagnostics': diagnostics,
+                    'proposals': synchronized['proposals'],
+                }
+            except Exception as error:
+                record_internal_error(
+                    'Case chat Persona proposal extraction failed',
+                    error,
+                    case_id=case_id,
+                )
+                proposal_summary = {
+                    'status': 'unavailable',
+                    'count': 0,
+                    'persona_id': persona_id,
+                }
+            case_store.update_case_chat_message_proposals(
+                assistant_record['id'], proposal_summary
+            )
+            assistant_record['proposals'] = proposal_summary
+        return jsonify(
+            user_message=user_record,
+            assistant_message=assistant_record,
+            proposal_summary=proposal_summary,
+        )
+    except AIEnrichmentContractError as error:
+        record_internal_error(
+            'Cited case-chat research contract failed', error, case_id=case_id
+        )
+        return {
+            'error': (
+                'Public-web research returned no usable citations. '
+                'The request was retained, but no assistant answer was saved.'
+            )
+        }, 502
+    except ValueError as error:
+        record_internal_error('Case chat request rejected', error)
+        return jsonify(error='Case chat request could not be processed.'), 400
+    except Exception as error:
+        record_internal_error('Case chat failed', error, case_id=case_id)
+        return {
+            'error': 'Case chat failed. Check the OpenLedger server logs.'
+        }, 502
+    finally:
+        lock.release()
 
 
 @app.route('/cases/<case_id>/timeline')

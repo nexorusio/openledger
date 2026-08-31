@@ -73,6 +73,54 @@ AI_EVIDENCE_SCHEMA = {
     "additionalProperties": False,
 }
 
+CASE_CHAT_PROPOSAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "field_name": {
+                        "type": "string",
+                        "enum": list(AI_EVIDENCE_FIELDS),
+                    },
+                    "value": {"type": "string"},
+                    "confidence": {"type": "integer"},
+                    "evidence_basis": {
+                        "type": "string",
+                        "enum": ["user_statement", "public_web"],
+                    },
+                    "source_url": {"type": ["string", "null"]},
+                    "source_title": {"type": ["string", "null"]},
+                    "reason": {"type": "string"},
+                    "latitude": {"type": ["number", "null"]},
+                    "longitude": {"type": ["number", "null"]},
+                    "coordinate_precision": {
+                        "type": ["string", "null"],
+                        "enum": ["city", "region", None],
+                    },
+                },
+                "required": [
+                    "field_name",
+                    "value",
+                    "confidence",
+                    "evidence_basis",
+                    "source_url",
+                    "source_title",
+                    "reason",
+                    "latitude",
+                    "longitude",
+                    "coordinate_precision",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["proposals"],
+    "additionalProperties": False,
+}
+
 
 class AIEnrichmentContractError(RuntimeError):
     """The enrichment response did not contain the required cited research."""
@@ -527,6 +575,184 @@ async def get_enriched_ai_analysis(
         response_data,
         require_web_search=web_search_enabled,
     )
+
+
+async def get_case_chat_response(
+    api_key: str,
+    *,
+    case_context,
+    conversation,
+    user_message: str,
+    model: str = "gpt-5.4",
+    api_base_url: str = DEFAULT_AI_API_BASE_URL,
+    timeout_seconds: int = 240,
+    web_search_enabled: bool = False,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
+):
+    """Answer one case-scoped analyst request with optional cited web research."""
+    url = _ai_api_url(
+        api_base_url,
+        "responses",
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    instructions = """You are the OpenLedger case assistant. Answer the analyst's
+current request using the supplied case record and bounded conversation history.
+Treat approved claims as reviewed case facts; label pending and uncertain claims
+explicitly; treat rejected claims only as audit context. User statements are
+unverified until reviewed. Separate stored case evidence, cited public-web
+information, and analytical inference. Never present an inference as a stored
+fact. When web search is available, cite the sources returned by the tool and
+prefer official, institutional, and reputable public sources. Do not infer
+sensitive traits, private addresses, criminality, or interpersonal relationships
+from weak signals. Do not claim to have modified a Persona; a separate
+server-controlled review workflow handles proposed updates. Be concise, neutral,
+and explicit about uncertainty. Use the product name OpenLedger only."""
+    bounded_conversation = []
+    conversation_budget = 30_000
+    for item in reversed(list(conversation or [])[-30:]):
+        if not isinstance(item, dict):
+            continue
+        role = str(item.get("role") or "").strip().casefold()
+        if role not in {"user", "assistant"}:
+            continue
+        content = str(item.get("content") or "")[: min(4_000, conversation_budget)]
+        if not content:
+            continue
+        bounded_conversation.insert(
+            0,
+            {
+                "role": role,
+                "author": str(item.get("author") or "")[:200],
+                "content": content,
+            },
+        )
+        conversation_budget -= len(content)
+        if conversation_budget <= 0:
+            break
+    serialized_case_context = json.dumps(
+        case_context, ensure_ascii=False, separators=(",", ":")
+    )
+    if len(serialized_case_context) > 70_000:
+        serialized_case_context = (
+            serialized_case_context[:70_000]
+            + "\n[Case context truncated at the server safety limit.]"
+        )
+    structured_input = json.dumps(
+        {
+            "case_record_json": serialized_case_context,
+            "conversation_history": bounded_conversation,
+            "current_analyst_request": str(user_message)[:12_000],
+        },
+        ensure_ascii=False,
+    )
+    payload: dict[str, object] = {
+        "model": model,
+        "instructions": instructions,
+        "input": structured_input,
+    }
+    if web_search_enabled:
+        payload["tools"] = [{"type": "web_search"}]
+        payload["tool_choice"] = "required"
+
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            await _check_response(resp)
+            try:
+                response_data = await resp.json()
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "OpenAI API returned an invalid JSON response"
+                ) from exc
+    return _parse_responses_analysis(
+        response_data,
+        require_web_search=web_search_enabled,
+    )
+
+
+async def get_case_chat_claim_proposals(
+    api_key: str,
+    *,
+    target_persona: str,
+    user_message: str,
+    assistant_answer: str,
+    sources,
+    model: str = "gpt-5.4",
+    api_base_url: str = DEFAULT_AI_API_BASE_URL,
+    timeout_seconds: int = 180,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
+):
+    """Extract narrow, reviewable Persona proposals from one chat turn."""
+    source_catalog = [
+        {
+            "title": str(source.get("title", ""))[:300],
+            "url": str(source.get("url", ""))[:2000],
+        }
+        for source in list(sources or [])[:100]
+        if isinstance(source, dict)
+    ]
+    url = _ai_api_url(
+        api_base_url,
+        "responses",
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    instructions = """Extract only reviewable public-biographical proposals for
+the named OpenLedger Persona. A user_statement proposal must be explicitly
+asserted in the analyst message; never convert the assistant's inference into a
+user statement. Cap its confidence at 50, use null for source and coordinate
+fields, and omit ambiguity. A public_web proposal must be explicitly supported
+by the assistant answer and one exact URL from the citation catalogue; cap
+confidence at 85. Extrapolations, predictions, and hypotheses must never become
+Persona proposals. Never propose email, phone, private address, finances,
+vehicles, criminal records, sensitive traits, or relationships. For a cited
+coarse current location only, an approximate city or region map center may be
+included. These records always require human review. Return an empty list when
+nothing qualifies."""
+    structured_input = json.dumps(
+        {
+            "target_persona": str(target_persona)[:500],
+            "analyst_message": str(user_message)[:12_000],
+            "assistant_answer": str(assistant_answer)[:30_000],
+            "citation_catalogue": source_catalog,
+        },
+        ensure_ascii=False,
+    )
+    payload = {
+        "model": model,
+        "instructions": instructions,
+        "input": structured_input,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "openledger_case_chat_persona_proposals",
+                "strict": True,
+                "schema": CASE_CHAT_PROPOSAL_SCHEMA,
+            }
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            await _check_response(resp)
+            try:
+                response_data = await resp.json()
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "OpenAI API returned an invalid JSON response"
+                ) from exc
+    return _parse_structured_response(response_data)
 
 
 async def get_ai_evidence_proposals(

@@ -15,6 +15,7 @@ from maigret.web.case_store import (
     persona_claims,
     utcnow,
 )
+from maigret.web.persona_intelligence import extract_case_chat_persona_claims
 
 
 @pytest.fixture
@@ -99,6 +100,83 @@ def test_active_job_cannot_be_deleted(store):
     job_id = store.create_investigation(["alice"], {})
     with pytest.raises(ValueError, match="Active investigations"):
         store.delete_job(job_id)
+
+
+def test_case_chat_is_durable_and_persona_proposals_retain_message_provenance(store):
+    job_id = store.create_investigation(["alice"], {})
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    case_id = case["id"]
+    persona_id = case["personas"][0]["id"]
+    user_message = store.append_case_chat_message(
+        case_id,
+        role="user",
+        author="field.analyst",
+        content="Alice works at Acme Labs.",
+        persona_id=persona_id,
+    )
+    assistant_message = store.append_case_chat_message(
+        case_id,
+        role="assistant",
+        author="OpenLedger AI",
+        content="That statement is unverified and can be proposed for review.",
+        persona_id=persona_id,
+        proposals={"status": "processing", "count": 0},
+        model="test-model",
+    )
+    diagnostics = {}
+    candidates = extract_case_chat_persona_claims(
+        [
+            {
+                "field_name": "company",
+                "value": "Acme Labs",
+                "confidence": 70,
+                "evidence_basis": "user_statement",
+                "source_url": None,
+                "source_title": None,
+                "reason": "The analyst explicitly supplied this employer.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            }
+        ],
+        sources=[],
+        target_persona="alice",
+        model="test-model",
+        user_message=user_message["content"],
+        user_message_id=user_message["id"],
+        assistant_message_id=assistant_message["id"],
+        provided_by="field.analyst",
+        diagnostics=diagnostics,
+    )
+    synchronized = store.sync_case_chat_persona_claims(
+        case_id, persona_id, candidates
+    )
+    store.update_case_chat_message_proposals(
+        assistant_message["id"],
+        {
+            "status": "pending_review",
+            "count": synchronized["count"],
+            "persona_id": persona_id,
+        },
+    )
+
+    retained = store.list_case_chat_messages(case_id)
+    assert [message["role"] for message in retained] == ["user", "assistant"]
+    assert retained[0]["content"] == "Alice works at Acme Labs."
+    assert retained[1]["proposals"]["status"] == "pending_review"
+    claim = next(
+        item
+        for item in store.get_persona(persona_id)["claims"]
+        if item["field_name"] == "company"
+    )
+    assert claim["review_status"] == "pending"
+    assert claim["confidence"] == 50
+    assert claim["source_engine"] == "case_chat_user_statement"
+    assert claim["evidence"][0]["details"]["unverified_user_statement"] is True
+    lineage = store.get_claim_lineage(claim["id"])
+    assert lineage[0]["provenance_type"] == "case_chat_message"
+    assert lineage[0]["chat_message_id"] == user_message["id"]
+    assert diagnostics["accepted"] == 1
 
 
 def test_legacy_terminal_result_is_imported_once(store):

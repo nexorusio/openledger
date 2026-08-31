@@ -1,5 +1,6 @@
 from maigret.web.persona_intelligence import (
     extract_ai_persona_claims,
+    extract_case_chat_persona_claims,
     extract_persona_claims,
     group_claims,
 )
@@ -298,3 +299,106 @@ def test_ai_location_map_center_is_reviewable_and_invalid_coordinates_are_explai
         "accepted": 1,
         "rejected": {"invalid_coordinate_proposal": 1},
     }
+
+
+def test_case_chat_keeps_user_statements_and_cited_research_separate():
+    diagnostics = {}
+    claims = extract_case_chat_persona_claims(
+        [
+            {
+                "field_name": "company",
+                "value": "Acme Labs",
+                "confidence": 90,
+                "evidence_basis": "user_statement",
+                "source_url": None,
+                "source_title": None,
+                "reason": "The analyst explicitly supplied the employer.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            },
+            {
+                "field_name": "occupation",
+                "value": "Research engineer",
+                "confidence": 79,
+                "evidence_basis": "public_web",
+                "source_url": "https://example.test/alice",
+                "source_title": "Official biography",
+                "reason": "The official biography states this occupation.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            },
+            {
+                "field_name": "summary",
+                "value": "Alice is likely influential.",
+                "confidence": 45,
+                "evidence_basis": "user_statement",
+                "source_url": None,
+                "source_title": None,
+                "reason": "This is an inference rather than supplied evidence.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            },
+        ],
+        sources=[
+            {
+                "title": "Official biography",
+                "url": "https://example.test/alice",
+            }
+        ],
+        target_persona="alice",
+        model="test-model",
+        user_message="Alice works at Acme Labs.",
+        user_message_id="user-message",
+        assistant_message_id="assistant-message",
+        provided_by="field.analyst",
+        diagnostics=diagnostics,
+    )
+
+    assert {claim["field_name"] for claim in claims} == {"company", "occupation"}
+    user_claim = next(
+        claim for claim in claims if claim["evidence_basis"] == "user_statement"
+    )
+    web_claim = next(
+        claim for claim in claims if claim["evidence_basis"] == "public_web"
+    )
+    assert user_claim["confidence"] == 50
+    assert user_claim["provenance_message_id"] == "user-message"
+    assert user_claim["evidence"][0]["source_url"] == ""
+    assert web_claim["confidence"] == 79
+    assert web_claim["provenance_message_id"] == "assistant-message"
+    assert web_claim["evidence"][0]["source_url"] == "https://example.test/alice"
+    assert diagnostics["rejected"]["unsupported_user_statement_field"] == 1
+
+
+def test_case_chat_rejects_model_values_not_explicitly_in_user_message():
+    diagnostics = {}
+    claims = extract_case_chat_persona_claims(
+        [
+            {
+                "field_name": "company",
+                "value": "Invented Corporation",
+                "confidence": 50,
+                "evidence_basis": "user_statement",
+                "source_url": None,
+                "source_title": None,
+                "reason": "The model guessed this company.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            }
+        ],
+        sources=[],
+        target_persona="alice",
+        model="test-model",
+        user_message="Please evaluate Alice.",
+        user_message_id="user-message",
+        assistant_message_id="assistant-message",
+        provided_by="field.analyst",
+        diagnostics=diagnostics,
+    )
+
+    assert claims == []
+    assert diagnostics["rejected"]["not_explicitly_user_provided"] == 1

@@ -116,6 +116,14 @@ caps confidence, and rejects sensitive or malformed suggestions. Accepted
 suggestions enter the Persona review queue as pending. AI cannot approve a
 record, and repeating analysis never clears an analyst rejection.
 
+Each case also has a persistent chat workspace. All messages remain in
+PostgreSQL with their actor, optional Persona target, citations, model, and
+proposal result. Chat reuses the configured OpenAI key and model; it does not add
+another service. Public-web research is enabled per message. When an analyst
+asks to propose supported facts, cited findings and explicit user statements
+enter the existing Persona queue as pending records. Inferences and
+extrapolations stay in the conversation and are never stored as Persona facts.
+
 Category and country filters are selected in the new-investigation form and are
 stored with that case rather than applied globally. Country codes describe where
 sources are focused; they do not assert or filter the subject's location.
@@ -133,14 +141,22 @@ approved internal endpoints for an isolated or sensitive deployment. Set
 
 ## Security model
 
-This setup is intended for one operator account and keeps port 5000 private.
-The application login uses a protected salted password hash, 12-hour sessions,
-CSRF protection, sign-in rate limiting, password change, and logout. Use a
-database-backed identity provider, per-user authorization, and audit logs
-before exposing OpenLedger as a true multi-user service. Gunicorn intentionally
-runs one web worker with multiple threads. Investigation execution belongs to
-the separate worker service; job state and replayable progress events are stored
-in PostgreSQL, while report files remain in the mounted runtime directory for
+This setup keeps port 5000 private and supports two application roles in the
+existing protected authentication file. The initial account is an
+administrator. Administrators can manage analyst accounts and system settings;
+analysts can use every investigation, case, Persona, relationship, timeline,
+history, and chat workspace but cannot open Settings or manage users. Every user
+may change their own password. Removing a user or changing their password
+invalidates that user's existing sessions.
+
+The application login uses protected salted password hashes, 12-hour sessions,
+CSRF protection, sign-in rate limiting, password change, and logout. This
+application-level RBAC does not replace a client's identity provider, case-level
+authorization, classification policy, or audit export. Add those controls before
+connecting multi-team production data. Gunicorn intentionally runs one web
+worker with multiple threads. Investigation execution belongs to the separate
+worker service; job state and replayable progress events are stored in
+PostgreSQL, while report files remain in the mounted runtime directory for
 compatibility.
 
 The application and worker run as unprivileged UID/GID 10001. Docker excludes

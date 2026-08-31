@@ -107,8 +107,12 @@
             <div class="security-callout mt-3">
                 <i data-lucide="plug-zap"></i>
                 <span>
+                    {% if current_role == 'admin' %}
                     OpenAI is not connected. Configure the protected server connection in
                     <a href="{{ url_for('settings_update', section='connections') }}">Settings</a>.
+                    {% else %}
+                    OpenAI is not connected. Ask an administrator to configure the protected server connection.
+                    {% endif %}
                 </span>
             </div>
             {% endif %}

@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+
+{% block title %}Access denied | OpenLedger{% endblock %}
+{% block breadcrumb %}Access denied{% endblock %}
+
+{% block content %}
+<section class="empty-state panel-card">
+    <i data-lucide="shield-x"></i>
+    <h1>Administrator access required</h1>
+    <p>This account can use investigation, case, Persona, relationship, and chat workspaces, but cannot open system settings.</p>
+    <a href="{{ url_for('index') }}" class="btn btn-primary">Return to workspace</a>
+</section>
+{% endblock %}

@@ -97,11 +97,50 @@ def test_create_auth_script_hashes_password_and_protects_file(tmp_path):
     )
 
     payload = json.loads(auth_file.read_text(encoding="utf-8"))
-    assert payload["username"] == "operator"
-    assert payload["password"]["algorithm"] == "pbkdf2_sha256"
+    assert payload["schema_version"] == 2
+    assert payload["users"][0]["username"] == "operator"
+    assert payload["users"][0]["role"] == "admin"
+    assert payload["users"][0]["password"]["algorithm"] == "pbkdf2_sha256"
     assert password not in auth_file.read_text(encoding="utf-8")
     assert os.stat(auth_file).st_mode & 0o777 == 0o600
     assert len(payload["revision"]) >= 16
+    assert len(payload["users"][0]["revision"]) >= 16
+
+
+def test_create_auth_password_reset_preserves_existing_analysts(tmp_path):
+    auth_file = tmp_path / "secrets" / "auth.json"
+    script = str(REPOSITORY_ROOT / "deploy" / "create_auth.py")
+    subprocess.run(
+        [script, str(auth_file), "admin"],
+        input="initial-admin-password",
+        text=True,
+        check=True,
+    )
+    payload = json.loads(auth_file.read_text(encoding="utf-8"))
+    payload["users"].append(
+        {
+            "username": "field.analyst",
+            "role": "analyst",
+            "revision": "analyst-revision-value-1234",
+            "password": payload["users"][0]["password"],
+        }
+    )
+    auth_file.write_text(json.dumps(payload), encoding="utf-8")
+
+    subprocess.run(
+        [script, str(auth_file), "replacement-admin"],
+        input="replacement-admin-password",
+        text=True,
+        check=True,
+    )
+    updated = json.loads(auth_file.read_text(encoding="utf-8"))
+
+    assert [user["username"] for user in updated["users"]] == [
+        "replacement-admin",
+        "field.analyst",
+    ]
+    assert updated["users"][0]["role"] == "admin"
+    assert updated["users"][1]["role"] == "analyst"
 
 
 def test_create_auth_rejects_short_password_without_echoing_it(tmp_path):
