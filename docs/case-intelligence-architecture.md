@@ -205,13 +205,24 @@ second stage receives the assessment and its citation catalogue without browsing
 again, then returns a strict JSON Schema payload. OpenLedger treats that payload
 as untrusted and validates it again before storage.
 
-The initial allowlist is intentionally limited to public-biographical fields:
-summary, full name, coarse current location, occupation, company, public social
-account, website, and photograph. Every accepted suggestion must identify an
-investigated username, cite an exact URL returned by the research stage, contain
-a review rationale, and use confidence between 40 and 85. Email, phone, private
-address, finances, vehicles, criminal records, sensitive traits, and inferred
-relationships are rejected at the server boundary even if the model emits them.
+The allowlist is intentionally limited to public-biographical and explicit public
+contact fields: summary, full name, coarse current location, occupation,
+affiliation, public social account, website, photograph, email, phone, and a
+published institutional or business contact address. `company` remains the
+backward-compatible storage key for affiliations such as employers, education
+institutions, associations, and organizations. Every accepted web suggestion
+must identify an investigated username, cite an exact URL returned by the
+research stage, contain a review rationale, and use confidence between 40 and
+85. Contact values must be exact, never derived from usernames or naming
+patterns. Private or residential addresses, finances, vehicles, criminal
+records, sensitive traits, and inferred relationships remain rejected.
+
+In One subject mode, exact email and phone identifiers supplied in the
+investigation form also become 50-confidence pending claims with
+`source_engine=investigation_input`. They remain unverified until an analyst
+reviews them. They are not attached in Independent subjects mode because the
+owning Persona would be ambiguous. Email registration observations can support
+account discovery, but do not establish an address or current location.
 
 Accepted suggestions use `source_engine=openai_web_research` and
 `evidence_type=cited_public_web`. They enter the same pending review queue as
@@ -267,10 +278,10 @@ approved claims. It creates a bipartite graph:
 
 - Persona nodes represent reviewed subjects.
 - Attribute nodes represent approved shared values such as a location,
-  company, email, phone, occupation, website, vehicle, or public account.
+  affiliation, email, phone, occupation, website, vehicle, or public account.
 - Edges mean only “this Persona has an approved claim with this value.”
 
-Two people connected to the same city or company have a shared-attribute lead,
+Two people connected to the same city or affiliation have a shared-attribute lead,
 not a confirmed personal or social relationship. Approximate matching,
 directional social interactions, ownership, and temporal co-location require
 separate evidence types and review policies before they become graph edges.

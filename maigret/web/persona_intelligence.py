@@ -7,6 +7,7 @@ import hashlib
 import ipaddress
 import json
 import math
+import re
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
@@ -42,12 +43,15 @@ FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
         ),
     },
     {
-        "key": "professional",
-        "title": "Professional and corporate",
+        "key": "affiliations",
+        "title": "Affiliations",
+        "description": (
+            "Employment, education, membership, institutional and ownership links."
+        ),
         "fields": (
-            ("occupation", "Occupation"),
-            ("company", "Company"),
-            ("company_ownership", "Company ownership"),
+            ("occupation", "Role or occupation"),
+            ("company", "Organization, institution or company"),
+            ("company_ownership", "Ownership or leadership"),
         ),
     },
     {
@@ -60,6 +64,20 @@ FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
         ),
     },
 )
+
+FIELD_DISPLAY_LABELS = {
+    field_name: label
+    for group in FIELD_GROUPS
+    for field_name, label in group["fields"]
+}
+
+
+def field_display_label(field_name: Any) -> str:
+    """Return the current product label for a backward-compatible storage key."""
+    normalized = str(field_name or "").strip()
+    return FIELD_DISPLAY_LABELS.get(
+        normalized, normalized.replace("_", " ").title()
+    )
 
 
 FIELD_ALIASES = {
@@ -94,8 +112,17 @@ FIELD_ALIASES = {
     "photo_url": "photograph",
     "picture": "photograph",
     "employer": "company",
+    "affiliation": "company",
+    "affiliations": "company",
+    "association": "company",
+    "college": "company",
+    "educational_institution": "company",
+    "institution": "company",
+    "membership_organization": "company",
     "organization": "company",
     "organisation": "company",
+    "school": "company",
+    "university": "company",
     "company": "company",
     "job": "occupation",
     "job_title": "occupation",
@@ -172,6 +199,9 @@ CONFIDENCE_SCORES = {
 AI_PROPOSAL_FIELDS = {
     "summary",
     "full_name",
+    "email",
+    "phone",
+    "address",
     "current_location",
     "occupation",
     "company",
@@ -183,6 +213,9 @@ AI_PROPOSAL_FIELDS = {
 AI_FIELD_LIMITS = {
     "summary": 1200,
     "full_name": 300,
+    "email": 254,
+    "phone": 80,
+    "address": 1000,
     "current_location": 300,
     "occupation": 500,
     "company": 500,
@@ -190,6 +223,87 @@ AI_FIELD_LIMITS = {
     "website": 2000,
     "photograph": 2000,
 }
+
+_EMAIL_VALUE_PATTERN = re.compile(
+    r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+$",
+    re.IGNORECASE,
+)
+_PHONE_VALUE_PATTERN = re.compile(r"^[0-9+().\-\s]+$")
+
+
+def _validated_contact_value(field_name: str, value: Any) -> str:
+    """Return one bounded explicit contact value, never an inferred derivative."""
+    normalized = " ".join(str(value or "").split())
+    if field_name == "email":
+        normalized = normalized.casefold()
+        if len(normalized) > 254 or not _EMAIL_VALUE_PATTERN.fullmatch(normalized):
+            return ""
+    elif field_name == "phone":
+        digits = re.sub(r"\D", "", normalized)
+        if not _PHONE_VALUE_PATTERN.fullmatch(normalized) or not 7 <= len(digits) <= 15:
+            return ""
+    elif field_name == "address" and len(normalized) < 5:
+        return ""
+    return normalized
+
+
+def extract_investigation_identifier_claims(
+    investigation_spec: Any,
+) -> List[Dict[str, Any]]:
+    """Turn exact same-subject contact inputs into pending, reviewable claims.
+
+    Investigation identifiers are analyst-provided context, not verified facts. They
+    therefore enter the same review queue as every other claim and are never attached
+    when independent-subject mode leaves their Persona ownership ambiguous.
+    """
+    if (
+        not isinstance(investigation_spec, dict)
+        or investigation_spec.get("processing_mode") != "same_subject"
+    ):
+        return []
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+    for identifier in list(investigation_spec.get("identifiers") or [])[:24]:
+        if not isinstance(identifier, dict):
+            continue
+        field_name = str(identifier.get("type") or "").strip().casefold()
+        if field_name not in {"email", "phone"}:
+            continue
+        value = _validated_contact_value(field_name, identifier.get("value"))
+        if not value:
+            continue
+        fingerprint = claim_fingerprint(field_name, value)
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        evidence = {
+            "evidence_type": "operator_provided_identifier",
+            "source_name": "Investigation input",
+            "source_url": "",
+            "details": {
+                "identifier_type": field_name,
+                "human_review_required": True,
+                "operator_provided": True,
+                "unverified_user_statement": True,
+            },
+        }
+        candidates.append(
+            {
+                "field_name": field_name,
+                "value": value,
+                "display_value": value,
+                "normalized_value": _normalized_value(value),
+                "confidence": 50,
+                "fingerprint": fingerprint,
+                "source_engine": "investigation_input",
+                "latitude": None,
+                "longitude": None,
+                "evidence": [
+                    dict(evidence, fingerprint=evidence_fingerprint(evidence))
+                ],
+            }
+        )
+    return candidates
 
 
 def _public_url(value: Any) -> str:
@@ -628,6 +742,11 @@ def extract_ai_persona_claims(
             if not value or value not in source_catalog:
                 reject("invalid_public_url")
                 continue
+        elif field_name in {"email", "phone", "address"}:
+            value = _validated_contact_value(field_name, value)
+            if not value:
+                reject("invalid_contact_value")
+                continue
         else:
             value = " ".join(value.split())
         try:
@@ -813,7 +932,7 @@ def extract_case_chat_persona_claims(
         for candidate in candidates
     }
     normalized_user_message = " ".join(str(user_message or "").split()).casefold()
-    allowed_user_fields = AI_PROPOSAL_FIELDS - {"summary"}
+    allowed_user_fields = AI_PROPOSAL_FIELDS - {"summary", "address"}
     for raw in user_proposals:
         field_name = str(raw.get("field_name") or "").strip()
         if field_name not in allowed_user_fields:
@@ -828,6 +947,11 @@ def extract_case_chat_persona_claims(
             value = _public_url(value)
             if not value:
                 reject("invalid_public_url")
+                continue
+        elif field_name in {"email", "phone", "address"}:
+            value = _validated_contact_value(field_name, value)
+            if not value:
+                reject("invalid_contact_value")
                 continue
         else:
             value = " ".join(value.split())
@@ -927,5 +1051,15 @@ def group_claims(claims: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
                     ),
                 }
             )
-        groups.append({"key": group["key"], "title": group["title"], "fields": fields})
+        groups.append(
+            {
+                "key": group["key"],
+                "title": group["title"],
+                "description": group.get(
+                    "description",
+                    "Approved information and evidence awaiting analyst review.",
+                ),
+                "fields": fields,
+            }
+        )
     return groups

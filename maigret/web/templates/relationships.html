@@ -113,7 +113,7 @@
                 <div class="relationship-field-filters">
                     {% for field_name, count in graph.stats.field_counts | dictsort %}
                     <button type="button" class="relationship-filter active" data-relationship-field="{{ field_name }}" aria-pressed="true">
-                        <span>{{ field_name | replace('_', ' ') | title }}</span><strong>{{ count }}</strong>
+                        <span>{{ field_display_label(field_name) }}</span><strong>{{ count }}</strong>
                     </button>
                     {% endfor %}
                 </div>
@@ -172,7 +172,7 @@
             <p>Complete an investigation or run a cited AI assessment. New findings will enter as pending records with their sources attached.</p>
             {% else %}
             <h3>No shared approved attributes yet</h3>
-            <p>Select All cases or approve an exact matching location, company, contact, account, occupation, website, vehicle, or ownership record on at least two Persona profiles.</p>
+            <p>Select All cases or approve an exact matching location, affiliation, contact, account, occupation, website, vehicle, or ownership record on at least two Persona profiles.</p>
             {% endif %}
         </div>
         {% endif %}

@@ -20,6 +20,9 @@ _LOOPBACK_AI_HOSTS = {"localhost", "127.0.0.1", "::1"}
 AI_EVIDENCE_FIELDS = (
     "summary",
     "full_name",
+    "email",
+    "phone",
+    "address",
     "current_location",
     "occupation",
     "company",
@@ -715,8 +718,14 @@ user statement. Cap its confidence at 50, use null for source and coordinate
 fields, and omit ambiguity. A public_web proposal must be explicitly supported
 by the assistant answer and one exact URL from the citation catalogue; cap
 confidence at 85. Extrapolations, predictions, and hypotheses must never become
-Persona proposals. Never propose email, phone, private address, finances,
-vehicles, criminal records, sensitive traits, or relationships. For a cited
+Persona proposals. Email and phone values must be exact and explicitly supplied
+by the analyst or explicitly published by the cited source. Address proposals
+are allowed only with public_web evidence and must be explicitly published
+institutional or business contact addresses; never propose or infer a private
+residence. Use the company field for any explicit
+affiliation, including an employer, educational institution, association, or
+organization. Never propose finances, vehicles, criminal records, sensitive
+traits, or relationships. For a cited
 coarse current location only, an approximate city or region map center may be
 included. These records always require human review. Return an empty list when
 nothing qualifies."""
@@ -798,8 +807,11 @@ async def get_ai_evidence_proposals(
 Return only facts explicitly supported by the supplied assessment and citation catalogue. Every
 proposal must use a source_url exactly as written in that catalogue and must identify exactly one
 investigated username. Omit uncertain values instead of guessing. Do not infer or propose private
-addresses, email addresses, phone numbers, finances, vehicles, criminal records, sensitive traits,
-or interpersonal relationships. A summary must be a concise public-professional description, not a
+or residential addresses. Email and phone values must be exact and explicitly published by the
+cited source. Address values must be explicitly published institutional or business contact
+addresses. Use the company field for any explicit affiliation, including an employer, educational
+institution, association, or organization. Never propose finances, vehicles, criminal records,
+sensitive traits, or interpersonal relationships. A summary must be a concise public-biographical description, not a
 speculative biography. Confidence measures source support, never identity certainty alone. Keep it
 at or below 85. For a coarse current_location only, latitude and longitude may contain an
 approximate city or region map center when that place is explicitly supported; set

@@ -2300,7 +2300,10 @@ class CaseStore:
             extract_profile_url_evidence_claims,
             extract_user_scanner_claims,
         )
-        from maigret.web.persona_intelligence import extract_persona_claims
+        from maigret.web.persona_intelligence import (
+            extract_investigation_identifier_claims,
+            extract_persona_claims,
+        )
 
         now = utcnow()
         synchronized = 0
@@ -2339,6 +2342,16 @@ class CaseStore:
                 and len(persona_rows) == 1
                 else None
             )
+            if grouped_persona_id:
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=grouped_persona_id,
+                    job_id=job_id,
+                    candidates=extract_investigation_identifier_claims(
+                        investigation_spec
+                    ),
+                    now=now,
+                )
             for report in result.get("individual_reports") or []:
                 username = str(report.get("username") or "").strip()
                 persona_id = grouped_persona_id or personas_by_name.get(

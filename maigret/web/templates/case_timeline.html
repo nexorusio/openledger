@@ -115,7 +115,7 @@
                     {% else %}
                     <div class="timeline-claim">
                         <div>
-                            <span>{{ event.claim.field_name | replace('_', ' ') | title }}</span>
+                            <span>{{ field_display_label(event.claim.field_name) }}</span>
                             <strong>{{ event.claim.display_value }}</strong>
                         </div>
                         <a href="{{ url_for('persona_workspace', persona_id=event.persona.id) }}">{{ event.persona.display_name }} <i data-lucide="arrow-up-right"></i></a>

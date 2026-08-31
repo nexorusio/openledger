@@ -1,7 +1,9 @@
 from maigret.web.persona_intelligence import (
     extract_ai_persona_claims,
     extract_case_chat_persona_claims,
+    extract_investigation_identifier_claims,
     extract_persona_claims,
+    field_display_label,
     group_claims,
 )
 
@@ -51,6 +53,73 @@ def test_grouped_form_keeps_requested_empty_categories_visible():
     assert fields["financial_profile"] == []
     assert fields["vehicle_ownership"] == []
     assert fields["criminal_record"] == []
+
+    affiliations = next(group for group in groups if group["key"] == "affiliations")
+    assert affiliations["title"] == "Affiliations"
+    assert affiliations["description"].startswith("Employment, education")
+    assert [field["label"] for field in affiliations["fields"]] == [
+        "Role or occupation",
+        "Organization, institution or company",
+        "Ownership or leadership",
+    ]
+    assert field_display_label("company") == "Organization, institution or company"
+    assert field_display_label("unknown_field") == "Unknown Field"
+
+
+def test_education_and_membership_sources_map_to_backward_compatible_affiliations():
+    claims = extract_persona_claims(
+        {
+            "username": "alice",
+            "claimed_profiles": [
+                {
+                    "site_name": "Institutional profile",
+                    "url": "https://university.example.test/alice",
+                    "confidence": "strong",
+                    "evidence": {
+                        "university": "Example University",
+                        "association": "Example Research Association",
+                    },
+                }
+            ],
+        }
+    )
+
+    affiliations = [claim for claim in claims if claim["field_name"] == "company"]
+    assert {claim["display_value"] for claim in affiliations} == {
+        "Example University",
+        "Example Research Association",
+    }
+
+
+def test_same_subject_contact_identifiers_become_pending_claim_candidates():
+    claims = extract_investigation_identifier_claims(
+        {
+            "processing_mode": "same_subject",
+            "identifiers": [
+                {"type": "email", "value": "Alice@Example.test"},
+                {"type": "phone", "value": "+62 812-3456-7890"},
+                {"type": "full_name", "value": "Alice Example"},
+            ],
+        }
+    )
+
+    assert {claim["field_name"] for claim in claims} == {"email", "phone"}
+    email = next(claim for claim in claims if claim["field_name"] == "email")
+    assert email["display_value"] == "alice@example.test"
+    assert email["confidence"] == 50
+    assert email["source_engine"] == "investigation_input"
+    assert email["evidence"][0]["evidence_type"] == "operator_provided_identifier"
+    assert email["evidence"][0]["details"]["human_review_required"] is True
+
+    assert (
+        extract_investigation_identifier_claims(
+            {
+                "processing_mode": "independent",
+                "identifiers": [{"type": "email", "value": "alice@example.test"}],
+            }
+        )
+        == []
+    )
 
 
 def test_socid_account_intelligence_is_bounded_and_keeps_metadata_as_evidence():
@@ -252,6 +321,61 @@ def test_ai_public_account_proposal_keeps_structured_account_value():
     }
 
 
+def test_cited_public_contacts_are_exact_validated_and_pending_only():
+    source = {
+        "title": "Official institutional profile",
+        "url": "https://university.example.test/alice",
+    }
+    proposals = [
+        {
+            "username": "alice",
+            "field_name": "email",
+            "value": "Alice@University.Example",
+            "confidence": 75,
+            "source_url": source["url"],
+            "source_title": source["title"],
+            "reason": "The institution explicitly publishes this email.",
+        },
+        {
+            "username": "alice",
+            "field_name": "phone",
+            "value": "+62 21 555 0100",
+            "confidence": 70,
+            "source_url": source["url"],
+            "source_title": source["title"],
+            "reason": "The institution explicitly publishes this phone number.",
+        },
+        {
+            "username": "alice",
+            "field_name": "email",
+            "value": "derived from the username",
+            "confidence": 80,
+            "source_url": source["url"],
+            "source_title": source["title"],
+            "reason": "This is not an exact contact value.",
+        },
+    ]
+    diagnostics = {}
+
+    claims = extract_ai_persona_claims(
+        proposals,
+        sources=[source],
+        usernames=["alice"],
+        model="test-model",
+        diagnostics=diagnostics,
+    )
+
+    assert {claim["field_name"] for claim in claims} == {"email", "phone"}
+    assert next(
+        claim for claim in claims if claim["field_name"] == "email"
+    )["display_value"] == "alice@university.example"
+    assert all(
+        claim["evidence"][0]["details"]["human_review_required"] is True
+        for claim in claims
+    )
+    assert diagnostics["rejected"] == {"invalid_contact_value": 1}
+
+
 def test_ai_location_map_center_is_reviewable_and_invalid_coordinates_are_explained():
     diagnostics = {}
     claims = extract_ai_persona_claims(
@@ -341,6 +465,18 @@ def test_case_chat_keeps_user_statements_and_cited_research_separate():
                 "longitude": None,
                 "coordinate_precision": None,
             },
+            {
+                "field_name": "address",
+                "value": "12 Private Street",
+                "confidence": 50,
+                "evidence_basis": "user_statement",
+                "source_url": None,
+                "source_title": None,
+                "reason": "A private address cannot enter from a chat statement.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            },
         ],
         sources=[
             {
@@ -350,7 +486,7 @@ def test_case_chat_keeps_user_statements_and_cited_research_separate():
         ],
         target_persona="alice",
         model="test-model",
-        user_message="Alice works at Acme Labs.",
+        user_message="Alice works at Acme Labs and lives at 12 Private Street.",
         user_message_id="user-message",
         assistant_message_id="assistant-message",
         provided_by="field.analyst",
@@ -370,7 +506,7 @@ def test_case_chat_keeps_user_statements_and_cited_research_separate():
     assert web_claim["confidence"] == 79
     assert web_claim["provenance_message_id"] == "assistant-message"
     assert web_claim["evidence"][0]["source_url"] == "https://example.test/alice"
-    assert diagnostics["rejected"]["unsupported_user_statement_field"] == 1
+    assert diagnostics["rejected"]["unsupported_user_statement_field"] == 2
 
 
 def test_case_chat_rejects_model_values_not_explicitly_in_user_message():
