@@ -1,5 +1,6 @@
 from flask import (
     Flask,
+    jsonify,
     render_template,
     request,
     send_from_directory,
@@ -338,18 +339,13 @@ def safe_log_value(value: Any, *, limit: int = 500) -> str:
 
 def record_internal_error(public_message: str, error: Exception, **context) -> str:
     """Log one sanitized diagnostic and return a non-sensitive client message."""
+    del context  # Never place request-derived identifiers in application logs.
     reference = secrets.token_hex(6)
-    context_text = ' '.join(
-        f'{safe_log_value(key, limit=60)}={safe_log_value(value, limit=160)}'
-        for key, value in sorted(context.items())
-    )
     logging.error(
-        '%s [error_ref=%s error_type=%s detail=%s%s]',
-        public_message,
+        '%s [error_ref=%s error_type=%s]',
+        safe_log_value(public_message, limit=200),
         reference,
-        type(error).__name__,
-        safe_log_value(error),
-        f' {context_text}' if context_text else '',
+        safe_log_value(type(error).__name__, limit=100),
     )
     return f'{public_message}. Reference: {reference}.'
 
@@ -2883,11 +2879,11 @@ def case_chat_message(case_id):
                 assistant_record['id'], proposal_summary
             )
             assistant_record['proposals'] = proposal_summary
-        return {
-            'user_message': user_record,
-            'assistant_message': assistant_record,
-            'proposal_summary': proposal_summary,
-        }
+        return jsonify(
+            user_message=user_record,
+            assistant_message=assistant_record,
+            proposal_summary=proposal_summary,
+        )
     except AIEnrichmentContractError as error:
         record_internal_error(
             'Cited case-chat research contract failed', error, case_id=case_id
@@ -2899,7 +2895,8 @@ def case_chat_message(case_id):
             )
         }, 502
     except ValueError as error:
-        return {'error': str(error)}, 400
+        record_internal_error('Case chat request rejected', error)
+        return jsonify(error='Case chat request could not be processed.'), 400
     except Exception as error:
         record_internal_error('Case chat failed', error, case_id=case_id)
         return {

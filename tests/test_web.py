@@ -174,6 +174,8 @@ def test_internal_errors_are_generic_for_clients_and_single_line_in_logs(
     log_message = caplog.records[-1].getMessage()
     assert '\n' not in log_message
     assert '\r' not in log_message
+    assert 'upstream secret' not in log_message
+    assert 'FORGED' not in log_message
 
 
 def test_failed_background_job_does_not_persist_upstream_exception_details(
@@ -976,6 +978,7 @@ def test_case_chat_persists_memory_research_and_pending_persona_proposals(
         )
 
         assert response.status_code == 200
+        assert response.content_type == 'application/json'
         payload = response.get_json()
         assert payload['assistant_message']['sources'][0]['title'] == (
             'Official biography'
@@ -998,6 +1001,41 @@ def test_case_chat_persists_memory_research_and_pending_persona_proposals(
         assert 'Alice works at Acme Labs.' in body
         assert 'Official biography' in body
         assert '1 Persona proposal' in body
+    finally:
+        store.dispose()
+
+
+def test_case_chat_does_not_expose_internal_validation_errors(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'case-chat-error.db'}", create_schema=True
+    )
+    monkeypatch.setattr(web_app, 'case_store', store)
+    try:
+        job_id = store.create_investigation(['alice'], {})
+        case_id = store.get_job(job_id)['case_id']
+
+        async def reject_chat(**_kwargs):
+            raise ValueError('private upstream validation detail')
+
+        monkeypatch.setattr(web_app, 'get_case_chat_response', reject_chat)
+        with client.session_transaction() as browser_session:
+            browser_session['csrf_token'] = 'test-csrf'
+
+        response = client.post(
+            f'/api/cases/{case_id}/chat',
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+            json={'message': 'Evaluate this information.'},
+        )
+
+        assert response.status_code == 400
+        assert response.content_type == 'application/json'
+        assert response.get_json() == {
+            'error': 'Case chat request could not be processed.'
+        }
+        assert 'private upstream' not in response.get_data(as_text=True)
     finally:
         store.dispose()
 
