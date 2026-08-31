@@ -1,4 +1,7 @@
 import asyncio
+import os
+import time
+from threading import Timer
 
 import pytest
 
@@ -121,6 +124,36 @@ def test_stop_route_rejects_missing_csrf(client, persistent_store):
     assert persistent_store.get_job(job_id)["status"] == "running"
 
 
+def test_persistent_worker_actively_interrupts_inflight_search_after_stop(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+
+    async def slow_search(*_args, **_kwargs):
+        await asyncio.sleep(2)
+        return {}
+
+    monkeypatch.setattr(web_app, "maigret_search", slow_search)
+    monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
+    monkeypatch.setattr(web_app, "PERSISTENT_CANCEL_POLL_SECONDS", 0.01)
+    request_stop = Timer(0.05, persistent_store.request_cancel, args=(job_id,))
+
+    started_at = time.monotonic()
+    request_stop.start()
+    try:
+        web_app.run_persistent_job(persistent_store, job)
+    finally:
+        request_stop.join()
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed < 1.5
+    cancelled = persistent_store.get_job(job_id)
+    assert cancelled["status"] == "cancelled"
+    assert cancelled["completed_at"] is not None
+    assert persistent_store.get_events(job_id)[-1]["event"]["type"] == "done"
+
+
 def test_queued_job_does_not_store_proxy_credentials(
     client, web_app, persistent_store, monkeypatch
 ):
@@ -219,6 +252,109 @@ def test_worker_shutdown_saves_partial_findings_as_interrupted_collection(
     assert done["status"] == "partial"
 
 
+def test_terminal_case_can_be_deleted_with_all_report_artifacts(
+    client, web_app, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    result = {
+        "status": "cancelled",
+        "session_folder": f"search_{job_id}",
+        "usernames": job["usernames"],
+        "error": "Stopped for test.",
+    }
+    persistent_store.finish(job_id, result)
+    case_id = job["case_id"]
+    report_directory = os.path.join(
+        web_app.app.config["REPORTS_FOLDER"], f"search_{job_id}"
+    )
+    os.makedirs(report_directory)
+    with open(
+        os.path.join(report_directory, "partial.json"), "w", encoding="utf-8"
+    ) as report_file:
+        report_file.write("{}")
+    web_app.job_results[job_id] = result
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "delete-case-csrf"
+
+    response = client.post(
+        f"/cases/{case_id}/delete",
+        data={"csrf_token": "delete-case-csrf"},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert "permanently deleted" in response.get_data(as_text=True)
+    assert persistent_store.get_case(case_id) is None
+    assert persistent_store.get_job(job_id) is None
+    assert not os.path.exists(report_directory)
+    assert job_id not in web_app.job_results
+
+
+def test_active_case_delete_is_refused_without_losing_data(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    case_id = persistent_store.get_job(job_id)["case_id"]
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "delete-case-csrf"
+
+    response = client.post(
+        f"/cases/{case_id}/delete",
+        data={"csrf_token": "delete-case-csrf"},
+        follow_redirects=True,
+    )
+
+    assert response.status_code == 200
+    assert "Stop the active investigation" in response.get_data(as_text=True)
+    assert persistent_store.get_case(case_id) is not None
+    assert persistent_store.get_job(job_id) is not None
+
+
+def test_case_delete_requires_csrf(client, persistent_store):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    persistent_store.finish(
+        job_id,
+        {"status": "cancelled", "usernames": job["usernames"]},
+    )
+
+    response = client.post(
+        f'/cases/{job["case_id"]}/delete',
+        data={"csrf_token": "invalid"},
+    )
+
+    assert response.status_code == 302
+    assert persistent_store.get_case(job["case_id"]) is not None
+    assert persistent_store.get_job(job_id) is not None
+
+
+def test_case_delete_rejects_symlinked_report_directory(
+    web_app, persistent_store, tmp_path
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    persistent_store.finish(
+        job_id,
+        {"status": "cancelled", "usernames": job["usernames"]},
+    )
+    outside_directory = tmp_path / "outside-reports"
+    outside_directory.mkdir()
+    sentinel = outside_directory / "preserve.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    os.makedirs(web_app.app.config["REPORTS_FOLDER"], exist_ok=True)
+    os.symlink(
+        outside_directory,
+        os.path.join(web_app.app.config["REPORTS_FOLDER"], f"search_{job_id}"),
+    )
+
+    with pytest.raises(ValueError, match="Invalid report session directory"):
+        web_app.delete_persisted_case(job["case_id"])
+
+    assert persistent_store.get_case(job["case_id"]) is not None
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+
+
 def test_child_worker_cancellation_is_not_recorded_as_completed(
     web_app, persistent_store, monkeypatch
 ):
@@ -283,10 +419,12 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "Cases" in cases_page
     assert "alice" in cases_page
     assert f'/cases/{case["id"]}' in cases_page
+    assert f'/cases/{case["id"]}/delete' in cases_page
 
     case_page = client.get(f'/cases/{case["id"]}').get_data(as_text=True)
     assert "Open structured profile" in case_page
     assert f"/personas/{persona_id}" in case_page
+    assert "Delete case" in case_page
 
     persona_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
     assert "Alice Example" in persona_page

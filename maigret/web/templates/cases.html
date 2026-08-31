@@ -51,6 +51,16 @@
                     <td>{{ case.updated_at or '—' }}</td>
                     <td class="text-end">
                         <a href="{{ url_for('case_workspace', case_id=case.id) }}" class="btn btn-sm btn-outline-secondary">Open case</a>
+                        <form method="POST"
+                              action="{{ url_for('delete_case_workspace', case_id=case.id) }}"
+                              class="d-inline"
+                              onsubmit="return confirm('Permanently delete this case, every investigation, report, chat message, Persona, and evidence record? This cannot be undone.');">
+                            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                            <button type="submit" class="btn btn-sm btn-outline-danger">
+                                <i data-lucide="trash-2"></i>
+                                Delete
+                            </button>
+                        </form>
                     </td>
                 </tr>
                 {% endfor %}

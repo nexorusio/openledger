@@ -136,13 +136,23 @@
             + ' email registrations found.';
     }
 
-    function stopScan() {
-        fetch('/api/scan/' + jobId + '/stop', {
-            method: 'POST',
-            headers: { 'X-OpenLedger-CSRF': csrfToken },
-        });
-        document.getElementById('live-status').textContent = 'Stopping…';
-        document.getElementById('stopBtn').disabled = true;
+    async function stopScan() {
+        const statusEl = document.getElementById('live-status');
+        const stopBtn = document.getElementById('stopBtn');
+        statusEl.textContent = 'Stopping…';
+        stopBtn.disabled = true;
+        try {
+            const response = await fetch('/api/scan/' + jobId + '/stop', {
+                method: 'POST',
+                headers: { 'X-OpenLedger-CSRF': csrfToken },
+            });
+            if (!response.ok && response.status !== 409) {
+                throw new Error('stop request failed');
+            }
+        } catch (_error) {
+            statusEl.textContent = 'The stop request could not be sent. Try again.';
+            stopBtn.disabled = false;
+        }
     }
 
     function onScanEvent(e) {
