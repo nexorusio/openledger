@@ -80,6 +80,7 @@ def test_index_renders(client):
     assert 'name="identifier_value"' in body
     assert '<form' in body
     assert 'Case source filters' in body
+    assert 'name="enable_github_profile_enrichment"' in body
     assert 'e.g. John Doe' in body
     assert 'Jati Pratomo' not in body
     assert 'Nexorus, urban planning' not in body
@@ -1354,6 +1355,96 @@ def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
     results_page = client.get(done_event['redirect']).get_data(as_text=True)
     assert 'GitHub' in results_page
     assert 'CSV Report' in results_page
+
+
+def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
+    client, web_app, monkeypatch
+):
+    requested_targets = []
+
+    async def fake_search(*args, **kwargs):
+        notify = kwargs['query_notify']
+        result = MaigretCheckResult(
+            username='alice',
+            site_name='GitHub',
+            site_url_user='https://github.com/alice',
+            status=MaigretCheckStatus.CLAIMED,
+            ids_data={},
+        )
+        notify.update(result)
+        return {'GitHub': {'status': result, 'url_user': result.site_url_user}}
+
+    async def fake_github_enrichment(target):
+        requested_targets.append(target)
+        return {
+            'source_engine': 'github_public_profile',
+            'subject_type': 'username',
+            'subject_value': 'alice',
+            'status': 'observed',
+            'site_name': 'GitHub',
+            'category': 'developer',
+            'source_url': 'https://github.com/alice',
+            'source_record_id': 'github-user:12345',
+            'extra': {
+                'api_version': '2026-03-10',
+                'github_id': 12345,
+                'login': 'alice',
+                'account_type': 'User',
+            },
+            'media': {},
+        }
+
+    monkeypatch.setattr(maigret, 'search', fake_search)
+    monkeypatch.setattr(
+        web_app, 'run_github_public_profile', fake_github_enrichment
+    )
+    monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
+
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={
+            'identifier_type': 'username',
+            'identifier_value': 'alice',
+            'processing_mode': 'independent',
+            'enable_github_profile_enrichment': 'on',
+        },
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
+    assert start.status_code == 200
+    job_id = start.get_json()['job_id']
+    body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
+    events = [
+        json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
+    ]
+
+    assert requested_targets == [
+        {
+            'investigated_username': 'alice',
+            'github_login': 'alice',
+            'profile_url': 'https://github.com/alice',
+        }
+    ]
+    collector_events = [
+        event
+        for event in events
+        if event.get('collector') == 'github-public-profile'
+    ]
+    assert [event['type'] for event in collector_events] == [
+        'collector_started',
+        'collector_completed',
+    ]
+    result = web_app.job_results[job_id]
+    assert result['github_enrichment_count'] == 1
+    assert result['collector_registration_count'] == 0
+    assert result['collector_observations'][0]['source_record_id'] == (
+        'github-user:12345'
+    )
 
 
 def test_live_scan_empty_username_rejected(client, web_app):

@@ -235,6 +235,7 @@ def build_investigation_plan(
     generate_variants = "generate_name_variants" in form
     allow_ai_context = "allow_ai_context" in form
     enable_user_scanner_email = "enable_user_scanner_email" in form
+    enable_github_profile_enrichment = "enable_github_profile_enrichment" in form
     if enable_user_scanner_email and processing_mode != "same_subject":
         raise InvestigationInputError(
             "User Scanner email evidence requires One subject mode so observations "
@@ -330,6 +331,7 @@ def build_investigation_plan(
         "generate_name_variants": generate_variants,
         "allow_ai_context": allow_ai_context,
         "enable_user_scanner_email": enable_user_scanner_email,
+        "enable_github_profile_enrichment": enable_github_profile_enrichment,
         "subject_label": subject_label,
         "identifiers": identifiers,
         "tags": tags,

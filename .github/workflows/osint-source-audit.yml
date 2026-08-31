@@ -1,0 +1,41 @@
+name: Governed OSINT source audit
+
+on:
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: osint-source-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  registry:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate governed source contracts
+        run: python .github/scripts/check_osint_sources.py
+
+  public-contract:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Smoke-test public source contracts
+        run: python .github/scripts/check_osint_sources.py --live

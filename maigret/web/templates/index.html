@@ -115,6 +115,15 @@
                 {% endif %}
 
                 <fieldset class="investigation-section">
+                    <legend class="form-label mb-2">Public profile enrichment</legend>
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="enable-github-profile-enrichment" name="enable_github_profile_enrichment">
+                        <label class="form-check-label" for="enable-github-profile-enrichment">Enrich claimed GitHub user profiles</label>
+                        <div class="form-text">Off by default. Contacts GitHub's public API only after OpenLedger finds a claimed GitHub account. Public profile fields become pending Persona evidence and are never approved automatically.</div>
+                    </div>
+                </fieldset>
+
+                <fieldset class="investigation-section">
                     <legend class="form-label mb-2">Result grouping</legend>
                     <div class="mode-selector">
                         <div class="mode-option">
@@ -242,6 +251,7 @@
     const generateToggle = document.getElementById('generate-name-variants');
     const aiContextToggle = document.getElementById('allow-ai-context');
     const userScannerToggle = document.getElementById('enable-user-scanner-email');
+    const githubEnrichmentToggle = document.getElementById('enable-github-profile-enrichment');
     const count = document.getElementById('query-plan-count');
     const summary = document.getElementById('query-plan-summary');
     const targets = document.getElementById('query-plan-targets');
@@ -351,7 +361,10 @@
         const scannerNote = userScannerToggle && userScannerToggle.checked
             ? ' Silent User Scanner email registrations will enter the same pending evidence review.'
             : '';
-        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${scannerNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
+        const githubNote = githubEnrichmentToggle && githubEnrichmentToggle.checked
+            ? ' Claimed GitHub user profiles will be enriched through the public API and queued for review.'
+            : '';
+        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${scannerNote}${githubNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
         error.hidden = true;
     }
 
@@ -412,7 +425,7 @@
             updateSourceTagSelects();
         });
     });
-    [generateToggle, aiContextToggle, userScannerToggle].filter(Boolean)
+    [generateToggle, aiContextToggle, userScannerToggle, githubEnrichmentToggle].filter(Boolean)
         .forEach(control => control.addEventListener('change', updatePlan));
     form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
     form.addEventListener('submit', event => {

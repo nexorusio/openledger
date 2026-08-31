@@ -145,6 +145,31 @@ def test_user_scanner_email_collection_is_explicit_and_requires_grouping():
         )
 
 
+def test_github_profile_enrichment_is_explicit_and_available_in_both_modes():
+    base = {
+        "identifier_type": ["username"],
+        "identifier_value": ["alice"],
+    }
+
+    assert build_investigation_plan(base)["enable_github_profile_enrichment"] is False
+    assert (
+        build_investigation_plan({**base, "enable_github_profile_enrichment": "on"})[
+            "enable_github_profile_enrichment"
+        ]
+        is True
+    )
+    assert (
+        build_investigation_plan(
+            {
+                **base,
+                "processing_mode": "independent",
+                "enable_github_profile_enrichment": "on",
+            }
+        )["enable_github_profile_enrichment"]
+        is True
+    )
+
+
 def test_ai_context_requires_explicit_consent():
     base = {
         "identifier_type": ["username", "full_name"],

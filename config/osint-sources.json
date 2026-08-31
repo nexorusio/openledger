@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "maintenance_policy": {
+    "review_interval_days": 90,
+    "stale_after_days": 365,
+    "update_policy": "review_then_pull_request",
+    "failure_policy": "degrade_collector_without_failing_investigation"
+  },
+  "sources": [
+    {
+      "id": "github_public_profile",
+      "display_name": "GitHub public user profile",
+      "status": "active",
+      "capability": "public_profile_enrichment",
+      "integration_mode": "native_public_api",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://docs.github.com/en/rest/users/users#get-a-user",
+      "api_versions_documentation": "https://docs.github.com/en/rest/about-the-rest-api/api-versions",
+      "rate_limits_documentation": "https://docs.github.com/en/rest/using-the-rest-api/rate-limits-for-the-rest-api",
+      "usage_terms": "https://docs.github.com/en/site-policy/github-terms/github-terms-of-service",
+      "endpoint_origin": "https://api.github.com",
+      "api_version": "2026-03-10",
+      "network_classification": "fixed_public_api",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false,
+        "unauthenticated_requests_per_hour_per_ip": 60
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "claimed_profile_url",
+        "accepted_target": "exact_github_profile_claimed_by_native_discovery",
+        "maximum_targets_per_investigation": 20
+      },
+      "guardrails": {
+        "fixed_network_origin": true,
+        "redirects_allowed": false,
+        "timeout_seconds": 15,
+        "maximum_response_bytes": 1000000,
+        "account_type": "User",
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": [
+        "social_account",
+        "platform_identifier:github_id",
+        "full_name",
+        "company",
+        "current_location",
+        "summary",
+        "website",
+        "photograph",
+        "linked_profile_lead"
+      ],
+      "observation_only_fields": [
+        "created_at",
+        "updated_at",
+        "followers",
+        "following",
+        "public_repos",
+        "public_gists",
+        "rate_limit_remaining",
+        "rate_limit_reset"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "live_contract_target": "octocat",
+        "owner": "OpenLedger maintainers"
+      }
+    }
+  ]
+}
