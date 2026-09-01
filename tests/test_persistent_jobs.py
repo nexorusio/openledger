@@ -1241,6 +1241,22 @@ def test_supplied_website_evidence_survives_wrong_wikidata_candidate(
     assert completed["affiliation_status"] == "partial"
     assert completed["website_address_count"] == 0
     assert completed["affiliated_person_count"] == 2
+    resolution_candidates = completed["organization_resolution_candidates"]
+    website_candidate = next(
+        candidate
+        for candidate in resolution_candidates
+        if candidate["source_engine"] == "official_website_public_content"
+    )
+    wikidata_candidate = next(
+        candidate
+        for candidate in resolution_candidates
+        if candidate["source_engine"] == "wikidata_affiliation"
+    )
+    assert website_candidate["candidate_key"] == (
+        "official_website_public_content:unistellar.co"
+    )
+    assert website_candidate["selectable"] is True
+    assert wikidata_candidate["selectable"] is False
     assert any(
         finding["category"] == "linked_company_profile_lead"
         and finding["source_url"]
@@ -1262,7 +1278,33 @@ def test_supplied_website_evidence_survives_wrong_wikidata_candidate(
     assert "No address was present in the captured official-site HTML" in case_page
     assert "Open profile for manual review" in case_page
     assert "Pascal Sembel" in case_page
-    assert "leave it unselected" in case_page
+    assert "Source-neutral resolution" in case_page
+    assert "Confirm operating identity" in case_page
+    assert "Not verified as an organization" in case_page
+    assert "leave Wikidata unselected" in case_page
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "organization-selection-csrf"
+    selected_response = client.post(
+        f"/cases/{job['case_id']}/affiliation/select",
+        data={
+            "csrf_token": "organization-selection-csrf",
+            "candidate_key": website_candidate["candidate_key"],
+        },
+        follow_redirects=True,
+    )
+    assert selected_response.status_code == 200
+    assert "Case organization confirmed" in selected_response.get_data(
+        as_text=True
+    )
+    selected_job = persistent_store.get_job(job_id)
+    assert selected_job["selected_organization"]["source_engine"] == (
+        "official_website_public_content"
+    )
+    assert selected_job["selected_organization"]["reviewed_by"] == (
+        "local-operator"
+    )
+    assert len(persistent_store.get_case(job["case_id"])["jobs"]) == 1
 
 
 def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(

@@ -69,18 +69,74 @@
             <p class="mb-0">The supplied website produced {{ affiliation_job.website_address_count | default(0) }} exact published addresses and {{ affiliation_job.website_person_count | default(0) }} named-person observations. A Wikidata mismatch does not discard this evidence; every Persona claim still requires review.</p>
         </div>
         {% endif %}
+        {% if affiliation_job.selected_organization %}
+        {% set selected_organization = affiliation_job.selected_organization %}
+        <article class="organization-selection-summary">
+            <div>
+                <span class="eyebrow">Analyst-confirmed case organization</span>
+                <h3>{{ selected_organization.label }}</h3>
+                <p>{{ selected_organization.identity_scope_label }} · {{ selected_organization.source_name }}</p>
+            </div>
+            <div class="organization-selection-review">
+                <span class="badge-soft success">Confirmed by analyst</span>
+                {% if selected_organization.source_url %}<a href="{{ selected_organization.source_url }}" target="_blank" rel="noopener noreferrer">Open selection evidence</a>{% endif %}
+                <small>{{ selected_organization.reviewed_by }} · {{ selected_organization.reviewed_at }}</small>
+            </div>
+            <p class="organization-selection-limitation"><strong>Scope:</strong> {{ selected_organization.limitation }} Persona affiliations derived from this organization remain separate pending claims.</p>
+        </article>
+        {% endif %}
+        {% if affiliation_job.organization_resolution_candidates %}
+        <section class="organization-resolution" aria-labelledby="organization-resolution-title">
+            <div class="registry-results-heading">
+                <div>
+                    <span class="eyebrow">Source-neutral resolution</span>
+                    <h3 id="organization-resolution-title">Choose what identifies this organization</h3>
+                    <p>Website operating identity, legal registry records and public knowledge entities remain distinct. Confirm only the source and scope the evidence supports.</p>
+                </div>
+                <span class="badge-soft warning">Analyst decision required</span>
+            </div>
+            <div class="organization-resolution-list">
+                {% for candidate in affiliation_job.organization_resolution_candidates %}
+                <article class="organization-resolution-candidate {{ 'selected' if candidate.selected else '' }}">
+                    <header>
+                        <div>
+                            <strong>{{ candidate.label }}</strong>
+                            <small>{{ candidate.identity_scope_label }} · {{ candidate.source_name }}</small>
+                            {% if candidate.description %}<small>{{ candidate.description }}</small>{% endif %}
+                        </div>
+                        <div class="organization-resolution-actions">
+                            {% if candidate.selected %}
+                            <span class="badge-soft success">Selected</span>
+                            {% elif candidate.selectable %}
+                            <form method="POST" action="{{ url_for('select_affiliation_entity', case_id=case.id) }}">
+                                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                <input type="hidden" name="candidate_key" value="{{ candidate.candidate_key }}">
+                                <button type="submit" class="btn btn-sm btn-outline-secondary">
+                                    {{ 'Confirm & query affiliations' if candidate.source_engine == 'wikidata_affiliation' else 'Confirm legal entity' if candidate.identity_scope == 'registered_legal_entity' else 'Confirm operating identity' }}
+                                </button>
+                            </form>
+                            {% else %}
+                            <span class="badge-soft warning">Not verified as an organization</span>
+                            {% endif %}
+                            {% if candidate.source_url %}<a href="{{ candidate.source_url }}" target="_blank" rel="noopener noreferrer">Open source</a>{% endif %}
+                        </div>
+                    </header>
+                    {% if candidate.website_domain %}<p><strong>Domain:</strong> {{ candidate.website_domain }}</p>{% endif %}
+                    {% if candidate.legal_jurisdiction %}<p><strong>Jurisdiction:</strong> {{ candidate.legal_jurisdiction }}</p>{% endif %}
+                    {% if candidate.published_addresses %}<p><strong>Published addresses:</strong> {{ candidate.published_addresses | join('; ') }}</p>{% endif %}
+                    <dl>
+                        <div><dt>Basis</dt><dd>{{ candidate.basis }}</dd></div>
+                        <div><dt>Limitation</dt><dd>{{ candidate.limitation }}</dd></div>
+                    </dl>
+                </article>
+                {% endfor %}
+            </div>
+        </section>
+        {% endif %}
         {% if affiliation_job.discovery_status == 'needs_selection' %}
-        <strong>Select the correct Wikidata organization—or leave it unselected</strong>
-        <p class="form-text">{{ affiliation_job.source_message or 'People extraction is paused until you choose one stored Wikidata candidate.' }}</p>
-        <div class="affiliation-candidate-list">
-            {% for candidate in affiliation_job.organization_candidates %}
-            <form method="POST" action="{{ url_for('select_affiliation_entity', case_id=case.id) }}" class="affiliation-candidate">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <input type="hidden" name="entity_id" value="{{ candidate.id }}">
-                <span><strong>{{ candidate.label }}</strong><small>{{ candidate.description or 'No description available' }} · {{ candidate.id }}</small>{% if candidate.context_note %}<small>{{ candidate.context_note }}</small>{% endif %}</span>
-                <button type="submit" class="btn btn-sm btn-outline-secondary">Use this organization</button>
-            </form>
-            {% endfor %}
+        <div class="alert alert-info mb-0" role="status">
+            <strong>Optional Wikidata match unresolved</strong>
+            <p class="mb-0">{{ affiliation_job.source_message or 'Wikidata people extraction is paused.' }} Choose a type-verified Wikidata candidate above only when it represents the same organization, or leave Wikidata unselected and use the independent website or registry evidence.</p>
         </div>
         {% elif affiliation_job.discovery_status in ('rate_limited', 'unavailable', 'not_found', 'partial') %}
         <div class="alert alert-warning mb-3" role="alert">

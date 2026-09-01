@@ -98,6 +98,25 @@ _WIKIDATA_RELATIONSHIPS = {
 MAX_WIKIDATA_AFFILIATION_ROWS = (
     MAX_WIKIDATA_AFFILIATED_PEOPLE * len(_WIKIDATA_RELATIONSHIPS)
 )
+_WIKIDATA_ORGANIZATION_INSTANCE_IDS = frozenset(
+    {
+        "Q43229",    # organization
+        "Q4830453",  # business
+        "Q783794",   # company
+        "Q6881511",  # enterprise
+        "Q2385804",  # educational institution
+        "Q3918",     # university
+        "Q1664720",  # institute
+        "Q163740",   # nonprofit organization
+        "Q79913",    # non-governmental organization
+        "Q484652",   # international organization
+        "Q327333",   # government agency
+        "Q48204",    # voluntary association
+        "Q7278",     # political party
+        "Q31855",    # research institute
+    }
+)
+MAX_ORGANIZATION_RESOLUTION_CANDIDATES = 15
 
 GLEIF_ENGINE = "gleif_lei_registry"
 GLEIF_API_URL = "https://api.gleif.org/api/v1/lei-records"
@@ -1090,6 +1109,58 @@ def normalize_wikidata_organization(entity_id: str, payload: Any) -> Dict[str, A
     }
 
 
+def enrich_wikidata_organization_candidates(
+    candidates: Any, entity_payload: Any
+) -> List[Dict[str, Any]]:
+    """Attach bounded type evidence before a Wikidata item is selectable."""
+    output = []
+    for raw_candidate in list(candidates or [])[:MAX_WIKIDATA_ENTITY_CANDIDATES]:
+        if not isinstance(raw_candidate, dict):
+            continue
+        entity_id = str(raw_candidate.get("id") or "").strip().upper()
+        try:
+            organization = normalize_wikidata_organization(
+                entity_id, entity_payload
+            )
+        except ValueError:
+            organization = None
+        instance_of = (
+            list(organization.get("instance_of") or [])[:20]
+            if isinstance(organization, dict)
+            else []
+        )
+        organization_eligible = bool(
+            set(instance_of).intersection(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+        )
+        candidate = dict(raw_candidate)
+        candidate.update(
+            {
+                "official_websites": (
+                    list(organization.get("official_websites") or [])[:5]
+                    if isinstance(organization, dict)
+                    else []
+                ),
+                "instance_of": instance_of,
+                "organization_eligible": organization_eligible,
+                "organization_type_status": (
+                    "verified_organization"
+                    if organization_eligible
+                    else "not_verified_as_organization"
+                ),
+                "type_note": (
+                    "Wikidata type evidence identifies this item as an organization."
+                    if organization_eligible
+                    else (
+                        "Wikidata did not provide a supported organization type for "
+                        "this item. It cannot be selected as the case organization."
+                    )
+                ),
+            }
+        )
+        output.append(candidate)
+    return output
+
+
 def _wikidata_binding_id(value: Any, pattern: re.Pattern[str]) -> str:
     if not isinstance(value, dict) or value.get("type") != "uri":
         return ""
@@ -1444,6 +1515,7 @@ async def run_wikidata_affiliation_discovery(
         ),
     }
     candidates = []
+    candidate_entity_payload = None
     async with session_factory(timeout=timeout, headers=headers) as session:
         if not selected_entity_id:
             status, payload, _retry_after = await _bounded_wikidata_json(
@@ -1467,13 +1539,41 @@ async def run_wikidata_affiliation_discovery(
                     "Wikidata organization lookup was unavailable.",
                 )
             candidates = normalize_wikidata_entity_candidates(affiliation_name, payload)
-            exact = [candidate for candidate in candidates if candidate["exact_match"]]
+            if candidates:
+                detail_status, candidate_entity_payload, _retry_after = (
+                    await _bounded_wikidata_json(
+                        session,
+                        WIKIDATA_API_URL,
+                        params={
+                            "action": "wbgetentities",
+                            "ids": "|".join(
+                                candidate["id"] for candidate in candidates
+                            ),
+                            "props": "labels|descriptions|claims",
+                            "languages": "en",
+                            "languagefallback": "1",
+                            "format": "json",
+                            "formatversion": "2",
+                        },
+                    )
+                )
+                if detail_status != "ok":
+                    candidate_entity_payload = {}
+                candidates = enrich_wikidata_organization_candidates(
+                    candidates, candidate_entity_payload
+                )
+            exact = [
+                candidate
+                for candidate in candidates
+                if candidate["exact_match"]
+                and candidate.get("organization_eligible") is True
+            ]
             if len(exact) != 1:
                 return _wikidata_diagnostic(
                     affiliation_name,
                     "needs_selection" if candidates else "not_found",
                     (
-                        "Select the correct Wikidata organization before people are extracted."
+                        "Select a type-verified Wikidata organization before people are extracted."
                         if candidates
                         else "Wikidata returned no usable organization candidates."
                     ),
@@ -1481,27 +1581,67 @@ async def run_wikidata_affiliation_discovery(
                 )
             selected_entity_id = exact[0]["id"]
 
-        status, payload, _retry_after = await _bounded_wikidata_json(
-            session,
-            WIKIDATA_API_URL,
-            params={
-                "action": "wbgetentities",
-                "ids": selected_entity_id,
-                "props": "labels|descriptions|claims",
-                "languages": "en",
-                "languagefallback": "1",
-                "format": "json",
-                "formatversion": "2",
-            },
+        payload = candidate_entity_payload
+        if not payload:
+            status, payload, _retry_after = await _bounded_wikidata_json(
+                session,
+                WIKIDATA_API_URL,
+                params={
+                    "action": "wbgetentities",
+                    "ids": selected_entity_id,
+                    "props": "labels|descriptions|claims",
+                    "languages": "en",
+                    "languagefallback": "1",
+                    "format": "json",
+                    "formatversion": "2",
+                },
+            )
+            if status != "ok":
+                return _wikidata_diagnostic(
+                    affiliation_name,
+                    status,
+                    "The selected organization was unavailable.",
+                    candidates,
+                )
+        organization = normalize_wikidata_organization(selected_entity_id, payload)
+        selected_candidate = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate.get("id") == selected_entity_id
+            ),
+            None,
         )
-        if status != "ok":
+        if selected_candidate is None:
+            selected_candidate = enrich_wikidata_organization_candidates(
+                [
+                    {
+                        "id": organization["id"],
+                        "label": organization["label"],
+                        "description": organization.get("description", ""),
+                        "url": organization["url"],
+                        "exact_match": (
+                            _affiliation_identity(organization["label"])
+                            == _affiliation_identity(affiliation_name)
+                        ),
+                        "match_type": "selected",
+                    }
+                ],
+                payload,
+            )[0]
+            candidates = [selected_candidate]
+        if selected_candidate.get("organization_eligible") is not True:
             return _wikidata_diagnostic(
                 affiliation_name,
-                status,
-                "The selected organization was unavailable.",
+                "needs_selection",
+                (
+                    "The selected Wikidata item is not type-verified as an "
+                    "organization. No affiliation lookup was run."
+                ),
                 candidates,
             )
-        organization = normalize_wikidata_organization(selected_entity_id, payload)
+        organization["organization_eligible"] = True
+        organization["organization_type_status"] = "verified_organization"
         if not entity_selected_by_operator:
             confirmation_reason = _wikidata_context_confirmation_reason(
                 candidates,
@@ -2062,6 +2202,11 @@ def normalize_official_website_public_content(
     contacts = _official_website_contacts(document)
     people = _extract_team_people(document)
     linked_profiles = _official_website_linked_company_profiles(document)
+    published_name_match = bool(
+        _affiliation_identity(name)
+        and _affiliation_identity(name)
+        in _affiliation_identity(" ".join(value for value in (title, description) if value))
+    )
     observed = bool(title or description or addresses or contacts or people)
     reason = (
         "Bounded public content was collected from the supplied official website."
@@ -2085,6 +2230,11 @@ def normalize_official_website_public_content(
             "website_url": final_url,
             "page_title": title,
             "description": description,
+            "name_observation_status": (
+                "published_name_match"
+                if published_name_match
+                else "operator_supplied_name"
+            ),
         },
         "addresses": addresses,
         "contacts": contacts,
@@ -2624,6 +2774,7 @@ def _fr_registry_claim_candidate(
             "public_registry_role": person["role"],
             "entity_status": entity.get("entity_status", ""),
             "registry_last_updated_at": entity.get("last_update_date", ""),
+            "analyst_selected_entity": entity.get("analyst_selected") is True,
             "human_review_required": True,
             "automatic_approval_allowed": False,
         },
@@ -2665,7 +2816,10 @@ def extract_fr_registry_affiliated_people(observation: Any) -> List[Dict[str, An
         or not legal_name
         or source_url
         != f"https://annuaire-entreprises.data.gouv.fr/entreprise/{siren}"
-        or entity.get("exact_name_match") is not True
+        or not (
+            entity.get("exact_name_match") is True
+            or entity.get("analyst_selected") is True
+        )
     ):
         return []
     entity = {**entity, "id": siren, "legal_name": legal_name}
@@ -2849,6 +3003,209 @@ def extract_official_website_affiliated_people(
             }
         )
     return output
+
+
+def build_organization_resolution_candidates(
+    wikidata_observation: Any,
+    *,
+    registry_observations: Any = None,
+    website_observation: Any = None,
+) -> List[Dict[str, Any]]:
+    """Build source-neutral, provenance-labelled case organization choices."""
+    output: List[Dict[str, Any]] = []
+    seen = set()
+
+    def add(candidate: Dict[str, Any]) -> None:
+        candidate_key = str(candidate.get("candidate_key") or "")[:500]
+        if not candidate_key or candidate_key in seen:
+            return
+        seen.add(candidate_key)
+        output.append(candidate)
+
+    if (
+        isinstance(website_observation, dict)
+        and website_observation.get("source_engine") == OFFICIAL_WEBSITE_ENGINE
+        and website_observation.get("status") == "observed"
+        and isinstance(website_observation.get("organization"), dict)
+    ):
+        organization = website_observation["organization"]
+        name = _bounded_text(organization.get("name"), limit=500)
+        domain = _normalize_dns_hostname(organization.get("domain"))
+        source_url = _safe_public_url(website_observation.get("source_url"))
+        try:
+            source_website = normalize_official_website_url(source_url)
+        except ValueError:
+            source_website = None
+        if (
+            name
+            and domain
+            and source_website
+            and _domains_equivalent(domain, source_website["domain"])
+        ):
+            addresses = [
+                _bounded_text(address, limit=1000)
+                for address in list(website_observation.get("addresses") or [])[
+                    :MAX_OFFICIAL_WEBSITE_ADDRESSES
+                ]
+                if _bounded_text(address, limit=1000)
+            ]
+            add(
+                {
+                    "candidate_key": f"{OFFICIAL_WEBSITE_ENGINE}:{domain}",
+                    "label": name,
+                    "source_engine": OFFICIAL_WEBSITE_ENGINE,
+                    "source_name": "Supplied organization website",
+                    "source_record_id": str(
+                        website_observation.get("source_record_id")
+                        or f"official-website:{domain}"
+                    )[:500],
+                    "source_url": source_url,
+                    "identity_scope": "first_party_operating_identity",
+                    "identity_scope_label": "First-party operating identity",
+                    "match_status": str(
+                        organization.get("name_observation_status")
+                        or "operator_supplied_name"
+                    )[:100],
+                    "selectable": True,
+                    "website_domain": domain,
+                    "published_addresses": addresses,
+                    "basis": (
+                        "The operator supplied this domain and organization name. "
+                        + (
+                            "The captured page title or description also contains "
+                            "the normalized organization name."
+                            if organization.get("name_observation_status")
+                            == "published_name_match"
+                            else (
+                                "Bounded public HTML was collected from the same "
+                                "domain, but the organization name remains operator "
+                                "context rather than an independently extracted fact."
+                            )
+                        )
+                    ),
+                    "limitation": (
+                        "Confirming this candidate identifies the website operating "
+                        "identity only. It does not prove legal registration, ownership, "
+                        "or that every published address is a registered office."
+                    ),
+                }
+            )
+
+    source_names = {
+        GLEIF_ENGINE: "GLEIF Global LEI Index",
+        FR_BUSINESS_REGISTRY_ENGINE: "French National Enterprise Directory",
+    }
+    for observation in list(registry_observations or [])[:5]:
+        if not isinstance(observation, dict):
+            continue
+        source_engine = str(observation.get("source_engine") or "")[:100]
+        for entity in list(observation.get("candidates") or [])[:5]:
+            if not isinstance(entity, dict):
+                continue
+            entity_id = _bounded_text(entity.get("id"), limit=100)
+            legal_name = _bounded_text(entity.get("legal_name"), limit=500)
+            source_url = _safe_public_url(entity.get("source_url"))
+            jurisdiction = _bounded_text(
+                entity.get("legal_jurisdiction"), limit=100
+            )
+            if not source_engine or not entity_id or not legal_name or not source_url:
+                continue
+            exact_match = entity.get("exact_name_match") is True
+            add(
+                {
+                    "candidate_key": f"{source_engine}:{entity_id}",
+                    "label": legal_name,
+                    "source_engine": source_engine,
+                    "source_name": source_names.get(
+                        source_engine, "Public business registry"
+                    ),
+                    "source_record_id": str(
+                        observation.get("source_record_id")
+                        or f"{source_engine}:{entity_id}"
+                    )[:500],
+                    "source_url": source_url,
+                    "entity_id": entity_id,
+                    "identity_scope": "registered_legal_entity",
+                    "identity_scope_label": "Registered legal entity",
+                    "match_status": (
+                        "exact_name_candidate" if exact_match else "requires_review"
+                    ),
+                    "selectable": True,
+                    "legal_jurisdiction": jurisdiction,
+                    "legal_address": dict(entity.get("legal_address") or {}),
+                    "basis": (
+                        f"The cited public registry returned this identifier in the "
+                        f"bounded {jurisdiction or 'requested'} jurisdiction search."
+                    ),
+                    "limitation": (
+                        "A registry record establishes a legal entity record, not that "
+                        "it owns the supplied website or represents the same operating "
+                        "group. Confirm the identity match before selection."
+                    ),
+                }
+            )
+
+    wikidata_candidates = []
+    if isinstance(wikidata_observation, dict):
+        wikidata_candidates = list(
+            wikidata_observation.get("organization_candidates") or []
+        )[:MAX_WIKIDATA_ENTITY_CANDIDATES]
+        organization = wikidata_observation.get("organization")
+        if isinstance(organization, dict) and not any(
+            isinstance(candidate, dict)
+            and candidate.get("id") == organization.get("id")
+            for candidate in wikidata_candidates
+        ):
+            wikidata_candidates.append(organization)
+    for entity in wikidata_candidates[:MAX_WIKIDATA_ENTITY_CANDIDATES]:
+        if not isinstance(entity, dict):
+            continue
+        entity_id = str(entity.get("id") or "").strip().upper()
+        label = _bounded_text(entity.get("label"), limit=500)
+        source_url = _wikidata_item_url(entity_id)
+        if not entity_id or not label or not source_url:
+            continue
+        eligible = entity.get("organization_eligible") is True
+        add(
+            {
+                "candidate_key": f"{WIKIDATA_ENGINE}:{entity_id}",
+                "label": label,
+                "description": _bounded_text(entity.get("description"), limit=1000),
+                "source_engine": WIKIDATA_ENGINE,
+                "source_name": "Wikidata",
+                "source_record_id": f"wikidata-organization:{entity_id}",
+                "source_url": source_url,
+                "entity_id": entity_id,
+                "identity_scope": "public_knowledge_entity",
+                "identity_scope_label": "Public knowledge entity",
+                "match_status": str(
+                    entity.get("organization_type_status")
+                    or "not_verified_as_organization"
+                )[:100],
+                "selectable": eligible,
+                "official_websites": list(
+                    entity.get("official_websites") or []
+                )[:5],
+                "basis": (
+                    "Wikidata supplied a name match and supported organization type "
+                    "statement."
+                    if eligible
+                    else "Wikidata supplied a name match without a supported organization type."
+                ),
+                "limitation": (
+                    "Wikidata is a public knowledge-graph source, not a legal registry. "
+                    "A confirmed match is used only for explicit affiliation lookup; "
+                    "all resulting Persona claims remain pending review."
+                    if eligible
+                    else (
+                        "This item may be an article, project, product, or other "
+                        "non-organization. It cannot be selected without organization "
+                        "type evidence."
+                    )
+                ),
+            }
+        )
+    return output[:MAX_ORGANIZATION_RESOLUTION_CANDIDATES]
 
 
 async def _read_bounded_public_json(

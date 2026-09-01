@@ -28,6 +28,7 @@ from maigret.web.collector_adapters import (
     WIKIPEDIA_ENGINE,
     _wikidata_people_query,
     build_business_context_assessment,
+    build_organization_resolution_candidates,
     claimed_profile_url_targets,
     extract_github_profile_claims,
     extract_fr_registry_affiliated_people,
@@ -519,6 +520,13 @@ def _wikidata_organization():
                 "labels": {"en": {"value": "Example Organization"}},
                 "descriptions": {"en": {"value": "Example"}},
                 "claims": {
+                    "P31": [
+                        {
+                            "mainsnak": {
+                                "datavalue": {"value": {"id": "Q43229"}}
+                            }
+                        }
+                    ],
                     "P856": [
                         {"mainsnak": {"datavalue": {"value": "https://example.org"}}}
                     ]
@@ -846,6 +854,58 @@ async def test_wikidata_jurisdiction_pauses_exact_name_auto_selection():
     assert candidate["context_status"] == "review_required"
     assert "Jurisdiction ID" in candidate["context_note"]
     assert "exact name alone is insufficient" in observation["reason"]
+
+
+@pytest.mark.asyncio
+async def test_wikidata_article_is_retained_but_cannot_be_selected_as_organization():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q127199078",
+                "label": "Unistellar eVscopes",
+                "description": "scholarly article",
+                "match": {"text": "Unistellar eVscopes"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q127199078": {
+                "labels": {"en": {"value": "Unistellar eVscopes"}},
+                "descriptions": {"en": {"value": "scholarly article"}},
+                "claims": {
+                    "P31": [
+                        {
+                            "mainsnak": {
+                                "datavalue": {"value": {"id": "Q13442814"}}
+                            }
+                        }
+                    ]
+                },
+            }
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Unistellar eVscopes",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "needs_selection"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is False
+    assert candidate["organization_type_status"] == (
+        "not_verified_as_organization"
+    )
+    assert "type-verified Wikidata organization" in observation["reason"]
+    assert len([item for item in calls if item[0] == "get"]) == 2
 
 
 def _gleif_entities():
@@ -1177,6 +1237,9 @@ def test_official_website_content_extracts_exact_cited_context_and_people():
         _official_website_html(),
     )
     people = extract_official_website_affiliated_people(observation)
+    organization_candidate = build_organization_resolution_candidates(
+        {}, website_observation=observation
+    )[0]
 
     assert observation["source_engine"] == OFFICIAL_WEBSITE_ENGINE
     assert observation["status"] == "observed"
@@ -1191,6 +1254,17 @@ def test_official_website_content_extracts_exact_cited_context_and_people():
     ]
     assert observation["people"] == [
         {"display_name": "Alice Example", "role": "Chief Executive Officer"}
+    ]
+    assert observation["organization"]["name_observation_status"] == (
+        "published_name_match"
+    )
+    assert organization_candidate["selectable"] is True
+    assert organization_candidate["published_addresses"] == [
+        "Jl. Kemang Timur No. 28, Jakarta 12730, Indonesia"
+    ]
+    assert "page title or description" in organization_candidate["basis"]
+    assert "does not prove legal registration" in organization_candidate[
+        "limitation"
     ]
     assert len(people) == 1
     assert {claim["field_name"] for claim in people[0]["claims"]} == {
