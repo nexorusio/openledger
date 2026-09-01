@@ -58,6 +58,7 @@ FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
         "key": "assets",
         "title": "Assets and risk records",
         "fields": (
+            ("offshore_database_match", "Offshore Leaks record match"),
             ("financial_profile", "Financial profile"),
             ("vehicle_ownership", "Vehicle ownership"),
             ("criminal_record", "Criminal record"),

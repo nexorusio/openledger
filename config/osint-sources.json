@@ -172,6 +172,148 @@
         "live_contract_target": "https://example.com/",
         "owner": "OpenLedger maintainers"
       }
+    },
+    {
+      "id": "wikidata_affiliation",
+      "display_name": "Wikidata organization and affiliation graph",
+      "status": "active",
+      "capability": "organization_resolution_and_explicit_people_affiliations",
+      "integration_mode": "native_public_api",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://www.mediawiki.org/wiki/Wikibase/API/en",
+      "usage_terms": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use",
+      "endpoint_origin": "https://www.wikidata.org",
+      "additional_endpoint_origins": ["https://query.wikidata.org"],
+      "api_version": "MediaWiki-Action-API-and-SPARQL-1.1",
+      "network_classification": "fixed_public_api",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "approved_affiliation_claim",
+        "accepted_target": "exact_analyst_approved_organization_institution_or_company",
+        "maximum_targets_per_investigation": 1
+      },
+      "guardrails": {
+        "fixed_network_origin": true,
+        "fixed_network_origins": ["https://www.wikidata.org", "https://query.wikidata.org"],
+        "redirects_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000,
+        "maximum_entity_candidates": 5,
+        "maximum_people_per_investigation": 50,
+        "asynchronous_worker_required": true,
+        "ambiguous_entity_requires_operator_selection": true,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": ["full_name", "company", "platform_identifier:wikidata_item_id"],
+      "observation_only_fields": [
+        "organization_description",
+        "organization_instance_of",
+        "official_organization_websites",
+        "wikidata_relation_property",
+        "wikidata_relation_direction"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "live_contract_target": "Q95",
+        "owner": "OpenLedger maintainers"
+      }
+    },
+    {
+      "id": "wikipedia_public_biography",
+      "display_name": "Wikipedia confirmed-name biography enrichment",
+      "status": "active",
+      "capability": "confirmed_person_biography_summary_and_lead_image",
+      "integration_mode": "native_public_api",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://www.mediawiki.org/wiki/API:Query",
+      "usage_terms": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use",
+      "endpoint_origin": "https://en.wikipedia.org",
+      "api_version": "MediaWiki-Action-API",
+      "network_classification": "fixed_public_api",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "operator_opt_in_mechanism": "analyst_approval_of_full_name_or_explicit_persona_rerun",
+        "input_type": "approved_full_name_claim",
+        "accepted_target": "exact_analyst_approved_person_name",
+        "maximum_targets_per_investigation": 1
+      },
+      "guardrails": {
+        "fixed_network_origin": true,
+        "redirects_allowed": false,
+        "timeout_seconds": 20,
+        "maximum_response_bytes": 1000000,
+        "maximum_page_candidates": 5,
+        "maximum_extract_characters": 2000,
+        "ambiguous_page_requires_operator_selection": true,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": ["summary", "photograph", "platform_identifier:wikipedia_page_id"],
+      "observation_only_fields": ["wikipedia_title", "wikipedia_page_id", "exact_title_match"],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "live_contract_target": "Albert Einstein",
+        "owner": "OpenLedger maintainers"
+      }
+    },
+    {
+      "id": "icij_offshore_leaks",
+      "display_name": "ICIJ Offshore Leaks exact-name alert",
+      "status": "active",
+      "capability": "confirmed_person_offshore_database_name_alert",
+      "integration_mode": "native_public_api",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://offshoreleaks.icij.org/docs/reconciliation",
+      "usage_terms": "https://offshoreleaks.icij.org/pages/database",
+      "endpoint_origin": "https://offshoreleaks.icij.org",
+      "api_version": "W3C-Reconciliation-0.2",
+      "network_classification": "fixed_public_api",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "operator_opt_in_mechanism": "analyst_approval_of_full_name_or_explicit_persona_rerun",
+        "input_type": "approved_full_name_claim",
+        "accepted_target": "exact_analyst_approved_person_name",
+        "maximum_targets_per_investigation": 1
+      },
+      "guardrails": {
+        "fixed_network_origin": true,
+        "redirects_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000,
+        "maximum_exact_name_matches": 5,
+        "officer_type_only": true,
+        "fuzzy_matches_create_alerts": false,
+        "independent_identity_confirmation_required": true,
+        "inclusion_does_not_imply_wrongdoing": true,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": ["offshore_database_match"],
+      "observation_only_fields": ["reconciliation_score", "dataset_description", "node_id"],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "live_contract_target": "Emma Watson",
+        "owner": "OpenLedger maintainers"
+      }
     }
   ]
 }

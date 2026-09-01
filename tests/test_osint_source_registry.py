@@ -16,7 +16,7 @@ def test_osint_source_registry_passes_static_governance_audit():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Validated 3 governed OSINT source" in result.stdout
+    assert "Validated 6 governed OSINT source" in result.stdout
 
 
 def test_github_contract_matches_runtime_limits_and_review_boundary():
@@ -75,3 +75,30 @@ def test_unfurl_and_wayback_contracts_are_offline_or_fixed_origin_and_reviewed()
     assert wayback["guardrails"]["match_type"] == "exact"
     assert wayback["guardrails"]["archived_page_content_fetched"] is False
     assert wayback["guardrails"]["automatic_approval_allowed"] is False
+
+
+def test_wikidata_affiliation_source_is_fixed_bounded_and_review_gated():
+    with open(os.path.join(ROOT, "config", "osint-sources.json"), encoding="utf-8") as registry_file:
+        sources = {source["id"]: source for source in json.load(registry_file)["sources"]}
+    source = sources["wikidata_affiliation"]
+    assert source["access"]["credentials_required"] is False
+    assert source["additional_endpoint_origins"] == ["https://query.wikidata.org"]
+    assert source["guardrails"]["maximum_entity_candidates"] == 5
+    assert source["guardrails"]["maximum_people_per_investigation"] == 50
+    assert source["guardrails"]["human_review_required"] is True
+    assert source["guardrails"]["automatic_approval_allowed"] is False
+
+
+def test_confirmed_name_sources_are_credential_free_bounded_and_review_gated():
+    with open(os.path.join(ROOT, "config", "osint-sources.json"), encoding="utf-8") as registry_file:
+        sources = {source["id"]: source for source in json.load(registry_file)["sources"]}
+    wikipedia = sources["wikipedia_public_biography"]
+    offshore = sources["icij_offshore_leaks"]
+    assert wikipedia["access"]["credentials_required"] is False
+    assert wikipedia["guardrails"]["maximum_page_candidates"] == 5
+    assert wikipedia["guardrails"]["ambiguous_page_requires_operator_selection"] is True
+    assert offshore["access"]["credentials_required"] is False
+    assert offshore["guardrails"]["maximum_exact_name_matches"] == 5
+    assert offshore["guardrails"]["fuzzy_matches_create_alerts"] is False
+    assert offshore["guardrails"]["independent_identity_confirmation_required"] is True
+    assert offshore["guardrails"]["automatic_approval_allowed"] is False

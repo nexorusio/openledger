@@ -123,6 +123,17 @@ def test_terminal_case_and_all_of_its_jobs_can_be_deleted(store):
     assert store.get_job(second_job_id) is None
 
 
+def test_case_delete_rechecks_exact_confirmation_inside_transaction(store):
+    job_id = store.create_investigation(["alice"], {})
+    job = store.claim_next("worker:test")
+    store.finish(job_id, {"status": "cancelled", "usernames": job["usernames"]})
+
+    with pytest.raises(ValueError, match="confirmation does not match"):
+        store.delete_case(job["case_id"], confirmation_name="Alice")
+
+    assert store.get_case(job["case_id"]) is not None
+
+
 def test_case_with_active_investigation_cannot_be_deleted(store):
     job_id = store.create_investigation(["alice"], {})
     case_id = store.get_job(job_id)["case_id"]
@@ -1374,3 +1385,190 @@ def test_independent_identifier_mode_keeps_separate_personas(store):
         "alice",
         "bob",
     ]
+
+
+def _affiliation_observation():
+    return {
+        "source_engine": "wikidata_affiliation",
+        "status": "observed",
+        "organization": {
+            "id": "Q95", "label": "Example Organization",
+            "url": "https://www.wikidata.org/wiki/Q95",
+            "official_websites": ["https://example.org"],
+        },
+        "people": [
+            {
+                "id": "Q1001", "label": "Alice Example",
+                "url": "https://www.wikidata.org/wiki/Q1001",
+                "relations": [{"property_id": "P108", "label": "employer", "direction": "person_to_organization"}],
+            },
+            {
+                "id": "Q1002", "label": "Bob Example",
+                "url": "https://www.wikidata.org/wiki/Q1002",
+                "relations": [{"property_id": "P3320", "label": "board member", "direction": "organization_to_person"}],
+            },
+        ],
+    }
+
+
+def test_affiliation_discovery_is_pending_until_relationship_review(store):
+    job_id = store.create_affiliation_investigation("Example Organization")
+    job = store.claim_next("worker:affiliation")
+    assert job["kind"] == "affiliation"
+    assert store.sync_affiliation_discovery(job_id, _affiliation_observation()) == {"personas": 2, "claims": 6}
+    case = store.get_case(job["case_id"])
+    assert store.build_relationship_graph(case["id"])["edges"] == []
+    for summary in case["personas"]:
+        persona = store.get_persona(summary["id"])
+        assert all(claim["review_status"] == "pending" for claim in persona["claims"])
+        company = next(claim for claim in persona["claims"] if claim["field_name"] == "company")
+        store.review_claim(company["id"], "approved", "analyst")
+    assert len(store.build_relationship_graph(case["id"])["edges"]) == 2
+
+
+def test_affiliation_selection_accepts_only_a_stored_candidate(store):
+    job_id = store.create_affiliation_investigation("Example Organization")
+    job = store.claim_next("worker:test")
+    store.finish(job_id, {"status": "completed", "organization_candidates": [{"id": "Q95", "label": "Example Organization"}]})
+    with pytest.raises(ValueError, match="not a stored candidate"):
+        store.queue_affiliation_entity(job["case_id"], "Q999")
+    selected = store.get_job(store.queue_affiliation_entity(job["case_id"], "Q95"))
+    assert selected["options"]["investigation_spec"]["wikidata_entity_id"] == "Q95"
+
+
+def _approved_full_name(store, name="Alice Example"):
+    job_id = store.create_investigation(["alice"], {})
+    job = store.claim_next("worker:identity-source")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": name},
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    store.sync_persona_claims(job_id, result)
+    persona_id = store.get_case(job["case_id"])["personas"][0]["id"]
+    claim = next(
+        claim
+        for claim in store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    store.review_claim(claim["id"], "approved", "analyst")
+    return persona_id, claim["id"]
+
+
+def _wikipedia_identity_observation(*, candidates=None):
+    return {
+        "source_engine": "wikipedia_public_biography",
+        "status": "observed",
+        "page_candidates": list(candidates or []),
+        "page": {
+            "page_id": "123",
+            "title": "Alice Example",
+            "url": "https://en.wikipedia.org/wiki/Alice_Example",
+            "extract": "Alice Example is a public figure.",
+            "thumbnail_url": "https://upload.wikimedia.org/alice.jpg",
+        },
+    }
+
+
+def _icij_identity_observation():
+    return {
+        "source_engine": "icij_offshore_leaks",
+        "status": "potential_match",
+        "matches": [
+            {
+                "node_id": "12126782",
+                "name": "Alice Example",
+                "description": "Officer record",
+                "score": 100,
+                "url": "https://offshoreleaks.icij.org/nodes/12126782",
+            }
+        ],
+    }
+
+
+def test_confirmed_name_enrichment_persists_only_pending_review_candidates(store):
+    persona_id, name_claim_id = _approved_full_name(store)
+    enrichment_id = store.create_identity_enrichment(persona_id, name_claim_id)
+    job = store.claim_next("worker:identity")
+
+    assert job["job_id"] == enrichment_id
+    assert job["kind"] == "identity_enrichment"
+    assert job["options"]["investigation_spec"]["confirmed_name"] == "Alice Example"
+    assert store.sync_identity_enrichment(
+        enrichment_id,
+        _wikipedia_identity_observation(),
+        _icij_identity_observation(),
+    ) == {"wikipedia_claims": 3, "offshore_alerts": 1}
+
+    claims = store.get_persona(persona_id)["claims"]
+    enriched = [
+        claim
+        for claim in claims
+        if claim["source_engine"]
+        in {"wikipedia_public_biography", "icij_offshore_leaks"}
+    ]
+    assert {claim["field_name"] for claim in enriched} == {
+        "summary",
+        "platform_identifier",
+        "photograph",
+        "offshore_database_match",
+    }
+    assert all(claim["review_status"] == "pending" for claim in enriched)
+    offshore = next(
+        claim for claim in enriched if claim["field_name"] == "offshore_database_match"
+    )
+    assert "not sufficient to confirm identity" in offshore["evidence"][0][
+        "details"
+    ]["identity_warning"]
+    assert "does not imply" in offshore["evidence"][0]["details"][
+        "identity_warning"
+    ]
+
+
+def test_wikipedia_selection_accepts_only_a_stored_candidate_for_same_persona(store):
+    persona_id, name_claim_id = _approved_full_name(store)
+    enrichment_id = store.create_identity_enrichment(persona_id, name_claim_id)
+    store.claim_next("worker:identity")
+    store.finish(
+        enrichment_id,
+        {
+            "status": "completed",
+            "wikipedia_candidates": [
+                {
+                    "page_id": "123",
+                    "title": "Alice Example",
+                    "url": "https://en.wikipedia.org/wiki/Alice_Example",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="not a stored candidate"):
+        store.create_identity_enrichment(
+            persona_id,
+            name_claim_id,
+            selected_wikipedia_page_id="999",
+        )
+    selected = store.get_job(
+        store.create_identity_enrichment(
+            persona_id,
+            name_claim_id,
+            selected_wikipedia_page_id="123",
+        )
+    )
+    assert selected["options"]["investigation_spec"][
+        "selected_wikipedia_page_id"
+    ] == "123"

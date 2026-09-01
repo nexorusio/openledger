@@ -5,11 +5,11 @@
 <section class="page-heading">
     <div>
         <p class="eyebrow">Active investigation</p>
-        <h1>Live discovery graph</h1>
-        <p class="page-description">Claimed profiles and extracted identifiers appear as OpenLedger checks each source.</p>
+        <h1>{{ 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live discovery graph' }}</h1>
+        <p class="page-description">{{ 'The worker is resolving the organization and explicit public affiliation statements.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Claimed profiles and extracted identifiers appear as OpenLedger checks each source.' }}</p>
     </div>
     <div class="heading-actions">
-        <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">Open reports</a>
+        <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Open reports' }}</a>
         <button type="button" id="stopBtn" class="btn btn-outline-danger">Stop investigation</button>
     </div>
 </section>
@@ -24,12 +24,22 @@
     </header>
     <div class="panel-body">
     <div class="live-stats">
+        {% if job_kind == 'identity_enrichment' %}
+        <div class="live-stat"><span>Sources</span><strong>Wikipedia + ICIJ</strong></div>
+        <div class="live-stat"><span>Offshore alerts</span><strong id="stat-offshore-alerts">{{ completed_offshore_alert_count }}</strong></div>
+        <div class="live-stat"><span>Approval status</span><strong>Pending review</strong></div>
+        {% elif job_kind == 'affiliation' %}
+        <div class="live-stat"><span>Organization status</span><strong id="stat-affiliation-entity">Resolving</strong></div>
+        <div class="live-stat"><span>Affiliated people</span><strong id="stat-affiliated-people">{{ completed_affiliated_person_count }}</strong></div>
+        <div class="live-stat"><span>Approval status</span><strong>Pending review</strong></div>
+        {% else %}
         <div class="live-stat"><span>Sources checked</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
         <div class="live-stat"><span>Profiles found</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
         <div class="live-stat"><span>Email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
         <div class="live-stat"><span>GitHub profiles enriched</span><strong id="stat-github-enriched">{{ completed_github_enrichment_count }}</strong></div>
         <div class="live-stat"><span>Archived profile URLs</span><strong id="stat-archived-profiles">{{ completed_archived_profile_count }}</strong></div>
         <div class="live-stat"><span>Graph status</span><strong>Streaming</strong></div>
+        {% endif %}
     </div>
     <div class="progress mb-3" style="height: 8px;">
         <div id="live-progress" class="progress-bar" role="progressbar" style="width: 0%;"></div>
@@ -43,18 +53,24 @@
 
 <script>
     const jobId = {{ job_id|tojson }};
+    const isAffiliation = {{ (job_kind == 'affiliation')|tojson }};
+    const isIdentityEnrichment = {{ (job_kind == 'identity_enrichment')|tojson }};
     const doneRedirect = {{ done_redirect|tojson }};
     const csrfToken = {{ csrf_token|tojson }};
     const completedFoundCount = {{ completed_found_count|tojson }};
     const completedRegistrationCount = {{ completed_registration_count|tojson }};
     const completedGithubEnrichmentCount = {{ completed_github_enrichment_count|tojson }};
     const completedArchivedProfileCount = {{ completed_archived_profile_count|tojson }};
+    const completedAffiliatedPersonCount = {{ completed_affiliated_person_count|tojson }};
+    const completedOffshoreAlertCount = {{ completed_offshore_alert_count|tojson }};
 
     let nodes = null, edges = null, network = null;
     let foundCount = doneRedirect ? completedFoundCount : 0;
     let registrationCount = doneRedirect ? completedRegistrationCount : 0;
     let githubEnrichmentCount = doneRedirect ? completedGithubEnrichmentCount : 0;
     let archivedProfileCount = doneRedirect ? completedArchivedProfileCount : 0;
+    let affiliatedPersonCount = doneRedirect ? completedAffiliatedPersonCount : 0;
+    let offshoreAlertCount = doneRedirect ? completedOffshoreAlertCount : 0;
 
     function ensureGraph() {
         if (network) return;
@@ -75,6 +91,8 @@
                 username: { color: '#d89524', shape: 'star', size: 22 },
                 site: { color: '#1f9d68' },
                 data: { color: '#0f8b8d', shape: 'box' },
+                organization: { color: '#d89524', shape: 'diamond', size: 24 },
+                person: { color: '#1f9d68', shape: 'dot', size: 16 },
             },
         });
         network.on('doubleClick', function (params) {
@@ -130,6 +148,8 @@
     }
 
     function completionText() {
+        if (isIdentityEnrichment) return 'Completed — public-record proposals are ready for analyst review.';
+        if (isAffiliation) return 'Completed — ' + affiliatedPersonCount + ' people proposed for analyst review.';
         return 'Completed — ' + foundCount + ' accounts, ' + githubEnrichmentCount
             + ' GitHub profiles enriched, ' + archivedProfileCount
             + ' archived profile URLs, and ' + registrationCount
@@ -177,6 +197,8 @@
                 'unfurl-url-analysis': 'Decomposing claimed profile URLs offline with Unfurl…',
                 'wayback-cdx': 'Checking exact claimed profile URLs in the Wayback capture index…',
                 'user-scanner': 'Checking email registrations with User Scanner (silent modules only)…',
+                'wikidata-affiliation': 'Resolving the organization and explicit Wikidata affiliation statements…',
+                'public-record-enrichment': 'Checking Wikipedia and ICIJ using the approved full name…',
             };
             statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
             const bar = document.getElementById('live-progress');
@@ -192,6 +214,10 @@
             } else if (ev.collector === 'user-scanner') {
                 registrationCount += Number(ev.found || 0);
                 document.getElementById('stat-registrations').textContent = registrationCount;
+            } else if (ev.collector === 'wikidata-affiliation') {
+                affiliatedPersonCount = Number(ev.found || 0);
+                const count = document.getElementById('stat-affiliated-people');
+                if (count) count.textContent = affiliatedPersonCount;
             }
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
             const completedMessages = {
@@ -199,6 +225,8 @@
                 'unfurl-url-analysis': 'Offline URL analysis collected. Checking archive metadata…',
                 'wayback-cdx': 'Archive evidence collected. Continuing the investigation…',
                 'user-scanner': 'Email evidence collected. Finalizing the investigation…',
+                'wikidata-affiliation': 'Affiliation evidence collected. Every proposal remains pending review.',
+                'public-record-enrichment': 'Public-record checks completed. Every proposal remains pending review.',
             };
             statusEl.textContent = completedMessages[ev.collector] || 'Additional evidence collected.';
         } else if (ev.type === 'collector_error') {
@@ -208,8 +236,25 @@
                 'unfurl-url-analysis': 'One profile URL could not be decomposed; continuing with archive checks…',
                 'wayback-cdx': 'One archive lookup was unavailable; continuing with saved findings…',
                 'user-scanner': 'Email evidence was unavailable; finalizing profile findings…',
+                'wikidata-affiliation': 'Wikidata was unavailable; the case remains intact.',
             };
             statusEl.textContent = errorMessages[ev.collector] || 'One evidence source was unavailable; continuing…';
+        } else if (ev.type === 'risk_alert') {
+            offshoreAlertCount = Number(ev.found || 0);
+            const count = document.getElementById('stat-offshore-alerts');
+            if (count) count.textContent = offshoreAlertCount;
+            statusEl.textContent = ev.message || 'Potential public-record match requires analyst review.';
+        } else if (ev.type === 'affiliation_entity') {
+            ensureGraph();
+            addNode('organization:' + ev.entity_id, ev.label, 'organization', {url: ev.url, title: ev.url});
+            const status = document.getElementById('stat-affiliation-entity');
+            if (status) status.textContent = 'Resolved';
+        } else if (ev.type === 'affiliated_person') {
+            ensureGraph();
+            const personId = 'person:' + ev.entity_id;
+            addNode(personId, ev.label, 'person', {url: ev.url, title: ev.url});
+            const organizations = nodes.get({filter: node => node.group === 'organization'});
+            if (organizations.length) addEdge(personId, organizations[0].id);
         } else if (ev.type === 'stopped') {
             statusEl.textContent = 'Stopped.';
         } else if (ev.type === 'error') {
