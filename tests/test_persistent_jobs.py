@@ -1275,7 +1275,7 @@ def test_supplied_website_evidence_survives_wrong_wikidata_candidate(
 
     case_page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
     assert "First-party website evidence collected independently" in case_page
-    assert "No address was present in the captured official-site HTML" in case_page
+    assert "No organization-published address was present" in case_page
     assert "Open profile for manual review" in case_page
     assert "Pascal Sembel" in case_page
     assert "Source-neutral resolution" in case_page

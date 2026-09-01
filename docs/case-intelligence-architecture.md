@@ -288,13 +288,15 @@ they do not establish a personal relationship.
 When a jurisdiction is supplied, the independent GLEIF adapter searches the
 global LEI index by organization name and country and retains up to five
 jurisdiction-matched entity candidates. A missing LEI result is never presented
-as proof that the business is unregistered. Country-level France searches also
-query the French National Enterprise Directory. Only one exact legal-name
-match can propose public natural-person leaders as pending `full_name`,
-backward-compatible `company`, and `occupation` claims. The adapter deliberately
-discards upstream birth and nationality data. Each proposal retains its SIREN,
-public role, source URL, and review restrictions; registry evidence never enters
-canonical Persona or relationship views automatically.
+as proof that the business is unregistered. Country-specific sources are
+independent governed adapters and never run outside their own jurisdiction.
+The shared selection and officer-normalization path is global: any governed
+registry adapter that supplies the normalized entity and named-officer contract
+may propose pending `full_name`, backward-compatible `company`, and `occupation`
+claims. Each proposal retains its actual source engine, registry identifier,
+jurisdiction, public role, record URL, and review restrictions. Birth,
+nationality, and unnecessary personal data are discarded; registry evidence
+never enters canonical Persona or relationship views automatically.
 
 An optional domain-context pass accepts one explicitly supplied official website,
 or the selected organization's `P856` website when available. The worker queries
@@ -306,11 +308,14 @@ statement includes its source basis and limitation. In particular, hosting,
 nameserver, mail-provider, registrar, and domain-registration geography never
 become evidence that the organization operates in that place.
 
-For organization-published addresses and broader operating context, the case
-workspace opens the existing persistent chat with a bounded research brief and
-public-web citations enabled. The brief requires direct citations and explicitly
-separates legal records, self-published statements, and infrastructure. It does
-not create an organization address claim on a Persona automatically.
+The website collector reads the supplied page and at most three same-domain
+organization-context pages. Exact addresses from Schema.org, semantic HTML,
+organization/contact/location sections, or bounded multilingual address markers
+become pending organization-location observations with the exact page URL.
+Residential labels are blocked. These observations remain separate from legal
+records and technical infrastructure, and are never copied to a person's
+location. Broader operating-context research remains available through the
+persistent cited case chat.
 
 ## Confirmed-name public-record enrichment
 

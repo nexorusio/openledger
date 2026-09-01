@@ -1569,6 +1569,79 @@ def test_analyst_selected_registry_entity_proposes_people_for_review(store):
         )
 
 
+def test_registry_selection_and_people_sync_are_not_france_specific(store):
+    job_id = store.create_affiliation_investigation(
+        "Example Global Organization", jurisdiction="ID"
+    )
+    job = store.claim_next("worker:global-registry-selection")
+    entity = {
+        "id": "9695005MSX1OYEMGDF46",
+        "identifier_type": "lei",
+        "legal_name": "EXAMPLE GLOBAL ORGANIZATION",
+        "legal_jurisdiction": "ID",
+        "entity_status": "active",
+        "exact_name_match": False,
+        "source_url": (
+            "https://api.gleif.org/api/v1/lei-records/"
+            "9695005MSX1OYEMGDF46"
+        ),
+        "people": [
+            {"display_name": "Ayu Example", "role": "Managing Director"}
+        ],
+    }
+    registry_observation = {
+        "source_engine": "gleif_lei_registry",
+        "status": "observed",
+        "candidates": [entity],
+        "selected_entity": None,
+    }
+    registry_candidate = {
+        "candidate_key": "gleif_lei_registry:9695005MSX1OYEMGDF46",
+        "label": "EXAMPLE GLOBAL ORGANIZATION",
+        "source_engine": "gleif_lei_registry",
+        "source_name": "GLEIF Global LEI Index",
+        "source_record_id": "gleif-search:example-global-organization",
+        "source_url": entity["source_url"],
+        "entity_id": entity["id"],
+        "identity_scope": "registered_legal_entity",
+        "identity_scope_label": "Registered legal entity",
+        "match_status": "requires_review",
+        "selectable": True,
+        "basis": "The governed registry returned this candidate.",
+        "limitation": "The analyst must confirm the identity match.",
+    }
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "registry_observations": [registry_observation],
+            "organization_resolution_candidates": [registry_candidate],
+        },
+    )
+
+    store.select_affiliation_organization(
+        job["case_id"], registry_candidate["candidate_key"], "analyst"
+    )
+
+    case = store.get_case(job["case_id"])
+    assert [persona["display_name"] for persona in case["personas"]] == [
+        "Ayu Example"
+    ]
+    persona = store.get_persona(case["personas"][0]["id"])
+    assert {claim["field_name"] for claim in persona["claims"]} == {
+        "full_name",
+        "company",
+        "occupation",
+    }
+    assert all(
+        claim["source_engine"] == "gleif_lei_registry"
+        for claim in persona["claims"]
+    )
+    assert all(
+        claim["review_status"] == "pending" for claim in persona["claims"]
+    )
+
+
 def _fr_affiliation_observation():
     entity = {
         "id": "812339356",

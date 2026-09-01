@@ -944,7 +944,7 @@ class CaseStore:
                     candidate["selected"] = (
                         candidate.get("candidate_key") == candidate_key
                     )
-            if selection.get("source_engine") == "fr_company_registry":
+            if selection.get("identity_scope") == "registered_legal_entity":
                 registry_observations = list(
                     result.get("registry_observations") or []
                 )[:5]
@@ -954,7 +954,7 @@ class CaseStore:
                     if (
                         not isinstance(registry_observation, dict)
                         or registry_observation.get("source_engine")
-                        != "fr_company_registry"
+                        != selection.get("source_engine")
                     ):
                         continue
                     for entity in list(
@@ -2898,11 +2898,11 @@ class CaseStore:
         website_observations: Optional[list[Dict[str, Any]]] = None,
     ) -> Dict[str, int]:
         from maigret.web.collector_adapters import (
-            FR_BUSINESS_REGISTRY_ENGINE,
             OFFICIAL_WEBSITE_ENGINE,
+            REGISTRY_SOURCE_ENGINES,
             WIKIDATA_ENGINE,
-            extract_fr_registry_affiliated_people,
             extract_official_website_affiliated_people,
+            extract_registry_affiliated_people,
             extract_wikidata_affiliation_people,
         )
 
@@ -2910,7 +2910,7 @@ class CaseStore:
         registry_observations = list(registry_observations or [])[:5]
         for registry_observation in registry_observations:
             people.extend(
-                extract_fr_registry_affiliated_people(registry_observation)
+                extract_registry_affiliated_people(registry_observation)
             )
         website_observations = list(website_observations or [])[:2]
         for website_observation in website_observations:
@@ -2998,8 +2998,9 @@ class CaseStore:
                 .where(
                     personas.c.case_id == case_id,
                     persona_claims.c.field_name == "full_name",
-                    claim_observations.c.source_engine
-                    == FR_BUSINESS_REGISTRY_ENGINE,
+                    claim_observations.c.source_engine.in_(
+                        REGISTRY_SOURCE_ENGINES
+                    ),
                     claim_observations.c.source_record_id.is_not(None),
                 )
             ).mappings():
@@ -3039,7 +3040,7 @@ class CaseStore:
                         str(candidate.get("source_record_id"))
                         for candidate in claims
                         if candidate.get("source_engine")
-                        == FR_BUSINESS_REGISTRY_ENGINE
+                        in REGISTRY_SOURCE_ENGINES
                         and candidate.get("field_name") == "full_name"
                         and candidate.get("source_record_id")
                     ),

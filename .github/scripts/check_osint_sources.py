@@ -235,9 +235,26 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
                 guardrails.get("maximum_redirects") in {0, 1},
                 f"{source_id}: public-web redirects must remain capped at one",
             )
+            maximum_pages = guardrails.get("maximum_pages")
             _require(
-                guardrails.get("maximum_pages") == 1,
-                f"{source_id}: public-web collection must remain one page",
+                isinstance(maximum_pages, int) and 1 <= maximum_pages <= 4,
+                f"{source_id}: public-web collection must remain capped at four pages",
+            )
+            maximum_response_bytes = guardrails.get("maximum_response_bytes")
+            maximum_total_response_bytes = guardrails.get(
+                "maximum_total_response_bytes", maximum_response_bytes
+            )
+            _require(
+                isinstance(maximum_response_bytes, int)
+                and 1 <= maximum_response_bytes <= 1000000,
+                f"{source_id}: per-page response limit exceeds one megabyte",
+            )
+            _require(
+                isinstance(maximum_total_response_bytes, int)
+                and maximum_response_bytes
+                <= maximum_total_response_bytes
+                <= 4000000,
+                f"{source_id}: total response limit exceeds four megabytes",
             )
             _require(
                 guardrails.get("script_execution_allowed") is False,

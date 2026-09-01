@@ -61,8 +61,8 @@ from maigret.web.collector_adapters import (
     build_business_context_assessment,
     build_organization_resolution_candidates,
     claimed_profile_url_targets,
-    extract_fr_registry_affiliated_people,
     extract_official_website_affiliated_people,
+    extract_registry_affiliated_people,
     extract_wikidata_affiliation_people,
     github_profile_targets,
     normalize_legal_jurisdiction,
@@ -2823,9 +2823,12 @@ def run_persistent_affiliation_job(
                         'website context before drawing a content conclusion.'
                     ),
                     'addresses': [],
+                    'location_observations': [],
                     'contacts': [],
                     'people': [],
                     'linked_company_profiles': [],
+                    'collected_pages': [],
+                    'page_failures': [],
                 }
         return (
             base_results,
@@ -2955,9 +2958,12 @@ def run_persistent_affiliation_job(
                 'reason': public_message,
                 'organization': None,
                 'addresses': [],
+                'location_observations': [],
                 'contacts': [],
                 'people': [],
                 'linked_company_profiles': [],
+                'collected_pages': [],
+                'page_failures': [],
             }
             source_errors.append(
                 {'collector': 'official-website-content', 'message': public_message}
@@ -2980,7 +2986,7 @@ def run_persistent_affiliation_job(
     registry_people = []
     for registry_observation in registry_observations:
         registry_people.extend(
-            extract_fr_registry_affiliated_people(registry_observation)
+            extract_registry_affiliated_people(registry_observation)
         )
     website_people = (
         extract_official_website_affiliated_people(website_result)
@@ -3019,7 +3025,7 @@ def run_persistent_affiliation_job(
                         ),
                     }
                 )
-        for person in extract_fr_registry_affiliated_people(
+        for person in extract_registry_affiliated_people(
             registry_observation
         ):
             sink.put(
@@ -3167,7 +3173,7 @@ def run_persistent_affiliation_job(
         people_found = (
             len(extract_wikidata_affiliation_people(source_observation))
             if source_name == 'wikidata-affiliation'
-            else len(extract_fr_registry_affiliated_people(source_observation))
+            else len(extract_registry_affiliated_people(source_observation))
         )
         sink.put(
             {

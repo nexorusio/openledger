@@ -130,7 +130,13 @@ FR_BUSINESS_REGISTRY_URL = "https://recherche-entreprises.api.gouv.fr/search"
 FR_BUSINESS_REGISTRY_TIMEOUT_SECONDS = 30
 FR_BUSINESS_REGISTRY_MAX_RESPONSE_BYTES = 1_000_000
 MAX_FR_BUSINESS_CANDIDATES = 5
-MAX_FR_BUSINESS_PEOPLE = 25
+MAX_REGISTRY_AFFILIATED_PEOPLE = 25
+
+REGISTRY_SOURCE_NAMES = {
+    GLEIF_ENGINE: "GLEIF Global LEI Index",
+    FR_BUSINESS_REGISTRY_ENGINE: "French National Enterprise Directory",
+}
+REGISTRY_SOURCE_ENGINES = frozenset(REGISTRY_SOURCE_NAMES)
 
 CLOUDFLARE_DNS_ENGINE = "cloudflare_dns_context"
 CLOUDFLARE_DNS_URL = "https://cloudflare-dns.com/dns-query"
@@ -148,6 +154,7 @@ MAX_OFFICIAL_WEBSITE_CONTACTS = 10
 MAX_OFFICIAL_WEBSITE_PEOPLE = 25
 MAX_OFFICIAL_WEBSITE_LINKED_PROFILES = 2
 MAX_OFFICIAL_WEBSITE_REDIRECTS = 1
+MAX_OFFICIAL_WEBSITE_PAGES = 4
 
 _LEI_PATTERN = re.compile(r"^[A-Z0-9]{20}$")
 _SIREN_PATTERN = re.compile(r"^[0-9]{9}$")
@@ -574,8 +581,27 @@ def _extract_team_people(document: Any) -> List[Dict[str, str]]:
 
 
 _ADDRESS_MARKER_PATTERN = re.compile(
-    r"\b(?:address|building|floor|gedung|jalan|jl\.?|jln\.?|lane|road|rd\.?|"
-    r"street|st\.?|suite|avenue|ave\.?|boulevard|drive)\b",
+    r"(?:\b(?:address|alamat|adresse|direcci[oó]n|endere[cç]o|indirizzo|anschrift|"
+    r"building|floor|gedung|jalan|jl\.?|jln\.?|lane|road|rd\.?|street|st\.?|"
+    r"suite|avenue|ave\.?|boulevard|drive|rue|calle|avenida|rua|via|ulica|"
+    r"stra(?:ss|ß)e|prospekt|ulitsa|شارع)\b|(?:丁目|番地|号|路|街))",
+    re.IGNORECASE,
+)
+_POSTAL_CODE_PATTERN = re.compile(
+    r"(?:\b\d{4,6}(?:-\d{3,4})?\b|"
+    r"\b[A-Z]{1,2}\d[A-Z\d]?\s*\d[A-Z]{2}\b|"
+    r"\b[A-Z]\d[A-Z]\s*\d[A-Z]\d\b)",
+    re.IGNORECASE,
+)
+_PRIVATE_ADDRESS_PATTERN = re.compile(
+    r"\b(?:home address|residential address|private residence|alamat rumah|"
+    r"adresse personnelle|domicilio particular|endere[cç]o residencial)\b",
+    re.IGNORECASE,
+)
+_ADDRESS_CONTEXT_PATTERN = re.compile(
+    r"(?:address|alamat|adresse|direcci[oó]n|endere[cç]o|indirizzo|anschrift|"
+    r"contact|location|office|headquarter|registered[-_ ]office|si[eè]ge|sede|"
+    r"kantor|lokasi|ubicaci[oó]n|localiza[cç][aã]o|所在地|地址|주소|адрес|العنوان)",
     re.IGNORECASE,
 )
 
@@ -585,8 +611,23 @@ def _looks_like_public_address(value: Any) -> bool:
     return bool(
         8 <= len(text) <= 1000
         and any(character.isdigit() for character in text)
-        and _ADDRESS_MARKER_PATTERN.search(text)
+        and not _PRIVATE_ADDRESS_PATTERN.search(text)
+        and (
+            _ADDRESS_MARKER_PATTERN.search(text)
+            or (
+                _POSTAL_CODE_PATTERN.search(text)
+                and ("," in text or " · " in text)
+            )
+        )
     )
+
+
+def _address_context_attribute(node: Any) -> bool:
+    values = " ".join(
+        str(node.get(attribute) or "")
+        for attribute in ("class", "id", "aria-label", "data-testid", "data-hook")
+    )[:1000]
+    return bool(_ADDRESS_CONTEXT_PATTERN.search(values))
 
 
 def _jsonld_addresses(document: Any) -> List[str]:
@@ -629,13 +670,42 @@ def _jsonld_addresses(document: Any) -> List[str]:
             for child in list(value.values())[:40]
             if isinstance(child, (dict, list))
         )
-    return addresses[:MAX_OFFICIAL_WEBSITE_ADDRESSES]
+    return [
+        address
+        for address in addresses
+        if not _PRIVATE_ADDRESS_PATTERN.search(address)
+    ][:MAX_OFFICIAL_WEBSITE_ADDRESSES]
 
 
 def _official_website_addresses(document: Any) -> List[str]:
     addresses = _jsonld_addresses(document)
     for node in document.xpath("//address|//*[@itemprop='address']")[:20]:
         _append_unique_text(addresses, _node_text(node, limit=1500), limit=1500)
+    for node in document.xpath(
+        "//*[@itemprop='streetAddress' or @itemprop='addressLocality' or "
+        "@itemprop='addressRegion' or @itemprop='postalCode' or "
+        "@itemprop='addressCountry']"
+    )[:80]:
+        container = node
+        while container is not None and container.get("itemscope") is None:
+            container = container.getparent()
+        if container is None:
+            container = node.getparent()
+        if container is None:
+            container = node
+        parts = [
+            _node_text(item, limit=500)
+            for item in container.xpath(
+                ".//*[@itemprop='streetAddress' or @itemprop='addressLocality' or "
+                "@itemprop='addressRegion' or @itemprop='postalCode' or "
+                "@itemprop='addressCountry']"
+            )[:10]
+        ]
+        _append_unique_text(
+            addresses,
+            ", ".join(dict.fromkeys(part for part in parts if part)),
+            limit=1500,
+        )
     for heading in document.xpath("//h1|//h2|//h3|//h4")[:200]:
         heading_text = _node_text(heading, limit=100).casefold()
         if not any(
@@ -667,7 +737,38 @@ def _official_website_addresses(document: Any) -> List[str]:
                     break
             if len(addresses) >= MAX_OFFICIAL_WEBSITE_ADDRESSES:
                 break
-    return addresses[:MAX_OFFICIAL_WEBSITE_ADDRESSES]
+    context_nodes = []
+    for node in document.xpath(
+        "//footer|//*[@class or @id or @aria-label or @data-testid or @data-hook]"
+    )[:500]:
+        if str(getattr(node, "tag", "")).casefold() == "footer" or (
+            _address_context_attribute(node)
+        ):
+            context_nodes.append(node)
+    for container in context_nodes[:80]:
+        nodes = container.xpath(".//address|.//p|.//li|.//span")[:120]
+        if not nodes:
+            nodes = [container]
+        for node in nodes:
+            candidate = _node_text(node, limit=1000)
+            if _looks_like_public_address(candidate):
+                _append_unique_text(addresses, candidate, limit=1500)
+            if len(addresses) >= MAX_OFFICIAL_WEBSITE_ADDRESSES:
+                break
+        if len(addresses) >= MAX_OFFICIAL_WEBSITE_ADDRESSES:
+            break
+    if len(addresses) < MAX_OFFICIAL_WEBSITE_ADDRESSES:
+        for node in document.xpath("//p|//li|//span")[:1000]:
+            candidate = _node_text(node, limit=1000)
+            if _looks_like_public_address(candidate):
+                _append_unique_text(addresses, candidate, limit=1500)
+            if len(addresses) >= MAX_OFFICIAL_WEBSITE_ADDRESSES:
+                break
+    return [
+        address
+        for address in addresses
+        if not _PRIVATE_ADDRESS_PATTERN.search(address)
+    ][:MAX_OFFICIAL_WEBSITE_ADDRESSES]
 
 
 def _bounded_mapping(value: Any, *, limit: int = 40) -> Dict[str, Any]:
@@ -941,7 +1042,7 @@ def normalize_fr_business_entities(
                 continue
             people_seen.add(identity)
             people.append({"display_name": display_name, "role": role})
-            if len(people) >= MAX_FR_BUSINESS_PEOPLE:
+            if len(people) >= MAX_REGISTRY_AFFILIATED_PEOPLE:
                 break
         seen.add(siren)
         candidates.append(
@@ -2176,6 +2277,75 @@ def _official_website_linked_company_profiles(document: Any) -> List[str]:
     return profiles
 
 
+_ORGANIZATION_CONTEXT_LINK_PATTERN = re.compile(
+    r"(?:about|company|contact|location|office|headquarter|team|leadership|"
+    r"tentang|kontak|lokasi|kantor|profil|adresse|contactez|si[eè]ge|"
+    r"empresa|contacto|ubicaci[oó]n|oficina|sobre|endere[cç]o|contato|sede|"
+    r"azienda|contatti|chi-siamo|unternehmen|kontakt|standort|会社|所在地|"
+    r"联系|地址|회사|위치|контакт|адрес|موقع|اتصل)",
+    re.IGNORECASE,
+)
+
+
+def _official_website_context_links(
+    document: Any, source_url: str, domain: str
+) -> List[str]:
+    links = []
+    for link in document.xpath("//a[@href]")[:500]:
+        href = str(link.get("href") or "").strip()
+        label = _node_text(link, limit=300)
+        if not _ORGANIZATION_CONTEXT_LINK_PATTERN.search(f"{href} {label}"):
+            continue
+        absolute = urljoin(source_url, href)
+        try:
+            normalized = normalize_official_website_url(absolute)
+        except ValueError:
+            continue
+        if not normalized or not _domains_equivalent(domain, normalized["domain"]):
+            continue
+        parsed = urlparse(normalized["url"])
+        if parsed.query and _url_has_sensitive_query_key(normalized["url"]):
+            continue
+        canonical = urlunparse(
+            (parsed.scheme, parsed.netloc, parsed.path or "/", "", parsed.query, "")
+        )
+        if canonical != source_url and canonical not in links:
+            links.append(canonical)
+        if len(links) >= MAX_OFFICIAL_WEBSITE_PAGES - 1:
+            break
+    return links
+
+
+def _official_website_location_observations(
+    addresses: Any, *, source_url: str
+) -> List[Dict[str, Any]]:
+    observations = []
+    for address in list(addresses or [])[:MAX_OFFICIAL_WEBSITE_ADDRESSES]:
+        address_text = _bounded_text(address, limit=1500)
+        if not address_text or _PRIVATE_ADDRESS_PATTERN.search(address_text):
+            continue
+        observations.append(
+            {
+                "observation_key": (
+                    "official-website-location:"
+                    f"{claim_fingerprint('address', source_url + ':' + address_text)}"
+                ),
+                "address": address_text,
+                "source_engine": OFFICIAL_WEBSITE_ENGINE,
+                "source_url": source_url,
+                "evidence_type": "organization_published_address",
+                "verification_status": "pending",
+                "basis": "Exact address text retained from the cited public webpage.",
+                "limitation": (
+                    "The page publishes this address, but it may be a contact, office, "
+                    "mailing, historical, or other location. It is not a personal address "
+                    "and does not establish legal registration or the full operating footprint."
+                ),
+            }
+        )
+    return observations
+
+
 def normalize_official_website_public_content(
     affiliation_name: Any,
     website: Any,
@@ -2237,9 +2407,16 @@ def normalize_official_website_public_content(
             ),
         },
         "addresses": addresses,
+        "location_observations": _official_website_location_observations(
+            addresses, source_url=final_url
+        ),
         "contacts": contacts,
         "people": people,
         "linked_company_profiles": linked_profiles,
+        "context_page_candidates": _official_website_context_links(
+            document, final_url, final_website["domain"]
+        ),
+        "collected_pages": [final_url],
         "extra": {
             "human_review_required": True,
             "automatic_approval_allowed": False,
@@ -2248,6 +2425,110 @@ def normalize_official_website_public_content(
             "operating_location_inference_allowed": False,
         },
     }
+
+
+async def _fetch_official_website_page(
+    session: Any,
+    url: str,
+    *,
+    supplied_domain: str,
+    resolver: Callable[..., Any],
+) -> tuple[str, Dict[str, Any]]:
+    current_url = url
+    response: Dict[str, Any] = {"status": "not_found"}
+    for redirect_count in range(MAX_OFFICIAL_WEBSITE_REDIRECTS + 1):
+        response = await _bounded_public_html_request(
+            session,
+            current_url,
+            resolver=resolver,
+            source_name="Official website",
+            maximum_bytes=OFFICIAL_WEBSITE_MAX_RESPONSE_BYTES,
+        )
+        if response["status"] != "redirect":
+            break
+        if redirect_count >= MAX_OFFICIAL_WEBSITE_REDIRECTS:
+            raise RuntimeError("The official website exceeded its redirect limit")
+        location = urljoin(current_url, response.get("location") or "")
+        redirected = normalize_official_website_url(location)
+        if not redirected or not _domains_equivalent(
+            supplied_domain, redirected["domain"]
+        ):
+            raise RuntimeError(
+                "The official website redirected outside its supplied domain"
+            )
+        current_url = redirected["url"]
+    return current_url, response
+
+
+def _merge_official_website_observations(
+    primary: Dict[str, Any], additional: Dict[str, Any]
+) -> Dict[str, Any]:
+    merged = dict(primary)
+
+    def merge_values(key: str, identity: Callable[[Any], Any], limit: int) -> None:
+        values = []
+        seen = set()
+        for value in list(primary.get(key) or []) + list(additional.get(key) or []):
+            marker = identity(value)
+            if marker in seen:
+                continue
+            seen.add(marker)
+            values.append(value)
+            if len(values) >= limit:
+                break
+        merged[key] = values
+
+    merge_values(
+        "addresses",
+        lambda value: _affiliation_identity(value),
+        MAX_OFFICIAL_WEBSITE_ADDRESSES,
+    )
+    merge_values(
+        "location_observations",
+        lambda value: str((value or {}).get("observation_key") or "")
+        if isinstance(value, dict)
+        else "",
+        MAX_OFFICIAL_WEBSITE_ADDRESSES,
+    )
+    merge_values(
+        "contacts",
+        lambda value: (
+            str((value or {}).get("type") or ""),
+            str((value or {}).get("value") or "").casefold(),
+        )
+        if isinstance(value, dict)
+        else ("", ""),
+        MAX_OFFICIAL_WEBSITE_CONTACTS,
+    )
+    merge_values(
+        "people",
+        lambda value: (
+            _affiliation_identity((value or {}).get("display_name")),
+            _affiliation_identity((value or {}).get("role")),
+        )
+        if isinstance(value, dict)
+        else ("", ""),
+        MAX_OFFICIAL_WEBSITE_PEOPLE,
+    )
+    merge_values(
+        "linked_company_profiles",
+        lambda value: str(value),
+        MAX_OFFICIAL_WEBSITE_LINKED_PROFILES,
+    )
+    merge_values(
+        "collected_pages", lambda value: str(value), MAX_OFFICIAL_WEBSITE_PAGES
+    )
+    merged["context_page_candidates"] = []
+    merged["status"] = "observed"
+    merged["reason"] = (
+        "Bounded public content was collected from "
+        f"{len(merged['collected_pages'])} same-domain organization page(s)."
+    )
+    merged["extra"] = {
+        **dict(primary.get("extra") or {}),
+        "pages_collected": len(merged["collected_pages"]),
+    }
+    return merged
 
 
 async def run_official_website_public_content(
@@ -2275,29 +2556,52 @@ async def run_official_website_public_content(
             "(+https://github.com/nexorusio/openledger)"
         ),
     }
-    current_url = normalized_website["url"]
     async with session_factory(timeout=timeout, headers=headers) as session:
-        for redirect_count in range(MAX_OFFICIAL_WEBSITE_REDIRECTS + 1):
-            response = await _bounded_public_html_request(
-                session,
-                current_url,
-                resolver=host_resolver,
-                source_name="Official website",
-                maximum_bytes=OFFICIAL_WEBSITE_MAX_RESPONSE_BYTES,
+        current_url, response = await _fetch_official_website_page(
+            session,
+            normalized_website["url"],
+            supplied_domain=normalized_website["domain"],
+            resolver=host_resolver,
+        )
+        if response["status"] == "ok":
+            observation = normalize_official_website_public_content(
+                name,
+                normalized_website,
+                response["body"],
+                source_url=current_url,
             )
-            if response["status"] != "redirect":
-                break
-            if redirect_count >= MAX_OFFICIAL_WEBSITE_REDIRECTS:
-                raise RuntimeError("The official website exceeded its redirect limit")
-            location = urljoin(current_url, response.get("location") or "")
-            redirected = normalize_official_website_url(location)
-            if not redirected or not _domains_equivalent(
-                normalized_website["domain"], redirected["domain"]
-            ):
-                raise RuntimeError(
-                    "The official website redirected outside its supplied domain"
-                )
-            current_url = redirected["url"]
+            page_failures = []
+            for context_url in list(
+                observation.get("context_page_candidates") or []
+            )[: MAX_OFFICIAL_WEBSITE_PAGES - 1]:
+                try:
+                    page_url, page_response = await _fetch_official_website_page(
+                        session,
+                        context_url,
+                        supplied_domain=normalized_website["domain"],
+                        resolver=host_resolver,
+                    )
+                    if page_response["status"] != "ok":
+                        page_failures.append(
+                            {"url": page_url, "status": page_response["status"]}
+                        )
+                        continue
+                    additional = normalize_official_website_public_content(
+                        name,
+                        normalized_website,
+                        page_response["body"],
+                        source_url=page_url,
+                    )
+                    observation = _merge_official_website_observations(
+                        observation, additional
+                    )
+                except (RuntimeError, ValueError):
+                    page_failures.append(
+                        {"url": context_url, "status": "unavailable"}
+                    )
+            observation["context_page_candidates"] = []
+            observation["page_failures"] = page_failures[:MAX_OFFICIAL_WEBSITE_PAGES]
+            return observation
     if response["status"] in {"rate_limited", "not_found"}:
         return {
             "source_engine": OFFICIAL_WEBSITE_ENGINE,
@@ -2316,20 +2620,19 @@ async def run_official_website_public_content(
             ),
             "organization": None,
             "addresses": [],
+            "location_observations": [],
             "contacts": [],
             "people": [],
             "linked_company_profiles": [],
+            "context_page_candidates": [],
+            "collected_pages": [],
+            "page_failures": [],
             "extra": {
                 "human_review_required": True,
                 "automatic_approval_allowed": False,
             },
         }
-    return normalize_official_website_public_content(
-        name,
-        normalized_website,
-        response["body"],
-        source_url=current_url,
-    )
+    raise RuntimeError("The supplied website returned an unsupported response")
 
 
 def _address_summary(address: Any) -> str:
@@ -2357,17 +2660,13 @@ def build_business_context_assessment(
 ) -> List[Dict[str, Any]]:
     """Build explicit, source-bounded context without inferring operations."""
     findings = []
-    source_names = {
-        GLEIF_ENGINE: "GLEIF Global LEI Index",
-        FR_BUSINESS_REGISTRY_ENGINE: "French National Enterprise Directory",
-    }
     for observation in list(registry_observations or [])[:10]:
         if not isinstance(observation, dict):
             continue
         entity = observation.get("selected_entity")
         if not isinstance(entity, dict):
             continue
-        source_name = source_names.get(
+        source_name = REGISTRY_SOURCE_NAMES.get(
             observation.get("source_engine"),
             str(observation.get("source_engine") or "Public registry"),
         )
@@ -2501,10 +2800,20 @@ def build_business_context_assessment(
                     "source_url": website_observation.get("source_url"),
                 }
             )
-        for address in list(website_observation.get("addresses") or [])[
-            :MAX_OFFICIAL_WEBSITE_ADDRESSES
-        ]:
-            address_text = _bounded_text(address, limit=1500)
+        location_observations = list(
+            website_observation.get("location_observations") or []
+        )[:MAX_OFFICIAL_WEBSITE_ADDRESSES]
+        if not location_observations:
+            location_observations = _official_website_location_observations(
+                website_observation.get("addresses"),
+                source_url=str(website_observation.get("source_url") or ""),
+            )
+        for location_observation in location_observations:
+            if not isinstance(location_observation, dict):
+                continue
+            address_text = _bounded_text(
+                location_observation.get("address"), limit=1500
+            )
             if not address_text:
                 continue
             findings.append(
@@ -2514,13 +2823,10 @@ def build_business_context_assessment(
                         "The supplied organization website publishes the address "
                         f"{address_text}."
                     ),
-                    "basis": "Exact address text retained from the cited public HTML.",
-                    "limitation": (
-                        "A self-published contact or office address is not necessarily a "
-                        "registered office and does not prove the full operating footprint."
-                    ),
+                    "basis": location_observation.get("basis"),
+                    "limitation": location_observation.get("limitation"),
                     "source_name": "Supplied organization website",
-                    "source_url": website_observation.get("source_url"),
+                    "source_url": location_observation.get("source_url"),
                 }
             )
         contacts = [
@@ -2749,28 +3055,33 @@ def extract_wikidata_affiliation_people(observation: Any) -> List[Dict[str, Any]
     return output
 
 
-def _fr_registry_claim_candidate(
+def _registry_claim_candidate(
     field_name: str,
     value: str,
     *,
     person: Dict[str, Any],
     entity: Dict[str, Any],
+    source_engine: str,
+    source_name: str,
 ) -> Dict[str, Any]:
     display_value = _bounded_text(value, limit=4000)
-    siren = entity["id"]
+    entity_id = _bounded_text(entity.get("id"), limit=100)
     source_record_id = (
-        f"fr-siren:{siren}:leader:"
+        f"registry-person:{source_engine}:"
+        f"{claim_fingerprint('registry_entity', entity_id)}:"
         f"{claim_fingerprint('full_name', person['display_name'])}"
     )
     evidence = {
         "evidence_type": "official_business_registry",
-        "source_name": "French National Enterprise Directory",
+        "source_name": source_name,
         "source_url": entity["source_url"],
         "details": {
             "legal_entity_name": entity["legal_name"],
             "legal_jurisdiction": entity["legal_jurisdiction"],
-            "siren": siren,
-            "siret": entity.get("headquarters_identifier", ""),
+            "registry_identifier": entity_id,
+            "registry_identifier_type": _bounded_text(
+                entity.get("identifier_type"), limit=100
+            ),
             "public_registry_role": person["role"],
             "entity_status": entity.get("entity_status", ""),
             "registry_last_updated_at": entity.get("last_update_date", ""),
@@ -2786,11 +3097,11 @@ def _fr_registry_claim_candidate(
         "normalized_value": display_value.casefold(),
         "confidence": 90,
         "fingerprint": claim_fingerprint(field_name, display_value),
-        "source_engine": FR_BUSINESS_REGISTRY_ENGINE,
+        "source_engine": source_engine,
         "source_record_id": source_record_id,
         "native_status": "observed",
         "observation_details": {
-            "legal_entity_identifier": siren,
+            "legal_entity_identifier": entity_id,
             "legal_jurisdiction": entity["legal_jurisdiction"],
             "registry_role": person["role"],
         },
@@ -2798,34 +3109,48 @@ def _fr_registry_claim_candidate(
     }
 
 
-def extract_fr_registry_affiliated_people(observation: Any) -> List[Dict[str, Any]]:
-    """Create pending people proposals only for one deterministic exact entity match."""
+def extract_registry_affiliated_people(observation: Any) -> List[Dict[str, Any]]:
+    """Create pending people proposals from any governed normalized registry."""
     if (
         not isinstance(observation, dict)
-        or observation.get("source_engine") != FR_BUSINESS_REGISTRY_ENGINE
         or observation.get("status") != "observed"
         or not isinstance(observation.get("selected_entity"), dict)
     ):
         return []
+    source_engine = _bounded_text(observation.get("source_engine"), limit=100)
+    source_name = REGISTRY_SOURCE_NAMES.get(source_engine)
+    if not source_name:
+        return []
     entity = observation["selected_entity"]
-    siren = str(entity.get("id") or "").strip()
+    entity_id = _bounded_text(entity.get("id"), limit=100)
     legal_name = _bounded_text(entity.get("legal_name"), limit=500)
-    source_url = str(entity.get("source_url") or "")
+    source_url = _safe_public_url(entity.get("source_url"))
+    legal_jurisdiction = _bounded_text(
+        entity.get("legal_jurisdiction"), limit=100
+    )
     if (
-        not _SIREN_PATTERN.fullmatch(siren)
+        not entity_id
         or not legal_name
-        or source_url
-        != f"https://annuaire-entreprises.data.gouv.fr/entreprise/{siren}"
+        or not source_url
+        or not legal_jurisdiction
         or not (
             entity.get("exact_name_match") is True
             or entity.get("analyst_selected") is True
         )
     ):
         return []
-    entity = {**entity, "id": siren, "legal_name": legal_name}
+    entity = {
+        **entity,
+        "id": entity_id,
+        "legal_name": legal_name,
+        "legal_jurisdiction": legal_jurisdiction,
+        "source_url": source_url,
+    }
     output = []
     seen = set()
-    for raw_person in list(entity.get("people") or [])[:MAX_FR_BUSINESS_PEOPLE]:
+    for raw_person in list(entity.get("people") or [])[
+        :MAX_REGISTRY_AFFILIATED_PEOPLE
+    ]:
         if not isinstance(raw_person, dict):
             continue
         display_name = _bounded_text(raw_person.get("display_name"), limit=500)
@@ -2837,22 +3162,45 @@ def extract_fr_registry_affiliated_people(observation: Any) -> List[Dict[str, An
         person = {"display_name": display_name, "role": role}
         output.append(
             {
-                "registry_person_key": f"fr:{siren}:{identity}",
+                "registry_person_key": (
+                    f"registry:{source_engine}:"
+                    f"{claim_fingerprint('registry_entity', entity_id)}:{identity}"
+                ),
                 "display_name": display_name,
                 "claims": [
-                    _fr_registry_claim_candidate(
-                        "full_name", display_name, person=person, entity=entity
+                    _registry_claim_candidate(
+                        "full_name",
+                        display_name,
+                        person=person,
+                        entity=entity,
+                        source_engine=source_engine,
+                        source_name=source_name,
                     ),
-                    _fr_registry_claim_candidate(
-                        "company", legal_name, person=person, entity=entity
+                    _registry_claim_candidate(
+                        "company",
+                        legal_name,
+                        person=person,
+                        entity=entity,
+                        source_engine=source_engine,
+                        source_name=source_name,
                     ),
-                    _fr_registry_claim_candidate(
-                        "occupation", role, person=person, entity=entity
+                    _registry_claim_candidate(
+                        "occupation",
+                        role,
+                        person=person,
+                        entity=entity,
+                        source_engine=source_engine,
+                        source_name=source_name,
                     ),
                 ],
             }
         )
     return output
+
+
+# Backward-compatible import for downstream deployments while the shared path
+# is now source-neutral.
+extract_fr_registry_affiliated_people = extract_registry_affiliated_people
 
 
 def _public_organization_claim_candidate(
@@ -3091,10 +3439,6 @@ def build_organization_resolution_candidates(
                 }
             )
 
-    source_names = {
-        GLEIF_ENGINE: "GLEIF Global LEI Index",
-        FR_BUSINESS_REGISTRY_ENGINE: "French National Enterprise Directory",
-    }
     for observation in list(registry_observations or [])[:5]:
         if not isinstance(observation, dict):
             continue
@@ -3116,7 +3460,7 @@ def build_organization_resolution_candidates(
                     "candidate_key": f"{source_engine}:{entity_id}",
                     "label": legal_name,
                     "source_engine": source_engine,
-                    "source_name": source_names.get(
+                    "source_name": REGISTRY_SOURCE_NAMES.get(
                         source_engine, "Public business registry"
                     ),
                     "source_record_id": str(

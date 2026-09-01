@@ -32,6 +32,7 @@ from maigret.web.collector_adapters import (
     claimed_profile_url_targets,
     extract_github_profile_claims,
     extract_fr_registry_affiliated_people,
+    extract_registry_affiliated_people,
     extract_icij_offshore_claims,
     extract_official_website_affiliated_people,
     extract_profile_url_evidence_claims,
@@ -1070,12 +1071,54 @@ def test_fr_registry_people_require_one_exact_entity_and_remain_review_inputs():
         for claim in person["claims"]:
             assert claim["source_engine"] == FR_BUSINESS_REGISTRY_ENGINE
             details = claim["evidence"][0]["details"]
-            assert details["siren"] == "812339356"
+            assert details["registry_identifier"] == "812339356"
+            assert details["registry_identifier_type"] == "siren"
             assert details["human_review_required"] is True
             assert details["automatic_approval_allowed"] is False
 
     ambiguous = dict(observation, selected_entity=None)
     assert extract_fr_registry_affiliated_people(ambiguous) == []
+
+
+def test_registry_people_contract_is_source_neutral_for_governed_adapters():
+    observation = {
+        "source_engine": GLEIF_ENGINE,
+        "status": "observed",
+        "selected_entity": {
+            "id": "9695005MSX1OYEMGDF46",
+            "identifier_type": "lei",
+            "legal_name": "Example Global Organization",
+            "legal_jurisdiction": "ID",
+            "source_url": (
+                "https://api.gleif.org/api/v1/lei-records/"
+                "9695005MSX1OYEMGDF46"
+            ),
+            "analyst_selected": True,
+            "people": [
+                {"display_name": "Ayu Example", "role": "Managing Director"}
+            ],
+        },
+    }
+
+    people = extract_registry_affiliated_people(observation)
+
+    assert len(people) == 1
+    assert people[0]["registry_person_key"].startswith(
+        "registry:gleif_lei_registry:"
+    )
+    assert {claim["field_name"] for claim in people[0]["claims"]} == {
+        "full_name",
+        "company",
+        "occupation",
+    }
+    assert all(
+        claim["source_engine"] == GLEIF_ENGINE
+        for claim in people[0]["claims"]
+    )
+    assert all(
+        claim["evidence"][0]["source_name"] == "GLEIF Global LEI Index"
+        for claim in people[0]["claims"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1230,6 +1273,23 @@ def _unistellar_official_website_html():
     </main></body></html>"""
 
 
+def _global_company_page_html():
+    return b"""<!doctype html><html><head><title>Global Example</title></head>
+    <body><main>
+      <p>10 Rue de Rivoli, 75001 Paris, France</p>
+      <p>Home address: 8 Private Road, 10000 Example</p>
+      <a href="/kontakt">Kontakt</a>
+      <a href="https://other.example/location">External location</a>
+    </main></body></html>"""
+
+
+def _global_contact_page_html():
+    return b"""<!doctype html><html><head><title>Kontakt</title></head>
+    <body><footer><div class="standort">
+      <span>Friedrichstrasse 123, 10117 Berlin, Germany</span>
+    </div></footer></body></html>"""
+
+
 def test_official_website_content_extracts_exact_cited_context_and_people():
     observation = normalize_official_website_public_content(
         "Example Organization",
@@ -1276,6 +1336,53 @@ def test_official_website_content_extracts_exact_cited_context_and_people():
         claim["evidence"][0]["details"]["human_review_required"] is True
         for claim in people[0]["claims"]
     )
+
+
+@pytest.mark.asyncio
+async def test_official_website_crawls_bounded_same_domain_context_pages_with_lineage():
+    calls = []
+    observation = await run_official_website_public_content(
+        "Global Example",
+        "https://example.org",
+        host_resolver=lambda _hostname, _port: ["93.184.216.34"],
+        session_factory=lambda **options: _FakeSequenceSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body=_global_company_page_html(),
+                    headers={"Content-Type": "text/html"},
+                ),
+                _FakeResponse(
+                    status=200,
+                    body=_global_contact_page_html(),
+                    headers={"Content-Type": "text/html"},
+                ),
+            ],
+            calls,
+            **options,
+        ),
+    )
+
+    assert observation["addresses"] == [
+        "10 Rue de Rivoli, 75001 Paris, France",
+        "Friedrichstrasse 123, 10117 Berlin, Germany",
+    ]
+    assert observation["collected_pages"] == [
+        "https://example.org",
+        "https://example.org/kontakt",
+    ]
+    assert {
+        item["source_url"] for item in observation["location_observations"]
+    } == {"https://example.org", "https://example.org/kontakt"}
+    assert all(
+        item["verification_status"] == "pending"
+        for item in observation["location_observations"]
+    )
+    assert all(
+        "personal address" in item["limitation"]
+        for item in observation["location_observations"]
+    )
+    assert len([item for item in calls if item[0] == "get"]) == 2
 
 
 @pytest.mark.parametrize(
