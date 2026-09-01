@@ -119,8 +119,12 @@
     {% if claim.field_name == 'company' and claim.review_status == 'approved' %}
     <form method="POST" action="{{ url_for('investigate_affiliation_claim', claim_id=claim.id) }}" class="affiliation-investigation-action">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label class="affiliation-jurisdiction-field">
+            <span>Registered jurisdiction <small>(optional)</small></span>
+            <input type="text" name="jurisdiction" maxlength="100" placeholder="France, FR, or US-DE" autocomplete="off">
+        </label>
         <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="building-2"></i> Open affiliation case</button>
-        <small>Find its official website and explicitly affiliated people. New claims remain pending.</small>
+        <small>Add a jurisdiction to search governed legal-entity registries. New people and claims remain pending.</small>
     </form>
     {% endif %}
 </article>

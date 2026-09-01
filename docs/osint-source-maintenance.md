@@ -37,3 +37,13 @@ The same opt-in queries only `https://web.archive.org/cdx/search/cdx`. Each requ
 An exact capture supports historical presence of the URL, not ownership by the Persona and not the truth of the archived page. It therefore attaches low-confidence evidence to the existing pending `social_account` claim. Empty, mismatched, malformed, unavailable, and rate-limited responses remain diagnostics and do not create claims.
 
 The scheduled source audit performs a small exact-URL CDX contract check. Because the API is unversioned, any response-shape or availability change fails the maintenance signal and requires a reviewed pull request; runtime failures still degrade only the Wayback collector.
+
+## Jurisdiction-scoped legal-entity adapters
+
+An analyst may add a country name, ISO 3166-1 alpha-2 code, or ISO 3166-2 subdivision code when opening a case from an approved affiliation. OpenLedger normalizes that value before collection and retains it in the investigation specification. Registry results are candidates, not confirmed organization claims.
+
+The global adapter queries the credential-free GLEIF API by exact operator-approved name and country, then applies the requested country or subdivision filter locally. It retains at most five bounded Legal Entity Identifier candidates. Because GLEIF covers entities issued an LEI rather than every registered business, a zero result is explicitly not treated as evidence that the business is unregistered.
+
+For country-level `FR` searches, a second independent adapter queries the French National Enterprise Directory. One unique exact legal-name match may propose public natural-person leaders as pending `full_name`, backward-compatible `company`, and `occupation` claims. Every proposal retains the SIREN record and public role as evidence. Dates of birth and nationality returned by the upstream source are deliberately excluded from normalization and storage.
+
+Both adapters use fixed HTTPS origins, redirects disabled, a thirty-second timeout, a one-megabyte response cap, no credential, at most twenty upstream rows, and no more than five retained entity candidates. A registry failure cannot fail Wikidata or another registry, and no result enters canonical Persona or relationship views without analyst approval.

@@ -335,6 +335,103 @@ def live_wayback_contract(source: dict) -> None:
     )
 
 
+def live_gleif_contract(source: dict) -> None:
+    target = source["maintenance"].get("live_contract_target")
+    _require(isinstance(target, str) and target, "GLEIF live target is missing")
+    endpoint = source["endpoint_origin"]
+    _require(endpoint == "https://api.gleif.org", "GLEIF endpoint origin changed")
+    query = urlencode(
+        {
+            "filter[entity.legalName]": target,
+            "filter[entity.legalAddress.country]": "US",
+            "page[number]": "1",
+            "page[size]": "5",
+        }
+    )
+    request = Request(
+        f"{endpoint}/api/v1/lei-records?{query}",
+        headers={
+            "Accept": "application/vnd.api+json",
+            "User-Agent": "OpenLedger-OSINT-Contract-Audit/1.0 (+https://github.com/nexorusio/openledger)",
+        },
+    )
+    try:
+        with build_opener(NoRedirectHandler()).open(request, timeout=30) as response:
+            payload = response.read(1_000_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(f"GLEIF live contract request failed: {error}") from error
+    _require(len(payload) <= 1_000_000, "GLEIF live response was oversized")
+    try:
+        rows = json.loads(payload).get("data")
+    except (AttributeError, json.JSONDecodeError) as error:
+        raise RuntimeError("GLEIF live contract returned invalid JSON") from error
+    _require(isinstance(rows, list) and rows, "GLEIF returned no LEI records")
+    _require(
+        any(
+            isinstance(row, dict)
+            and re.fullmatch(
+                r"[A-Z0-9]{20}",
+                str((row.get("attributes") or {}).get("lei") or ""),
+            )
+            and str(
+                (((row.get("attributes") or {}).get("entity") or {}).get("legalName") or {}).get("name")
+                or ""
+            ).casefold()
+            == target.casefold()
+            for row in rows
+        ),
+        "GLEIF legal-name or LEI contract changed",
+    )
+
+
+def live_fr_company_registry_contract(source: dict) -> None:
+    target = source["maintenance"].get("live_contract_target")
+    _require(
+        isinstance(target, str) and re.fullmatch(r"[0-9]{9}", target),
+        "French registry live target is missing",
+    )
+    endpoint = source["endpoint_origin"]
+    _require(
+        endpoint == "https://recherche-entreprises.api.gouv.fr",
+        "French registry endpoint origin changed",
+    )
+    query = urlencode({"q": target, "page": "1", "per_page": "5"})
+    request = Request(
+        f"{endpoint}/search?{query}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "OpenLedger-OSINT-Contract-Audit/1.0 (+https://github.com/nexorusio/openledger)",
+        },
+    )
+    try:
+        with build_opener(NoRedirectHandler()).open(request, timeout=30) as response:
+            payload = response.read(1_000_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(
+            f"French registry live contract request failed: {error}"
+        ) from error
+    _require(
+        len(payload) <= 1_000_000,
+        "French registry live response was oversized",
+    )
+    try:
+        rows = json.loads(payload).get("results")
+    except (AttributeError, json.JSONDecodeError) as error:
+        raise RuntimeError(
+            "French registry live contract returned invalid JSON"
+        ) from error
+    _require(isinstance(rows, list) and rows, "French registry returned no entity")
+    _require(
+        any(
+            isinstance(row, dict)
+            and str(row.get("siren") or "") == target
+            and bool(str(row.get("nom_complet") or row.get("nom_raison_sociale") or ""))
+            for row in rows
+        ),
+        "French registry SIREN or legal-name contract changed",
+    )
+
+
 def live_wikidata_contract(source: dict) -> None:
     target = source["maintenance"].get("live_contract_target")
     _require(
@@ -477,6 +574,10 @@ def main() -> int:
             sources_by_id = {source["id"]: source for source in registry["sources"]}
             live_github_contract(sources_by_id["github_public_profile"])
             live_wayback_contract(sources_by_id["wayback_cdx"])
+            live_gleif_contract(sources_by_id["gleif_lei_registry"])
+            live_fr_company_registry_contract(
+                sources_by_id["fr_company_registry"]
+            )
             live_wikidata_contract(sources_by_id["wikidata_affiliation"])
             live_wikipedia_contract(sources_by_id["wikipedia_public_biography"])
             live_icij_offshore_contract(sources_by_id["icij_offshore_leaks"])

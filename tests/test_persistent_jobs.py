@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import time
 from threading import Timer
@@ -952,6 +953,101 @@ def test_affiliation_worker_persists_pending_people(web_app, persistent_store, m
     assert persistent_store.get_events(job_id)[-1]["event"]["redirect"] == f"/cases/{job['case_id']}"
 
 
+def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar", jurisdiction="FR"
+    )
+    job = persistent_store.claim_next("worker:jurisdiction")
+
+    async def failed_wikidata(*_args, **_kwargs):
+        raise RuntimeError("private upstream diagnostic")
+
+    async def empty_gleif(*_args, **_kwargs):
+        return {
+            "source_engine": "gleif_lei_registry",
+            "status": "not_found",
+            "reason": (
+                "GLEIF returned no jurisdiction-matched LEI record. This does "
+                "not prove that the entity is not registered."
+            ),
+            "candidates": [],
+            "selected_entity": None,
+        }
+
+    async def france_registry(*_args, **_kwargs):
+        entity = {
+            "id": "812339356",
+            "identifier_type": "siren",
+            "legal_name": "UNISTELLAR",
+            "legal_jurisdiction": "FR",
+            "jurisdiction_label": "France",
+            "headquarters_identifier": "81233935600030",
+            "entity_status": "active",
+            "last_update_date": "2026-08-01T00:00:00Z",
+            "legal_address": {
+                "lines": ["5 AVENUE DU GENERAL LECLERC"],
+                "city": "Marseille",
+                "region": "93",
+                "country": "FR",
+                "postal_code": "13003",
+            },
+            "people": [
+                {
+                    "display_name": "Arnaud Malvache",
+                    "role": "Président de SAS",
+                },
+                {
+                    "display_name": "Laurent Marfisi",
+                    "role": "Directeur Général",
+                },
+            ],
+            "exact_name_match": True,
+            "source_url": (
+                "https://annuaire-entreprises.data.gouv.fr/entreprise/812339356"
+            ),
+        }
+        return {
+            "source_engine": "fr_company_registry",
+            "status": "observed",
+            "reason": "Public records from the French National Enterprise Directory.",
+            "candidates": [entity],
+            "selected_entity": entity,
+        }
+
+    monkeypatch.setattr(
+        web_app, "run_wikidata_affiliation_discovery", failed_wikidata
+    )
+    monkeypatch.setattr(web_app, "run_gleif_legal_entity_search", empty_gleif)
+    monkeypatch.setattr(
+        web_app, "run_fr_business_registry_search", france_registry
+    )
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["affiliation_status"] == "partial"
+    assert completed["registry_candidate_count"] == 1
+    assert completed["affiliated_person_count"] == 2
+    assert completed["claim_proposal_count"] == 6
+    assert "private upstream diagnostic" not in json.dumps(completed)
+    case = persistent_store.get_case(job["case_id"])
+    assert len(case["personas"]) == 2
+    for persona_summary in case["personas"]:
+        persona = persistent_store.get_persona(persona_summary["id"])
+        assert all(
+            claim["review_status"] == "pending" for claim in persona["claims"]
+        )
+
+    page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "French National Enterprise Directory" in page
+    assert "SIREN 812339356" in page
+    assert "GLEIF covers entities issued a Legal Entity Identifier" in page
+    assert "automatically approved" in page
+
+
 def test_affiliation_source_failure_is_not_rendered_as_zero_people(
     client, persistent_store
 ):
@@ -1003,10 +1099,16 @@ def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
     assert "Open affiliation case" in client.get(f"/personas/{persona['id']}").get_data(as_text=True)
     with client.session_transaction() as session:
         session["csrf_token"] = "affiliation-csrf"
-    response = client.post(f"/claims/{company['id']}/investigate-affiliation", data={"csrf_token": "affiliation-csrf"})
+    response = client.post(
+        f"/claims/{company['id']}/investigate-affiliation",
+        data={"csrf_token": "affiliation-csrf", "jurisdiction": "France"},
+    )
     job_id = response.location.rsplit("/", 1)[-1]
     affiliation_job = persistent_store.get_job(job_id)
     assert affiliation_job["kind"] == "affiliation"
+    assert affiliation_job["options"]["investigation_spec"][
+        "legal_jurisdiction"
+    ]["code"] == "FR"
     assert persistent_store.get_case(affiliation_job["case_id"])["personas"] == []
 
 

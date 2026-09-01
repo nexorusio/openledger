@@ -654,27 +654,39 @@ class CaseStore:
         return job_id
 
     def create_affiliation_investigation(
-        self, affiliation_name: str, *, source_claim_id: Optional[str] = None
+        self,
+        affiliation_name: str,
+        *,
+        source_claim_id: Optional[str] = None,
+        jurisdiction: Any = None,
     ) -> str:
-        from maigret.web.collector_adapters import normalize_affiliation_name
+        from maigret.web.collector_adapters import (
+            normalize_affiliation_name,
+            normalize_legal_jurisdiction,
+        )
 
         affiliation_name = normalize_affiliation_name(affiliation_name)
+        legal_jurisdiction = normalize_legal_jurisdiction(jurisdiction)
         source_claim_id = str(source_claim_id or "").strip() or None
         if source_claim_id and len(source_claim_id) > 100:
             raise ValueError("Invalid source claim identifier")
         now = utcnow()
         case_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
         specification = {
-            "schema_version": 1,
+            "schema_version": 2,
             "investigation_type": "affiliation",
             "affiliation_name": affiliation_name,
             "source_claim_id": source_claim_id,
+            "legal_jurisdiction": legal_jurisdiction,
         }
+        case_title = f"Affiliation: {affiliation_name}"
+        if legal_jurisdiction:
+            case_title += f" · {legal_jurisdiction['code']}"
         with self.engine.begin() as connection:
             connection.execute(
                 insert(cases).values(
                     id=case_id,
-                    title=f"Affiliation: {affiliation_name}"[:500],
+                    title=case_title[:500],
                     status="open",
                     created_at=now,
                     updated_at=now,
@@ -688,7 +700,16 @@ class CaseStore:
                     status="queued",
                     usernames=[],
                     options={"investigation_spec": specification},
-                    progress={"checked": 0, "total": 2, "found": 0},
+                    progress={
+                        "checked": 0,
+                        "total": (
+                            4
+                            if legal_jurisdiction
+                            and legal_jurisdiction["code"] == "FR"
+                            else 3 if legal_jurisdiction else 2
+                        ),
+                        "found": 0,
+                    },
                     result=None,
                     error=None,
                     cancel_requested=False,
@@ -699,7 +720,12 @@ class CaseStore:
             )
         self.append_event(
             job_id,
-            {"type": "queued", "target_type": "affiliation", "affiliation": affiliation_name},
+            {
+                "type": "queued",
+                "target_type": "affiliation",
+                "affiliation": affiliation_name,
+                "legal_jurisdiction": legal_jurisdiction,
+            },
         )
         return job_id
 
@@ -863,10 +889,14 @@ class CaseStore:
             candidate = None
             affiliation_name = ""
             source_claim_id = None
+            legal_jurisdiction = None
             for prior in prior_jobs:
                 spec = dict(prior["options"] or {}).get("investigation_spec") or {}
                 affiliation_name = affiliation_name or str(spec.get("affiliation_name") or "")
                 source_claim_id = source_claim_id or spec.get("source_claim_id")
+                legal_jurisdiction = legal_jurisdiction or spec.get(
+                    "legal_jurisdiction"
+                )
                 for item in list(dict(prior["result"] or {}).get("organization_candidates") or [])[:5]:
                     if isinstance(item, dict) and str(item.get("id") or "").upper() == entity_id:
                         candidate = item
@@ -877,26 +907,38 @@ class CaseStore:
                 raise ValueError("The selected organization is not a stored candidate for this case")
             selected_label = " ".join(str(candidate.get("label") or affiliation_name).split())[:500]
             specification = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "investigation_type": "affiliation",
                 "affiliation_name": affiliation_name[:500],
                 "source_claim_id": source_claim_id,
+                "legal_jurisdiction": legal_jurisdiction,
                 "wikidata_entity_id": entity_id,
                 "selected_entity_label": selected_label,
             }
+            total_sources = (
+                4
+                if isinstance(legal_jurisdiction, dict)
+                and legal_jurisdiction.get("code") == "FR"
+                else 3 if legal_jurisdiction else 2
+            )
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id, case_id=case_id, kind="affiliation", status="queued",
                     usernames=[], options={"investigation_spec": specification},
-                    progress={"checked": 1, "total": 2, "found": 0}, result=None,
+                    progress={"checked": 1, "total": total_sources, "found": 0}, result=None,
                     error=None, cancel_requested=False, attempts=0,
                     created_at=now, updated_at=now,
                 )
             )
+            title = f"Affiliation: {selected_label}"
+            if isinstance(legal_jurisdiction, dict) and legal_jurisdiction.get(
+                "code"
+            ):
+                title += f" · {legal_jurisdiction['code']}"
             connection.execute(
-                update(cases).where(cases.c.id == case_id).values(
-                    title=f"Affiliation: {selected_label}"[:500], updated_at=now
-                )
+                update(cases)
+                .where(cases.c.id == case_id)
+                .values(title=title[:500], updated_at=now)
             )
         self.append_event(job_id, {"type": "queued", "target_type": "wikidata_entity", "entity_id": entity_id})
         return job_id
@@ -2571,26 +2613,55 @@ class CaseStore:
         return synchronized
 
     def sync_affiliation_discovery(
-        self, job_id: str, observation: Dict[str, Any]
+        self,
+        job_id: str,
+        observation: Dict[str, Any],
+        *,
+        registry_observations: Optional[list[Dict[str, Any]]] = None,
     ) -> Dict[str, int]:
         from maigret.web.collector_adapters import (
+            FR_BUSINESS_REGISTRY_ENGINE,
             WIKIDATA_ENGINE,
+            extract_fr_registry_affiliated_people,
             extract_wikidata_affiliation_people,
         )
 
         people = extract_wikidata_affiliation_people(observation)
+        registry_observations = list(registry_observations or [])[:5]
+        for registry_observation in registry_observations:
+            people.extend(
+                extract_fr_registry_affiliated_people(registry_observation)
+            )
         if not people:
             return {"personas": 0, "claims": 0}
+
         organization = observation.get("organization")
-        if not isinstance(organization, dict):
+        organization_label = (
+            " ".join(str(organization.get("label") or "").split())[:500]
+            if isinstance(organization, dict)
+            else ""
+        )
+        if not organization_label:
+            for registry_observation in registry_observations:
+                selected_entity = registry_observation.get("selected_entity")
+                if not isinstance(selected_entity, dict):
+                    continue
+                organization_label = " ".join(
+                    str(selected_entity.get("legal_name") or "").split()
+                )[:500]
+                if organization_label:
+                    break
+        if not organization_label:
             raise ValueError("Affiliation discovery is missing its organization")
-        organization_label = " ".join(str(organization.get("label") or "").split())[:500]
+
         now = utcnow()
         synchronized = inserted_personas = 0
         with self.engine.begin() as connection:
-            statement = select(investigation_jobs.c.case_id, investigation_jobs.c.kind).where(
-                investigation_jobs.c.id == job_id
-            )
+            statement = select(
+                investigation_jobs.c.case_id,
+                investigation_jobs.c.kind,
+                investigation_jobs.c.options,
+            ).where(investigation_jobs.c.id == job_id)
             if self.engine.dialect.name == "postgresql":
                 statement = statement.with_for_update()
             job = connection.execute(statement).mappings().first()
@@ -2599,7 +2670,9 @@ class CaseStore:
             if job["kind"] != "affiliation":
                 raise ValueError("Only affiliation jobs can synchronize this evidence")
             case_id = str(job["case_id"])
+
             personas_by_id = {}
+            personas_by_registry_record = {}
             rows = connection.execute(
                 select(personas.c.id, persona_claims.c.value)
                 .join(persona_claims, persona_claims.c.persona_id == personas.c.id)
@@ -2611,28 +2684,89 @@ class CaseStore:
             ).mappings()
             for row in rows:
                 value = row["value"]
-                if isinstance(value, dict) and value.get("identifier_type") == "wikidata_item_id":
-                    personas_by_id[str(value.get("identifier") or "").upper()] = str(row["id"])
+                if (
+                    isinstance(value, dict)
+                    and value.get("identifier_type") == "wikidata_item_id"
+                ):
+                    personas_by_id[
+                        str(value.get("identifier") or "").upper()
+                    ] = str(row["id"])
+            for row in connection.execute(
+                select(personas.c.id, claim_observations.c.source_record_id)
+                .join(persona_claims, persona_claims.c.persona_id == personas.c.id)
+                .join(
+                    claim_observations,
+                    claim_observations.c.claim_id == persona_claims.c.id,
+                )
+                .where(
+                    personas.c.case_id == case_id,
+                    persona_claims.c.field_name == "full_name",
+                    claim_observations.c.source_engine
+                    == FR_BUSINESS_REGISTRY_ENGINE,
+                    claim_observations.c.source_record_id.is_not(None),
+                )
+            ).mappings():
+                personas_by_registry_record[
+                    str(row["source_record_id"])
+                ] = str(row["id"])
+
             for person in people:
-                persona_id = personas_by_id.get(person["wikidata_id"])
+                wikidata_id = str(person.get("wikidata_id") or "").upper()
+                claims = list(person.get("claims") or [])
+                registry_record_id = next(
+                    (
+                        str(candidate.get("source_record_id"))
+                        for candidate in claims
+                        if candidate.get("source_engine")
+                        == FR_BUSINESS_REGISTRY_ENGINE
+                        and candidate.get("field_name") == "full_name"
+                        and candidate.get("source_record_id")
+                    ),
+                    "",
+                )
+                persona_id = (
+                    personas_by_id.get(wikidata_id)
+                    if wikidata_id
+                    else personas_by_registry_record.get(registry_record_id)
+                )
                 if not persona_id:
                     persona_id = str(uuid.uuid4())
                     connection.execute(
                         insert(personas).values(
-                            id=persona_id, case_id=case_id,
-                            display_name=person["display_name"], created_at=now,
+                            id=persona_id,
+                            case_id=case_id,
+                            display_name=person["display_name"],
+                            created_at=now,
                         )
                     )
-                    personas_by_id[person["wikidata_id"]] = persona_id
+                    if wikidata_id:
+                        personas_by_id[wikidata_id] = persona_id
+                    elif registry_record_id:
+                        personas_by_registry_record[
+                            registry_record_id
+                        ] = persona_id
                     inserted_personas += 1
                 synchronized += self._upsert_persona_candidates(
-                    connection, persona_id=persona_id, job_id=job_id,
-                    candidates=person["claims"], now=now,
+                    connection,
+                    persona_id=persona_id,
+                    job_id=job_id,
+                    candidates=claims,
+                    now=now,
                 )
+
+            specification = dict(job["options"] or {}).get(
+                "investigation_spec"
+            ) or {}
+            legal_jurisdiction = specification.get("legal_jurisdiction")
+            title = f"Affiliation: {organization_label}"
+            if isinstance(legal_jurisdiction, dict) and legal_jurisdiction.get(
+                "code"
+            ):
+                title += f" · {legal_jurisdiction['code']}"
             connection.execute(
-                update(cases).where(cases.c.id == case_id).values(
-                    title=f"Affiliation: {organization_label}"[:500], updated_at=now
-                )
+                update(cases)
+                .where(cases.c.id == case_id)
+                .values(title=title[:500], updated_at=now)
             )
         return {"personas": inserted_personas, "claims": synchronized}
 

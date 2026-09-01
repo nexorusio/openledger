@@ -6,7 +6,7 @@
     <div>
         <p class="eyebrow">Active investigation</p>
         <h1>{{ 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live discovery graph' }}</h1>
-        <p class="page-description">{{ 'The worker is resolving the organization and explicit public affiliation statements.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Claimed profiles and extracted identifiers appear as OpenLedger checks each source.' }}</p>
+        <p class="page-description">{{ 'The worker is resolving the organization, jurisdictional registry candidates and explicit public affiliation statements.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Claimed profiles and extracted identifiers appear as OpenLedger checks each source.' }}</p>
     </div>
     <div class="heading-actions">
         <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Open reports' }}</a>
@@ -30,6 +30,7 @@
         <div class="live-stat"><span>Approval status</span><strong>Pending review</strong></div>
         {% elif job_kind == 'affiliation' %}
         <div class="live-stat"><span>Organization status</span><strong id="stat-affiliation-entity">Resolving</strong></div>
+        <div class="live-stat"><span>Registry candidates</span><strong id="stat-registry-candidates">{{ completed_registry_candidate_count }}</strong></div>
         <div class="live-stat"><span>Affiliated people</span><strong id="stat-affiliated-people">{{ completed_affiliated_person_count }}</strong></div>
         <div class="live-stat"><span>Approval status</span><strong>Pending review</strong></div>
         {% else %}
@@ -62,6 +63,7 @@
     const completedGithubEnrichmentCount = {{ completed_github_enrichment_count|tojson }};
     const completedArchivedProfileCount = {{ completed_archived_profile_count|tojson }};
     const completedAffiliatedPersonCount = {{ completed_affiliated_person_count|tojson }};
+    const completedRegistryCandidateCount = {{ completed_registry_candidate_count|tojson }};
     const completedOffshoreAlertCount = {{ completed_offshore_alert_count|tojson }};
 
     let nodes = null, edges = null, network = null;
@@ -70,6 +72,7 @@
     let githubEnrichmentCount = doneRedirect ? completedGithubEnrichmentCount : 0;
     let archivedProfileCount = doneRedirect ? completedArchivedProfileCount : 0;
     let affiliatedPersonCount = doneRedirect ? completedAffiliatedPersonCount : 0;
+    let registryCandidateCount = doneRedirect ? completedRegistryCandidateCount : 0;
     let offshoreAlertCount = doneRedirect ? completedOffshoreAlertCount : 0;
 
     function ensureGraph() {
@@ -149,7 +152,7 @@
 
     function completionText() {
         if (isIdentityEnrichment) return 'Completed — public-record proposals are ready for analyst review.';
-        if (isAffiliation) return 'Completed — ' + affiliatedPersonCount + ' people proposed for analyst review.';
+        if (isAffiliation) return 'Completed — ' + registryCandidateCount + ' registry candidates and ' + affiliatedPersonCount + ' people are ready for analyst review.';
         return 'Completed — ' + foundCount + ' accounts, ' + githubEnrichmentCount
             + ' GitHub profiles enriched, ' + archivedProfileCount
             + ' archived profile URLs, and ' + registrationCount
@@ -198,6 +201,8 @@
                 'wayback-cdx': 'Checking exact claimed profile URLs in the Wayback capture index…',
                 'user-scanner': 'Checking email registrations with User Scanner (silent modules only)…',
                 'wikidata-affiliation': 'Resolving the organization and explicit Wikidata affiliation statements…',
+                'gleif-registry': 'Searching the GLEIF index for jurisdiction-matched legal entities…',
+                'fr-company-registry': 'Searching the French National Enterprise Directory…',
                 'public-record-enrichment': 'Checking Wikipedia and ICIJ using the approved full name…',
             };
             statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
@@ -215,9 +220,16 @@
                 registrationCount += Number(ev.found || 0);
                 document.getElementById('stat-registrations').textContent = registrationCount;
             } else if (ev.collector === 'wikidata-affiliation') {
-                affiliatedPersonCount = Number(ev.found || 0);
+                affiliatedPersonCount = Number(ev.people_found || ev.found || 0);
                 const count = document.getElementById('stat-affiliated-people');
                 if (count) count.textContent = affiliatedPersonCount;
+            } else if (ev.collector === 'gleif-registry' || ev.collector === 'fr-company-registry') {
+                registryCandidateCount += Number(ev.found || 0);
+                affiliatedPersonCount += Number(ev.people_found || 0);
+                const registryCount = document.getElementById('stat-registry-candidates');
+                if (registryCount) registryCount.textContent = registryCandidateCount;
+                const peopleCount = document.getElementById('stat-affiliated-people');
+                if (peopleCount) peopleCount.textContent = affiliatedPersonCount;
             }
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
             const completedMessages = {
@@ -226,6 +238,8 @@
                 'wayback-cdx': 'Archive evidence collected. Continuing the investigation…',
                 'user-scanner': 'Email evidence collected. Finalizing the investigation…',
                 'wikidata-affiliation': 'Affiliation evidence collected. Every proposal remains pending review.',
+                'gleif-registry': 'GLEIF legal-entity candidates collected. Every candidate remains unverified.',
+                'fr-company-registry': 'French registry evidence collected. Every people proposal remains pending review.',
                 'public-record-enrichment': 'Public-record checks completed. Every proposal remains pending review.',
             };
             statusEl.textContent = completedMessages[ev.collector] || 'Additional evidence collected.';
@@ -237,6 +251,8 @@
                 'wayback-cdx': 'One archive lookup was unavailable; continuing with saved findings…',
                 'user-scanner': 'Email evidence was unavailable; finalizing profile findings…',
                 'wikidata-affiliation': 'Wikidata was unavailable; the case remains intact.',
+                'gleif-registry': 'GLEIF was unavailable; other affiliation sources remain usable.',
+                'fr-company-registry': 'The French registry was unavailable; other affiliation sources remain usable.',
             };
             statusEl.textContent = errorMessages[ev.collector] || 'One evidence source was unavailable; continuing…';
         } else if (ev.type === 'risk_alert') {
@@ -244,7 +260,7 @@
             const count = document.getElementById('stat-offshore-alerts');
             if (count) count.textContent = offshoreAlertCount;
             statusEl.textContent = ev.message || 'Potential public-record match requires analyst review.';
-        } else if (ev.type === 'affiliation_entity') {
+        } else if (ev.type === 'affiliation_entity' || ev.type === 'registry_entity') {
             ensureGraph();
             addNode('organization:' + ev.entity_id, ev.label, 'organization', {url: ev.url, title: ev.url});
             const status = document.getElementById('stat-affiliation-entity');

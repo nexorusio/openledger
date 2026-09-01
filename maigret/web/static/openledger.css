@@ -6,23 +6,38 @@
     font-display: swap;
 }
 
-.affiliation-investigation-action { margin-top: .75rem; display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; }
-.affiliation-investigation-action small { color: var(--text-muted); }
+.affiliation-investigation-action { margin-top: .75rem; display: flex; gap: .75rem; align-items: end; flex-wrap: wrap; }
+.affiliation-investigation-action small { color: var(--ol-muted); }
+.affiliation-jurisdiction-field { display: grid; gap: .35rem; min-width: min(100%, 16rem); color: var(--ol-muted); font-size: .82rem; }
+.affiliation-jurisdiction-field > span { font-weight: 600; }
+.affiliation-jurisdiction-field input { min-height: 2.25rem; border: 1px solid var(--ol-border); border-radius: .45rem; background: var(--ol-surface); color: var(--ol-text); padding: .45rem .65rem; }
 .affiliation-case-body { display: grid; gap: 1rem; }
 .affiliation-candidate-list { display: grid; gap: .75rem; }
-.affiliation-candidate { border: 1px solid var(--border-color); border-radius: .75rem; padding: .9rem; display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
+.affiliation-candidate { border: 1px solid var(--ol-border); border-radius: .75rem; padding: .9rem; display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
 .affiliation-candidate span { display: grid; gap: .2rem; }
-.affiliation-candidate small { color: var(--text-muted); }
+.affiliation-candidate small { color: var(--ol-muted); }
 .affiliation-entity-summary { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
 .affiliation-source-links { display: grid; gap: .4rem; text-align: right; }
+.registry-results { border-top: 1px solid var(--ol-border); padding-top: 1rem; display: grid; gap: .9rem; }
+.registry-results-heading, .registry-source-card > header, .registry-candidate { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
+.registry-results-heading h3 { margin: .15rem 0 0; }
+.registry-source-list, .registry-candidate-list { display: grid; gap: .75rem; }
+.registry-source-card { border: 1px solid var(--ol-border); border-radius: .75rem; padding: .9rem; display: grid; gap: .8rem; }
+.registry-source-card > header > div, .registry-candidate > div:first-child { display: grid; gap: .2rem; }
+.registry-source-card small, .registry-candidate small { color: var(--ol-muted); }
+.registry-candidate { border-top: 1px solid var(--ol-border); padding-top: .75rem; }
+.registry-candidate:first-child { border-top: 0; padding-top: 0; }
+.registry-candidate-actions { display: flex; gap: .45rem; justify-content: flex-end; align-items: center; flex-wrap: wrap; text-align: right; }
+.registry-coverage-note { display: flex; gap: .45rem; margin: 0; color: var(--ol-muted); font-size: .82rem; }
+.registry-coverage-note i { flex: 0 0 auto; width: 1rem; height: 1rem; margin-top: .1rem; }
 .offshore-alert { display: flex; gap: 1rem; align-items: flex-start; border: 1px solid rgba(239, 83, 80, .65); border-left: 4px solid #ef5350; border-radius: .8rem; padding: 1rem 1.1rem; margin-bottom: 1.25rem; background: rgba(239, 83, 80, .1); }
 .offshore-alert > i { color: #ff7773; flex: 0 0 auto; margin-top: .15rem; }
-.offshore-alert p { margin: .35rem 0 .75rem; color: var(--text-muted); max-width: 80rem; }
+.offshore-alert p { margin: .35rem 0 .75rem; color: var(--ol-muted); max-width: 80rem; }
 .offshore-alert-records { display: flex; flex-wrap: wrap; gap: .6rem; }
 .offshore-alert-records span { display: flex; gap: .55rem; align-items: center; flex-wrap: wrap; border: 1px solid rgba(239, 83, 80, .35); border-radius: .55rem; padding: .45rem .65rem; }
 .offshore-alert-records em { font-style: normal; color: #ffaaa7; font-size: .82rem; }
 .identity-enrichment-body { display: grid; gap: 1rem; }
-.public-record-clear { display: flex; gap: .5rem; align-items: center; color: var(--text-muted); }
+.public-record-clear { display: flex; gap: .5rem; align-items: center; color: var(--ol-muted); }
 
 :root {
     --ol-accent: #0f8b8d;
@@ -4332,6 +4347,13 @@ textarea.form-control.compact-textarea {
 @media (max-width: 767px) {
     .analyst-create-grid,
     .case-chat-options { grid-template-columns: 1fr; }
+    .affiliation-candidate,
+    .affiliation-entity-summary,
+    .registry-results-heading,
+    .registry-source-card > header,
+    .registry-candidate { align-items: stretch; flex-direction: column; }
+    .affiliation-source-links,
+    .registry-candidate-actions { justify-content: flex-start; text-align: left; }
     .case-chat-message { width: 94%; }
     .case-chat-thread { max-height: none; min-height: 360px; padding: 14px; }
 }

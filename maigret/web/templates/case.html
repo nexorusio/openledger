@@ -55,10 +55,12 @@
 {% set latest_spec = case.jobs[0].options.investigation_spec if case.jobs and case.jobs[0].options and case.jobs[0].options.investigation_spec else none %}
 {% set affiliation_job = case.jobs[0] if case.jobs and case.jobs[0].kind == 'affiliation' else none %}
 {% if affiliation_job %}
+{% set combined_affiliation_status = affiliation_job.affiliation_status | default(affiliation_job.discovery_status, true) | default(affiliation_job.status, true) %}
+{% set affiliation_jurisdiction = affiliation_job.legal_jurisdiction | default(latest_spec.legal_jurisdiction if latest_spec else none, true) %}
 <section class="panel-card affiliation-case-card">
     <header class="panel-header">
-        <div><h2>Affiliation discovery</h2><p>Wikidata resolves the organization, its official website and explicit public affiliation statements. Every claim requires analyst review.</p></div>
-        <span class="badge-soft {{ 'success' if affiliation_job.discovery_status == 'observed' else 'warning' }}">{{ affiliation_job.discovery_status | default(affiliation_job.status, true) | replace('_', ' ') | title }}</span>
+        <div><h2>Affiliation discovery</h2><p>Governed public sources resolve organizations, jurisdiction-scoped registry candidates and explicit affiliations. Every claim requires analyst review.</p></div>
+        <span class="badge-soft {{ 'success' if combined_affiliation_status == 'observed' else 'warning' }}">{{ combined_affiliation_status | replace('_', ' ') | title }}</span>
     </header>
     <div class="panel-body affiliation-case-body">
         {% if affiliation_job.discovery_status == 'needs_selection' %}
@@ -102,11 +104,69 @@
                 {% for website in affiliation_job.organization.official_websites %}<a href="{{ website }}" target="_blank" rel="noopener noreferrer">Official website{{ ' ' ~ loop.index if loop.length > 1 else '' }}</a>{% endfor %}
             </div>
         </div>
-        <div class="persona-status-strip"><span><strong>{{ affiliation_job.affiliated_person_count | default(0) }}</strong> people observed</span><span><strong>{{ affiliation_job.claim_proposal_count | default(0) }}</strong> pending claims</span><span><strong>0</strong> automatically approved</span></div>
         <p class="form-text mb-0">Statements may be current or historical. Approving shared affiliation claims can add relationship leads; it does not prove a personal relationship.</p>
         {% elif affiliation_job.status in ('queued', 'running', 'cancel_requested') %}
         <p class="form-text mb-0">Organization discovery is running in the existing OpenLedger worker.</p>
         {% else %}<p class="form-text mb-0">{{ affiliation_job.source_message or 'No usable organization evidence was returned.' }}</p>{% endif %}
+
+        {% if affiliation_jurisdiction %}
+        <section class="registry-results" aria-labelledby="registry-results-title">
+            <div class="registry-results-heading">
+                <div>
+                    <span class="eyebrow">Registered jurisdiction</span>
+                    <h3 id="registry-results-title">{{ affiliation_jurisdiction.label }} · {{ affiliation_jurisdiction.code }}</h3>
+                </div>
+                <span class="badge-soft">{{ affiliation_job.registry_candidate_count | default(0) }} candidates</span>
+            </div>
+            {% if affiliation_job.registry_observations %}
+            <div class="registry-source-list">
+                {% for registry in affiliation_job.registry_observations %}
+                <article class="registry-source-card">
+                    <header>
+                        <div>
+                            <strong>{{ 'GLEIF Global LEI Index' if registry.source_engine == 'gleif_lei_registry' else 'French National Enterprise Directory' if registry.source_engine == 'fr_company_registry' else registry.source_engine }}</strong>
+                            <small>{{ registry.reason }}</small>
+                        </div>
+                        <span class="badge-soft {{ 'success' if registry.status == 'observed' else 'warning' }}">{{ registry.status | replace('_', ' ') | title }}</span>
+                    </header>
+                    {% if registry.candidates %}
+                    <div class="registry-candidate-list">
+                        {% for candidate in registry.candidates %}
+                        <div class="registry-candidate">
+                            <div>
+                                <strong>{{ candidate.legal_name }}</strong>
+                                <small>{{ candidate.identifier_type | upper }} {{ candidate.id }} · {{ candidate.legal_jurisdiction }}{% if candidate.entity_status %} · {{ candidate.entity_status | title }}{% endif %}</small>
+                                {% if candidate.legal_address %}
+                                <small>{{ candidate.legal_address.lines | join(', ') }}{% if candidate.legal_address.city %} · {{ candidate.legal_address.city }}{% endif %}{% if candidate.legal_address.postal_code %} {{ candidate.legal_address.postal_code }}{% endif %}</small>
+                                {% endif %}
+                            </div>
+                            <div class="registry-candidate-actions">
+                                {% if candidate.exact_name_match %}<span class="badge-soft success">Exact name candidate</span>{% endif %}
+                                <span class="badge-soft warning">Pending verification</span>
+                                <a href="{{ candidate.source_url }}" target="_blank" rel="noopener noreferrer">Open source record</a>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% elif registry.status in ('rate_limited', 'unavailable') %}
+                    <p class="form-text mb-0">This source failed independently. Its absence is not a registration conclusion.</p>
+                    {% else %}
+                    <p class="form-text mb-0">No candidate was returned within this bounded name and jurisdiction search.</p>
+                    {% endif %}
+                    {% if registry.source_engine == 'gleif_lei_registry' %}
+                    <p class="registry-coverage-note"><i data-lucide="info"></i> GLEIF covers entities issued a Legal Entity Identifier. No match does not mean the business is unregistered.</p>
+                    {% endif %}
+                </article>
+                {% endfor %}
+            </div>
+            {% elif affiliation_job.status not in ('queued', 'running', 'cancel_requested') %}
+            <p class="form-text mb-0">No jurisdictional registry result was retained.</p>
+            {% endif %}
+        </section>
+        {% endif %}
+        {% if affiliation_job.status == 'completed' and combined_affiliation_status not in ('rate_limited', 'unavailable') %}
+        <div class="persona-status-strip"><span><strong>{{ affiliation_job.registry_candidate_count | default(0) }}</strong> registry candidates</span><span><strong>{{ affiliation_job.affiliated_person_count | default(0) }}</strong> people observed</span><span><strong>{{ affiliation_job.claim_proposal_count | default(0) }}</strong> pending claims</span><span><strong>0</strong> automatically approved</span></div>
+        {% endif %}
     </div>
 </section>
 {% elif latest_spec %}

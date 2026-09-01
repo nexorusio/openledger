@@ -15,6 +15,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, urlparse
 
 import aiohttp
+import pycountry
 
 from maigret.result import MaigretCheckStatus
 from maigret.web.persona_intelligence import (
@@ -94,6 +95,24 @@ _WIKIDATA_RELATIONSHIPS = {
 MAX_WIKIDATA_AFFILIATION_ROWS = (
     MAX_WIKIDATA_AFFILIATED_PEOPLE * len(_WIKIDATA_RELATIONSHIPS)
 )
+
+GLEIF_ENGINE = "gleif_lei_registry"
+GLEIF_API_URL = "https://api.gleif.org/api/v1/lei-records"
+GLEIF_TIMEOUT_SECONDS = 30
+GLEIF_MAX_RESPONSE_BYTES = 1_000_000
+MAX_GLEIF_SEARCH_ROWS = 20
+MAX_GLEIF_CANDIDATES = 5
+
+FR_BUSINESS_REGISTRY_ENGINE = "fr_company_registry"
+FR_BUSINESS_REGISTRY_URL = "https://recherche-entreprises.api.gouv.fr/search"
+FR_BUSINESS_REGISTRY_TIMEOUT_SECONDS = 30
+FR_BUSINESS_REGISTRY_MAX_RESPONSE_BYTES = 1_000_000
+MAX_FR_BUSINESS_CANDIDATES = 5
+MAX_FR_BUSINESS_PEOPLE = 25
+
+_LEI_PATTERN = re.compile(r"^[A-Z0-9]{20}$")
+_SIREN_PATTERN = re.compile(r"^[0-9]{9}$")
+_SIRET_PATTERN = re.compile(r"^[0-9]{14}$")
 _ICIJ_NODE_ID_PATTERN = re.compile(r"^[1-9][0-9]{0,19}$")
 _WIKIPEDIA_PAGE_URL_PATTERN = re.compile(
     r"^https://en\.wikipedia\.org/wiki/[^?#]{1,2000}$"
@@ -249,6 +268,239 @@ def normalize_confirmed_person_name(value: Any) -> str:
     if any(ord(character) < 32 for character in normalized):
         raise ValueError("Confirmed names cannot contain control characters")
     return normalized
+
+
+def normalize_legal_jurisdiction(value: Any) -> Optional[Dict[str, str]]:
+    """Resolve a country or ISO-3166 subdivision without accepting free-form scope."""
+    raw = unicodedata.normalize("NFKC", str(value or "")).strip()
+    if not raw:
+        return None
+    if len(raw) > 100 or any(ord(character) < 32 for character in raw):
+        raise ValueError("Select a valid legal jurisdiction")
+    code_candidate = raw.replace("_", "-").upper()
+    country = None
+    subdivision = None
+    if re.fullmatch(r"[A-Z]{2}", code_candidate):
+        country = pycountry.countries.get(alpha_2=code_candidate)
+    elif re.fullmatch(r"[A-Z]{2}-[A-Z0-9]{1,3}", code_candidate):
+        subdivision = pycountry.subdivisions.get(code=code_candidate)
+    else:
+        try:
+            country = pycountry.countries.lookup(raw)
+        except LookupError:
+            country = None
+    if subdivision is not None:
+        country = pycountry.countries.get(alpha_2=subdivision.country_code)
+        country_name = str(getattr(country, "name", subdivision.country_code))
+        return {
+            "code": str(subdivision.code),
+            "label": f"{subdivision.name}, {country_name}"[:200],
+            "country_code": str(subdivision.country_code),
+        }
+    if country is not None:
+        return {
+            "code": str(country.alpha_2),
+            "label": str(country.name)[:200],
+            "country_code": str(country.alpha_2),
+        }
+    raise ValueError(
+        "Use a country name, two-letter country code, or ISO subdivision code such as US-DE"
+    )
+
+
+def _jurisdiction_matches(candidate: Any, jurisdiction: Dict[str, str]) -> bool:
+    candidate_code = str(candidate or "").strip().upper()
+    requested_code = jurisdiction["code"]
+    if requested_code == jurisdiction["country_code"]:
+        return candidate_code == requested_code or candidate_code.startswith(
+            f"{requested_code}-"
+        )
+    return candidate_code == requested_code
+
+
+def _bounded_address(value: Any) -> Dict[str, Any]:
+    address = value if isinstance(value, dict) else {}
+    lines = []
+    for raw in list(address.get("addressLines") or [])[:4]:
+        line = _bounded_text(raw, limit=300)
+        if line:
+            lines.append(line)
+    return {
+        "lines": lines,
+        "city": _bounded_text(address.get("city"), limit=200),
+        "region": _bounded_text(address.get("region"), limit=40),
+        "country": _bounded_text(address.get("country"), limit=2).upper(),
+        "postal_code": _bounded_text(address.get("postalCode"), limit=40),
+    }
+
+
+def normalize_gleif_legal_entities(
+    affiliation_name: str,
+    jurisdiction: Dict[str, str],
+    payload: Any,
+) -> List[Dict[str, Any]]:
+    rows = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("GLEIF returned an invalid legal-entity document")
+    query_identity = _affiliation_identity(affiliation_name)
+    candidates = []
+    seen = set()
+    for raw in rows[:MAX_GLEIF_SEARCH_ROWS]:
+        if not isinstance(raw, dict):
+            continue
+        attributes = raw.get("attributes") if isinstance(raw.get("attributes"), dict) else {}
+        entity = attributes.get("entity") if isinstance(attributes.get("entity"), dict) else {}
+        registration = (
+            attributes.get("registration")
+            if isinstance(attributes.get("registration"), dict)
+            else {}
+        )
+        lei = str(attributes.get("lei") or raw.get("id") or "").strip().upper()
+        legal_name_record = (
+            entity.get("legalName") if isinstance(entity.get("legalName"), dict) else {}
+        )
+        legal_name = _bounded_text(legal_name_record.get("name"), limit=500)
+        legal_jurisdiction = _bounded_text(entity.get("jurisdiction"), limit=20).upper()
+        if (
+            not _LEI_PATTERN.fullmatch(lei)
+            or lei in seen
+            or not legal_name
+            or not _jurisdiction_matches(legal_jurisdiction, jurisdiction)
+        ):
+            continue
+        other_names = []
+        exact_name_match = _affiliation_identity(legal_name) == query_identity
+        for other in list(entity.get("otherNames") or [])[:20]:
+            if not isinstance(other, dict):
+                continue
+            name = _bounded_text(other.get("name"), limit=500)
+            if name and name not in other_names:
+                other_names.append(name)
+                if _affiliation_identity(name) == query_identity:
+                    exact_name_match = True
+        registered_at = entity.get("registeredAt")
+        registered_at = registered_at if isinstance(registered_at, dict) else {}
+        registered_as = _bounded_text(entity.get("registeredAs"), limit=100)
+        source_url = f"https://api.gleif.org/api/v1/lei-records/{lei}"
+        seen.add(lei)
+        candidates.append(
+            {
+                "id": lei,
+                "identifier_type": "lei",
+                "legal_name": legal_name,
+                "other_names": other_names[:10],
+                "legal_jurisdiction": legal_jurisdiction,
+                "jurisdiction_label": jurisdiction["label"],
+                "registered_at": _bounded_text(registered_at.get("id"), limit=40),
+                "registered_as": registered_as,
+                "entity_status": _bounded_text(entity.get("status"), limit=40),
+                "registration_status": _bounded_text(
+                    registration.get("status"), limit=40
+                ),
+                "corroboration_level": _bounded_text(
+                    registration.get("corroborationLevel"), limit=60
+                ),
+                "initial_registration_date": _bounded_text(
+                    registration.get("initialRegistrationDate"), limit=40
+                ),
+                "last_update_date": _bounded_text(
+                    registration.get("lastUpdateDate"), limit=40
+                ),
+                "legal_address": _bounded_address(entity.get("legalAddress")),
+                "exact_name_match": exact_name_match,
+                "source_url": source_url,
+            }
+        )
+    candidates.sort(key=lambda candidate: not candidate["exact_name_match"])
+    return candidates[:MAX_GLEIF_CANDIDATES]
+
+
+def normalize_fr_business_entities(
+    affiliation_name: str,
+    jurisdiction: Dict[str, str],
+    payload: Any,
+) -> List[Dict[str, Any]]:
+    rows = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(rows, list):
+        raise ValueError("The French business registry returned an invalid document")
+    query_identity = _affiliation_identity(affiliation_name)
+    candidates = []
+    seen = set()
+    for raw in rows[:20]:
+        if not isinstance(raw, dict):
+            continue
+        siren = str(raw.get("siren") or "").strip()
+        legal_name = _bounded_text(
+            raw.get("nom_raison_sociale") or raw.get("nom_complet"), limit=500
+        )
+        if not _SIREN_PATTERN.fullmatch(siren) or siren in seen or not legal_name:
+            continue
+        headquarters = raw.get("siege") if isinstance(raw.get("siege"), dict) else {}
+        siret = str(headquarters.get("siret") or "").strip()
+        if not _SIRET_PATTERN.fullmatch(siret):
+            siret = ""
+        people = []
+        people_seen = set()
+        for leader in list(raw.get("dirigeants") or [])[:50]:
+            if (
+                not isinstance(leader, dict)
+                or leader.get("type_dirigeant") != "personne physique"
+            ):
+                continue
+            family_name = _bounded_text(leader.get("nom"), limit=200)
+            given_names = _bounded_text(leader.get("prenoms"), limit=200)
+            display_name = " ".join(part for part in (given_names, family_name) if part)
+            role = _bounded_text(leader.get("qualite"), limit=300)
+            identity = _affiliation_identity(display_name)
+            if not display_name or not role or identity in people_seen:
+                continue
+            people_seen.add(identity)
+            people.append({"display_name": display_name, "role": role})
+            if len(people) >= MAX_FR_BUSINESS_PEOPLE:
+                break
+        seen.add(siren)
+        candidates.append(
+            {
+                "id": siren,
+                "identifier_type": "siren",
+                "legal_name": legal_name,
+                "legal_jurisdiction": jurisdiction["code"],
+                "jurisdiction_label": jurisdiction["label"],
+                "registered_at": "French National Enterprise Register",
+                "registered_as": siren,
+                "headquarters_identifier": siret,
+                "entity_status": (
+                    "active" if raw.get("etat_administratif") == "A" else "ceased"
+                ),
+                "creation_date": _bounded_text(raw.get("date_creation"), limit=40),
+                "last_update_date": _bounded_text(raw.get("date_mise_a_jour"), limit=40),
+                "legal_form_code": _bounded_text(raw.get("nature_juridique"), limit=40),
+                "legal_address": {
+                    "lines": [
+                        _bounded_text(headquarters.get("adresse"), limit=500)
+                    ]
+                    if headquarters.get("adresse")
+                    else [],
+                    "city": _bounded_text(
+                        headquarters.get("libelle_commune")
+                        or headquarters.get("libelle_commune_etranger"),
+                        limit=200,
+                    ),
+                    "region": _bounded_text(headquarters.get("region"), limit=40),
+                    "country": "FR",
+                    "postal_code": _bounded_text(
+                        headquarters.get("code_postal"), limit=40
+                    ),
+                },
+                "people": people,
+                "exact_name_match": _affiliation_identity(legal_name) == query_identity,
+                "source_url": (
+                    f"https://annuaire-entreprises.data.gouv.fr/entreprise/{siren}"
+                ),
+            }
+        )
+    candidates.sort(key=lambda candidate: not candidate["exact_name_match"])
+    return candidates[:MAX_FR_BUSINESS_CANDIDATES]
 
 
 def _wikidata_item_url(entity_id: Any) -> str:
@@ -483,6 +735,43 @@ async def _bounded_wikidata_json(session: Any, url: str, *, params: Any):
         raise RuntimeError("Wikidata returned invalid JSON") from error
 
 
+async def _bounded_registry_json(
+    session: Any,
+    url: str,
+    *,
+    params: Any,
+    maximum_bytes: int,
+    source_name: str,
+):
+    async with session.get(url, params=params, allow_redirects=False) as response:
+        retry_after = str(response.headers.get("Retry-After") or "")[:40]
+        if response.status in {403, 429}:
+            return "rate_limited", None, retry_after
+        if response.status == 404:
+            return "not_found", None, retry_after
+        if response.status != 200:
+            raise RuntimeError(
+                f"{source_name} public service returned HTTP {int(response.status)}"
+            )
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"{source_name} returned an invalid response length"
+                ) from error
+            if declared_length < 0 or declared_length > maximum_bytes:
+                raise RuntimeError(f"{source_name} returned an oversized response")
+        body = await response.content.read(maximum_bytes + 1)
+        if len(body) > maximum_bytes:
+            raise RuntimeError(f"{source_name} returned an oversized response")
+    try:
+        return "ok", json.loads(body), retry_after
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{source_name} returned invalid JSON") from error
+
+
 def _wikidata_diagnostic(name: str, status: str, reason: str, candidates=None):
     return {
         "source_engine": WIKIDATA_ENGINE,
@@ -603,6 +892,179 @@ async def run_wikidata_affiliation_discovery(
     }
 
 
+def _registry_observation(
+    *,
+    source_engine: str,
+    source_url: str,
+    affiliation_name: str,
+    jurisdiction: Dict[str, str],
+    status: str,
+    reason: str,
+    candidates: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    candidates = list(candidates or [])[:5]
+    exact = [candidate for candidate in candidates if candidate.get("exact_name_match")]
+    selected_entity = exact[0] if len(exact) == 1 else None
+    return {
+        "source_engine": source_engine,
+        "subject_type": "legal_entity",
+        "subject_value": affiliation_name,
+        "jurisdiction": dict(jurisdiction),
+        "status": status,
+        "source_url": source_url,
+        "source_record_id": (
+            f"{source_engine}-search:"
+            f"{claim_fingerprint('company', jurisdiction['code'] + ':' + affiliation_name)}"
+        ),
+        "reason": reason[:1000],
+        "candidates": candidates,
+        "selected_entity": selected_entity,
+        "extra": {
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+            "zero_result_scope": source_engine,
+        },
+    }
+
+
+async def run_gleif_legal_entity_search(
+    affiliation_name: str,
+    jurisdiction: Any,
+    *,
+    timeout_seconds: int = GLEIF_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    affiliation_name = normalize_affiliation_name(affiliation_name)
+    normalized_jurisdiction = (
+        jurisdiction
+        if isinstance(jurisdiction, dict)
+        else normalize_legal_jurisdiction(jurisdiction)
+    )
+    if not isinstance(normalized_jurisdiction, dict):
+        raise ValueError("A legal jurisdiction is required for registry search")
+    normalized_jurisdiction = normalize_legal_jurisdiction(
+        normalized_jurisdiction.get("code")
+    )
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 45)))
+    headers = {
+        "Accept": "application/vnd.api+json",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        status, payload, _retry_after = await _bounded_registry_json(
+            session,
+            GLEIF_API_URL,
+            params={
+                "filter[entity.legalName]": affiliation_name,
+                "filter[entity.legalAddress.country]": normalized_jurisdiction[
+                    "country_code"
+                ],
+                "page[number]": 1,
+                "page[size]": MAX_GLEIF_SEARCH_ROWS,
+            },
+            maximum_bytes=GLEIF_MAX_RESPONSE_BYTES,
+            source_name="GLEIF",
+        )
+    if status != "ok":
+        return _registry_observation(
+            source_engine=GLEIF_ENGINE,
+            source_url=GLEIF_API_URL,
+            affiliation_name=affiliation_name,
+            jurisdiction=normalized_jurisdiction,
+            status=status,
+            reason="The GLEIF legal-entity index was unavailable.",
+        )
+    candidates = normalize_gleif_legal_entities(
+        affiliation_name, normalized_jurisdiction, payload
+    )
+    return _registry_observation(
+        source_engine=GLEIF_ENGINE,
+        source_url=GLEIF_API_URL,
+        affiliation_name=affiliation_name,
+        jurisdiction=normalized_jurisdiction,
+        status="observed" if candidates else "not_found",
+        reason=(
+            "Jurisdiction-matched public LEI records."
+            if candidates
+            else (
+                "GLEIF returned no jurisdiction-matched LEI record. This does not "
+                "prove that the entity is not registered."
+            )
+        ),
+        candidates=candidates,
+    )
+
+
+async def run_fr_business_registry_search(
+    affiliation_name: str,
+    jurisdiction: Any,
+    *,
+    timeout_seconds: int = FR_BUSINESS_REGISTRY_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    affiliation_name = normalize_affiliation_name(affiliation_name)
+    normalized_jurisdiction = (
+        jurisdiction
+        if isinstance(jurisdiction, dict)
+        else normalize_legal_jurisdiction(jurisdiction)
+    )
+    if not isinstance(normalized_jurisdiction, dict):
+        raise ValueError("A legal jurisdiction is required for registry search")
+    normalized_jurisdiction = normalize_legal_jurisdiction(
+        normalized_jurisdiction.get("code")
+    )
+    if normalized_jurisdiction["code"] != "FR":
+        raise ValueError(
+            "The French registry adapter accepts only the country-level FR jurisdiction"
+        )
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 45)))
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        status, payload, _retry_after = await _bounded_registry_json(
+            session,
+            FR_BUSINESS_REGISTRY_URL,
+            params={"q": affiliation_name, "page": 1, "per_page": 20},
+            maximum_bytes=FR_BUSINESS_REGISTRY_MAX_RESPONSE_BYTES,
+            source_name="French business registry",
+        )
+    if status != "ok":
+        return _registry_observation(
+            source_engine=FR_BUSINESS_REGISTRY_ENGINE,
+            source_url=FR_BUSINESS_REGISTRY_URL,
+            affiliation_name=affiliation_name,
+            jurisdiction=normalized_jurisdiction,
+            status=status,
+            reason="The French national business search was unavailable.",
+        )
+    candidates = normalize_fr_business_entities(
+        affiliation_name, normalized_jurisdiction, payload
+    )
+    return _registry_observation(
+        source_engine=FR_BUSINESS_REGISTRY_ENGINE,
+        source_url=FR_BUSINESS_REGISTRY_URL,
+        affiliation_name=affiliation_name,
+        jurisdiction=normalized_jurisdiction,
+        status="observed" if candidates else "not_found",
+        reason=(
+            "Public records from the French National Enterprise Directory."
+            if candidates
+            else "The French public business search returned no matching entity."
+        ),
+        candidates=candidates,
+    )
+
+
 def _wikidata_claim_candidate(field_name, value, confidence, person, organization, evidence_type, details):
     evidence = {
         "evidence_type": evidence_type,
@@ -708,6 +1170,108 @@ def extract_wikidata_affiliation_people(observation: Any) -> List[Dict[str, Any]
                     _wikidata_claim_candidate(
                         "platform_identifier", identifier, 70, person, organization,
                         "wikidata_entity_identifier", {"identifier_scope": "Public Wikidata entity identifier."}
+                    ),
+                ],
+            }
+        )
+    return output
+
+
+def _fr_registry_claim_candidate(
+    field_name: str,
+    value: str,
+    *,
+    person: Dict[str, Any],
+    entity: Dict[str, Any],
+) -> Dict[str, Any]:
+    display_value = _bounded_text(value, limit=4000)
+    siren = entity["id"]
+    source_record_id = (
+        f"fr-siren:{siren}:leader:"
+        f"{claim_fingerprint('full_name', person['display_name'])}"
+    )
+    evidence = {
+        "evidence_type": "official_business_registry",
+        "source_name": "French National Enterprise Directory",
+        "source_url": entity["source_url"],
+        "details": {
+            "legal_entity_name": entity["legal_name"],
+            "legal_jurisdiction": entity["legal_jurisdiction"],
+            "siren": siren,
+            "siret": entity.get("headquarters_identifier", ""),
+            "public_registry_role": person["role"],
+            "entity_status": entity.get("entity_status", ""),
+            "registry_last_updated_at": entity.get("last_update_date", ""),
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+        },
+    }
+    return {
+        "field_name": field_name,
+        "value": display_value,
+        "display_value": display_value,
+        "normalized_value": display_value.casefold(),
+        "confidence": 90,
+        "fingerprint": claim_fingerprint(field_name, display_value),
+        "source_engine": FR_BUSINESS_REGISTRY_ENGINE,
+        "source_record_id": source_record_id,
+        "native_status": "observed",
+        "observation_details": {
+            "legal_entity_identifier": siren,
+            "legal_jurisdiction": entity["legal_jurisdiction"],
+            "registry_role": person["role"],
+        },
+        "evidence": [dict(evidence, fingerprint=evidence_fingerprint(evidence))],
+    }
+
+
+def extract_fr_registry_affiliated_people(observation: Any) -> List[Dict[str, Any]]:
+    """Create pending people proposals only for one deterministic exact entity match."""
+    if (
+        not isinstance(observation, dict)
+        or observation.get("source_engine") != FR_BUSINESS_REGISTRY_ENGINE
+        or observation.get("status") != "observed"
+        or not isinstance(observation.get("selected_entity"), dict)
+    ):
+        return []
+    entity = observation["selected_entity"]
+    siren = str(entity.get("id") or "").strip()
+    legal_name = _bounded_text(entity.get("legal_name"), limit=500)
+    source_url = str(entity.get("source_url") or "")
+    if (
+        not _SIREN_PATTERN.fullmatch(siren)
+        or not legal_name
+        or source_url
+        != f"https://annuaire-entreprises.data.gouv.fr/entreprise/{siren}"
+        or entity.get("exact_name_match") is not True
+    ):
+        return []
+    entity = {**entity, "id": siren, "legal_name": legal_name}
+    output = []
+    seen = set()
+    for raw_person in list(entity.get("people") or [])[:MAX_FR_BUSINESS_PEOPLE]:
+        if not isinstance(raw_person, dict):
+            continue
+        display_name = _bounded_text(raw_person.get("display_name"), limit=500)
+        role = _bounded_text(raw_person.get("role"), limit=300)
+        identity = _affiliation_identity(display_name)
+        if not display_name or not role or identity in seen:
+            continue
+        seen.add(identity)
+        person = {"display_name": display_name, "role": role}
+        output.append(
+            {
+                "registry_person_key": f"fr:{siren}:{identity}",
+                "display_name": display_name,
+                "claims": [
+                    _fr_registry_claim_candidate(
+                        "full_name", display_name, person=person, entity=entity
+                    ),
+                    _fr_registry_claim_candidate(
+                        "company", legal_name, person=person, entity=entity
+                    ),
+                    _fr_registry_claim_candidate(
+                        "occupation", role, person=person, entity=entity
                     ),
                 ],
             }

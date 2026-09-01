@@ -53,8 +53,15 @@ from maigret.web.case_store import (
     database_url_from_environment,
 )
 from maigret.web.collector_adapters import (
+    FR_BUSINESS_REGISTRY_ENGINE,
+    GLEIF_ENGINE,
     claimed_profile_url_targets,
+    extract_fr_registry_affiliated_people,
+    extract_wikidata_affiliation_people,
     github_profile_targets,
+    normalize_legal_jurisdiction,
+    run_fr_business_registry_search,
+    run_gleif_legal_entity_search,
     run_github_public_profile,
     run_icij_offshore_match,
     run_unfurl_url_analysis,
@@ -2676,31 +2683,70 @@ def run_persistent_affiliation_job(
     specification = (job.get('options') or {}).get('investigation_spec') or {}
     affiliation_name = str(specification.get('affiliation_name') or '').strip()
     selected_entity_id = str(specification.get('wikidata_entity_id') or '').strip() or None
+    legal_jurisdiction = specification.get('legal_jurisdiction')
+    if isinstance(legal_jurisdiction, dict):
+        legal_jurisdiction = normalize_legal_jurisdiction(
+            legal_jurisdiction.get('code')
+        )
+    else:
+        legal_jurisdiction = normalize_legal_jurisdiction(legal_jurisdiction)
     sink = PersistentEventSink(store, job_id)
-    sink.put({'type': 'collector_started', 'collector': 'wikidata-affiliation', 'target_type': 'affiliation', 'targets': 1})
+    source_specs = [
+        (
+            'wikidata-affiliation',
+            run_wikidata_affiliation_discovery(
+                affiliation_name, selected_entity_id=selected_entity_id
+            ),
+        )
+    ]
+    if legal_jurisdiction:
+        source_specs.append(
+            (
+                'gleif-registry',
+                run_gleif_legal_entity_search(
+                    affiliation_name, legal_jurisdiction
+                ),
+            )
+        )
+        if legal_jurisdiction['code'] == 'FR':
+            source_specs.append(
+                (
+                    'fr-company-registry',
+                    run_fr_business_registry_search(
+                        affiliation_name, legal_jurisdiction
+                    ),
+                )
+            )
+    for source_name, _coroutine in source_specs:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': source_name,
+                'target_type': 'legal_entity',
+                'targets': 1,
+            }
+        )
     runtime_job = {'cancelled': False}
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    task = loop.create_task(
-        run_wikidata_affiliation_discovery(
-            affiliation_name, selected_entity_id=selected_entity_id
+
+    async def collect_sources():
+        return await asyncio.gather(
+            *(coroutine for _source_name, coroutine in source_specs),
+            return_exceptions=True,
         )
-    )
+
+    task = loop.create_task(collect_sources())
     watcher = loop.create_task(
         watch_persistent_job_stop(
             store, job_id, task, runtime_job, shutdown_check=shutdown_check
         )
     )
-    observation = None
-    source_message = ''
+    source_results = None
     try:
-        observation = loop.run_until_complete(task)
+        source_results = loop.run_until_complete(task)
     except asyncio.CancelledError:
         pass
-    except Exception as error:
-        source_message = record_internal_error(
-            'Wikidata affiliation source failed', error, session=job_id
-        )
     finally:
         if not watcher.done():
             watcher.cancel()
@@ -2722,24 +2768,65 @@ def run_persistent_affiliation_job(
         )
         sink.put({'type': 'done', 'status': status})
         return
-    if observation is None:
-        result = {
-            'status': 'completed',
-            'usernames': [],
-            'discovery_status': 'unavailable',
-            'source_message': source_message or 'Wikidata was unavailable.',
-            'organization_candidates': [],
-            'organization': None,
-            'affiliated_person_count': 0,
-            'claim_proposal_count': 0,
-        }
-        store.finish(job_id, result)
-        sink.put({'type': 'collector_error', 'collector': 'wikidata-affiliation', 'message': result['source_message']})
-        sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
-        return
+
+    source_observations = {}
+    source_errors = []
+    for index, (source_name, _coroutine) in enumerate(source_specs):
+        source_result = (
+            source_results[index]
+            if isinstance(source_results, list) and index < len(source_results)
+            else RuntimeError('The public source did not return a result')
+        )
+        if not isinstance(source_result, (dict, BaseException)):
+            source_result = RuntimeError(
+                'The public source returned an invalid observation'
+            )
+        if isinstance(source_result, BaseException):
+            public_message = record_internal_error(
+                f'{source_name} affiliation source failed',
+                source_result,
+                session=job_id,
+            )
+            engine = {
+                'gleif-registry': GLEIF_ENGINE,
+                'fr-company-registry': FR_BUSINESS_REGISTRY_ENGINE,
+            }.get(source_name, 'wikidata_affiliation')
+            source_result = {
+                'source_engine': engine,
+                'status': 'unavailable',
+                'reason': public_message,
+                'organization_candidates': [],
+                'organization': None,
+                'people': [],
+                'candidates': [],
+                'selected_entity': None,
+            }
+            source_errors.append(
+                {'collector': source_name, 'message': public_message}
+            )
+        source_observations[source_name] = source_result
+
+    observation = source_observations['wikidata-affiliation']
+    registry_observations = [
+        source_observations[source_name]
+        for source_name, _coroutine in source_specs
+        if source_name != 'wikidata-affiliation'
+    ]
     synchronized = {'personas': 0, 'claims': 0}
+    wikidata_people = extract_wikidata_affiliation_people(observation)
+    registry_people = []
+    for registry_observation in registry_observations:
+        registry_people.extend(
+            extract_fr_registry_affiliated_people(registry_observation)
+        )
+    if wikidata_people or registry_people:
+        synchronized = store.sync_affiliation_discovery(
+            job_id,
+            observation,
+            registry_observations=registry_observations,
+        )
+
     if observation.get('status') == 'observed':
-        synchronized = store.sync_affiliation_discovery(job_id, observation)
         organization = observation.get('organization') or {}
         sink.put(
             {'type': 'affiliation_entity', 'entity_id': organization.get('id'),
@@ -2748,22 +2835,114 @@ def run_persistent_affiliation_job(
         for person in list(observation.get('people') or [])[:50]:
             if isinstance(person, dict):
                 sink.put({'type': 'affiliated_person', 'entity_id': person.get('id'), 'label': person.get('label'), 'url': person.get('url')})
+    for registry_observation in registry_observations:
+        for candidate in list(registry_observation.get('candidates') or [])[:5]:
+            if isinstance(candidate, dict):
+                sink.put(
+                    {
+                        'type': 'registry_entity',
+                        'entity_id': candidate.get('id'),
+                        'label': candidate.get('legal_name'),
+                        'url': candidate.get('source_url'),
+                        'source_engine': registry_observation.get(
+                            'source_engine'
+                        ),
+                    }
+                )
+        for person in extract_fr_registry_affiliated_people(
+            registry_observation
+        ):
+            sink.put(
+                {
+                    'type': 'affiliated_person',
+                    'entity_id': person.get('registry_person_key'),
+                    'label': person.get('display_name'),
+                    'url': (
+                        registry_observation.get('selected_entity') or {}
+                    ).get('source_url'),
+                }
+            )
+
+    source_statuses = [
+        str(source_observation.get('status') or 'unavailable')
+        for source_observation in source_observations.values()
+    ]
+    has_useful_result = any(
+        status in {'observed', 'needs_selection'} for status in source_statuses
+    )
+    has_unavailable_source = any(
+        status in {'rate_limited', 'unavailable'} for status in source_statuses
+    )
+    if has_useful_result and has_unavailable_source:
+        affiliation_status = 'partial'
+    elif 'observed' in source_statuses:
+        affiliation_status = 'observed'
+    elif 'needs_selection' in source_statuses:
+        affiliation_status = 'needs_selection'
+    elif source_statuses and all(
+        status == 'not_found' for status in source_statuses
+    ):
+        affiliation_status = 'not_found'
+    else:
+        affiliation_status = 'unavailable'
+
+    registry_candidate_count = sum(
+        len(registry_observation.get('candidates') or [])
+        for registry_observation in registry_observations
+    )
+    unique_people = {
+        ' '.join(str(person.get('display_name') or '').split()).casefold()
+        for person in wikidata_people + registry_people
+        if str(person.get('display_name') or '').strip()
+    }
     result = {
         'status': 'completed',
         'usernames': [],
         'discovery_status': observation.get('status'),
+        'affiliation_status': affiliation_status,
         'source_message': str(observation.get('reason') or '')[:1000],
         'organization_candidates': list(observation.get('organization_candidates') or [])[:5],
         'organization': observation.get('organization'),
-        'affiliated_person_count': len(observation.get('people') or []),
+        'legal_jurisdiction': legal_jurisdiction,
+        'registry_observations': registry_observations,
+        'registry_candidate_count': registry_candidate_count,
+        'registry_person_count': len(registry_people),
+        'affiliated_person_count': len(unique_people),
         'persona_proposal_count': synchronized['personas'],
         'claim_proposal_count': synchronized['claims'],
         'source_engine': observation.get('source_engine'),
         'source_record_id': observation.get('source_record_id'),
+        'source_errors': source_errors,
     }
     store.finish(job_id, result)
-    event_type = 'collector_completed' if observation.get('status') in {'observed', 'needs_selection'} else 'collector_error'
-    sink.put({'type': event_type, 'collector': 'wikidata-affiliation', 'observations': 1, 'found': result['affiliated_person_count'], 'message': result['source_message']})
+    for source_name, _coroutine in source_specs:
+        source_observation = source_observations[source_name]
+        source_status = source_observation.get('status')
+        event_type = (
+            'collector_error'
+            if source_status in {'rate_limited', 'unavailable'}
+            else 'collector_completed'
+        )
+        found = (
+            len(source_observation.get('people') or [])
+            if source_name == 'wikidata-affiliation'
+            else len(source_observation.get('candidates') or [])
+        )
+        people_found = (
+            len(extract_wikidata_affiliation_people(source_observation))
+            if source_name == 'wikidata-affiliation'
+            else len(extract_fr_registry_affiliated_people(source_observation))
+        )
+        sink.put(
+            {
+                'type': event_type,
+                'collector': source_name,
+                'observations': 1,
+                'found': found,
+                'people_found': people_found,
+                'message': str(source_observation.get('reason') or '')[:1000],
+            }
+        )
     sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
 
 
@@ -3824,7 +4003,9 @@ def investigate_affiliation_claim(claim_id):
         return redirect(url_for('persona_workspace', persona_id=claim['persona_id']))
     try:
         job_id = case_store.create_affiliation_investigation(
-            claim['display_value'], source_claim_id=claim_id
+            claim['display_value'],
+            source_claim_id=claim_id,
+            jurisdiction=request.form.get('jurisdiction', ''),
         )
     except ValueError as error:
         flash(str(error), 'danger')
@@ -4039,6 +4220,9 @@ def live_results(job_id):
             'archived_profile_count', 0
         ),
         completed_affiliated_person_count=(result or {}).get('affiliated_person_count', 0),
+        completed_registry_candidate_count=(result or {}).get(
+            'registry_candidate_count', 0
+        ),
         completed_offshore_alert_count=(result or {}).get('offshore_alert_count', 0),
     )
 

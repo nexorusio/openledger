@@ -4,6 +4,10 @@ import pytest
 
 from maigret.result import MaigretCheckResult, MaigretCheckStatus
 from maigret.web.collector_adapters import (
+    FR_BUSINESS_REGISTRY_ENGINE,
+    FR_BUSINESS_REGISTRY_URL,
+    GLEIF_API_URL,
+    GLEIF_ENGINE,
     GITHUB_API_BASE_URL,
     GITHUB_API_VERSION,
     GITHUB_ENGINE,
@@ -22,6 +26,7 @@ from maigret.web.collector_adapters import (
     _wikidata_people_query,
     claimed_profile_url_targets,
     extract_github_profile_claims,
+    extract_fr_registry_affiliated_people,
     extract_icij_offshore_claims,
     extract_profile_url_evidence_claims,
     extract_user_scanner_claims,
@@ -29,7 +34,10 @@ from maigret.web.collector_adapters import (
     extract_wikipedia_person_claims,
     github_profile_targets,
     normalize_github_public_profile,
+    normalize_fr_business_entities,
+    normalize_gleif_legal_entities,
     normalize_icij_offshore_matches,
+    normalize_legal_jurisdiction,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
     normalize_wayback_capture_index,
@@ -38,6 +46,8 @@ from maigret.web.collector_adapters import (
     normalize_wikidata_organization,
     normalize_wikipedia_candidates,
     run_github_public_profile,
+    run_fr_business_registry_search,
+    run_gleif_legal_entity_search,
     run_icij_offshore_match,
     run_wayback_capture_index,
     run_wikidata_affiliation_discovery,
@@ -607,6 +617,199 @@ async def test_wikidata_runtime_uses_only_fixed_bounded_endpoints():
     assert all(item["allow_redirects"] is False for item in requests)
     assert "Authorization" not in calls[0][1]["headers"]
     assert "LIMIT 50" in requests[-1]["params"]["query"]
+
+
+def _gleif_entities():
+    return {
+        "data": [
+            {
+                "id": "9695005MSX1OYEMGDF46",
+                "attributes": {
+                    "lei": "9695005MSX1OYEMGDF46",
+                    "entity": {
+                        "legalName": {"name": "UNISTELLAR"},
+                        "otherNames": [{"name": "Unistellar SAS"}],
+                        "jurisdiction": "FR",
+                        "registeredAt": {"id": "RA000189"},
+                        "registeredAs": "812339356",
+                        "status": "ACTIVE",
+                        "legalAddress": {
+                            "addressLines": ["5 Avenue du General Leclerc"],
+                            "city": "Marseille",
+                            "region": "FR-13",
+                            "country": "FR",
+                            "postalCode": "13003",
+                        },
+                    },
+                    "registration": {
+                        "status": "ISSUED",
+                        "corroborationLevel": "FULLY_CORROBORATED",
+                        "initialRegistrationDate": "2020-01-01T00:00:00Z",
+                        "lastUpdateDate": "2026-01-01T00:00:00Z",
+                    },
+                },
+            }
+        ]
+    }
+
+
+def _fr_business_entities():
+    return {
+        "results": [
+            {
+                "siren": "812339356",
+                "nom_complet": "UNISTELLAR",
+                "nom_raison_sociale": "UNISTELLAR",
+                "etat_administratif": "A",
+                "date_creation": "2015-07-06",
+                "date_mise_a_jour": "2026-08-01T00:00:00Z",
+                "nature_juridique": "5710",
+                "siege": {
+                    "siret": "81233935600030",
+                    "adresse": "5 AVENUE DU GENERAL LECLERC 13003 MARSEILLE",
+                    "libelle_commune": "Marseille",
+                    "region": "93",
+                    "code_postal": "13003",
+                },
+                "dirigeants": [
+                    {
+                        "type_dirigeant": "personne physique",
+                        "prenoms": "Arnaud",
+                        "nom": "Malvache",
+                        "qualite": "Président de SAS",
+                        "annee_de_naissance": "1977",
+                        "mois_de_naissance": "04",
+                        "nationalite": "Française",
+                    },
+                    {
+                        "type_dirigeant": "personne physique",
+                        "prenoms": "Laurent",
+                        "nom": "Marfisi",
+                        "qualite": "Directeur Général",
+                    },
+                ],
+            }
+        ]
+    }
+
+
+def test_legal_jurisdiction_normalization_is_iso_backed():
+    assert normalize_legal_jurisdiction("France") == {
+        "code": "FR",
+        "label": "France",
+        "country_code": "FR",
+    }
+    assert normalize_legal_jurisdiction("us-de")["code"] == "US-DE"
+    assert normalize_legal_jurisdiction("") is None
+    with pytest.raises(ValueError, match="country name"):
+        normalize_legal_jurisdiction("the moon")
+
+
+def test_registry_normalization_is_bounded_and_drops_private_person_fields():
+    jurisdiction = normalize_legal_jurisdiction("FR")
+    gleif = normalize_gleif_legal_entities(
+        "Unistellar", jurisdiction, _gleif_entities()
+    )
+    france = normalize_fr_business_entities(
+        "Unistellar", jurisdiction, _fr_business_entities()
+    )
+
+    assert gleif[0]["id"] == "9695005MSX1OYEMGDF46"
+    assert gleif[0]["exact_name_match"] is True
+    assert france[0]["id"] == "812339356"
+    assert france[0]["headquarters_identifier"] == "81233935600030"
+    assert france[0]["people"] == [
+        {"display_name": "Arnaud Malvache", "role": "Président de SAS"},
+        {"display_name": "Laurent Marfisi", "role": "Directeur Général"},
+    ]
+    serialized = json.dumps(france, ensure_ascii=False).casefold()
+    assert "naissance" not in serialized
+    assert "nationalite" not in serialized
+    assert "française" not in serialized
+
+
+def test_fr_registry_people_require_one_exact_entity_and_remain_review_inputs():
+    jurisdiction = normalize_legal_jurisdiction("FR")
+    candidates = normalize_fr_business_entities(
+        "Unistellar", jurisdiction, _fr_business_entities()
+    )
+    observation = {
+        "source_engine": FR_BUSINESS_REGISTRY_ENGINE,
+        "status": "observed",
+        "selected_entity": candidates[0],
+    }
+    people = extract_fr_registry_affiliated_people(observation)
+
+    assert len(people) == 2
+    assert {claim["field_name"] for claim in people[0]["claims"]} == {
+        "full_name",
+        "company",
+        "occupation",
+    }
+    for person in people:
+        for claim in person["claims"]:
+            assert claim["source_engine"] == FR_BUSINESS_REGISTRY_ENGINE
+            details = claim["evidence"][0]["details"]
+            assert details["siren"] == "812339356"
+            assert details["human_review_required"] is True
+            assert details["automatic_approval_allowed"] is False
+
+    ambiguous = dict(observation, selected_entity=None)
+    assert extract_fr_registry_affiliated_people(ambiguous) == []
+
+
+@pytest.mark.asyncio
+async def test_registry_requests_use_only_fixed_bounded_credential_free_endpoints():
+    gleif_calls = []
+    gleif_observation = await run_gleif_legal_entity_search(
+        "Unistellar",
+        "FR",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [
+                _FakeResponse(
+                    status=200, body=json.dumps(_gleif_entities()).encode()
+                )
+            ],
+            gleif_calls,
+            **options,
+        ),
+    )
+    gleif_request = gleif_calls[1][1]
+    assert gleif_request["url"] == GLEIF_API_URL
+    assert gleif_request["allow_redirects"] is False
+    assert gleif_request["params"]["filter[entity.legalAddress.country]"] == "FR"
+    assert gleif_request["params"]["page[size]"] == 20
+    assert "Authorization" not in gleif_calls[0][1]["headers"]
+    assert gleif_observation["source_engine"] == GLEIF_ENGINE
+
+    france_calls = []
+    france_observation = await run_fr_business_registry_search(
+        "Unistellar",
+        "FR",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body=json.dumps(_fr_business_entities()).encode(),
+                )
+            ],
+            france_calls,
+            **options,
+        ),
+    )
+    france_request = france_calls[1][1]
+    assert france_request["url"] == FR_BUSINESS_REGISTRY_URL
+    assert france_request["allow_redirects"] is False
+    assert france_request["params"] == {
+        "q": "Unistellar",
+        "page": 1,
+        "per_page": 20,
+    }
+    assert "Authorization" not in france_calls[0][1]["headers"]
+    assert france_observation["selected_entity"]["id"] == "812339356"
+
+    with pytest.raises(ValueError, match="country-level FR"):
+        await run_fr_business_registry_search("Unistellar", "FR-IDF")
 
 
 def _wikipedia_pages(title="Alice Example"):
