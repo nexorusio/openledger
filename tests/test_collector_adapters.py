@@ -1162,6 +1162,79 @@ async def test_wikidata_organization_subclass_is_type_verified_before_selection(
 
 
 @pytest.mark.asyncio
+async def test_wikidata_keeps_verified_branch_when_later_class_fetch_fails():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900020",
+                "label": "Example Institute",
+                "description": "public institute",
+                "match": {"text": "Example Institute"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900020": {
+                "labels": {"en": {"value": "Example Institute"}},
+                "descriptions": {"en": {"value": "public institute"}},
+                "claims": {
+                    "P31": [
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q900021"}}}},
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q900022"}}}},
+                    ]
+                },
+            }
+        }
+    }
+    first_hierarchy = {
+        "entities": {
+            "Q900021": {
+                "claims": {
+                    "P279": [
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q43229"}}}}
+                    ]
+                }
+            },
+            "Q900022": {
+                "claims": {
+                    "P279": [
+                        {"mainsnak": {"datavalue": {"value": {"id": "Q900023"}}}}
+                    ]
+                }
+            },
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(status=200, body=json.dumps(first_hierarchy).encode()),
+        _FakeResponse(status=429, body=b"", headers={"Retry-After": "60"}),
+        _FakeResponse(
+            status=200,
+            body=json.dumps({"results": {"bindings": []}}).encode(),
+        ),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Institute",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "observed"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is True
+    assert candidate["organization_type_status"] == "verified_organization"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert requests[2]["params"]["ids"] == "Q900021|Q900022"
+    assert requests[3]["params"]["ids"] == "Q900023"
+    assert len(requests) == 5
+
+
+@pytest.mark.asyncio
 async def test_wikidata_type_request_failure_is_not_negative_type_evidence():
     calls = []
     responses = [
@@ -1831,6 +1904,30 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
             "longitude": None,
         },
         {
+            "observation_type": "company_profile",
+            "value": "Alice Doe · +33.1.23.45.67.89",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing exposes a punctuated employee phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "+33\u202f1\u202f23\u202f45\u202f67\u202f89",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing exposes a Unicode-spaced phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
             "observation_type": "business_activity",
             "value": "Think tank",
             "source_url": "https://uncited.example/organization",
@@ -1915,6 +2012,10 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
     assert normalize_public_web_organization_sources(
         [
             {
+                "title": "Unistellar company profile",
+                "url": "https://www.linkedin.com/company/unistellar/",
+            },
+            {
                 "title": "Employee email alice@example.test",
                 "url": "https://example.org/company",
             },
@@ -1958,34 +2059,24 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "title": "Alice Doe is a team.member",
                 "url": "https://example.org/team-punctuation",
             },
+            {
+                "title": "Alice Doe · +33.1.23.45.67.89",
+                "url": "https://example.org/phone-dots",
+            },
+            {
+                "title": "+33\u202f1\u202f23\u202f45\u202f67\u202f89",
+                "url": "https://example.org/phone-unicode-space",
+            },
+            {
+                "title": "LinkedIn member",
+                "url": "https://www.linkedin.com/in/alice-doe/",
+            },
         ]
     ) == [
-        {"title": "example.org", "url": "https://example.org/company"},
-        {"title": "example.org", "url": "https://example.org/leadership"},
-        {"title": "example.org", "url": "https://example.org/executives"},
-        {"title": "example.org", "url": "https://example.org/board"},
-        {"title": "example.org", "url": "https://example.org/management"},
         {
-            "title": "example.org",
-            "url": "https://example.org/management-horizontal-bar",
-        },
-        {
-            "title": "example.org",
-            "url": "https://example.org/team-fullwidth-hyphen",
-        },
-        {
-            "title": "example.org",
-            "url": "https://example.org/management-double-hyphen",
-        },
-        {
-            "title": "example.org",
-            "url": "https://example.org/team-mixed-separators",
-        },
-        {
-            "title": "example.org",
-            "url": "https://example.org/management-zero-width",
-        },
-        {"title": "example.org", "url": "https://example.org/team-punctuation"},
+            "title": "Unistellar company profile",
+            "url": "https://www.linkedin.com/company/unistellar/",
+        }
     ]
 
 

@@ -655,7 +655,7 @@ _EMAIL_ADDRESS_PATTERN = re.compile(
     r"\.[A-Za-z]{2,63}(?![A-Za-z0-9.-])"
 )
 _PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
-    r"(?<!\w)\+?\d(?:[\d ()-]{5,}\d)(?!\w)"
+    r"(?<!\w)\+?\d(?:[\W_]*\d){6,14}(?!\w)"
 )
 _PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
     r"(?:\b(?:employee|staff member)(?:'s|’s)?\b|"
@@ -730,7 +730,8 @@ def _contains_personal_organization_data(value: Any) -> bool:
         or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
     ):
         return bool(text)
-    for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(text):
+    phone_text = unicodedata.normalize("NFKC", text)
+    for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(phone_text):
         candidate = match.group(0)
         digit_count = sum(character.isdigit() for character in candidate)
         if 7 <= digit_count <= 15 and candidate.startswith("+"):
@@ -755,7 +756,17 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
         ):
             continue
         source_title = _bounded_text(source.get("title"), limit=300)
-        if not source_title or _contains_personal_organization_data(source_title):
+        parsed_source = urlparse(source_url)
+        source_domain = (parsed_source.hostname or "").casefold().rstrip(".")
+        personal_profile_url = bool(
+            (source_domain == "linkedin.com" or source_domain.endswith(".linkedin.com"))
+            and parsed_source.path.casefold().startswith(("/in/", "/pub/"))
+        )
+        if personal_profile_url or (
+            source_title and _contains_personal_organization_data(source_title)
+        ):
+            continue
+        if not source_title:
             source_title = urlparse(source_url).hostname or "Public web source"
         seen.add(source_url)
         output.append({"title": source_title, "url": source_url})
@@ -1667,6 +1678,18 @@ async def _resolve_wikidata_organization_classes(
         return "not_needed", set()
 
     graph: Dict[str, set[str]] = {}
+
+    def resolved_classes() -> set[str]:
+        verified = set(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+        changed = True
+        while changed:
+            changed = False
+            for child_id, parent_ids in graph.items():
+                if child_id not in verified and parent_ids.intersection(verified):
+                    verified.add(child_id)
+                    changed = True
+        return verified.difference(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+
     visited = set()
     frontier = unresolved[:MAX_WIKIDATA_CLASS_IDS]
     for _depth in range(MAX_WIKIDATA_CLASS_DEPTH):
@@ -1690,10 +1713,10 @@ async def _resolve_wikidata_organization_classes(
             },
         )
         if status != "ok":
-            return status, set()
+            return status, resolved_classes()
         entities = payload.get("entities") if isinstance(payload, dict) else None
         if not isinstance(entities, dict):
-            return "invalid_response", set()
+            return "invalid_response", resolved_classes()
         next_frontier = []
         for entity_id in frontier:
             entity = entities.get(entity_id)
@@ -1716,15 +1739,7 @@ async def _resolve_wikidata_organization_classes(
             graph[entity_id] = parents
         frontier = next_frontier
 
-    verified = set(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
-    changed = True
-    while changed:
-        changed = False
-        for child_id, parent_ids in graph.items():
-            if child_id not in verified and parent_ids.intersection(verified):
-                verified.add(child_id)
-                changed = True
-    return "ok", verified.difference(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+    return "ok", resolved_classes()
 
 
 def _wikidata_binding_id(value: Any, pattern: re.Pattern[str]) -> str:
