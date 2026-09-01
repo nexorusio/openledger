@@ -649,6 +649,21 @@ _PRIVATE_ADDRESS_PATTERN = re.compile(
     r"adresse personnelle|domicilio particular|endere[cç]o residencial)\b",
     re.IGNORECASE,
 )
+_EMAIL_ADDRESS_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}"
+    r"@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?"
+    r"\.[A-Za-z]{2,63}(?![A-Za-z0-9.-])"
+)
+_PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
+    r"(?<!\w)\+?\d(?:[\d ()-]{5,}\d)(?!\w)"
+)
+_PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
+    r"(?:\b(?:employee|staff member)(?:'s|’s)?\b|"
+    r"\b(?:individual|personal|private)(?:'s|’s)?\s+"
+    r"(?:address|contact|data|details?|email|home|mobile|phone|residence|"
+    r"whatsapp)\b)",
+    re.IGNORECASE,
+)
 _BUSINESS_LOCATION_CONTEXT_PATTERN = re.compile(
     r"\b(?:business|company|commercial|corporate|organization|organisation|"
     r"office|headquarters?|head office|registered office|branch|store|facility|"
@@ -684,6 +699,48 @@ def _looks_like_public_address(value: Any) -> bool:
     )
 
 
+def _contains_personal_organization_data(value: Any) -> bool:
+    """Reject person-level contact data from organization-only observations."""
+    text = _bounded_text(value, limit=3000)
+    if (
+        not text
+        or _PRIVATE_ADDRESS_PATTERN.search(text)
+        or _EMAIL_ADDRESS_PATTERN.search(text)
+        or _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
+    ):
+        return bool(text)
+    for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(text):
+        candidate = match.group(0)
+        digit_count = sum(character.isdigit() for character in candidate)
+        if 7 <= digit_count <= 15 and candidate.startswith("+"):
+            return True
+        if 10 <= digit_count <= 15:
+            return True
+    return False
+
+
+def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, str]]:
+    """Retain only bounded public citations with privacy-safe display titles."""
+    output = []
+    seen = set()
+    for source in list(sources or [])[:100]:
+        if not isinstance(source, dict):
+            continue
+        source_url = _safe_public_url(source.get("url"))
+        if (
+            not source_url
+            or source_url in seen
+            or _EMAIL_ADDRESS_PATTERN.search(unquote(source_url))
+        ):
+            continue
+        source_title = _bounded_text(source.get("title"), limit=300)
+        if not source_title or _contains_personal_organization_data(source_title):
+            source_title = urlparse(source_url).hostname or "Public web source"
+        seen.add(source_url)
+        output.append({"title": source_title, "url": source_url})
+    return output
+
+
 def normalize_public_web_organization_findings(
     organization_name: str,
     proposals: Any,
@@ -694,15 +751,8 @@ def normalize_public_web_organization_findings(
     """Bind AI-extracted organization observations to exact web citations."""
     organization_name = normalize_affiliation_name(organization_name)
     citation_titles: Dict[str, str] = {}
-    for source in list(sources or [])[:100]:
-        if not isinstance(source, dict):
-            continue
-        source_url = _safe_public_url(source.get("url"))
-        if not source_url:
-            continue
-        citation_titles[source_url] = _bounded_text(
-            source.get("title"), limit=300
-        ) or urlparse(source_url).hostname or "Public web source"
+    for source in normalize_public_web_organization_sources(sources):
+        citation_titles[source["url"]] = source["title"]
 
     if isinstance(official_website, dict):
         official_website = official_website.get("url")
@@ -757,8 +807,8 @@ def normalize_public_web_organization_findings(
         if (
             not value
             or not reason
-            or _PRIVATE_ADDRESS_PATTERN.search(value)
-            or _PRIVATE_ADDRESS_PATTERN.search(reason)
+            or _contains_personal_organization_data(value)
+            or _contains_personal_organization_data(reason)
         ):
             continue
         if observation_type == "business_address" and (

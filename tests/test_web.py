@@ -395,6 +395,15 @@ def test_role_organization_suggestion_preserves_legal_suffix_and_fails_ambiguous
         "Advocate for Center for Reproductive Rights"
     ) == "Center for Reproductive Rights"
     assert web_app.suggested_role_organization(
+        "Advocate for Lawyers at Work"
+    ) == "Lawyers at Work"
+    assert web_app.suggested_role_organization(
+        "Counsel for Smith, Jones & Co."
+    ) == "Smith, Jones & Co."
+    assert web_app.suggested_role_organization(
+        "CEO, Advisor at Acme Widgets"
+    ) == ""
+    assert web_app.suggested_role_organization(
         "Co-founder, CEO, Acme Widgets"
     ) == ""
     assert web_app.suggested_role_organization(

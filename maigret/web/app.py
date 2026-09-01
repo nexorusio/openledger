@@ -71,6 +71,7 @@ from maigret.web.collector_adapters import (
     normalize_legal_jurisdiction,
     normalize_official_website_url,
     normalize_public_web_organization_findings,
+    normalize_public_web_organization_sources,
     run_cloudflare_dns_context,
     run_fr_business_registry_search,
     run_gleif_legal_entity_search,
@@ -2987,6 +2988,9 @@ def run_persistent_affiliation_job(
                 web_search_enabled=True,
                 **ai_endpoint_options(),
             )
+            durable_sources = normalize_public_web_organization_sources(
+                response.get('sources', [])
+            )
             proposal_error = ''
             try:
                 raw_findings = await get_organization_context_proposals(
@@ -2995,14 +2999,14 @@ def run_persistent_affiliation_job(
                     legal_jurisdiction=legal_jurisdiction,
                     official_website=explicit_website,
                     research_answer=response['analysis'],
-                    sources=response.get('sources', []),
+                    sources=durable_sources,
                     model=model,
                     **ai_endpoint_options(),
                 )
                 findings = normalize_public_web_organization_findings(
                     affiliation_name,
                     raw_findings,
-                    sources=response.get('sources', []),
+                    sources=durable_sources,
                     official_website=explicit_website,
                 )
             except Exception as error:
@@ -3034,7 +3038,7 @@ def run_persistent_affiliation_job(
                 # repeat private addresses or employee data despite the prompt, so
                 # only the validated findings and citations cross the durable boundary.
                 'analysis': '',
-                'sources': list(response.get('sources') or [])[:100],
+                'sources': durable_sources,
                 'findings': findings,
                 'proposal_error': proposal_error,
                 'direct_platform_fetch_performed': False,
@@ -4865,22 +4869,20 @@ def suggested_role_organization(value):
     if not role:
         return ""
     candidate = ""
-    at_separators = list(
-        re.finditer(r"\s+at\s+", role, flags=re.IGNORECASE)
+    explicit_separators = list(
+        re.finditer(r"\s+(?:at|for|with)\s+", role, flags=re.IGNORECASE)
     )
-    if at_separators:
-        candidate = role[at_separators[0].end() :].strip()
-    elif "," in role:
+    first_explicit = explicit_separators[0] if explicit_separators else None
+    first_comma = role.find(",")
+    if first_explicit and (
+        first_comma < 0 or first_explicit.start() < first_comma
+    ):
+        candidate = role[first_explicit.end() :].strip()
+    elif first_comma >= 0:
         segments = [segment.strip() for segment in role.split(",")]
-        if len(segments) != 2:
+        if len(segments) != 2 or first_explicit:
             return ""
         candidate = segments[1]
-    else:
-        contextual_separators = list(
-            re.finditer(r"\s+(?:for|with)\s+", role, flags=re.IGNORECASE)
-        )
-        if contextual_separators:
-            candidate = role[contextual_separators[0].end() :].strip()
     if (
         not 2 <= len(candidate) <= 200
         or not any(character.isalpha() for character in candidate)
