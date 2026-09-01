@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -96,7 +96,12 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
         _require(source["status"] == "active", f"{source_id}: source is not active")
         _require(
             source["integration_mode"]
-            in {"native_public_api", "bundled_cli", "bundled_library"},
+            in {
+                "native_public_api",
+                "bounded_public_web",
+                "bundled_cli",
+                "bundled_library",
+            },
             f"{source_id}: unsupported integration mode",
         )
         for key in ("catalog_reference", "official_documentation", "usage_terms"):
@@ -206,6 +211,42 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
                     == [source["endpoint_origin"], *additional_origins],
                     f"{source_id}: every runtime origin must be statically fixed",
                 )
+        elif source["integration_mode"] == "bounded_public_web":
+            _require(
+                source["network_classification"]
+                == "operator_supplied_public_web",
+                f"{source_id}: unexpected public-web network classification",
+            )
+            _require(
+                guardrails.get("fixed_network_origin") is False,
+                f"{source_id}: operator URL origin must not be described as fixed",
+            )
+            for key in (
+                "dns_resolution_required",
+                "public_ip_only",
+                "resolved_ip_pinning_required",
+                "same_site_redirects_only",
+            ):
+                _require(
+                    guardrails.get(key) is True,
+                    f"{source_id}: guardrails.{key} must be true",
+                )
+            _require(
+                guardrails.get("maximum_redirects") in {0, 1},
+                f"{source_id}: public-web redirects must remain capped at one",
+            )
+            _require(
+                guardrails.get("maximum_pages") == 1,
+                f"{source_id}: public-web collection must remain one page",
+            )
+            _require(
+                guardrails.get("script_execution_allowed") is False,
+                f"{source_id}: scripts must not execute during public-web collection",
+            )
+            _require(
+                guardrails.get("sensitive_query_parameters_allowed") is False,
+                f"{source_id}: credential-like URL query parameters must be rejected",
+            )
         else:
             _require(
                 source["network_classification"] == "offline_local",
@@ -607,6 +648,45 @@ def live_icij_offshore_contract(source: dict) -> None:
     )
 
 
+def live_official_website_contract(source: dict) -> None:
+    target = source["maintenance"].get("live_contract_target")
+    parsed_target = urlparse(str(target or ""))
+    _require(
+        isinstance(target, str)
+        and parsed_target.scheme == "https"
+        and parsed_target.hostname == "www.unistellar.co"
+        and parsed_target.port in {None, 443}
+        and parsed_target.path in {"", "/"}
+        and not parsed_target.query
+        and not parsed_target.fragment,
+        "Official website live target is missing",
+    )
+    request = Request(
+        target,
+        headers={
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "en-US,en;q=0.8",
+            "User-Agent": "OpenLedger-OSINT-Contract-Audit/1.0 (+https://github.com/nexorusio/openledger)",
+        },
+    )
+    try:
+        with build_opener(NoRedirectHandler()).open(request, timeout=20) as response:
+            payload = response.read(750_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(
+            f"Official website live contract request failed: {error}"
+        ) from error
+    _require(len(payload) <= 750_000, "Official website response was oversized")
+    content = payload.decode("utf-8", errors="replace").casefold()
+    _require(
+        "unistellar" in content
+        and "corporate@unistellar.co" in content
+        and "pascal sembel" in content
+        and "ferdinata suryanto" in content,
+        "Official website public HTML contract changed",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -629,6 +709,9 @@ def main() -> int:
             live_wikidata_contract(sources_by_id["wikidata_affiliation"])
             live_wikipedia_contract(sources_by_id["wikipedia_public_biography"])
             live_icij_offshore_contract(sources_by_id["icij_offshore_leaks"])
+            live_official_website_contract(
+                sources_by_id["official_website_public_content"]
+            )
     except (OSError, ValueError, RuntimeError, StopIteration) as error:
         print(f"OSINT source audit failed: {error}", file=sys.stderr)
         return 1

@@ -63,8 +63,14 @@
         <span class="badge-soft {{ 'success' if combined_affiliation_status == 'observed' else 'warning' }}">{{ combined_affiliation_status | replace('_', ' ') | title }}</span>
     </header>
     <div class="panel-body affiliation-case-body">
+        {% if affiliation_job.website_observation and affiliation_job.website_observation.status == 'observed' %}
+        <div class="alert alert-info mb-3" role="status">
+            <strong>First-party website evidence collected independently</strong>
+            <p class="mb-0">The supplied website produced {{ affiliation_job.website_address_count | default(0) }} exact published addresses and {{ affiliation_job.website_person_count | default(0) }} named-person observations. A Wikidata mismatch does not discard this evidence; every Persona claim still requires review.</p>
+        </div>
+        {% endif %}
         {% if affiliation_job.discovery_status == 'needs_selection' %}
-        <strong>Select the correct organization</strong>
+        <strong>Select the correct Wikidata organization—or leave it unselected</strong>
         <p class="form-text">{{ affiliation_job.source_message or 'People extraction is paused until you choose one stored Wikidata candidate.' }}</p>
         <div class="affiliation-candidate-list">
             {% for candidate in affiliation_job.organization_candidates %}
@@ -193,6 +199,25 @@
             <p class="form-text">No direct registered, website, or technical context finding was retained. This is an evidence gap, not a conclusion that the entity has no operations.</p>
             {% endif %}
 
+            {% if affiliation_job.website_observation %}
+            {% set website_evidence = affiliation_job.website_observation %}
+            <article class="domain-context-card">
+                <header>
+                    <div><strong>Supplied website content · {{ website_evidence.subject_value or affiliation_job.website_context.domain }}</strong><small>{{ website_evidence.reason }}</small></div>
+                    <span class="badge-soft {{ 'success' if website_evidence.status == 'observed' else 'warning' }}">{{ website_evidence.status | replace('_', ' ') | title }}</span>
+                </header>
+                {% if website_evidence.organization %}
+                <p><strong>{{ website_evidence.organization.page_title or website_evidence.organization.name }}</strong>{% if website_evidence.organization.description %}<br>{{ website_evidence.organization.description }}{% endif %}</p>
+                {% endif %}
+                {% if website_evidence.addresses %}<div><strong>Exact published addresses</strong><ul>{% for address in website_evidence.addresses %}<li>{{ address }}</li>{% endfor %}</ul></div>{% elif website_evidence.status == 'observed' %}<p class="form-text">No address was present in the captured official-site HTML. This is an evidence gap, not proof that the organization has no office.</p>{% endif %}
+                {% if website_evidence.contacts %}<div><strong>Organization contacts</strong><ul>{% for contact in website_evidence.contacts %}<li>{{ contact.type | title }} · {{ contact.value }}</li>{% endfor %}</ul></div>{% endif %}
+                {% if website_evidence.people %}<div><strong>Explicitly named team members</strong><ul>{% for person in website_evidence.people %}<li>{{ person.display_name }} · {{ person.role }} <span class="badge-soft warning">Pending review</span></li>{% endfor %}</ul></div>{% endif %}
+                {% if website_evidence.linked_company_profiles %}<div><strong>Linked public company profiles</strong><ul>{% for profile_url in website_evidence.linked_company_profiles %}<li><a href="{{ profile_url }}" target="_blank" rel="noopener noreferrer">Open profile for manual review</a></li>{% endfor %}</ul><p class="form-text">OpenLedger retained these exact outgoing links but did not scrape or copy the external profiles. Cite any address or employee detail separately before treating it as evidence.</p></div>{% endif %}
+                {% if website_evidence.source_url %}<a href="{{ website_evidence.source_url }}" target="_blank" rel="noopener noreferrer">Open supplied website evidence</a>{% endif %}
+                <p class="registry-coverage-note"><i data-lucide="info"></i> Self-published website content is retained as cited evidence, not silently promoted to a legal or operating fact.</p>
+            </article>
+            {% endif %}
+
             {% if affiliation_job.dns_observation %}
             {% set dns = affiliation_job.dns_observation %}
             <article class="domain-context-card">
@@ -222,10 +247,10 @@
                         <span>Official website URL <small>(optional if already resolved)</small></span>
                         <input type="url" name="official_website" maxlength="2000" value="{{ affiliation_job.website_context.url if affiliation_job.website_context else '' }}" placeholder="https://example.org" autocomplete="off">
                     </label>
-                    <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="network"></i> Run domain context</button>
+                    <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="network"></i> Run website &amp; domain context</button>
                 </form>
             </div>
-            <p class="form-text mb-0">Cited web research is the path for exact addresses published on an official site. OpenLedger keeps those statements separate from legal records and technical infrastructure.</p>
+            <p class="form-text mb-0">The worker reads bounded public HTML from the supplied site and retains exact published addresses, contacts, personnel and outgoing company-profile links. It does not scrape those external profiles, and it keeps website statements separate from registry records and DNS infrastructure.</p>
         </section>
         {% if affiliation_job.status == 'completed' and (affiliation_job.affiliated_person_count | default(0) > 0 or affiliation_job.registry_candidate_count | default(0) > 0 or combined_affiliation_status not in ('rate_limited', 'unavailable', 'partial')) %}
         <div class="persona-status-strip"><span><strong>{{ affiliation_job.registry_candidate_count | default(0) }}</strong> registry candidates</span><span><strong>{{ affiliation_job.affiliated_person_count | default(0) }}</strong> people observed</span><span><strong>{{ affiliation_job.claim_proposal_count | default(0) }}</strong> pending claims</span><span><strong>0</strong> automatically approved</span></div>

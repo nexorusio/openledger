@@ -56,9 +56,11 @@ from maigret.web.collector_adapters import (
     CLOUDFLARE_DNS_ENGINE,
     FR_BUSINESS_REGISTRY_ENGINE,
     GLEIF_ENGINE,
+    OFFICIAL_WEBSITE_ENGINE,
     build_business_context_assessment,
     claimed_profile_url_targets,
     extract_fr_registry_affiliated_people,
+    extract_official_website_affiliated_people,
     extract_wikidata_affiliation_people,
     github_profile_targets,
     normalize_legal_jurisdiction,
@@ -68,6 +70,7 @@ from maigret.web.collector_adapters import (
     run_gleif_legal_entity_search,
     run_github_public_profile,
     run_icij_offshore_match,
+    run_official_website_public_content,
     run_unfurl_url_analysis,
     run_user_scanner_email,
     run_wayback_capture_index,
@@ -2745,6 +2748,14 @@ def run_persistent_affiliation_job(
         sink.put(
             {
                 'type': 'collector_started',
+                'collector': 'official-website-content',
+                'target_type': 'organization_website',
+                'targets': 1,
+            }
+        )
+        sink.put(
+            {
+                'type': 'collector_started',
                 'collector': 'cloudflare-dns-context',
                 'target_type': 'organization_domain',
                 'targets': 1,
@@ -2781,12 +2792,16 @@ def run_persistent_affiliation_job(
                     website_context_source = 'wikidata_official_website'
                     break
         dns_result = None
+        website_result = None
         if domain_context_requested:
             if website_context:
-                try:
-                    dns_result = await run_cloudflare_dns_context(website_context)
-                except Exception as error:
-                    dns_result = error
+                dns_result, website_result = await asyncio.gather(
+                    run_cloudflare_dns_context(website_context),
+                    run_official_website_public_content(
+                        affiliation_name, website_context
+                    ),
+                    return_exceptions=True,
+                )
             else:
                 dns_result = {
                     'source_engine': CLOUDFLARE_DNS_ENGINE,
@@ -2798,7 +2813,25 @@ def run_persistent_affiliation_job(
                     'records': {},
                     'record_count': 0,
                 }
-        return base_results, dns_result, website_context, website_context_source
+                website_result = {
+                    'source_engine': OFFICIAL_WEBSITE_ENGINE,
+                    'status': 'not_run',
+                    'reason': (
+                        'No official website URL was available. Supply one and rerun '
+                        'website context before drawing a content conclusion.'
+                    ),
+                    'addresses': [],
+                    'contacts': [],
+                    'people': [],
+                    'linked_company_profiles': [],
+                }
+        return (
+            base_results,
+            dns_result,
+            website_result,
+            website_context,
+            website_context_source,
+        )
 
     task = loop.create_task(collect_sources())
     watcher = loop.create_task(
@@ -2808,12 +2841,14 @@ def run_persistent_affiliation_job(
     )
     source_results = None
     dns_result = None
+    website_result = None
     website_context = explicit_website
     website_context_source = 'operator_input' if explicit_website else ''
     try:
         (
             source_results,
             dns_result,
+            website_result,
             website_context,
             website_context_source,
         ) = loop.run_until_complete(task)
@@ -2900,6 +2935,32 @@ def run_persistent_affiliation_job(
                 {'collector': 'cloudflare-dns-context', 'message': public_message}
             )
         source_observations['cloudflare-dns-context'] = dns_result
+        if isinstance(website_result, BaseException) or not isinstance(
+            website_result, dict
+        ):
+            public_message = record_internal_error(
+                'official-website-content affiliation source failed',
+                website_result
+                if isinstance(website_result, BaseException)
+                else RuntimeError(
+                    'The official website source returned an invalid observation'
+                ),
+                session=job_id,
+            )
+            website_result = {
+                'source_engine': OFFICIAL_WEBSITE_ENGINE,
+                'status': 'unavailable',
+                'reason': public_message,
+                'organization': None,
+                'addresses': [],
+                'contacts': [],
+                'people': [],
+                'linked_company_profiles': [],
+            }
+            source_errors.append(
+                {'collector': 'official-website-content', 'message': public_message}
+            )
+        source_observations['official-website-content'] = website_result
 
     observation = source_observations['wikidata-affiliation']
     registry_observations = [
@@ -2907,6 +2968,11 @@ def run_persistent_affiliation_job(
         for source_name, _coroutine in source_specs
         if source_name != 'wikidata-affiliation'
     ]
+    website_observations = [
+        website_result
+    ] if isinstance(website_result, dict) and website_result.get(
+        'status'
+    ) != 'not_run' else []
     synchronized = {'personas': 0, 'claims': 0}
     wikidata_people = extract_wikidata_affiliation_people(observation)
     registry_people = []
@@ -2914,11 +2980,17 @@ def run_persistent_affiliation_job(
         registry_people.extend(
             extract_fr_registry_affiliated_people(registry_observation)
         )
-    if wikidata_people or registry_people:
+    website_people = (
+        extract_official_website_affiliated_people(website_result)
+        if isinstance(website_result, dict)
+        else []
+    )
+    if wikidata_people or registry_people or website_people:
         synchronized = store.sync_affiliation_discovery(
             job_id,
             observation,
             registry_observations=registry_observations,
+            website_observations=website_observations,
         )
 
     if observation.get('status') in {'observed', 'partial'}:
@@ -2958,6 +3030,23 @@ def run_persistent_affiliation_job(
                     ).get('source_url'),
                 }
             )
+    for person in website_people:
+        sink.put(
+            {
+                'type': 'affiliated_person',
+                'entity_id': person.get('public_person_key'),
+                'label': person.get('display_name'),
+                'url': next(
+                    (
+                        evidence.get('source_url')
+                        for claim in list(person.get('claims') or [])
+                        for evidence in list(claim.get('evidence') or [])
+                        if isinstance(evidence, dict) and evidence.get('source_url')
+                    ),
+                    None,
+                ),
+            }
+        )
 
     source_statuses = [
         str(source_observation.get('status') or 'unavailable')
@@ -2973,6 +3062,8 @@ def run_persistent_affiliation_job(
         for status in source_statuses
     )
     if has_useful_result and has_unavailable_source:
+        affiliation_status = 'partial'
+    elif 'observed' in source_statuses and 'needs_selection' in source_statuses:
         affiliation_status = 'partial'
     elif 'observed' in source_statuses:
         affiliation_status = 'observed'
@@ -2991,7 +3082,7 @@ def run_persistent_affiliation_job(
     )
     unique_people = {
         ' '.join(str(person.get('display_name') or '').split()).casefold()
-        for person in wikidata_people + registry_people
+        for person in wikidata_people + registry_people + website_people
         if str(person.get('display_name') or '').strip()
     }
     result = {
@@ -3009,11 +3100,23 @@ def run_persistent_affiliation_job(
         'domain_context_requested': domain_context_requested,
         'website_context': website_context,
         'website_context_source': website_context_source,
+        'website_observation': (
+            website_result if domain_context_requested else None
+        ),
+        'website_person_count': len(website_people),
+        'website_address_count': (
+            len(website_result.get('addresses') or [])
+            if isinstance(website_result, dict)
+            else 0
+        ),
         'dns_observation': dns_result if domain_context_requested else None,
         'business_context_findings': build_business_context_assessment(
             registry_observations,
             website=website_context,
             website_source=website_context_source,
+            website_observation=(
+                website_result if isinstance(website_result, dict) else None
+            ),
             dns_observation=(
                 dns_result if isinstance(dns_result, dict) else None
             ),
@@ -3077,6 +3180,45 @@ def run_persistent_affiliation_job(
                 ),
             }
         )
+        for collector_name, source_observation, people_extractor in (
+            (
+                'official-website-content',
+                website_result,
+                extract_official_website_affiliated_people,
+            ),
+        ):
+            source_status = (
+                source_observation.get('status')
+                if isinstance(source_observation, dict)
+                else 'unavailable'
+            )
+            sink.put(
+                {
+                    'type': (
+                        'collector_error'
+                        if source_status in {'rate_limited', 'unavailable', 'partial'}
+                        else 'collector_completed'
+                    ),
+                    'collector': collector_name,
+                    'observations': 0 if source_status == 'not_run' else 1,
+                    'found': (
+                        len(source_observation.get('addresses') or [])
+                        + len(source_observation.get('people') or [])
+                        if isinstance(source_observation, dict)
+                        else 0
+                    ),
+                    'people_found': (
+                        len(people_extractor(source_observation))
+                        if isinstance(source_observation, dict)
+                        else 0
+                    ),
+                    'message': (
+                        str(source_observation.get('reason') or '')[:1000]
+                        if isinstance(source_observation, dict)
+                        else 'The public website source was unavailable.'
+                    ),
+                }
+            )
     sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
 
 
@@ -4220,7 +4362,9 @@ def rerun_affiliation_domain_context(case_id):
         flash(str(error), 'warning')
         return redirect(url_for('case_workspace', case_id=case_id))
     flash(
-        'Domain context queued. DNS findings remain technical observations only.',
+        'Website and domain context queued. Published website statements and '
+        'linked company-profile evidence remain pending review; DNS stays '
+        'technical observation only.',
         'success',
     )
     return redirect(url_for('live_results', job_id=job_id))

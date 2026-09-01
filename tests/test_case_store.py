@@ -1559,14 +1559,14 @@ def test_affiliation_domain_context_is_explicit_and_preserved_on_rerun(store):
         "url": "https://example.org/about",
         "domain": "example.org",
     }
-    assert job["progress"]["total"] == 5
+    assert job["progress"]["total"] == 6
     store.finish(job_id, {"status": "completed"})
 
     rerun = store.get_job(store.queue_affiliation_context(job["case_id"]))
     rerun_specification = rerun["options"]["investigation_spec"]
     assert rerun_specification["enable_domain_context"] is True
     assert rerun_specification["official_website"]["domain"] == "example.org"
-    assert rerun["progress"]["total"] == 5
+    assert rerun["progress"]["total"] == 6
 
 
 def _approved_full_name(store, name="Alice Example"):

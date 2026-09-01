@@ -340,6 +340,67 @@
       }
     },
     {
+      "id": "official_website_public_content",
+      "display_name": "Supplied official website public content",
+      "status": "active",
+      "capability": "first_party_organization_statements_contacts_addresses_and_personnel",
+      "integration_mode": "bounded_public_web",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://www.rfc-editor.org/rfc/rfc9110.html",
+      "usage_terms": "https://www.w3.org/TR/ethical-web-principles/",
+      "api_version": "HTTP-Semantics-and-HTML-current",
+      "network_classification": "operator_supplied_public_web",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "official_website_url_from_operator_or_selected_organization",
+        "accepted_target": "one_exact_public_organization_website_page",
+        "maximum_targets_per_investigation": 1
+      },
+      "guardrails": {
+        "fixed_network_origin": false,
+        "dns_resolution_required": true,
+        "public_ip_only": true,
+        "resolved_ip_pinning_required": true,
+        "sensitive_query_parameters_allowed": false,
+        "redirects_allowed": true,
+        "same_site_redirects_only": true,
+        "maximum_redirects": 1,
+        "timeout_seconds": 20,
+        "maximum_response_bytes": 750000,
+        "maximum_pages": 1,
+        "maximum_addresses": 10,
+        "maximum_contacts": 10,
+        "maximum_people": 25,
+        "maximum_linked_company_profiles": 2,
+        "script_execution_allowed": false,
+        "residential_address_collection_allowed": false,
+        "inferred_contact_collection_allowed": false,
+        "operating_location_inference_allowed": false,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": ["full_name", "company", "occupation"],
+      "observation_only_fields": [
+        "page_title",
+        "organization_description",
+        "exact_public_address",
+        "organizational_email",
+        "organizational_phone",
+        "linked_public_company_profile"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-01",
+        "review_due_by": "2026-11-30",
+        "live_contract_target": "https://www.unistellar.co/",
+        "owner": "OpenLedger maintainers"
+      }
+    },
+    {
       "id": "wikidata_affiliation",
       "display_name": "Wikidata organization and affiliation graph",
       "status": "active",

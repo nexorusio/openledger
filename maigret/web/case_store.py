@@ -714,7 +714,7 @@ class CaseStore:
                             if legal_jurisdiction
                             and legal_jurisdiction["code"] == "FR"
                             else 3 if legal_jurisdiction else 2
-                        ) + (1 if enable_domain_context else 0),
+                        ) + (2 if enable_domain_context else 0),
                         "found": 0,
                     },
                     result=None,
@@ -937,7 +937,7 @@ class CaseStore:
                 and legal_jurisdiction.get("code") == "FR"
                 else 3 if legal_jurisdiction else 2
             )
-            total_sources += 1 if enable_domain_context else 0
+            total_sources += 2 if enable_domain_context else 0
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id, case_id=case_id, kind="affiliation", status="queued",
@@ -1020,7 +1020,7 @@ class CaseStore:
                 if isinstance(legal_jurisdiction, dict)
                 and legal_jurisdiction.get("code") == "FR"
                 else 3 if legal_jurisdiction else 2
-            ) + 1
+            ) + 2
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,
@@ -2726,11 +2726,14 @@ class CaseStore:
         observation: Dict[str, Any],
         *,
         registry_observations: Optional[list[Dict[str, Any]]] = None,
+        website_observations: Optional[list[Dict[str, Any]]] = None,
     ) -> Dict[str, int]:
         from maigret.web.collector_adapters import (
             FR_BUSINESS_REGISTRY_ENGINE,
+            OFFICIAL_WEBSITE_ENGINE,
             WIKIDATA_ENGINE,
             extract_fr_registry_affiliated_people,
+            extract_official_website_affiliated_people,
             extract_wikidata_affiliation_people,
         )
 
@@ -2739,6 +2742,11 @@ class CaseStore:
         for registry_observation in registry_observations:
             people.extend(
                 extract_fr_registry_affiliated_people(registry_observation)
+            )
+        website_observations = list(website_observations or [])[:2]
+        for website_observation in website_observations:
+            people.extend(
+                extract_official_website_affiliated_people(website_observation)
             )
         if not people:
             return {"personas": 0, "claims": 0}
@@ -2756,6 +2764,16 @@ class CaseStore:
                     continue
                 organization_label = " ".join(
                     str(selected_entity.get("legal_name") or "").split()
+                )[:500]
+                if organization_label:
+                    break
+        if not organization_label:
+            for website_observation in website_observations:
+                website_organization = website_observation.get("organization")
+                if not isinstance(website_organization, dict):
+                    continue
+                organization_label = " ".join(
+                    str(website_organization.get("name") or "").split()
                 )[:500]
                 if organization_label:
                     break
@@ -2781,6 +2799,8 @@ class CaseStore:
 
             personas_by_id = {}
             personas_by_registry_record = {}
+            personas_by_public_record = {}
+            personas_by_public_name = {}
             rows = connection.execute(
                 select(personas.c.id, persona_claims.c.value)
                 .join(persona_claims, persona_claims.c.persona_id == personas.c.id)
@@ -2817,6 +2837,30 @@ class CaseStore:
                 personas_by_registry_record[
                     str(row["source_record_id"])
                 ] = str(row["id"])
+            for row in connection.execute(
+                select(
+                    personas.c.id,
+                    persona_claims.c.value,
+                    claim_observations.c.source_record_id,
+                )
+                .join(persona_claims, persona_claims.c.persona_id == personas.c.id)
+                .join(
+                    claim_observations,
+                    claim_observations.c.claim_id == persona_claims.c.id,
+                )
+                .where(
+                    personas.c.case_id == case_id,
+                    persona_claims.c.field_name == "full_name",
+                    claim_observations.c.source_engine == OFFICIAL_WEBSITE_ENGINE,
+                    claim_observations.c.source_record_id.is_not(None),
+                )
+            ).mappings():
+                persona_id = str(row["id"])
+                source_record_id = str(row["source_record_id"])
+                personas_by_public_record[source_record_id] = persona_id
+                identity = " ".join(str(row["value"] or "").split()).casefold()
+                if identity:
+                    personas_by_public_name.setdefault(identity, persona_id)
 
             for person in people:
                 wikidata_id = str(person.get("wikidata_id") or "").upper()
@@ -2832,11 +2876,32 @@ class CaseStore:
                     ),
                     "",
                 )
+                public_record_ids = [
+                    str(candidate.get("source_record_id"))
+                    for candidate in claims
+                    if candidate.get("source_engine") == OFFICIAL_WEBSITE_ENGINE
+                    and candidate.get("field_name") == "full_name"
+                    and candidate.get("source_record_id")
+                ]
+                public_name_identity = " ".join(
+                    str(person.get("display_name") or "").split()
+                ).casefold()
                 persona_id = (
                     personas_by_id.get(wikidata_id)
                     if wikidata_id
                     else personas_by_registry_record.get(registry_record_id)
                 )
+                if not persona_id:
+                    persona_id = next(
+                        (
+                            personas_by_public_record.get(source_record_id)
+                            for source_record_id in public_record_ids
+                            if personas_by_public_record.get(source_record_id)
+                        ),
+                        None,
+                    )
+                if not persona_id and public_record_ids and public_name_identity:
+                    persona_id = personas_by_public_name.get(public_name_identity)
                 if not persona_id:
                     persona_id = str(uuid.uuid4())
                     connection.execute(
@@ -2853,7 +2918,18 @@ class CaseStore:
                         personas_by_registry_record[
                             registry_record_id
                         ] = persona_id
+                    elif public_record_ids:
+                        for source_record_id in public_record_ids:
+                            personas_by_public_record[source_record_id] = persona_id
+                        if public_name_identity:
+                            personas_by_public_name[
+                                public_name_identity
+                            ] = persona_id
                     inserted_personas += 1
+                for source_record_id in public_record_ids:
+                    personas_by_public_record[source_record_id] = persona_id
+                if public_record_ids and public_name_identity:
+                    personas_by_public_name[public_name_identity] = persona_id
                 synchronized += self._upsert_persona_candidates(
                     connection,
                     persona_id=persona_id,

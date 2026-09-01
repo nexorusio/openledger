@@ -16,7 +16,7 @@ def test_osint_source_registry_passes_static_governance_audit():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Validated 9 governed OSINT source" in result.stdout
+    assert "Validated 10 governed OSINT source" in result.stdout
 
 
 def test_github_contract_matches_runtime_limits_and_review_boundary():
@@ -147,3 +147,28 @@ def test_confirmed_name_sources_are_credential_free_bounded_and_review_gated():
     assert offshore["guardrails"]["fuzzy_matches_create_alerts"] is False
     assert offshore["guardrails"]["independent_identity_confirmation_required"] is True
     assert offshore["guardrails"]["automatic_approval_allowed"] is False
+
+
+def test_public_website_source_is_ssrf_bounded_and_review_gated():
+    with open(
+        os.path.join(ROOT, "config", "osint-sources.json"), encoding="utf-8"
+    ) as registry_file:
+        sources = {
+            source["id"]: source
+            for source in json.load(registry_file)["sources"]
+        }
+
+    website = sources["official_website_public_content"]
+    assert website["integration_mode"] == "bounded_public_web"
+    assert website["access"]["credentials_required"] is False
+    assert website["guardrails"]["dns_resolution_required"] is True
+    assert website["guardrails"]["public_ip_only"] is True
+    assert website["guardrails"]["resolved_ip_pinning_required"] is True
+    assert website["guardrails"]["sensitive_query_parameters_allowed"] is False
+    assert website["guardrails"]["same_site_redirects_only"] is True
+    assert website["guardrails"]["maximum_pages"] == 1
+    assert website["guardrails"]["script_execution_allowed"] is False
+    assert website["guardrails"]["automatic_approval_allowed"] is False
+    assert website["observation_only_fields"][-1] == (
+        "linked_public_company_profile"
+    )
