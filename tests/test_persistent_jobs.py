@@ -949,6 +949,32 @@ def _affiliation_worker_observation():
     }
 
 
+def _official_website_worker_observation(*, linked_profiles=None):
+    return {
+        "source_engine": "official_website_public_content",
+        "source_record_id": "official-website:example-org",
+        "status": "observed",
+        "source_url": "https://example.org",
+        "reason": "Bounded public content was collected.",
+        "organization": {
+            "name": "Example Organization",
+            "domain": "example.org",
+            "website_url": "https://example.org",
+            "page_title": "Example Organization",
+            "description": "Public organization description.",
+        },
+        "addresses": [],
+        "contacts": [],
+        "people": [],
+        "linked_company_profiles": list(linked_profiles or []),
+        "extra": {
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+            "self_published_source": True,
+        },
+    }
+
+
 def test_affiliation_worker_persists_pending_people(
     web_app, persistent_store, monkeypatch
 ):
@@ -1049,8 +1075,14 @@ def test_affiliation_domain_context_is_observation_only_and_explains_limits(
             "record_count": 3,
         }
 
+    async def fake_website(*_args, **_kwargs):
+        return _official_website_worker_observation()
+
     monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", fake_discovery)
     monkeypatch.setattr(web_app, "run_cloudflare_dns_context", fake_dns)
+    monkeypatch.setattr(
+        web_app, "run_official_website_public_content", fake_website
+    )
     web_app.run_persistent_job(persistent_store, job)
 
     completed = persistent_store.get_job(job_id)
@@ -1091,8 +1123,14 @@ def test_dns_context_failure_does_not_discard_affiliation_people(
     async def failed_dns(*_args, **_kwargs):
         raise RuntimeError("private DNS upstream diagnostic")
 
+    async def fake_website(*_args, **_kwargs):
+        return _official_website_worker_observation()
+
     monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", fake_discovery)
     monkeypatch.setattr(web_app, "run_cloudflare_dns_context", failed_dns)
+    monkeypatch.setattr(
+        web_app, "run_official_website_public_content", fake_website
+    )
     web_app.run_persistent_job(persistent_store, job)
 
     completed = persistent_store.get_job(job_id)
@@ -1102,6 +1140,120 @@ def test_dns_context_failure_does_not_discard_affiliation_people(
     assert completed["dns_observation"]["status"] == "unavailable"
     assert "private DNS upstream diagnostic" not in json.dumps(completed)
     assert len(persistent_store.get_case(job["case_id"])["personas"]) == 1
+
+
+def test_supplied_website_evidence_survives_wrong_wikidata_candidate(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar",
+        jurisdiction="ID",
+        enable_domain_context=True,
+        official_website="https://unistellar.co",
+    )
+    job = persistent_store.claim_next("worker:official-website")
+
+    async def wrong_wikidata(*_args, **_kwargs):
+        return {
+            "source_engine": "wikidata_affiliation",
+            "status": "needs_selection",
+            "reason": "The exact-name Wikidata candidate has a different website.",
+            "organization_candidates": [
+                {
+                    "id": "Q65073466",
+                    "label": "Unistellar",
+                    "description": "French telescope company",
+                    "url": "https://www.wikidata.org/wiki/Q65073466",
+                    "official_websites": ["https://unistellaroptics.com"],
+                }
+            ],
+            "organization": None,
+            "people": [],
+        }
+
+    async def no_registry_match(*_args, **_kwargs):
+        return {
+            "source_engine": "gleif_lei_registry",
+            "status": "not_found",
+            "reason": "No jurisdiction-matched LEI record.",
+            "candidates": [],
+            "selected_entity": None,
+        }
+
+    async def no_dns_records(*_args, **_kwargs):
+        return {
+            "source_engine": "cloudflare_dns_context",
+            "status": "observed",
+            "reason": "Current public DNS records.",
+            "domain": "unistellar.co",
+            "records": {},
+            "record_count": 0,
+        }
+
+    async def official_website(*_args, **_kwargs):
+        observation = _official_website_worker_observation(
+            linked_profiles=["https://www.linkedin.com/company/unistellar"]
+        )
+        observation.update(
+            {
+                "source_record_id": "official-website:unistellar",
+                "source_url": "https://www.unistellar.co/",
+                "organization": {
+                    "name": "Unistellar",
+                    "domain": "unistellar.co",
+                    "website_url": "https://www.unistellar.co/",
+                    "page_title": "Unistellar Business Group",
+                    "description": "A group of companies in advisory and investment.",
+                },
+                "contacts": [
+                    {"type": "email", "value": "corporate@unistellar.co"}
+                ],
+                "people": [
+                    {"display_name": "Pascal Sembel", "role": "Finance & Investment"},
+                    {
+                        "display_name": "Ferdinata Suryanto",
+                        "role": "Corporate Finance & Investment",
+                    },
+                ],
+            }
+        )
+        return observation
+
+    monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", wrong_wikidata)
+    monkeypatch.setattr(web_app, "run_gleif_legal_entity_search", no_registry_match)
+    monkeypatch.setattr(web_app, "run_cloudflare_dns_context", no_dns_records)
+    monkeypatch.setattr(
+        web_app, "run_official_website_public_content", official_website
+    )
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["affiliation_status"] == "partial"
+    assert completed["website_address_count"] == 0
+    assert completed["affiliated_person_count"] == 2
+    assert any(
+        finding["category"] == "linked_company_profile_lead"
+        and finding["source_url"]
+        == "https://www.linkedin.com/company/unistellar"
+        and "did not fetch or copy" in finding["limitation"]
+        for finding in completed["business_context_findings"]
+    )
+    personas = persistent_store.get_case(job["case_id"])["personas"]
+    assert {persona["display_name"] for persona in personas} == {
+        "Pascal Sembel",
+        "Ferdinata Suryanto",
+    }
+    for persona_summary in personas:
+        persona = persistent_store.get_persona(persona_summary["id"])
+        assert all(claim["review_status"] == "pending" for claim in persona["claims"])
+
+    case_page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "First-party website evidence collected independently" in case_page
+    assert "No address was present in the captured official-site HTML" in case_page
+    assert "Open profile for manual review" in case_page
+    assert "Pascal Sembel" in case_page
+    assert "leave it unselected" in case_page
 
 
 def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(

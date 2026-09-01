@@ -15,6 +15,7 @@ from maigret.web.collector_adapters import (
     GITHUB_ENGINE,
     ICIJ_OFFSHORE_ENGINE,
     ICIJ_RECONCILE_URL,
+    OFFICIAL_WEBSITE_ENGINE,
     UNFURL_ENGINE,
     UNFURL_VERSION,
     USER_SCANNER_ENGINE,
@@ -31,6 +32,7 @@ from maigret.web.collector_adapters import (
     extract_github_profile_claims,
     extract_fr_registry_affiliated_people,
     extract_icij_offshore_claims,
+    extract_official_website_affiliated_people,
     extract_profile_url_evidence_claims,
     extract_user_scanner_claims,
     extract_wikidata_affiliation_people,
@@ -43,6 +45,7 @@ from maigret.web.collector_adapters import (
     normalize_legal_jurisdiction,
     normalize_cloudflare_dns_context,
     normalize_official_website_url,
+    normalize_official_website_public_content,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
     normalize_wayback_capture_index,
@@ -55,6 +58,7 @@ from maigret.web.collector_adapters import (
     run_gleif_legal_entity_search,
     run_cloudflare_dns_context,
     run_icij_offshore_match,
+    run_official_website_public_content,
     run_wayback_capture_index,
     run_wikidata_affiliation_discovery,
     run_wikipedia_person_enrichment,
@@ -1137,6 +1141,153 @@ async def test_dns_context_uses_fixed_no_redirect_credential_free_queries():
     assert observation["extra"]["operating_location_inference_allowed"] is False
 
 
+def _official_website_html():
+    return b"""<!doctype html>
+    <html><head><title>Example Organization</title>
+    <meta name="description" content="Example Organization builds public-interest technology in Indonesia.">
+    </head><body><main>
+      <h2>Contact and office</h2>
+      <address>Jl. Kemang Timur No. 28, Jakarta 12730, Indonesia</address>
+      <a href="mailto:corporate@example.org">Contact</a>
+      <a href="https://www.linkedin.com/company/example-organization?trk=site">LinkedIn</a>
+      <h2>Team</h2>
+      <h3>Alice Example</h3><p>Chief Executive Officer</p>
+      <p>Alice has worked in technology for many years.</p>
+    </main></body></html>"""
+
+
+def _unistellar_official_website_html():
+    return b"""<!doctype html><html><head><title>Unistellar</title>
+    <meta name="description" content="A business group with technology, education and data divisions.">
+    </head><body><main>
+      <h2>TEAM</h2>
+      <h3>Prof. Roy Sembel</h3><p>Senior Advisor</p>
+      <h3>Pascal Sembel</h3><p>Finance &amp; Investment</p>
+      <h3>Ferdinata Suryanto</h3><p>Corporate Finance &amp; Investment</p>
+      <h2>CONTACT</h2>
+      <a href="mailto:corporate@unistellar.co">corporate@unistellar.co</a>
+      <a href="https://www.linkedin.com/company/unistellar">Company profile</a>
+    </main></body></html>"""
+
+
+def test_official_website_content_extracts_exact_cited_context_and_people():
+    observation = normalize_official_website_public_content(
+        "Example Organization",
+        "https://example.org",
+        _official_website_html(),
+    )
+    people = extract_official_website_affiliated_people(observation)
+
+    assert observation["source_engine"] == OFFICIAL_WEBSITE_ENGINE
+    assert observation["status"] == "observed"
+    assert observation["addresses"] == [
+        "Jl. Kemang Timur No. 28, Jakarta 12730, Indonesia"
+    ]
+    assert observation["contacts"] == [
+        {"type": "email", "value": "corporate@example.org"}
+    ]
+    assert observation["linked_company_profiles"] == [
+        "https://www.linkedin.com/company/example-organization"
+    ]
+    assert observation["people"] == [
+        {"display_name": "Alice Example", "role": "Chief Executive Officer"}
+    ]
+    assert len(people) == 1
+    assert {claim["field_name"] for claim in people[0]["claims"]} == {
+        "full_name",
+        "company",
+        "occupation",
+    }
+    assert all(
+        claim["evidence"][0]["details"]["human_review_required"] is True
+        for claim in people[0]["claims"]
+    )
+
+
+@pytest.mark.parametrize(
+    "url",
+    ["https://example.org:80", "http://example.org:443"],
+)
+def test_official_website_rejects_scheme_mismatched_ports(url):
+    with pytest.raises(ValueError, match="standard web port"):
+        normalize_official_website_url(url)
+
+
+def test_official_website_rejects_sensitive_query_parameters():
+    with pytest.raises(ValueError, match="credential-like"):
+        normalize_official_website_url("https://example.org/?access_token=private")
+
+
+def test_unistellar_site_retains_people_email_and_link_without_inventing_address():
+    observation = normalize_official_website_public_content(
+        "Unistellar",
+        "https://www.unistellar.co/",
+        _unistellar_official_website_html(),
+    )
+
+    assert observation["addresses"] == []
+    assert observation["contacts"] == [
+        {"type": "email", "value": "corporate@unistellar.co"}
+    ]
+    assert observation["people"] == [
+        {"display_name": "Prof. Roy Sembel", "role": "Senior Advisor"},
+        {"display_name": "Pascal Sembel", "role": "Finance & Investment"},
+        {
+            "display_name": "Ferdinata Suryanto",
+            "role": "Corporate Finance & Investment",
+        },
+    ]
+    assert observation["linked_company_profiles"] == [
+        "https://www.linkedin.com/company/unistellar"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_official_website_fetch_pins_public_ip_and_disables_redirects():
+    calls = []
+    observation = await run_official_website_public_content(
+        "Example Organization",
+        "https://example.org",
+        host_resolver=lambda _hostname, _port: ["93.184.216.34"],
+        session_factory=lambda **options: _FakeSession(
+            _FakeResponse(
+                status=200,
+                body=_official_website_html(),
+                headers={"Content-Type": "text/html; charset=utf-8"},
+            ),
+            calls,
+            **options,
+        ),
+    )
+
+    request = calls[1][1]
+    assert request == {
+        "url": "https://93.184.216.34/",
+        "allow_redirects": False,
+        "headers": {"Host": "example.org"},
+        "server_hostname": "example.org",
+    }
+    assert "Authorization" not in calls[0][1]["headers"]
+    assert observation["status"] == "observed"
+
+
+@pytest.mark.asyncio
+async def test_official_website_fetch_blocks_non_public_resolution_before_request():
+    calls = []
+    with pytest.raises(ValueError, match="non-public"):
+        await run_official_website_public_content(
+            "Example Organization",
+            "https://example.org",
+            host_resolver=lambda _hostname, _port: ["127.0.0.1"],
+            session_factory=lambda **options: _FakeSession(
+                _FakeResponse(status=200, body=_official_website_html()),
+                calls,
+                **options,
+            ),
+        )
+    assert [item for item in calls if item[0] == "get"] == []
+
+
 def test_business_context_states_basis_and_never_converts_dns_to_operations():
     jurisdiction = normalize_legal_jurisdiction("FR")
     candidates = normalize_fr_business_entities(
@@ -1182,6 +1333,39 @@ def test_business_context_states_basis_and_never_converts_dns_to_operations():
     )
     assert "do not establish" in dns_finding["limitation"]
     assert "operates in" not in dns_finding["conclusion"].casefold()
+
+
+def test_business_context_explains_website_evidence_and_external_profile_limit():
+    website_observation = normalize_official_website_public_content(
+        "Example Organization",
+        "https://example.org",
+        _official_website_html(),
+    )
+    findings = build_business_context_assessment(
+        [],
+        website="https://example.org",
+        website_source="operator_input",
+        website_observation=website_observation,
+    )
+    categories = {finding["category"] for finding in findings}
+    assert categories.issuperset(
+        {
+            "official_website_statement",
+            "official_website_address",
+            "official_contact_context",
+            "official_personnel_statement",
+            "linked_company_profile_lead",
+        }
+    )
+    linked_lead = next(
+        finding
+        for finding in findings
+        if finding["category"] == "linked_company_profile_lead"
+    )
+    assert linked_lead["source_url"] == (
+        "https://www.linkedin.com/company/example-organization"
+    )
+    assert "did not fetch or copy" in linked_lead["limitation"]
 
 
 def _wikipedia_pages(title="Alice Example"):

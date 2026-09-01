@@ -5,17 +5,20 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import ipaddress
+import inspect
 import json
 import os
 import re
+import socket
 import sys
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
-from urllib.parse import parse_qsl, quote, urlparse
+from urllib.parse import parse_qsl, quote, unquote, urljoin, urlparse, urlunparse
 
 import aiohttp
 import pycountry
+from lxml import etree, html as lxml_html
 
 from maigret.result import MaigretCheckStatus
 from maigret.web.persona_intelligence import (
@@ -118,12 +121,24 @@ CLOUDFLARE_DNS_QUERY_TYPES = ("A", "AAAA", "MX", "NS")
 MAX_DNS_RECORDS_PER_TYPE = 20
 MAX_DNS_RECORDS_TOTAL = 40
 
+OFFICIAL_WEBSITE_ENGINE = "official_website_public_content"
+OFFICIAL_WEBSITE_TIMEOUT_SECONDS = 20
+OFFICIAL_WEBSITE_MAX_RESPONSE_BYTES = 750_000
+MAX_OFFICIAL_WEBSITE_ADDRESSES = 10
+MAX_OFFICIAL_WEBSITE_CONTACTS = 10
+MAX_OFFICIAL_WEBSITE_PEOPLE = 25
+MAX_OFFICIAL_WEBSITE_LINKED_PROFILES = 2
+MAX_OFFICIAL_WEBSITE_REDIRECTS = 1
+
 _LEI_PATTERN = re.compile(r"^[A-Z0-9]{20}$")
 _SIREN_PATTERN = re.compile(r"^[0-9]{9}$")
 _SIRET_PATTERN = re.compile(r"^[0-9]{14}$")
 _ICIJ_NODE_ID_PATTERN = re.compile(r"^[1-9][0-9]{0,19}$")
 _WIKIPEDIA_PAGE_URL_PATTERN = re.compile(
     r"^https://en\.wikipedia\.org/wiki/[^?#]{1,2000}$"
+)
+_LINKEDIN_COMPANY_URL_PATTERN = re.compile(
+    r"^https://www\.linkedin\.com/company/([A-Za-z0-9][A-Za-z0-9_-]{0,99})/?$"
 )
 
 _GITHUB_LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
@@ -267,12 +282,373 @@ def normalize_official_website_url(value: Any) -> Optional[Dict[str, str]]:
         port = parsed.port
     except ValueError as error:
         raise ValueError("Enter a valid official website port") from error
-    if port not in {None, 80, 443}:
-        raise ValueError("Official website URLs may use only standard web ports")
+    expected_port = 443 if parsed.scheme.casefold() == "https" else 80
+    if port not in {None, expected_port}:
+        raise ValueError(
+            "Official website URLs may use only standard web ports matching their scheme"
+        )
     domain = _normalize_dns_hostname(parsed.hostname)
     if not domain:
         raise ValueError("Enter a public official website domain")
+    if parsed.query and _url_has_sensitive_query_key(safe_url):
+        raise ValueError(
+            "Official website URLs must not contain credential-like query parameters"
+        )
     return {"url": safe_url, "domain": domain}
+
+
+def _normalize_linkedin_company_url(value: Any) -> str:
+    safe_url = _safe_public_url(value)
+    if not safe_url:
+        return ""
+    parsed = urlparse(safe_url)
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.casefold() != "https"
+        or (parsed.hostname or "").casefold().rstrip(".") != "www.linkedin.com"
+        or port not in {None, 443}
+    ):
+        return ""
+    canonical = urlunparse(
+        ("https", "www.linkedin.com", parsed.path.rstrip("/"), "", "", "")
+    )
+    return canonical if _LINKEDIN_COMPANY_URL_PATTERN.fullmatch(canonical) else ""
+
+
+def _validated_public_addresses(values: Any) -> List[str]:
+    addresses = []
+    for raw_value in list(values or [])[:20]:
+        value = raw_value[0] if isinstance(raw_value, (tuple, list)) else raw_value
+        try:
+            address = ipaddress.ip_address(str(value or "").split("%", 1)[0])
+        except ValueError as error:
+            raise ValueError("The website hostname returned an invalid address") from error
+        if (
+            not address.is_global
+            or address.is_multicast
+            or address.is_reserved
+            or address.is_unspecified
+            or address.is_loopback
+            or address.is_link_local
+            or address.is_private
+        ):
+            raise ValueError("The website hostname resolved to a non-public address")
+        canonical = str(address)
+        if canonical not in addresses:
+            addresses.append(canonical)
+    if not addresses:
+        raise ValueError("The website hostname did not resolve to a public address")
+    return addresses[:4]
+
+
+async def _resolve_public_host(hostname: str, port: int) -> List[str]:
+    loop = asyncio.get_running_loop()
+    try:
+        results = await loop.getaddrinfo(
+            hostname,
+            port,
+            family=socket.AF_UNSPEC,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as error:
+        raise RuntimeError("The website hostname could not be resolved") from error
+    return _validated_public_addresses([result[4][0] for result in results])
+
+
+async def _resolved_public_addresses(
+    resolver: Callable[..., Any], hostname: str, port: int
+) -> List[str]:
+    result = resolver(hostname, port)
+    if inspect.isawaitable(result):
+        result = await result
+    return _validated_public_addresses(result)
+
+
+def _pinned_request_target(url: str, address: str) -> tuple[str, str, str]:
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    if not hostname:
+        raise ValueError("The website URL has no hostname")
+    port = parsed.port or (443 if parsed.scheme.casefold() == "https" else 80)
+    ip_value = ipaddress.ip_address(address)
+    request_host = f"[{ip_value}]" if ip_value.version == 6 else str(ip_value)
+    if port not in {80, 443}:
+        request_host += f":{port}"
+    host_header = hostname if port in {80, 443} else f"{hostname}:{port}"
+    target = urlunparse(
+        (
+            parsed.scheme.casefold(),
+            request_host,
+            parsed.path or "/",
+            parsed.params,
+            parsed.query,
+            "",
+        )
+    )
+    return target, hostname, host_header
+
+
+async def _bounded_public_html_request(
+    session: Any,
+    url: str,
+    *,
+    resolver: Callable[..., Any],
+    source_name: str,
+    maximum_bytes: int,
+) -> Dict[str, Any]:
+    normalized = normalize_official_website_url(url)
+    if not normalized:
+        raise ValueError("A public website URL is required")
+    parsed = urlparse(normalized["url"])
+    port = parsed.port or (443 if parsed.scheme.casefold() == "https" else 80)
+    addresses = await _resolved_public_addresses(resolver, normalized["domain"], port)
+    request_url, server_hostname, host_header = _pinned_request_target(
+        normalized["url"], addresses[0]
+    )
+    request_options: Dict[str, Any] = {
+        "allow_redirects": False,
+        "headers": {"Host": host_header},
+    }
+    if parsed.scheme.casefold() == "https":
+        request_options["server_hostname"] = server_hostname
+    async with session.get(request_url, **request_options) as response:
+        if response.status in {301, 302, 303, 307, 308}:
+            return {
+                "status": "redirect",
+                "location": str(response.headers.get("Location") or "")[:2000],
+            }
+        if response.status in {403, 429}:
+            return {"status": "rate_limited"}
+        if response.status == 404:
+            return {"status": "not_found"}
+        if response.status != 200:
+            raise RuntimeError(
+                f"{source_name} returned HTTP {int(response.status)}"
+            )
+        content_type = str(response.headers.get("Content-Type") or "").casefold()
+        if content_type and not any(
+            allowed in content_type
+            for allowed in ("text/html", "application/xhtml+xml")
+        ):
+            raise RuntimeError(f"{source_name} did not return an HTML document")
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    f"{source_name} returned an invalid response length"
+                ) from error
+            if declared_length < 0 or declared_length > maximum_bytes:
+                raise RuntimeError(f"{source_name} returned an oversized response")
+        body = await response.content.read(maximum_bytes + 1)
+        if len(body) > maximum_bytes:
+            raise RuntimeError(f"{source_name} returned an oversized response")
+    return {"status": "ok", "body": body}
+
+
+def _public_html_document(body: Any, *, source_name: str):
+    if not isinstance(body, (bytes, bytearray)) or not body:
+        raise ValueError(f"{source_name} returned an empty HTML document")
+    parser = etree.HTMLParser(
+        recover=True,
+        no_network=True,
+        remove_comments=True,
+        huge_tree=False,
+    )
+    try:
+        document = lxml_html.fromstring(bytes(body), parser=parser)
+    except (etree.ParserError, TypeError, ValueError) as error:
+        raise ValueError(f"{source_name} returned invalid HTML") from error
+    if document is None:
+        raise ValueError(f"{source_name} returned invalid HTML")
+    return document
+
+
+def _node_text(node: Any, *, limit: int = 2000) -> str:
+    if node is None:
+        return ""
+    try:
+        value = " ".join(node.itertext())
+    except (AttributeError, TypeError):
+        value = str(node or "")
+    return _bounded_text(value, limit=limit)
+
+
+def _append_unique_text(values: List[str], value: Any, *, limit: int) -> None:
+    normalized = _bounded_text(value, limit=limit)
+    if normalized and normalized.casefold() not in {
+        existing.casefold() for existing in values
+    }:
+        values.append(normalized)
+
+
+def _looks_like_person_name(value: Any) -> bool:
+    name = _bounded_text(value, limit=200)
+    words = name.split()
+    excluded = {
+        "about us",
+        "advisory services",
+        "business divisions",
+        "career",
+        "contact",
+        "employees",
+        "leadership",
+        "management",
+        "our team",
+        "people",
+        "team",
+    }
+    return bool(
+        2 <= len(words) <= 7
+        and name.casefold() not in excluded
+        and not any(character.isdigit() for character in name)
+        and all(any(character.isalpha() for character in word) for word in words)
+    )
+
+
+def _extract_team_people(document: Any) -> List[Dict[str, str]]:
+    elements = document.xpath("//h1|//h2|//h3|//h4|//p")
+    people: List[Dict[str, str]] = []
+    seen = set()
+    section_level = None
+    for index, element in enumerate(elements):
+        tag = str(getattr(element, "tag", "")).casefold()
+        text = _node_text(element, limit=500)
+        if tag in {"h1", "h2", "h3", "h4"} and text.casefold() in {
+            "team",
+            "our team",
+            "leadership",
+            "management",
+            "people",
+        }:
+            section_level = int(tag[1])
+            continue
+        if section_level is None:
+            continue
+        if tag in {"h1", "h2", "h3", "h4"}:
+            level = int(tag[1])
+            if level <= section_level:
+                section_level = None
+                continue
+            if not _looks_like_person_name(text):
+                continue
+            role = ""
+            for following in elements[index + 1 : index + 5]:
+                following_tag = str(getattr(following, "tag", "")).casefold()
+                if following_tag in {"h1", "h2", "h3", "h4"}:
+                    break
+                candidate_role = _node_text(following, limit=300)
+                if candidate_role and len(candidate_role.split()) <= 18:
+                    role = candidate_role
+                    break
+            identity = _affiliation_identity(text)
+            if role and identity not in seen:
+                seen.add(identity)
+                people.append({"display_name": text, "role": role})
+        if len(people) >= MAX_OFFICIAL_WEBSITE_PEOPLE:
+            break
+    return people
+
+
+_ADDRESS_MARKER_PATTERN = re.compile(
+    r"\b(?:address|building|floor|gedung|jalan|jl\.?|jln\.?|lane|road|rd\.?|"
+    r"street|st\.?|suite|avenue|ave\.?|boulevard|drive)\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_public_address(value: Any) -> bool:
+    text = _bounded_text(value, limit=1000)
+    return bool(
+        8 <= len(text) <= 1000
+        and any(character.isdigit() for character in text)
+        and _ADDRESS_MARKER_PATTERN.search(text)
+    )
+
+
+def _jsonld_addresses(document: Any) -> List[str]:
+    addresses = []
+    remaining = 200
+    queue: List[Any] = []
+    for node in document.xpath("//script[@type='application/ld+json']")[:10]:
+        raw = str(node.text or "")[:50_000]
+        try:
+            queue.append(json.loads(raw))
+        except (TypeError, json.JSONDecodeError):
+            continue
+    while queue and remaining > 0:
+        remaining -= 1
+        value = queue.pop(0)
+        if isinstance(value, list):
+            queue.extend(value[:40])
+            continue
+        if not isinstance(value, dict):
+            continue
+        raw_address = value.get("address")
+        if isinstance(raw_address, dict):
+            parts = [
+                raw_address.get("streetAddress"),
+                raw_address.get("addressLocality"),
+                raw_address.get("addressRegion"),
+                raw_address.get("postalCode"),
+                raw_address.get("addressCountry"),
+            ]
+            address = ", ".join(
+                dict.fromkeys(
+                    _bounded_text(part, limit=500) for part in parts if part
+                )
+            )
+            _append_unique_text(addresses, address, limit=1500)
+        elif isinstance(raw_address, str):
+            _append_unique_text(addresses, raw_address, limit=1500)
+        queue.extend(
+            child
+            for child in list(value.values())[:40]
+            if isinstance(child, (dict, list))
+        )
+    return addresses[:MAX_OFFICIAL_WEBSITE_ADDRESSES]
+
+
+def _official_website_addresses(document: Any) -> List[str]:
+    addresses = _jsonld_addresses(document)
+    for node in document.xpath("//address|//*[@itemprop='address']")[:20]:
+        _append_unique_text(addresses, _node_text(node, limit=1500), limit=1500)
+    for heading in document.xpath("//h1|//h2|//h3|//h4")[:200]:
+        heading_text = _node_text(heading, limit=100).casefold()
+        if not any(
+            marker in heading_text
+            for marker in ("address", "contact", "location", "office")
+        ):
+            continue
+        container = heading
+        while container is not None and str(container.tag).casefold() not in {
+            "section",
+            "article",
+            "footer",
+        }:
+            container = container.getparent()
+        if container is None:
+            container = heading.getparent()
+        if container is None:
+            continue
+        lines = [
+            _node_text(node, limit=500)
+            for node in container.xpath(".//p|.//li|.//address")[:40]
+        ]
+        lines = [line for line in lines if line and "@" not in line]
+        for start in range(len(lines)):
+            for width in (1, 2, 3):
+                candidate = ", ".join(lines[start : start + width])
+                if _looks_like_public_address(candidate):
+                    _append_unique_text(addresses, candidate, limit=1500)
+                    break
+            if len(addresses) >= MAX_OFFICIAL_WEBSITE_ADDRESSES:
+                break
+    return addresses[:MAX_OFFICIAL_WEBSITE_ADDRESSES]
 
 
 def _bounded_mapping(value: Any, *, limit: int = 40) -> Dict[str, Any]:
@@ -1608,6 +1984,204 @@ async def run_cloudflare_dns_context(
     }
 
 
+def _official_website_description(document: Any) -> str:
+    for xpath in (
+        "//meta[translate(@name, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='description']/@content",
+        "//meta[translate(@property, 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz')='og:description']/@content",
+    ):
+        for value in document.xpath(xpath)[:2]:
+            description = _bounded_text(value, limit=2000)
+            if description:
+                return description
+    for paragraph in document.xpath("//main//p|//body//p")[:100]:
+        description = _node_text(paragraph, limit=2000)
+        if len(description) >= 40:
+            return description
+    return ""
+
+
+def _official_website_contacts(document: Any) -> List[Dict[str, str]]:
+    contacts: List[Dict[str, str]] = []
+    seen = set()
+    for link in document.xpath("//a[@href]")[:500]:
+        href = str(link.get("href") or "").strip()
+        kind = value = ""
+        if href.casefold().startswith("mailto:"):
+            value = unquote(href[7:].split("?", 1)[0]).strip().casefold()
+            if re.fullmatch(r"[^\s@]{1,200}@[A-Za-z0-9.-]{1,253}", value):
+                kind = "email"
+        elif href.casefold().startswith("tel:"):
+            value = re.sub(r"[^0-9+() .-]", "", unquote(href[4:])).strip()
+            if not 7 <= len(re.sub(r"\D", "", value)) <= 20:
+                value = ""
+            else:
+                kind = "phone"
+        identity = (kind, value)
+        if kind and value and identity not in seen:
+            seen.add(identity)
+            contacts.append({"type": kind, "value": value})
+        if len(contacts) >= MAX_OFFICIAL_WEBSITE_CONTACTS:
+            break
+    return contacts
+
+
+def _official_website_linked_company_profiles(document: Any) -> List[str]:
+    profiles = []
+    for link in document.xpath("//a[@href]")[:500]:
+        profile_url = _normalize_linkedin_company_url(link.get("href"))
+        if profile_url and profile_url not in profiles:
+            profiles.append(profile_url)
+        if len(profiles) >= MAX_OFFICIAL_WEBSITE_LINKED_PROFILES:
+            break
+    return profiles
+
+
+def normalize_official_website_public_content(
+    affiliation_name: Any,
+    website: Any,
+    body: Any,
+    *,
+    source_url: Any = None,
+) -> Dict[str, Any]:
+    name = normalize_affiliation_name(affiliation_name)
+    normalized_website = normalize_official_website_url(
+        website.get("url") if isinstance(website, dict) else website
+    )
+    if not normalized_website:
+        raise ValueError("An official website is required")
+    final_url = _safe_public_url(source_url) or normalized_website["url"]
+    final_website = normalize_official_website_url(final_url)
+    if not final_website or not _domains_equivalent(
+        normalized_website["domain"], final_website["domain"]
+    ):
+        raise ValueError("The official website response changed to another domain")
+    document = _public_html_document(body, source_name="Official website")
+    title = _node_text((document.xpath("//title") or [None])[0], limit=500)
+    description = _official_website_description(document)
+    addresses = _official_website_addresses(document)
+    contacts = _official_website_contacts(document)
+    people = _extract_team_people(document)
+    linked_profiles = _official_website_linked_company_profiles(document)
+    observed = bool(title or description or addresses or contacts or people)
+    reason = (
+        "Bounded public content was collected from the supplied official website."
+        if observed
+        else "The supplied website returned HTML but no bounded organization evidence was extracted."
+    )
+    return {
+        "source_engine": OFFICIAL_WEBSITE_ENGINE,
+        "subject_type": "organization_website",
+        "subject_value": final_website["domain"],
+        "status": "observed" if observed else "not_found",
+        "source_url": final_url,
+        "source_record_id": (
+            "official-website:"
+            f"{claim_fingerprint('website', final_website['domain'])}"
+        ),
+        "reason": reason,
+        "organization": {
+            "name": name,
+            "domain": final_website["domain"],
+            "website_url": final_url,
+            "page_title": title,
+            "description": description,
+        },
+        "addresses": addresses,
+        "contacts": contacts,
+        "people": people,
+        "linked_company_profiles": linked_profiles,
+        "extra": {
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+            "self_published_source": True,
+            "address_is_legal_registration_proof": False,
+            "operating_location_inference_allowed": False,
+        },
+    }
+
+
+async def run_official_website_public_content(
+    affiliation_name: Any,
+    website: Any,
+    *,
+    timeout_seconds: int = OFFICIAL_WEBSITE_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+    host_resolver: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    name = normalize_affiliation_name(affiliation_name)
+    normalized_website = normalize_official_website_url(
+        website.get("url") if isinstance(website, dict) else website
+    )
+    if not normalized_website:
+        raise ValueError("An official website is required")
+    session_factory = session_factory or aiohttp.ClientSession
+    host_resolver = host_resolver or _resolve_public_host
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.8",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    current_url = normalized_website["url"]
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        for redirect_count in range(MAX_OFFICIAL_WEBSITE_REDIRECTS + 1):
+            response = await _bounded_public_html_request(
+                session,
+                current_url,
+                resolver=host_resolver,
+                source_name="Official website",
+                maximum_bytes=OFFICIAL_WEBSITE_MAX_RESPONSE_BYTES,
+            )
+            if response["status"] != "redirect":
+                break
+            if redirect_count >= MAX_OFFICIAL_WEBSITE_REDIRECTS:
+                raise RuntimeError("The official website exceeded its redirect limit")
+            location = urljoin(current_url, response.get("location") or "")
+            redirected = normalize_official_website_url(location)
+            if not redirected or not _domains_equivalent(
+                normalized_website["domain"], redirected["domain"]
+            ):
+                raise RuntimeError(
+                    "The official website redirected outside its supplied domain"
+                )
+            current_url = redirected["url"]
+    if response["status"] in {"rate_limited", "not_found"}:
+        return {
+            "source_engine": OFFICIAL_WEBSITE_ENGINE,
+            "subject_type": "organization_website",
+            "subject_value": normalized_website["domain"],
+            "status": response["status"],
+            "source_url": current_url,
+            "source_record_id": (
+                "official-website:"
+                f"{claim_fingerprint('website', normalized_website['domain'])}"
+            ),
+            "reason": (
+                "The supplied website limited the bounded public request."
+                if response["status"] == "rate_limited"
+                else "The supplied website did not return a public page."
+            ),
+            "organization": None,
+            "addresses": [],
+            "contacts": [],
+            "people": [],
+            "linked_company_profiles": [],
+            "extra": {
+                "human_review_required": True,
+                "automatic_approval_allowed": False,
+            },
+        }
+    return normalize_official_website_public_content(
+        name,
+        normalized_website,
+        response["body"],
+        source_url=current_url,
+    )
+
+
 def _address_summary(address: Any) -> str:
     if not isinstance(address, dict):
         return ""
@@ -1628,6 +2202,7 @@ def build_business_context_assessment(
     *,
     website: Any = None,
     website_source: str = "",
+    website_observation: Any = None,
     dns_observation: Any = None,
 ) -> List[Dict[str, Any]]:
     """Build explicit, source-bounded context without inferring operations."""
@@ -1752,6 +2327,130 @@ def build_business_context_assessment(
                 "source_url": normalized_website["url"],
             }
         )
+    if (
+        isinstance(website_observation, dict)
+        and website_observation.get("source_engine") == OFFICIAL_WEBSITE_ENGINE
+        and website_observation.get("status") == "observed"
+    ):
+        organization = website_observation.get("organization") or {}
+        description = _bounded_text(organization.get("description"), limit=2000)
+        if description:
+            findings.append(
+                {
+                    "category": "official_website_statement",
+                    "conclusion": description,
+                    "basis": (
+                        "Exact text published on the operator-supplied organization "
+                        "website during the bounded collection."
+                    ),
+                    "limitation": (
+                        "This is a self-published description. It does not independently "
+                        "prove legal registration, ownership, scale, or every current activity."
+                    ),
+                    "source_name": "Supplied organization website",
+                    "source_url": website_observation.get("source_url"),
+                }
+            )
+        for address in list(website_observation.get("addresses") or [])[
+            :MAX_OFFICIAL_WEBSITE_ADDRESSES
+        ]:
+            address_text = _bounded_text(address, limit=1500)
+            if not address_text:
+                continue
+            findings.append(
+                {
+                    "category": "official_website_address",
+                    "conclusion": (
+                        "The supplied organization website publishes the address "
+                        f"{address_text}."
+                    ),
+                    "basis": "Exact address text retained from the cited public HTML.",
+                    "limitation": (
+                        "A self-published contact or office address is not necessarily a "
+                        "registered office and does not prove the full operating footprint."
+                    ),
+                    "source_name": "Supplied organization website",
+                    "source_url": website_observation.get("source_url"),
+                }
+            )
+        contacts = [
+            f"{item.get('type')}: {item.get('value')}"
+            for item in list(website_observation.get("contacts") or [])[
+                :MAX_OFFICIAL_WEBSITE_CONTACTS
+            ]
+            if isinstance(item, dict) and item.get("type") and item.get("value")
+        ]
+        if contacts:
+            findings.append(
+                {
+                    "category": "official_contact_context",
+                    "conclusion": (
+                        "The supplied organization website publishes "
+                        + "; ".join(contacts)
+                        + "."
+                    )[:2500],
+                    "basis": "Exact mailto or telephone links in the cited public HTML.",
+                    "limitation": (
+                        "A published organizational contact is not a private-person "
+                        "identifier and must not be attached to a Persona without separate evidence."
+                    ),
+                    "source_name": "Supplied organization website",
+                    "source_url": website_observation.get("source_url"),
+                }
+            )
+        people = [
+            f"{item.get('display_name')} — {item.get('role')}"
+            for item in list(website_observation.get("people") or [])[
+                :MAX_OFFICIAL_WEBSITE_PEOPLE
+            ]
+            if isinstance(item, dict)
+            and item.get("display_name")
+            and item.get("role")
+        ]
+        if people:
+            findings.append(
+                {
+                    "category": "official_personnel_statement",
+                    "conclusion": (
+                        "The supplied website explicitly names: "
+                        + "; ".join(people)
+                        + "."
+                    )[:3000],
+                    "basis": "Named people and adjacent roles in a team or leadership section.",
+                    "limitation": (
+                        "Self-published personnel statements can be stale or incomplete. "
+                        "Every Persona claim remains pending analyst review."
+                    ),
+                    "source_name": "Supplied organization website",
+                    "source_url": website_observation.get("source_url"),
+                }
+            )
+        for profile_url in list(
+            website_observation.get("linked_company_profiles") or []
+        )[:MAX_OFFICIAL_WEBSITE_LINKED_PROFILES]:
+            safe_profile_url = _normalize_linkedin_company_url(profile_url)
+            if not safe_profile_url:
+                continue
+            findings.append(
+                {
+                    "category": "linked_company_profile_lead",
+                    "conclusion": (
+                        "The supplied organization website links to a public "
+                        "company profile that can be reviewed for additional context."
+                    ),
+                    "basis": (
+                        "Exact outgoing company-profile URL retained from the supplied "
+                        "website's public HTML."
+                    ),
+                    "limitation": (
+                        "OpenLedger did not fetch or copy the external profile. Any "
+                        "address, employee, or business detail on it must be reviewed "
+                        "and cited separately before it becomes evidence."
+                    ),
+                    "source_name": "Supplied organization website",
+                    "source_url": safe_profile_url,
+                }
+            )
     if isinstance(dns_observation, dict):
         records = dns_observation.get("records") or {}
         record_labels = []
@@ -1995,6 +2694,156 @@ def extract_fr_registry_affiliated_people(observation: Any) -> List[Dict[str, An
                     ),
                     _fr_registry_claim_candidate(
                         "occupation", role, person=person, entity=entity
+                    ),
+                ],
+            }
+        )
+    return output
+
+
+def _public_organization_claim_candidate(
+    field_name: str,
+    value: Any,
+    *,
+    person: Dict[str, Any],
+    organization_name: str,
+    source_engine: str,
+    source_name: str,
+    source_url: str,
+    source_record_id: str,
+    confidence: int,
+    evidence_type: str,
+) -> Dict[str, Any]:
+    display_value = (
+        str(value.get("identifier") or value.get("url") or "")
+        if isinstance(value, dict)
+        else _bounded_text(value, limit=4000)
+    )
+    normalized_value = (
+        json.dumps(value, sort_keys=True, ensure_ascii=False)
+        if isinstance(value, dict)
+        else display_value.casefold()
+    )
+    details = {
+        "organization_name": organization_name,
+        "published_role": person.get("role", ""),
+        "listed_profile_url": person.get("profile_url", ""),
+        "source_scope": (
+            "Explicit organization personnel statement; it may be stale or incomplete."
+        ),
+        "human_review_required": True,
+        "automatic_approval_allowed": False,
+    }
+    evidence = {
+        "evidence_type": evidence_type,
+        "source_name": source_name,
+        "source_url": source_url,
+        "details": details,
+    }
+    return {
+        "field_name": field_name,
+        "value": value,
+        "display_value": display_value,
+        "normalized_value": normalized_value,
+        "confidence": confidence,
+        "fingerprint": claim_fingerprint(field_name, value),
+        "source_engine": source_engine,
+        "source_record_id": source_record_id,
+        "native_status": "observed",
+        "observation_details": {
+            "organization_name": organization_name,
+            "published_role": person.get("role", ""),
+        },
+        "evidence": [dict(evidence, fingerprint=evidence_fingerprint(evidence))],
+    }
+
+
+def extract_official_website_affiliated_people(
+    observation: Any,
+) -> List[Dict[str, Any]]:
+    if (
+        not isinstance(observation, dict)
+        or observation.get("source_engine") != OFFICIAL_WEBSITE_ENGINE
+        or observation.get("status") != "observed"
+        or not isinstance(observation.get("organization"), dict)
+    ):
+        return []
+    organization = observation["organization"]
+    organization_name = _bounded_text(organization.get("name"), limit=500)
+    domain = _normalize_dns_hostname(organization.get("domain"))
+    source_url = _safe_public_url(observation.get("source_url"))
+    try:
+        source_website = normalize_official_website_url(source_url)
+    except ValueError:
+        source_website = None
+    if (
+        not organization_name
+        or not domain
+        or not source_website
+        or not _domains_equivalent(domain, source_website["domain"])
+    ):
+        return []
+    output = []
+    seen = set()
+    raw_people = list(observation.get("people") or [])
+    for raw_person in raw_people[:MAX_OFFICIAL_WEBSITE_PEOPLE]:
+        if not isinstance(raw_person, dict):
+            continue
+        display_name = _bounded_text(raw_person.get("display_name"), limit=500)
+        role = _bounded_text(raw_person.get("role"), limit=300)
+        identity = _affiliation_identity(display_name)
+        if (
+            not _looks_like_person_name(display_name)
+            or not role
+            or identity in seen
+        ):
+            continue
+        seen.add(identity)
+        person = {"display_name": display_name, "role": role}
+        source_record_id = (
+            f"official-website-person:{domain}:"
+            f"{claim_fingerprint('full_name', display_name)}"
+        )
+        output.append(
+            {
+                "public_person_key": source_record_id,
+                "display_name": display_name,
+                "claims": [
+                    _public_organization_claim_candidate(
+                        "full_name",
+                        display_name,
+                        person=person,
+                        organization_name=organization_name,
+                        source_engine=OFFICIAL_WEBSITE_ENGINE,
+                        source_name="Supplied organization website",
+                        source_url=source_url,
+                        source_record_id=source_record_id,
+                        confidence=78,
+                        evidence_type="official_website_team_statement",
+                    ),
+                    _public_organization_claim_candidate(
+                        "company",
+                        organization_name,
+                        person=person,
+                        organization_name=organization_name,
+                        source_engine=OFFICIAL_WEBSITE_ENGINE,
+                        source_name="Supplied organization website",
+                        source_url=source_url,
+                        source_record_id=source_record_id,
+                        confidence=75,
+                        evidence_type="official_website_team_statement",
+                    ),
+                    _public_organization_claim_candidate(
+                        "occupation",
+                        role,
+                        person=person,
+                        organization_name=organization_name,
+                        source_engine=OFFICIAL_WEBSITE_ENGINE,
+                        source_name="Supplied organization website",
+                        source_url=source_url,
+                        source_record_id=source_record_id,
+                        confidence=72,
+                        evidence_type="official_website_team_statement",
                     ),
                 ],
             }
