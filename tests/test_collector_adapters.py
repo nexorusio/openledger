@@ -1942,6 +1942,14 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "title": "Alice Doe is a team－member",
                 "url": "https://example.org/team-fullwidth-hyphen",
             },
+            {
+                "title": "Management--team: Alice Doe",
+                "url": "https://example.org/management-double-hyphen",
+            },
+            {
+                "title": "Alice Doe is a team/_member",
+                "url": "https://example.org/team-mixed-separators",
+            },
         ]
     ) == [
         {"title": "example.org", "url": "https://example.org/company"},
@@ -1956,6 +1964,14 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
         {
             "title": "example.org",
             "url": "https://example.org/team-fullwidth-hyphen",
+        },
+        {
+            "title": "example.org",
+            "url": "https://example.org/management-double-hyphen",
+        },
+        {
+            "title": "example.org",
+            "url": "https://example.org/team-mixed-separators",
         },
     ]
 

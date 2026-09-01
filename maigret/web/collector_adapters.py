@@ -714,11 +714,13 @@ def _looks_like_public_address(value: Any) -> bool:
 def _contains_personal_organization_data(value: Any) -> bool:
     """Reject person-level contact data from organization-only observations."""
     text = _bounded_text(value, limit=3000)
-    role_text = "".join(
-        " "
-        if character in "_/" or unicodedata.category(character) == "Pd"
-        else character
-        for character in text
+    role_text = " ".join(
+        "".join(
+            " "
+            if character in "_/" or unicodedata.category(character) == "Pd"
+            else character
+            for character in text
+        ).split()
     )
     if (
         not text
