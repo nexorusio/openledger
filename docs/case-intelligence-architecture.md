@@ -284,6 +284,32 @@ identifier claims retaining entity and relation lineage. Only analyst-approved
 shared affiliation claims can enter the existing Relationships projection, and
 they do not establish a personal relationship.
 
+## Confirmed-name public-record enrichment
+
+Approving a `full_name` claim queues two independent, credential-free checks in
+the existing worker. The Wikipedia adapter uses the English MediaWiki Action API
+to propose a bounded introductory summary, page identifier, and available lead
+image. An exact, non-disambiguation title may proceed directly to the review
+queue; otherwise an analyst must select one of at most five stored candidates.
+
+The ICIJ Offshore Leaks adapter uses the public W3C Reconciliation API and keeps
+only exact-name `Officer` candidates. A match creates a prominent pending risk
+alert linked to the ICIJ node. It never confirms that the OpenLedger Persona and
+the ICIJ record are the same person, never automatically establishes an offshore
+affiliation, and never implies illegal or improper conduct. The analyst must
+compare independent identifiers before approving the record. Fuzzy candidates
+do not create alerts.
+
+Both sources use fixed HTTPS origins, redirects disabled, response and result
+limits, explicit user agents, and source-scoped failure handling. Wikipedia and
+ICIJ proposals enter the existing claim, evidence, observation, review, and
+timeline model without a schema migration or separate service.
+
+OpenCorporates was evaluated but is not active because its normal API path
+requires an API key. OpenData.org was also evaluated but is not active because
+its current terms prohibit automated retrieval and use in a third-party service
+without a separate agreement. Neither source is scraped or called by OpenLedger.
+
 ## Relationship projection
 
 The Relationships workspace separates two graph contracts. **Persona evidence**

@@ -7,6 +7,8 @@ from maigret.web.collector_adapters import (
     GITHUB_API_BASE_URL,
     GITHUB_API_VERSION,
     GITHUB_ENGINE,
+    ICIJ_OFFSHORE_ENGINE,
+    ICIJ_RECONCILE_URL,
     UNFURL_ENGINE,
     UNFURL_VERSION,
     USER_SCANNER_ENGINE,
@@ -15,22 +17,31 @@ from maigret.web.collector_adapters import (
     WIKIDATA_ENGINE,
     WIKIDATA_API_URL,
     WIKIDATA_QUERY_URL,
+    WIKIPEDIA_API_URL,
+    WIKIPEDIA_ENGINE,
+    _wikidata_people_query,
     claimed_profile_url_targets,
     extract_github_profile_claims,
+    extract_icij_offshore_claims,
     extract_profile_url_evidence_claims,
     extract_user_scanner_claims,
     extract_wikidata_affiliation_people,
+    extract_wikipedia_person_claims,
     github_profile_targets,
     normalize_github_public_profile,
+    normalize_icij_offshore_matches,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
     normalize_wayback_capture_index,
     normalize_wikidata_affiliated_people,
     normalize_wikidata_entity_candidates,
     normalize_wikidata_organization,
+    normalize_wikipedia_candidates,
     run_github_public_profile,
+    run_icij_offshore_match,
     run_wayback_capture_index,
     run_wikidata_affiliation_discovery,
+    run_wikipedia_person_enrichment,
     user_scanner_email_targets,
 )
 
@@ -517,6 +528,46 @@ def test_wikidata_affiliation_rejects_malformed_binding_and_relation_documents()
     }) == []
 
 
+def test_wikidata_caps_distinct_people_without_dropping_their_relation_rows():
+    bindings = []
+    for index in range(1, 52):
+        for property_id in ("P108", "P463"):
+            bindings.append(
+                {
+                    "person": {
+                        "type": "uri",
+                        "value": f"http://www.wikidata.org/entity/Q{1000 + index}",
+                    },
+                    "personLabel": {
+                        "type": "literal",
+                        "value": f"Person {index}",
+                    },
+                    "property": {
+                        "type": "uri",
+                        "value": (
+                            "http://www.wikidata.org/prop/direct/" + property_id
+                        ),
+                    },
+                    "direction": {
+                        "type": "literal",
+                        "value": "person_to_organization",
+                    },
+                }
+            )
+
+    people = normalize_wikidata_affiliated_people(
+        {"results": {"bindings": bindings}}
+    )
+    query = _wikidata_people_query("Q95")
+
+    assert len(people) == 50
+    assert len(people[0]["relations"]) == 2
+    assert people[-1]["id"] == "Q1050"
+    assert "SELECT DISTINCT ?person WHERE" in query
+    assert "LIMIT 50" in query
+    assert "LIMIT 450" in query
+
+
 class _FakeSequenceSession:
     def __init__(self, responses, calls, **options):
         self.responses = list(responses)
@@ -531,6 +582,10 @@ class _FakeSequenceSession:
 
     def get(self, url, **options):
         self.calls.append(("get", {"url": url, **options}))
+        return self.responses.pop(0)
+
+    def post(self, url, **options):
+        self.calls.append(("post", {"url": url, **options}))
         return self.responses.pop(0)
 
 
@@ -552,3 +607,120 @@ async def test_wikidata_runtime_uses_only_fixed_bounded_endpoints():
     assert all(item["allow_redirects"] is False for item in requests)
     assert "Authorization" not in calls[0][1]["headers"]
     assert "LIMIT 50" in requests[-1]["params"]["query"]
+
+
+def _wikipedia_pages(title="Alice Example"):
+    return {
+        "query": {
+            "pages": [
+                {
+                    "pageid": 123,
+                    "ns": 0,
+                    "title": title,
+                    "fullurl": "https://en.wikipedia.org/wiki/Alice_Example",
+                    "extract": "Alice Example is a public-interest technologist.",
+                    "thumbnail": {
+                        "source": "https://upload.wikimedia.org/alice.jpg"
+                    },
+                }
+            ]
+        }
+    }
+
+
+def _icij_matches(*, exact=True):
+    return {
+        "result": [
+            {
+                "id": "12126782",
+                "name": "Alice Example" if exact else "Alice Other",
+                "description": "Officer node extracted from test data.",
+                "match": exact,
+                "score": 100.0 if exact else 75.0,
+                "types": [
+                    {
+                        "id": "https://offshoreleaks.icij.org/schema/oldb/officer",
+                        "name": "Officer",
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_confirmed_name_normalizers_keep_only_reviewable_exact_records():
+    wikipedia = normalize_wikipedia_candidates("Alice Example", _wikipedia_pages())
+    assert wikipedia[0]["exact_title_match"] is True
+    assert wikipedia[0]["thumbnail_url"].startswith("https://upload.wikimedia.org/")
+    assert normalize_icij_offshore_matches("Alice Example", _icij_matches())[0][
+        "node_id"
+    ] == "12126782"
+    assert normalize_icij_offshore_matches(
+        "Alice Example", _icij_matches(exact=False)
+    ) == []
+
+
+def test_confirmed_name_findings_become_pending_claim_inputs_with_warnings():
+    wikipedia_observation = {
+        "source_engine": WIKIPEDIA_ENGINE,
+        "status": "observed",
+        "page": normalize_wikipedia_candidates(
+            "Alice Example", _wikipedia_pages()
+        )[0],
+    }
+    offshore_observation = {
+        "source_engine": ICIJ_OFFSHORE_ENGINE,
+        "status": "potential_match",
+        "matches": normalize_icij_offshore_matches(
+            "Alice Example", _icij_matches()
+        ),
+    }
+    wikipedia_claims = extract_wikipedia_person_claims(wikipedia_observation)
+    offshore_claims = extract_icij_offshore_claims(offshore_observation)
+    assert {claim["field_name"] for claim in wikipedia_claims} == {
+        "summary",
+        "platform_identifier",
+        "photograph",
+    }
+    assert offshore_claims[0]["field_name"] == "offshore_database_match"
+    warning = offshore_claims[0]["evidence"][0]["details"]["identity_warning"]
+    assert "not sufficient to confirm identity" in warning
+    assert all(
+        claim["evidence"][0]["details"]["automatic_approval_allowed"] is False
+        for claim in wikipedia_claims + offshore_claims
+    )
+
+
+@pytest.mark.asyncio
+async def test_confirmed_name_runtime_uses_only_fixed_credential_free_endpoints():
+    wikipedia_calls = []
+    wikipedia_response = _FakeResponse(
+        status=200, body=json.dumps(_wikipedia_pages()).encode()
+    )
+    wikipedia = await run_wikipedia_person_enrichment(
+        "Alice Example",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [wikipedia_response], wikipedia_calls, **options
+        ),
+    )
+    assert wikipedia["status"] == "observed"
+    assert wikipedia_calls[1][1]["url"] == WIKIPEDIA_API_URL
+    assert wikipedia_calls[1][1]["allow_redirects"] is False
+    assert "Authorization" not in wikipedia_calls[0][1]["headers"]
+
+    icij_calls = []
+    icij_response = _FakeResponse(
+        status=200, body=json.dumps(_icij_matches()).encode()
+    )
+    offshore = await run_icij_offshore_match(
+        "Alice Example",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [icij_response], icij_calls, **options
+        ),
+    )
+    assert offshore["status"] == "potential_match"
+    assert icij_calls[1][0] == "post"
+    assert icij_calls[1][1]["url"] == ICIJ_RECONCILE_URL
+    assert icij_calls[1][1]["allow_redirects"] is False
+    assert icij_calls[1][1]["json"]["type"] == "Officer"
+    assert "Authorization" not in icij_calls[0][1]["headers"]

@@ -56,10 +56,12 @@ from maigret.web.collector_adapters import (
     claimed_profile_url_targets,
     github_profile_targets,
     run_github_public_profile,
+    run_icij_offshore_match,
     run_unfurl_url_analysis,
     run_user_scanner_email,
     run_wayback_capture_index,
     run_wikidata_affiliation_discovery,
+    run_wikipedia_person_enrichment,
     user_scanner_available,
     user_scanner_email_targets,
 )
@@ -2765,10 +2767,162 @@ def run_persistent_affiliation_job(
     sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
 
 
+def run_persistent_identity_enrichment_job(
+    store: CaseStore, job: Dict[str, Any], shutdown_check=None
+):
+    job_id = job['job_id']
+    specification = (job.get('options') or {}).get('investigation_spec') or {}
+    persona_id = str(specification.get('persona_id') or '')
+    confirmed_name = str(specification.get('confirmed_name') or '').strip()
+    selected_page_id = (
+        str(specification.get('selected_wikipedia_page_id') or '').strip() or None
+    )
+    sink = PersistentEventSink(store, job_id)
+    sink.put(
+        {
+            'type': 'collector_started',
+            'collector': 'public-record-enrichment',
+            'target_type': 'confirmed_person_name',
+            'targets': 2,
+        }
+    )
+    runtime_job = {'cancelled': False}
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def collect_sources():
+        return await asyncio.gather(
+            run_wikipedia_person_enrichment(
+                confirmed_name, selected_page_id=selected_page_id
+            ),
+            run_icij_offshore_match(confirmed_name),
+            return_exceptions=True,
+        )
+
+    task = loop.create_task(collect_sources())
+    watcher = loop.create_task(
+        watch_persistent_job_stop(
+            store, job_id, task, runtime_job, shutdown_check=shutdown_check
+        )
+    )
+    source_results = None
+    try:
+        source_results = loop.run_until_complete(task)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if not watcher.done():
+            watcher.cancel()
+        loop.run_until_complete(asyncio.gather(watcher, return_exceptions=True))
+        loop.close()
+
+    shutdown_requested = bool(shutdown_check and shutdown_check())
+    cancel_requested = store.is_cancel_requested(job_id)
+    if shutdown_requested or cancel_requested:
+        status = 'interrupted' if shutdown_requested else 'cancelled'
+        store.finish(
+            job_id,
+            {
+                'status': status,
+                'error': 'The public-record enrichment was stopped.',
+                'usernames': [],
+                'persona_id': persona_id,
+            },
+        )
+        sink.put({'type': 'done', 'status': status})
+        return
+
+    wikipedia_observation = {
+        'source_engine': 'wikipedia_public_biography',
+        'status': 'unavailable',
+        'page_candidates': [],
+    }
+    icij_observation = {
+        'source_engine': 'icij_offshore_leaks',
+        'status': 'unavailable',
+        'matches': [],
+    }
+    source_errors = []
+    if isinstance(source_results, list) and len(source_results) == 2:
+        if isinstance(source_results[0], Exception):
+            source_errors.append(
+                record_internal_error(
+                    'Wikipedia enrichment source failed',
+                    source_results[0],
+                    session=job_id,
+                )
+            )
+        else:
+            wikipedia_observation = source_results[0]
+        if isinstance(source_results[1], Exception):
+            source_errors.append(
+                record_internal_error(
+                    'ICIJ Offshore Leaks source failed',
+                    source_results[1],
+                    session=job_id,
+                )
+            )
+        else:
+            icij_observation = source_results[1]
+    synchronized = store.sync_identity_enrichment(
+        job_id, wikipedia_observation, icij_observation
+    )
+    offshore_matches = list(icij_observation.get('matches') or [])[:5]
+    result = {
+        'status': 'completed',
+        'usernames': [],
+        'persona_id': persona_id,
+        'confirmed_name': confirmed_name,
+        'wikipedia_status': wikipedia_observation.get('status'),
+        'wikipedia_candidates': list(
+            wikipedia_observation.get('page_candidates') or []
+        )[:5],
+        'wikipedia_page': wikipedia_observation.get('page'),
+        'wikipedia_claim_count': synchronized['wikipedia_claims'],
+        'offshore_status': icij_observation.get('status'),
+        'offshore_matches': offshore_matches,
+        'offshore_alert_count': synchronized['offshore_alerts'],
+        'source_errors': [str(message)[:1000] for message in source_errors[:2]],
+    }
+    store.finish(job_id, result)
+    if offshore_matches:
+        sink.put(
+            {
+                'type': 'risk_alert',
+                'collector': 'icij-offshore-leaks',
+                'found': len(offshore_matches),
+                'message': (
+                    'Potential exact-name Offshore Leaks matches require identity review.'
+                ),
+            }
+        )
+    sink.put(
+        {
+            'type': 'collector_completed',
+            'collector': 'public-record-enrichment',
+            'observations': (
+                synchronized['wikipedia_claims'] + synchronized['offshore_alerts']
+            ),
+            'found': len(offshore_matches),
+        }
+    )
+    sink.put(
+        {
+            'type': 'done',
+            'status': 'completed',
+            'redirect': f'/personas/{persona_id}',
+        }
+    )
+
+
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
     """Execute a claimed database job independently from any browser request."""
     if job.get('kind') == 'affiliation':
         return run_persistent_affiliation_job(store, job, shutdown_check=shutdown_check)
+    if job.get('kind') == 'identity_enrichment':
+        return run_persistent_identity_enrichment_job(
+            store, job, shutdown_check=shutdown_check
+        )
     job_id = job['job_id']
     usernames = job['usernames']
     options = hydrate_persistent_options(job['options'])
@@ -2913,7 +3067,17 @@ def scan_stream(job_id):
                                     'redirect': (
                                         f"/cases/{current['case_id']}"
                                         if current.get('kind') == 'affiliation' and current['status'] == 'completed'
-                                        else (f"/results/{current['session_folder']}" if current['status'] == 'completed' else None)
+                                        else (
+                                            f"/personas/{current.get('persona_id')}"
+                                            if current.get('kind') == 'identity_enrichment'
+                                            and current['status'] == 'completed'
+                                            and current.get('persona_id')
+                                            else (
+                                                f"/results/{current['session_folder']}"
+                                                if current['status'] == 'completed'
+                                                else None
+                                            )
+                                        )
                                     ),
                                 }
                             )
@@ -3434,6 +3598,22 @@ def persona_workspace(persona_id):
         ),
         None,
     )
+    approved_full_name = next(
+        (
+            claim
+            for claim in persona['claims']
+            if claim['field_name'] == 'full_name'
+            and claim['review_status'] == 'approved'
+        ),
+        None,
+    )
+    offshore_matches = [
+        claim
+        for claim in persona['claims']
+        if claim['field_name'] == 'offshore_database_match'
+        and claim['review_status'] != 'rejected'
+    ]
+    identity_enrichment = case_store.get_persona_identity_enrichment(persona_id)
     map_locations = [
         {
             'id': claim['id'],
@@ -3470,6 +3650,9 @@ def persona_workspace(persona_id):
         review_claims=review_claims,
         review_counts=review_counts,
         approved_photograph=approved_photograph,
+        approved_full_name=approved_full_name,
+        offshore_matches=offshore_matches,
+        identity_enrichment=identity_enrichment,
         map_locations=map_locations,
         ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
         field_display_label=field_display_label,
@@ -3569,6 +3752,61 @@ def refresh_persona(persona_id):
     return redirect(url_for('live_results', job_id=job_id))
 
 
+@app.route('/claims/<claim_id>/enrich-public-records', methods=['POST'])
+def enrich_identity_claim(claim_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    if case_store is None:
+        flash('Public-record enrichment requires persistent storage.', 'warning')
+        return redirect(url_for('cases_workspace'))
+    claim = case_store.get_claim(claim_id)
+    if not claim:
+        flash('That confirmed-name record no longer exists.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    try:
+        job_id = case_store.create_identity_enrichment(
+            claim['persona_id'], claim_id
+        )
+    except KeyError:
+        flash('That Persona no longer exists.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    except ValueError as error:
+        flash(str(error), 'warning')
+        return redirect(
+            url_for('persona_workspace', persona_id=claim['persona_id'])
+        )
+    flash(
+        'Wikipedia and ICIJ public-record checks were queued. '
+        'Every proposal still requires review.',
+        'success',
+    )
+    return redirect(url_for('live_results', job_id=job_id))
+
+
+@app.route('/personas/<persona_id>/wikipedia/select', methods=['POST'])
+def select_wikipedia_biography(persona_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('persona_workspace', persona_id=persona_id))
+    if case_store is None:
+        flash('Public-record enrichment requires persistent storage.', 'warning')
+        return redirect(url_for('cases_workspace'))
+    try:
+        job_id = case_store.create_identity_enrichment(
+            persona_id,
+            request.form.get('source_claim_id', ''),
+            selected_wikipedia_page_id=request.form.get('page_id', ''),
+        )
+    except KeyError:
+        flash('That Persona no longer exists.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    except ValueError as error:
+        flash(str(error), 'warning')
+        return redirect(url_for('persona_workspace', persona_id=persona_id))
+    return redirect(url_for('live_results', job_id=job_id))
+
+
 @app.route('/claims/<claim_id>/investigate-affiliation', methods=['POST'])
 def investigate_affiliation_claim(claim_id):
     if not is_valid_csrf(request.form.get('csrf_token')):
@@ -3624,6 +3862,7 @@ def review_persona_claim(claim_id):
         flash('The persona workspace requires persistent storage.', 'warning')
         return redirect(url_for('history'))
     decision = request.form.get('decision', '')
+    reviewed_claim = case_store.get_claim(claim_id)
     reviewer = session.get('username') or 'local-operator'
     latitude = request.form.get('latitude')
     longitude = request.form.get('longitude')
@@ -3634,11 +3873,13 @@ def review_persona_claim(claim_id):
         and not str(latitude or '').strip()
         and not str(longitude or '').strip()
     ):
-        claim = case_store.get_claim(claim_id)
-        if claim and claim.get('field_name') in {'address', 'current_location'}:
+        if reviewed_claim and reviewed_claim.get('field_name') in {
+            'address',
+            'current_location',
+        }:
             try:
                 center = geocode_place_center(
-                    claim.get('display_value', ''),
+                    reviewed_claim.get('display_value', ''),
                     endpoint=app.config['GEOCODER_URL'],
                     timeout_seconds=app.config['GEOCODER_TIMEOUT_SECONDS'],
                 )
@@ -3675,6 +3916,24 @@ def review_persona_claim(claim_id):
     if not stored_persona_id:
         flash('That evidence record no longer exists.', 'warning')
         return redirect(url_for('cases_workspace'))
+    if (
+        decision == 'approved'
+        and reviewed_claim
+        and reviewed_claim.get('field_name') == 'full_name'
+        and reviewed_claim.get('review_status') != 'approved'
+    ):
+        try:
+            case_store.create_identity_enrichment(stored_persona_id, claim_id)
+        except ValueError as error:
+            flash(
+                f'Name approved, but public-record enrichment was not queued: {error}',
+                'warning',
+            )
+        else:
+            flash(
+                'Confirmed-name Wikipedia and Offshore Leaks checks were queued.',
+                'success',
+            )
     if generated_map_center:
         flash(
             'Record approved and mapped to the generated place centroid.',
@@ -3754,11 +4013,14 @@ def live_results(job_id):
     done_redirect = None
     result = result or stored_job
     if result and result.get('status') == 'completed':
-        done_redirect = (
-            url_for('case_workspace', case_id=result['case_id'])
-            if result.get('kind') == 'affiliation'
-            else url_for('results', session_id=result['session_folder'])
-        )
+        if result.get('kind') == 'affiliation':
+            done_redirect = url_for('case_workspace', case_id=result['case_id'])
+        elif result.get('kind') == 'identity_enrichment' and result.get('persona_id'):
+            done_redirect = url_for(
+                'persona_workspace', persona_id=result['persona_id']
+            )
+        else:
+            done_redirect = url_for('results', session_id=result['session_folder'])
 
     return render_template(
         'live.html',
@@ -3777,6 +4039,7 @@ def live_results(job_id):
             'archived_profile_count', 0
         ),
         completed_affiliated_person_count=(result or {}).get('affiliated_person_count', 0),
+        completed_offshore_alert_count=(result or {}).get('offshore_alert_count', 0),
     )
 
 

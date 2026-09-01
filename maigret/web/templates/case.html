@@ -74,6 +74,26 @@
             </form>
             {% endfor %}
         </div>
+        {% elif affiliation_job.discovery_status in ('rate_limited', 'unavailable', 'not_found') %}
+        <div class="alert alert-warning mb-3" role="alert">
+            <strong>Affiliation source check incomplete</strong>
+            <p class="mb-0">{{ affiliation_job.source_message or 'Wikidata did not return usable affiliation evidence.' }}</p>
+        </div>
+        {% if affiliation_job.organization %}
+        <div class="affiliation-entity-summary">
+            <div><span class="eyebrow">Organization resolved before the source failure</span><h3>{{ affiliation_job.organization.label }}</h3><p>{{ affiliation_job.organization.description }}</p></div>
+            <div class="affiliation-source-links">
+                <a href="{{ affiliation_job.organization.url }}" target="_blank" rel="noopener noreferrer">Open Wikidata entity</a>
+                {% for website in affiliation_job.organization.official_websites %}<a href="{{ website }}" target="_blank" rel="noopener noreferrer">Official website{{ ' ' ~ loop.index if loop.length > 1 else '' }}</a>{% endfor %}
+            </div>
+        </div>
+        <form method="POST" action="{{ url_for('select_affiliation_entity', case_id=case.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="entity_id" value="{{ affiliation_job.organization.id }}">
+            <button type="submit" class="btn btn-sm btn-outline-secondary">Retry affiliation lookup</button>
+        </form>
+        {% endif %}
+        <p class="form-text mb-0">No zero-result conclusion was recorded. Retry before treating this case as having no public affiliation statements.</p>
         {% elif affiliation_job.organization %}
         <div class="affiliation-entity-summary">
             <div><span class="eyebrow">Resolved public entity</span><h3>{{ affiliation_job.organization.label }}</h3><p>{{ affiliation_job.organization.description }}</p></div>

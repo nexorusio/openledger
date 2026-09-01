@@ -387,6 +387,84 @@ def live_wikidata_contract(source: dict) -> None:
     _require(isinstance(bindings, list) and bindings, "Wikidata query returned no relation")
 
 
+def live_wikipedia_contract(source: dict) -> None:
+    target = source["maintenance"].get("live_contract_target")
+    _require(isinstance(target, str) and target, "Wikipedia live target is missing")
+    query = urlencode(
+        {
+            "action": "query",
+            "generator": "search",
+            "gsrsearch": target,
+            "gsrnamespace": "0",
+            "gsrlimit": "5",
+            "prop": "extracts|pageimages|pageprops|info",
+            "exintro": "1",
+            "explaintext": "1",
+            "exchars": "2000",
+            "piprop": "thumbnail",
+            "pithumbsize": "500",
+            "inprop": "url",
+            "redirects": "1",
+            "format": "json",
+            "formatversion": "2",
+        }
+    )
+    request = Request(
+        f"https://en.wikipedia.org/w/api.php?{query}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "OpenLedger-OSINT-Contract-Audit/1.0 (+https://github.com/nexorusio/openledger)",
+        },
+    )
+    try:
+        with build_opener(NoRedirectHandler()).open(request, timeout=20) as response:
+            payload = response.read(1_000_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(f"Wikipedia live contract request failed: {error}") from error
+    _require(len(payload) <= 1_000_000, "Wikipedia live response was oversized")
+    pages = (json.loads(payload).get("query") or {}).get("pages")
+    _require(isinstance(pages, list) and pages, "Wikipedia page contract changed")
+    _require(
+        any(page.get("title") == target and page.get("extract") for page in pages),
+        "Wikipedia exact biography contract changed",
+    )
+
+
+def live_icij_offshore_contract(source: dict) -> None:
+    target = source["maintenance"].get("live_contract_target")
+    _require(isinstance(target, str) and target, "ICIJ live target is missing")
+    body = json.dumps(
+        {"query": target, "type": "Officer", "limit": 5}
+    ).encode("utf-8")
+    request = Request(
+        "https://offshoreleaks.icij.org/api/v1/reconcile",
+        data=body,
+        method="POST",
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "User-Agent": "OpenLedger-OSINT-Contract-Audit/1.0 (+https://github.com/nexorusio/openledger)",
+        },
+    )
+    try:
+        with build_opener(NoRedirectHandler()).open(request, timeout=30) as response:
+            payload = response.read(1_000_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(f"ICIJ live contract request failed: {error}") from error
+    _require(len(payload) <= 1_000_000, "ICIJ live response was oversized")
+    results = json.loads(payload).get("result")
+    _require(isinstance(results, list) and results, "ICIJ reconciliation contract changed")
+    _require(
+        any(
+            item.get("name") == target
+            and item.get("match") is True
+            and item.get("score") == 100.0
+            for item in results
+        ),
+        "ICIJ exact-name reconciliation contract changed",
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -400,6 +478,8 @@ def main() -> int:
             live_github_contract(sources_by_id["github_public_profile"])
             live_wayback_contract(sources_by_id["wayback_cdx"])
             live_wikidata_contract(sources_by_id["wikidata_affiliation"])
+            live_wikipedia_contract(sources_by_id["wikipedia_public_biography"])
+            live_icij_offshore_contract(sources_by_id["icij_offshore_leaks"])
     except (OSError, ValueError, RuntimeError, StopIteration) as error:
         print(f"OSINT source audit failed: {error}", file=sys.stderr)
         return 1

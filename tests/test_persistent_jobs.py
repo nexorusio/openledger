@@ -952,6 +952,43 @@ def test_affiliation_worker_persists_pending_people(web_app, persistent_store, m
     assert persistent_store.get_events(job_id)[-1]["event"]["redirect"] == f"/cases/{job['case_id']}"
 
 
+def test_affiliation_source_failure_is_not_rendered_as_zero_people(
+    client, persistent_store
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Example Organization"
+    )
+    job = persistent_store.claim_next("worker:affiliation")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "discovery_status": "rate_limited",
+            "source_message": (
+                "The organization resolved, but affiliation relations were unavailable."
+            ),
+            "organization_candidates": [
+                {"id": "Q95", "label": "Example Organization"}
+            ],
+            "organization": {
+                "id": "Q95",
+                "label": "Example Organization",
+                "description": "Example",
+                "url": "https://www.wikidata.org/wiki/Q95",
+                "official_websites": ["https://example.org"],
+            },
+            "affiliated_person_count": 0,
+            "claim_proposal_count": 0,
+        },
+    )
+
+    page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "Affiliation source check incomplete" in page
+    assert "No zero-result conclusion was recorded" in page
+    assert "Retry affiliation lookup" in page
+    assert "people observed" not in page
+
+
 def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
     source_job_id = persistent_store.create_investigation(["alice"], {})
     source_job = persistent_store.claim_next("worker:source")
@@ -971,3 +1008,138 @@ def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
     affiliation_job = persistent_store.get_job(job_id)
     assert affiliation_job["kind"] == "affiliation"
     assert persistent_store.get_case(affiliation_job["case_id"])["personas"] == []
+
+
+def _persistent_approved_full_name(store, name="Alice Example"):
+    job_id = store.create_investigation(["alice"], {})
+    job = store.claim_next("worker:identity-source")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": name},
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    store.sync_persona_claims(job_id, result)
+    persona_id = store.get_case(job["case_id"])["personas"][0]["id"]
+    name_claim = next(
+        claim
+        for claim in store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    store.review_claim(name_claim["id"], "approved", "analyst")
+    return persona_id, name_claim["id"]
+
+
+def test_identity_worker_degrades_sources_and_persists_review_gated_alerts(
+    client, web_app, persistent_store, monkeypatch
+):
+    persona_id, name_claim_id = _persistent_approved_full_name(persistent_store)
+    job_id = persistent_store.create_identity_enrichment(persona_id, name_claim_id)
+    job = persistent_store.claim_next("worker:identity")
+
+    async def fake_wikipedia(*_args, **_kwargs):
+        raise RuntimeError("Wikipedia is temporarily unavailable")
+
+    async def fake_icij(*_args, **_kwargs):
+        return {
+            "source_engine": "icij_offshore_leaks",
+            "status": "potential_match",
+            "matches": [
+                {
+                    "node_id": "12126782",
+                    "name": "Alice Example",
+                    "description": "Officer record",
+                    "score": 100,
+                    "url": "https://offshoreleaks.icij.org/nodes/12126782",
+                }
+            ],
+        }
+
+    monkeypatch.setattr(web_app, "run_wikipedia_person_enrichment", fake_wikipedia)
+    monkeypatch.setattr(web_app, "run_icij_offshore_match", fake_icij)
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["offshore_alert_count"] == 1
+    assert len(completed["source_errors"]) == 1
+    offshore = next(
+        claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "offshore_database_match"
+    )
+    assert offshore["review_status"] == "pending"
+    events = [item["event"] for item in persistent_store.get_events(job_id)]
+    assert any(event["type"] == "risk_alert" for event in events)
+    assert events[-1]["redirect"] == f"/personas/{persona_id}"
+    page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    assert "Potential ICIJ Offshore Leaks name match" in page
+    assert "not confirmed identity or evidence of wrongdoing" in page
+    assert "Review ICIJ source" in page
+
+
+def test_approving_full_name_queues_confirmed_name_enrichment(
+    client, persistent_store
+):
+    source_job_id = persistent_store.create_investigation(["alice"], {})
+    source_job = persistent_store.claim_next("worker:identity-source")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": "Alice Example"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(source_job_id, result)
+    persistent_store.sync_persona_claims(source_job_id, result)
+    persona_id = persistent_store.get_case(source_job["case_id"])["personas"][0][
+        "id"
+    ]
+    name_claim = next(
+        claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    with client.session_transaction() as session:
+        session["csrf_token"] = "identity-review-csrf"
+    response = client.post(
+        f"/claims/{name_claim['id']}/review",
+        data={
+            "csrf_token": "identity-review-csrf",
+            "persona_id": persona_id,
+            "decision": "approved",
+        },
+    )
+
+    assert response.status_code == 302
+    enrichment = persistent_store.get_persona_identity_enrichment(persona_id)
+    assert enrichment["kind"] == "identity_enrichment"
+    assert enrichment["status"] == "queued"
+    assert enrichment["options"]["investigation_spec"]["confirmed_name"] == (
+        "Alice Example"
+    )
+    live_page = client.get(f"/live/{enrichment['job_id']}")
+    assert live_page.status_code == 200
+    assert "Confirmed-name enrichment" in live_page.get_data(as_text=True)

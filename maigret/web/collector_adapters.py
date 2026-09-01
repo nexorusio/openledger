@@ -60,6 +60,19 @@ WIKIDATA_MAX_RESPONSE_BYTES = 1_000_000
 MAX_WIKIDATA_ENTITY_CANDIDATES = 5
 MAX_WIKIDATA_AFFILIATED_PEOPLE = 50
 
+WIKIPEDIA_ENGINE = "wikipedia_public_biography"
+WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
+WIKIPEDIA_TIMEOUT_SECONDS = 20
+WIKIPEDIA_MAX_RESPONSE_BYTES = 1_000_000
+MAX_WIKIPEDIA_CANDIDATES = 5
+WIKIPEDIA_MAX_EXTRACT_CHARS = 2_000
+
+ICIJ_OFFSHORE_ENGINE = "icij_offshore_leaks"
+ICIJ_RECONCILE_URL = "https://offshoreleaks.icij.org/api/v1/reconcile"
+ICIJ_TIMEOUT_SECONDS = 30
+ICIJ_MAX_RESPONSE_BYTES = 1_000_000
+MAX_ICIJ_MATCHES = 5
+
 _WIKIDATA_ID_PATTERN = re.compile(r"^Q[1-9][0-9]{0,19}$")
 _WIKIDATA_ENTITY_URL_PATTERN = re.compile(
     r"^https?://www\.wikidata\.org/entity/(Q[1-9][0-9]{0,19})$"
@@ -78,6 +91,13 @@ _WIKIDATA_RELATIONSHIPS = {
     "P1037": "director or manager",
     "P3320": "board member",
 }
+MAX_WIKIDATA_AFFILIATION_ROWS = (
+    MAX_WIKIDATA_AFFILIATED_PEOPLE * len(_WIKIDATA_RELATIONSHIPS)
+)
+_ICIJ_NODE_ID_PATTERN = re.compile(r"^[1-9][0-9]{0,19}$")
+_WIKIPEDIA_PAGE_URL_PATTERN = re.compile(
+    r"^https://en\.wikipedia\.org/wiki/[^?#]{1,2000}$"
+)
 
 _GITHUB_LOGIN_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$")
 _X_USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_]{1,15}$")
@@ -221,6 +241,16 @@ def _affiliation_identity(value: Any) -> str:
     return " ".join(normalized.split()).casefold()
 
 
+def normalize_confirmed_person_name(value: Any) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value or ""))
+    normalized = " ".join(normalized.split())
+    if not 2 <= len(normalized) <= 300:
+        raise ValueError("Confirmed names must contain between 2 and 300 characters")
+    if any(ord(character) < 32 for character in normalized):
+        raise ValueError("Confirmed names cannot contain control characters")
+    return normalized
+
+
 def _wikidata_item_url(entity_id: Any) -> str:
     entity_id = str(entity_id or "").strip().upper()
     if not _WIKIDATA_ID_PATTERN.fullmatch(entity_id):
@@ -347,7 +377,7 @@ def normalize_wikidata_affiliated_people(payload: Any) -> List[Dict[str, Any]]:
     if not isinstance(bindings, list):
         raise ValueError("Wikidata affiliation query returned invalid bindings")
     people: Dict[str, Dict[str, Any]] = {}
-    for binding in bindings[:MAX_WIKIDATA_AFFILIATED_PEOPLE]:
+    for binding in bindings[:MAX_WIKIDATA_AFFILIATION_ROWS]:
         if not isinstance(binding, dict):
             continue
         person_id = _wikidata_binding_id(
@@ -365,9 +395,11 @@ def normalize_wikidata_affiliated_people(payload: Any) -> List[Dict[str, Any]]:
             or direction not in {"person_to_organization", "organization_to_person"}
         ):
             continue
-        person = people.setdefault(
-            person_id,
-            {
+        person = people.get(person_id)
+        if person is None:
+            if len(people) >= MAX_WIKIDATA_AFFILIATED_PEOPLE:
+                continue
+            person = {
                 "id": person_id,
                 "label": label,
                 "description": _wikidata_binding_text(
@@ -375,8 +407,8 @@ def normalize_wikidata_affiliated_people(payload: Any) -> List[Dict[str, Any]]:
                 ),
                 "url": _wikidata_item_url(person_id),
                 "relations": [],
-            },
-        )
+            }
+            people[person_id] = person
         relation = {
             "property_id": property_id,
             "label": _WIKIDATA_RELATIONSHIPS[property_id],
@@ -393,6 +425,20 @@ def _wikidata_people_query(entity_id: str) -> str:
     return f"""
 SELECT DISTINCT ?person ?personLabel ?personDescription ?property ?direction WHERE {{
   {{
+    SELECT DISTINCT ?person WHERE {{
+      {{
+        VALUES ?candidateProperty {{ wdt:P69 wdt:P108 wdt:P463 wdt:P1416 }}
+        ?person ?candidateProperty wd:{entity_id} .
+      }} UNION {{
+        VALUES ?candidateProperty {{ wdt:P112 wdt:P169 wdt:P488 wdt:P1037 wdt:P3320 }}
+        wd:{entity_id} ?candidateProperty ?person .
+      }}
+      ?person wdt:P31 wd:Q5 .
+    }}
+    ORDER BY ?person
+    LIMIT {MAX_WIKIDATA_AFFILIATED_PEOPLE}
+  }}
+  {{
     VALUES ?property {{ wdt:P69 wdt:P108 wdt:P463 wdt:P1416 }}
     ?person ?property wd:{entity_id} .
     BIND("person_to_organization" AS ?direction)
@@ -404,7 +450,8 @@ SELECT DISTINCT ?person ?personLabel ?personDescription ?property ?direction WHE
   ?person wdt:P31 wd:Q5 .
   SERVICE wikibase:label {{ bd:serviceParam wikibase:language "en". }}
 }}
-LIMIT {MAX_WIKIDATA_AFFILIATED_PEOPLE}
+ORDER BY ?person ?property ?direction
+LIMIT {MAX_WIKIDATA_AFFILIATION_ROWS}
 """.strip()
 
 
@@ -664,6 +711,490 @@ def extract_wikidata_affiliation_people(observation: Any) -> List[Dict[str, Any]
                     ),
                 ],
             }
+        )
+    return output
+
+
+async def _read_bounded_public_json(
+    response: Any, *, source_name: str, maximum_bytes: int
+) -> Any:
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            declared_length = int(content_length)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError(
+                f"{source_name} returned an invalid response length"
+            ) from error
+        if declared_length < 0 or declared_length > maximum_bytes:
+            raise RuntimeError(f"{source_name} returned an oversized response")
+    body = await response.content.read(maximum_bytes + 1)
+    if len(body) > maximum_bytes:
+        raise RuntimeError(f"{source_name} returned an oversized response")
+    try:
+        return json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError(f"{source_name} returned invalid JSON") from error
+
+
+def normalize_wikipedia_candidates(
+    confirmed_name: str, payload: Any
+) -> List[Dict[str, Any]]:
+    query = payload.get("query") if isinstance(payload, dict) else None
+    pages = query.get("pages") if isinstance(query, dict) else None
+    if not isinstance(pages, list):
+        raise ValueError("Wikipedia returned an invalid page document")
+    name_identity = _affiliation_identity(confirmed_name)
+    output = []
+    seen = set()
+    for raw in pages[:MAX_WIKIPEDIA_CANDIDATES]:
+        if not isinstance(raw, dict) or raw.get("missing") is True:
+            continue
+        page_id = raw.get("pageid")
+        if not isinstance(page_id, int) or page_id <= 0 or page_id in seen:
+            continue
+        title = _bounded_text(raw.get("title"), limit=500)
+        source_url = _safe_public_url(raw.get("fullurl"))
+        if (
+            not title
+            or not _WIKIPEDIA_PAGE_URL_PATTERN.fullmatch(source_url)
+            or raw.get("ns") not in {None, 0}
+        ):
+            continue
+        pageprops = raw.get("pageprops")
+        if isinstance(pageprops, dict) and "disambiguation" in pageprops:
+            continue
+        thumbnail = raw.get("thumbnail")
+        thumbnail_url = (
+            _safe_public_url(thumbnail.get("source"))
+            if isinstance(thumbnail, dict)
+            else ""
+        )
+        if thumbnail_url and urlparse(thumbnail_url).hostname.casefold() not in {
+            "upload.wikimedia.org"
+        }:
+            thumbnail_url = ""
+        seen.add(page_id)
+        output.append(
+            {
+                "page_id": str(page_id),
+                "title": title,
+                "url": source_url,
+                "extract": _bounded_text(
+                    raw.get("extract"), limit=WIKIPEDIA_MAX_EXTRACT_CHARS
+                ),
+                "thumbnail_url": thumbnail_url,
+                "exact_title_match": _affiliation_identity(title) == name_identity,
+            }
+        )
+    return output
+
+
+def _wikipedia_diagnostic(
+    confirmed_name: str, status: str, reason: str, candidates=None
+) -> Dict[str, Any]:
+    return {
+        "source_engine": WIKIPEDIA_ENGINE,
+        "subject_type": "confirmed_person_name",
+        "subject_value": confirmed_name,
+        "status": status,
+        "source_url": "https://en.wikipedia.org/",
+        "source_record_id": (
+            f"wikipedia-search:{claim_fingerprint('full_name', confirmed_name)}"
+        ),
+        "reason": reason[:1000],
+        "page_candidates": list(candidates or [])[:MAX_WIKIPEDIA_CANDIDATES],
+        "page": None,
+        "extra": {"human_review_required": True, "automatic_approval_allowed": False},
+    }
+
+
+async def run_wikipedia_person_enrichment(
+    confirmed_name: str,
+    *,
+    selected_page_id: Optional[str] = None,
+    timeout_seconds: int = WIKIPEDIA_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    confirmed_name = normalize_confirmed_person_name(confirmed_name)
+    selected_page_id = str(selected_page_id or "").strip()
+    if selected_page_id and (
+        not selected_page_id.isdigit() or len(selected_page_id) > 20
+    ):
+        raise ValueError("Invalid selected Wikipedia page identifier")
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    common_params = {
+        "action": "query",
+        "prop": "extracts|pageimages|pageprops|info",
+        "exintro": "1",
+        "explaintext": "1",
+        "exchars": str(WIKIPEDIA_MAX_EXTRACT_CHARS),
+        "piprop": "thumbnail",
+        "pithumbsize": "500",
+        "inprop": "url",
+        "redirects": "1",
+        "format": "json",
+        "formatversion": "2",
+    }
+    if selected_page_id:
+        params = {**common_params, "pageids": selected_page_id}
+    else:
+        params = {
+            **common_params,
+            "generator": "search",
+            "gsrsearch": confirmed_name,
+            "gsrnamespace": "0",
+            "gsrlimit": str(MAX_WIKIPEDIA_CANDIDATES),
+        }
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        async with session.get(
+            WIKIPEDIA_API_URL, params=params, allow_redirects=False
+        ) as response:
+            if response.status in {403, 429}:
+                return _wikipedia_diagnostic(
+                    confirmed_name,
+                    "rate_limited",
+                    "Wikipedia temporarily limited the public lookup.",
+                )
+            if response.status != 200:
+                raise RuntimeError(
+                    f"Wikipedia public API returned HTTP {int(response.status)}"
+                )
+            payload = await _read_bounded_public_json(
+                response,
+                source_name="Wikipedia",
+                maximum_bytes=WIKIPEDIA_MAX_RESPONSE_BYTES,
+            )
+    candidates = normalize_wikipedia_candidates(confirmed_name, payload)
+    if selected_page_id:
+        selected = [
+            candidate
+            for candidate in candidates
+            if candidate["page_id"] == selected_page_id
+        ]
+        if len(selected) != 1:
+            return _wikipedia_diagnostic(
+                confirmed_name,
+                "not_found",
+                "The selected Wikipedia page is unavailable or unsuitable.",
+            )
+        page = selected[0]
+    else:
+        exact = [candidate for candidate in candidates if candidate["exact_title_match"]]
+        if len(exact) != 1:
+            return _wikipedia_diagnostic(
+                confirmed_name,
+                "needs_selection" if candidates else "not_found",
+                (
+                    "Select the correct Wikipedia biography before proposing details."
+                    if candidates
+                    else "Wikipedia returned no usable biography candidates."
+                ),
+                candidates,
+            )
+        page = exact[0]
+    if not page["extract"]:
+        return _wikipedia_diagnostic(
+            confirmed_name,
+            "not_found",
+            "The selected Wikipedia page has no usable introductory extract.",
+            candidates,
+        )
+    return {
+        "source_engine": WIKIPEDIA_ENGINE,
+        "subject_type": "confirmed_person_name",
+        "subject_value": confirmed_name,
+        "status": "observed",
+        "source_url": page["url"],
+        "source_record_id": f"wikipedia-page:{page['page_id']}",
+        "reason": "Public Wikipedia biography proposed for analyst review.",
+        "page_candidates": candidates,
+        "page": page,
+        "extra": {"human_review_required": True, "automatic_approval_allowed": False},
+    }
+
+
+def normalize_icij_offshore_matches(
+    confirmed_name: str, payload: Any
+) -> List[Dict[str, Any]]:
+    results = payload.get("result") if isinstance(payload, dict) else None
+    if not isinstance(results, list):
+        raise ValueError("ICIJ returned an invalid reconciliation document")
+    name_identity = _affiliation_identity(confirmed_name)
+    output = []
+    seen = set()
+    for raw in results[:25]:
+        if not isinstance(raw, dict):
+            continue
+        node_id = str(raw.get("id") or "").strip()
+        name = _bounded_text(raw.get("name"), limit=500)
+        types = raw.get("types") if isinstance(raw.get("types"), list) else []
+        officer_type = any(
+            isinstance(item, dict)
+            and item.get("id")
+            == "https://offshoreleaks.icij.org/schema/oldb/officer"
+            for item in types[:10]
+        )
+        try:
+            score = float(raw.get("score"))
+        except (TypeError, ValueError):
+            continue
+        exact = (
+            raw.get("match") is True
+            and _affiliation_identity(name) == name_identity
+            and 0 <= score <= 100
+        )
+        if (
+            not exact
+            or not officer_type
+            or not _ICIJ_NODE_ID_PATTERN.fullmatch(node_id)
+            or node_id in seen
+        ):
+            continue
+        seen.add(node_id)
+        output.append(
+            {
+                "node_id": node_id,
+                "name": name,
+                "description": _bounded_text(raw.get("description"), limit=1000),
+                "score": score,
+                "url": f"https://offshoreleaks.icij.org/nodes/{node_id}",
+            }
+        )
+        if len(output) >= MAX_ICIJ_MATCHES:
+            break
+    return output
+
+
+async def run_icij_offshore_match(
+    confirmed_name: str,
+    *,
+    timeout_seconds: int = ICIJ_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    confirmed_name = normalize_confirmed_person_name(confirmed_name)
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 45)))
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        async with session.post(
+            ICIJ_RECONCILE_URL,
+            json={"query": confirmed_name, "type": "Officer", "limit": MAX_ICIJ_MATCHES},
+            allow_redirects=False,
+        ) as response:
+            if response.status in {403, 429}:
+                status, payload = "rate_limited", None
+            elif response.status == 200:
+                status = "ok"
+                payload = await _read_bounded_public_json(
+                    response,
+                    source_name="ICIJ Offshore Leaks",
+                    maximum_bytes=ICIJ_MAX_RESPONSE_BYTES,
+                )
+            else:
+                raise RuntimeError(
+                    "ICIJ Offshore Leaks reconciliation returned "
+                    f"HTTP {int(response.status)}"
+                )
+    matches = normalize_icij_offshore_matches(confirmed_name, payload) if payload else []
+    observation_status = "potential_match" if matches else (
+        "rate_limited" if status == "rate_limited" else "no_match"
+    )
+    return {
+        "source_engine": ICIJ_OFFSHORE_ENGINE,
+        "subject_type": "confirmed_person_name",
+        "subject_value": confirmed_name,
+        "status": observation_status,
+        "source_url": "https://offshoreleaks.icij.org/",
+        "source_record_id": (
+            f"icij-offshore-search:{claim_fingerprint('full_name', confirmed_name)}"
+        ),
+        "reason": (
+            "Exact-name candidates require independent identity confirmation. "
+            "Database inclusion does not imply illegal or improper conduct."
+        ),
+        "matches": matches,
+        "extra": {"human_review_required": True, "automatic_approval_allowed": False},
+    }
+
+
+def _public_record_claim_candidate(
+    field_name: str,
+    value: Any,
+    display_value: str,
+    confidence: int,
+    source_engine: str,
+    source_record_id: str,
+    evidence_type: str,
+    source_name: str,
+    source_url: str,
+    details: Dict[str, Any],
+) -> Dict[str, Any]:
+    evidence = {
+        "evidence_type": evidence_type,
+        "source_name": source_name,
+        "source_url": source_url,
+        "details": {
+            **details,
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+        },
+    }
+    return {
+        "field_name": field_name,
+        "value": value,
+        "display_value": display_value,
+        "normalized_value": (
+            json.dumps(value, sort_keys=True, ensure_ascii=False)
+            if isinstance(value, dict)
+            else display_value.casefold()
+        ),
+        "confidence": confidence,
+        "fingerprint": claim_fingerprint(field_name, value),
+        "source_engine": source_engine,
+        "source_record_id": source_record_id,
+        "native_status": "observed",
+        "evidence": [dict(evidence, fingerprint=evidence_fingerprint(evidence))],
+    }
+
+
+def extract_wikipedia_person_claims(observation: Any) -> List[Dict[str, Any]]:
+    if (
+        not isinstance(observation, dict)
+        or observation.get("source_engine") != WIKIPEDIA_ENGINE
+        or observation.get("status") != "observed"
+        or not isinstance(observation.get("page"), dict)
+    ):
+        return []
+    page = observation["page"]
+    page_id = str(page.get("page_id") or "")
+    title = _bounded_text(page.get("title"), limit=500)
+    source_url = _safe_public_url(page.get("url"))
+    extract = _bounded_text(page.get("extract"), limit=WIKIPEDIA_MAX_EXTRACT_CHARS)
+    if (
+        not page_id.isdigit()
+        or not title
+        or not extract
+        or not _WIKIPEDIA_PAGE_URL_PATTERN.fullmatch(source_url)
+    ):
+        return []
+    details = {
+        "wikipedia_page_id": page_id,
+        "wikipedia_title": title,
+        "identity_scope": "Confirmed name lookup; article attribution still requires review.",
+    }
+    claims = [
+        _public_record_claim_candidate(
+            "summary",
+            extract,
+            extract,
+            60,
+            WIKIPEDIA_ENGINE,
+            f"wikipedia-page:{page_id}",
+            "wikipedia_introductory_extract",
+            "Wikipedia",
+            source_url,
+            details,
+        ),
+        _public_record_claim_candidate(
+            "platform_identifier",
+            {
+                "platform": "Wikipedia",
+                "identifier_type": "wikipedia_page_id",
+                "identifier": page_id,
+                "url": source_url,
+            },
+            title,
+            65,
+            WIKIPEDIA_ENGINE,
+            f"wikipedia-page:{page_id}",
+            "wikipedia_page_identifier",
+            "Wikipedia",
+            source_url,
+            details,
+        ),
+    ]
+    thumbnail_url = _safe_public_url(page.get("thumbnail_url"))
+    if thumbnail_url and urlparse(thumbnail_url).hostname.casefold() == "upload.wikimedia.org":
+        claims.append(
+            _public_record_claim_candidate(
+                "photograph",
+                thumbnail_url,
+                thumbnail_url,
+                55,
+                WIKIPEDIA_ENGINE,
+                f"wikipedia-page:{page_id}",
+                "wikipedia_lead_image",
+                "Wikipedia",
+                source_url,
+                details,
+            )
+        )
+    return claims
+
+
+def extract_icij_offshore_claims(observation: Any) -> List[Dict[str, Any]]:
+    if (
+        not isinstance(observation, dict)
+        or observation.get("source_engine") != ICIJ_OFFSHORE_ENGINE
+        or observation.get("status") != "potential_match"
+    ):
+        return []
+    output = []
+    for match in list(observation.get("matches") or [])[:MAX_ICIJ_MATCHES]:
+        if not isinstance(match, dict):
+            continue
+        node_id = str(match.get("node_id") or "")
+        name = _bounded_text(match.get("name"), limit=500)
+        source_url = _safe_public_url(match.get("url"))
+        if (
+            not _ICIJ_NODE_ID_PATTERN.fullmatch(node_id)
+            or source_url != f"https://offshoreleaks.icij.org/nodes/{node_id}"
+            or not name
+        ):
+            continue
+        value = {
+            "provider": "ICIJ Offshore Leaks Database",
+            "node_id": node_id,
+            "name": name,
+            "url": source_url,
+        }
+        output.append(
+            _public_record_claim_candidate(
+                "offshore_database_match",
+                value,
+                name,
+                50,
+                ICIJ_OFFSHORE_ENGINE,
+                f"icij-offshore-node:{node_id}",
+                "icij_exact_name_candidate",
+                "ICIJ Offshore Leaks Database",
+                source_url,
+                {
+                    "reconciliation_score": match.get("score"),
+                    "dataset_description": _bounded_text(
+                        match.get("description"), limit=1000
+                    ),
+                    "identity_warning": (
+                        "An exact name is not sufficient to confirm identity. "
+                        "Inclusion does not imply illegal or improper conduct."
+                    ),
+                },
+            )
         )
     return output
 

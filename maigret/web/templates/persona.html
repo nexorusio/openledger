@@ -163,8 +163,72 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button type="submit" class="btn btn-primary"><i data-lucide="refresh-cw"></i> Run investigation again</button>
         </form>
+        {% if approved_full_name %}
+            {% if identity_enrichment and identity_enrichment.status in ('queued', 'running', 'cancel_requested') %}
+            <a href="{{ url_for('live_results', job_id=identity_enrichment.job_id) }}" class="btn btn-outline-secondary"><i data-lucide="scan-search"></i> Public-record progress</a>
+            {% else %}
+            <form method="POST" action="{{ url_for('enrich_identity_claim', claim_id=approved_full_name.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button type="submit" class="btn btn-outline-secondary"><i data-lucide="scan-search"></i> Enrich confirmed name</button>
+            </form>
+            {% endif %}
+        {% endif %}
     </div>
 </section>
+
+{% if offshore_matches %}
+<section class="offshore-alert" role="alert" aria-label="Potential Offshore Leaks match">
+    <i data-lucide="triangle-alert"></i>
+    <div>
+        <strong>Potential ICIJ Offshore Leaks name match</strong>
+        <p>An exact name appears in the ICIJ database. This is an investigative alert, not confirmed identity or evidence of wrongdoing. Compare the source record with independently verified identifiers before approving it.</p>
+        <div class="offshore-alert-records">
+            {% for match in offshore_matches %}
+            <span>
+                <b>{{ match.display_value }}</b>
+                <em>{{ match.review_status | replace('_', ' ') | title }}</em>
+                {% for evidence in match.evidence %}
+                    {% if evidence.source_url %}<a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">Review ICIJ source</a>{% endif %}
+                {% endfor %}
+            </span>
+            {% endfor %}
+        </div>
+    </div>
+</section>
+{% endif %}
+
+{% if identity_enrichment and identity_enrichment.status == 'completed' %}
+<section class="panel-card identity-enrichment-card">
+    <header class="panel-header">
+        <div><h2>Confirmed-name enrichment</h2><p>Credential-free Wikipedia and ICIJ checks. All resulting records remain subject to analyst review.</p></div>
+        <span class="badge-soft">{{ identity_enrichment.completed_at }}</span>
+    </header>
+    <div class="panel-body identity-enrichment-body">
+        {% if identity_enrichment.wikipedia_status == 'needs_selection' and approved_full_name %}
+        <strong>Select the correct Wikipedia biography</strong>
+        <p class="form-text">No biography is used until you choose one of the stored candidates.</p>
+        <div class="affiliation-candidate-list">
+            {% for candidate in identity_enrichment.wikipedia_candidates %}
+            <form method="POST" action="{{ url_for('select_wikipedia_biography', persona_id=persona.id) }}" class="affiliation-candidate">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="source_claim_id" value="{{ approved_full_name.id }}">
+                <input type="hidden" name="page_id" value="{{ candidate.page_id }}">
+                <span><strong>{{ candidate.title }}</strong><small>{{ candidate.extract | truncate(220) }}</small></span>
+                <button type="submit" class="btn btn-sm btn-outline-secondary">Use this biography</button>
+            </form>
+            {% endfor %}
+        </div>
+        {% elif identity_enrichment.wikipedia_status == 'observed' %}
+        <p class="mb-0"><strong>Wikipedia biography found.</strong> Its introductory summary, page identifier, and available lead image were added to the review queue.</p>
+        {% else %}
+        <p class="mb-0">No unambiguous Wikipedia biography was proposed. Status: {{ identity_enrichment.wikipedia_status | default('unavailable', true) | replace('_', ' ') }}.</p>
+        {% endif %}
+        {% if identity_enrichment.offshore_status == 'no_match' %}
+        <p class="public-record-clear mb-0"><i data-lucide="shield-check"></i> No exact-name ICIJ Offshore Leaks candidate was returned in this check.</p>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
 
 <section class="persona-lifecycle" aria-label="Evidence lifecycle">
     <div><span>1</span><strong>Collect</strong><small>Source adapters and cited AI research create pending proposals.</small></div>

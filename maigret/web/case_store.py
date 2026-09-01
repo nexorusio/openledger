@@ -703,6 +703,135 @@ class CaseStore:
         )
         return job_id
 
+    def create_identity_enrichment(
+        self,
+        persona_id: str,
+        source_claim_id: str,
+        *,
+        selected_wikipedia_page_id: Optional[str] = None,
+    ) -> str:
+        """Queue governed public-record checks for one approved full-name claim."""
+        source_claim_id = str(source_claim_id or "").strip()
+        selected_page_id = str(selected_wikipedia_page_id or "").strip() or None
+        if selected_page_id and (
+            not selected_page_id.isdigit() or len(selected_page_id) > 20
+        ):
+            raise ValueError("Select a valid Wikipedia biography")
+        now, job_id = utcnow(), str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            persona_statement = select(
+                personas.c.case_id,
+                personas.c.display_name,
+            ).where(personas.c.id == persona_id)
+            if self.engine.dialect.name == "postgresql":
+                persona_statement = persona_statement.with_for_update()
+            persona_row = connection.execute(persona_statement).mappings().first()
+            if not persona_row:
+                raise KeyError(persona_id)
+            claim = (
+                connection.execute(
+                    select(
+                        persona_claims.c.display_value,
+                        persona_claims.c.field_name,
+                        persona_claims.c.review_status,
+                    ).where(
+                        persona_claims.c.id == source_claim_id,
+                        persona_claims.c.persona_id == persona_id,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if (
+                not claim
+                or claim["field_name"] != "full_name"
+                or claim["review_status"] != "approved"
+            ):
+                raise ValueError(
+                    "Public-record enrichment requires an approved full name"
+                )
+            if connection.scalar(
+                select(investigation_jobs.c.id)
+                .where(
+                    investigation_jobs.c.case_id == persona_row["case_id"],
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                )
+                .limit(1)
+            ):
+                raise ValueError("This case already has an active investigation")
+            if selected_page_id:
+                prior_rows = connection.execute(
+                    select(investigation_jobs.c.result, investigation_jobs.c.options)
+                    .where(
+                        investigation_jobs.c.case_id == persona_row["case_id"],
+                        investigation_jobs.c.kind == "identity_enrichment",
+                        investigation_jobs.c.status == "completed",
+                    )
+                    .order_by(investigation_jobs.c.created_at.desc())
+                    .limit(20)
+                ).mappings()
+                stored_candidate = False
+                for prior in prior_rows:
+                    prior_spec = dict(prior["options"] or {}).get(
+                        "investigation_spec"
+                    ) or {}
+                    if str(prior_spec.get("persona_id") or "") != persona_id:
+                        continue
+                    candidates = list(
+                        dict(prior["result"] or {}).get("wikipedia_candidates") or []
+                    )[:5]
+                    if any(
+                        isinstance(candidate, dict)
+                        and str(candidate.get("page_id") or "") == selected_page_id
+                        for candidate in candidates
+                    ):
+                        stored_candidate = True
+                        break
+                if not stored_candidate:
+                    raise ValueError(
+                        "The selected Wikipedia page is not a stored candidate"
+                    )
+            confirmed_name = " ".join(str(claim["display_value"] or "").split())
+            specification = {
+                "schema_version": 1,
+                "investigation_type": "identity_enrichment",
+                "persona_id": persona_id,
+                "source_claim_id": source_claim_id,
+                "confirmed_name": confirmed_name[:300],
+                "selected_wikipedia_page_id": selected_page_id,
+            }
+            connection.execute(
+                insert(investigation_jobs).values(
+                    id=job_id,
+                    case_id=persona_row["case_id"],
+                    kind="identity_enrichment",
+                    status="queued",
+                    usernames=[],
+                    options={"investigation_spec": specification},
+                    progress={"checked": 0, "total": 2, "found": 0},
+                    result=None,
+                    error=None,
+                    cancel_requested=False,
+                    attempts=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            connection.execute(
+                update(cases)
+                .where(cases.c.id == persona_row["case_id"])
+                .values(updated_at=now)
+            )
+        self.append_event(
+            job_id,
+            {
+                "type": "queued",
+                "target_type": "confirmed_person_name",
+                "persona_id": persona_id,
+            },
+        )
+        return job_id
+
     def queue_affiliation_entity(self, case_id: str, entity_id: str) -> str:
         entity_id = str(entity_id or "").strip().upper()
         if not re.fullmatch(r"Q[1-9][0-9]{0,19}", entity_id):
@@ -1086,6 +1215,33 @@ class CaseStore:
                     }
                 )
         return summaries
+
+    def get_persona_identity_enrichment(
+        self, persona_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the latest durable identity-enrichment job for one Persona."""
+        with self.engine.connect() as connection:
+            persona_case_id = connection.scalar(
+                select(personas.c.case_id).where(personas.c.id == persona_id)
+            )
+            if not persona_case_id:
+                return None
+            rows = connection.execute(
+                select(investigation_jobs)
+                .where(
+                    investigation_jobs.c.case_id == persona_case_id,
+                    investigation_jobs.c.kind == "identity_enrichment",
+                )
+                .order_by(investigation_jobs.c.created_at.desc())
+                .limit(50)
+            ).mappings()
+            for row in rows:
+                specification = dict(row["options"] or {}).get(
+                    "investigation_spec"
+                ) or {}
+                if str(specification.get("persona_id") or "") == persona_id:
+                    return self._serialize_job(row)
+        return None
 
     def get_case(self, case_id: str) -> Optional[Dict[str, Any]]:
         with self.engine.connect() as connection:
@@ -2479,6 +2635,67 @@ class CaseStore:
                 )
             )
         return {"personas": inserted_personas, "claims": synchronized}
+
+    def sync_identity_enrichment(
+        self,
+        job_id: str,
+        wikipedia_observation: Dict[str, Any],
+        icij_observation: Dict[str, Any],
+    ) -> Dict[str, int]:
+        """Persist public-record findings as pending, provenance-linked claims."""
+        from maigret.web.collector_adapters import (
+            extract_icij_offshore_claims,
+            extract_wikipedia_person_claims,
+        )
+
+        wikipedia_claims = extract_wikipedia_person_claims(wikipedia_observation)
+        offshore_claims = extract_icij_offshore_claims(icij_observation)
+        now = utcnow()
+        with self.engine.begin() as connection:
+            statement = select(
+                investigation_jobs.c.case_id,
+                investigation_jobs.c.kind,
+                investigation_jobs.c.options,
+            ).where(investigation_jobs.c.id == job_id)
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            job = connection.execute(statement).mappings().first()
+            if not job:
+                raise KeyError(job_id)
+            if job["kind"] != "identity_enrichment":
+                raise ValueError(
+                    "Only identity-enrichment jobs can synchronize this evidence"
+                )
+            specification = dict(job["options"] or {}).get(
+                "investigation_spec"
+            ) or {}
+            persona_id = str(specification.get("persona_id") or "")
+            persona_case_id = connection.scalar(
+                select(personas.c.case_id).where(personas.c.id == persona_id)
+            )
+            if not persona_case_id or persona_case_id != job["case_id"]:
+                raise ValueError("Identity-enrichment Persona does not belong to its case")
+            wikipedia_count = self._upsert_persona_candidates(
+                connection,
+                persona_id=persona_id,
+                job_id=job_id,
+                candidates=wikipedia_claims,
+                now=now,
+            )
+            offshore_count = self._upsert_persona_candidates(
+                connection,
+                persona_id=persona_id,
+                job_id=job_id,
+                candidates=offshore_claims,
+                now=now,
+            )
+            if wikipedia_count or offshore_count:
+                connection.execute(
+                    update(cases)
+                    .where(cases.c.id == job["case_id"])
+                    .values(updated_at=now)
+                )
+        return {"wikipedia_claims": wikipedia_count, "offshore_alerts": offshore_count}
 
     def sync_persona_claims(self, job_id: str, result: Dict[str, Any]) -> int:
         """Upsert deterministic claims while preserving every human decision."""
