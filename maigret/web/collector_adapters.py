@@ -716,10 +716,8 @@ def _contains_personal_organization_data(value: Any) -> bool:
     text = _bounded_text(value, limit=3000)
     role_text = " ".join(
         "".join(
-            " "
-            if character in "_/" or unicodedata.category(character) == "Pd"
-            else character
-            for character in text
+            character if character.isalnum() else " "
+            for character in unicodedata.normalize("NFKC", text)
         ).split()
     )
     if (

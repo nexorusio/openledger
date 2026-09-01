@@ -1950,6 +1950,14 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "title": "Alice Doe is a team/_member",
                 "url": "https://example.org/team-mixed-separators",
             },
+            {
+                "title": "Management\u200bteam: Alice Doe",
+                "url": "https://example.org/management-zero-width",
+            },
+            {
+                "title": "Alice Doe is a team.member",
+                "url": "https://example.org/team-punctuation",
+            },
         ]
     ) == [
         {"title": "example.org", "url": "https://example.org/company"},
@@ -1973,6 +1981,11 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
             "title": "example.org",
             "url": "https://example.org/team-mixed-separators",
         },
+        {
+            "title": "example.org",
+            "url": "https://example.org/management-zero-width",
+        },
+        {"title": "example.org", "url": "https://example.org/team-punctuation"},
     ]
 
 
