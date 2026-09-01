@@ -67,26 +67,110 @@
         if (event.key === 'Escape') closeMobileSidebar();
     });
 
-    document.querySelectorAll('.case-delete-form').forEach(function (form) {
-        form.addEventListener('submit', function (event) {
-            const expected = form.dataset.caseTitle || '';
-            const typed = window.prompt(
-                'This deletion is permanent and cannot be undone.\n\n'
-                + 'Type the exact case name to continue:\n' + expected
-            );
-            if (typed === null || typed !== expected) {
-                event.preventDefault();
-                if (typed !== null) window.alert('The case name did not match. Nothing was deleted.');
-                return;
+    const caseDeleteForms = document.querySelectorAll('.case-delete-form');
+    const caseDeleteElement = document.getElementById('caseDeleteModal');
+    const caseDeleteExpected = document.getElementById('caseDeleteExpected');
+    const caseDeleteInput = document.getElementById('caseDeleteConfirmation');
+    const caseDeleteConfirm = document.getElementById('caseDeleteConfirm');
+    const caseDeleteCopy = document.getElementById('caseDeleteCopy');
+    const caseDeleteCopyStatus = document.getElementById('caseDeleteCopyStatus');
+    const caseDeleteError = document.getElementById('caseDeleteError');
+
+    if (
+        caseDeleteForms.length
+        && caseDeleteElement
+        && caseDeleteExpected
+        && caseDeleteInput
+        && caseDeleteConfirm
+        && caseDeleteCopy
+        && caseDeleteCopyStatus
+        && caseDeleteError
+        && window.bootstrap
+    ) {
+        const caseDeleteModal = new window.bootstrap.Modal(caseDeleteElement);
+        let pendingDeleteForm = null;
+        let expectedCaseTitle = '';
+
+        function setDeleteValidation(showError) {
+            const matches = Boolean(expectedCaseTitle) && caseDeleteInput.value === expectedCaseTitle;
+            caseDeleteConfirm.disabled = !matches;
+            caseDeleteInput.setAttribute('aria-invalid', String(showError && !matches));
+            caseDeleteError.hidden = !showError || matches;
+            return matches;
+        }
+
+        function resetDeleteModal() {
+            pendingDeleteForm = null;
+            expectedCaseTitle = '';
+            caseDeleteExpected.textContent = '';
+            caseDeleteInput.value = '';
+            caseDeleteInput.removeAttribute('aria-invalid');
+            caseDeleteConfirm.disabled = true;
+            caseDeleteError.hidden = true;
+            caseDeleteCopyStatus.textContent = '';
+        }
+
+        function fallbackCopy(textToCopy) {
+            const helper = document.createElement('textarea');
+            helper.value = textToCopy;
+            helper.setAttribute('readonly', '');
+            helper.style.position = 'fixed';
+            helper.style.opacity = '0';
+            document.body.appendChild(helper);
+            helper.select();
+            const copied = document.execCommand('copy');
+            helper.remove();
+            if (!copied) throw new Error('Copy command was rejected.');
+        }
+
+        async function copyCaseTitle() {
+            try {
+                if (navigator.clipboard && window.isSecureContext) {
+                    await navigator.clipboard.writeText(expectedCaseTitle);
+                } else {
+                    fallbackCopy(expectedCaseTitle);
+                }
+                caseDeleteCopyStatus.textContent = 'Case name copied.';
+            } catch (_error) {
+                caseDeleteCopyStatus.textContent = 'Copy failed. Select the case name and copy it manually.';
             }
-            const confirmation = form.querySelector('input[name="confirmation_name"]');
-            if (!confirmation) {
+        }
+
+        caseDeleteForms.forEach(function (form) {
+            form.addEventListener('submit', function (event) {
                 event.preventDefault();
-                return;
-            }
-            confirmation.value = typed;
+                pendingDeleteForm = form;
+                expectedCaseTitle = form.dataset.caseTitle || '';
+                caseDeleteExpected.textContent = expectedCaseTitle;
+                caseDeleteInput.value = '';
+                caseDeleteCopyStatus.textContent = '';
+                setDeleteValidation(false);
+                caseDeleteModal.show();
+            });
         });
-    });
+
+        caseDeleteInput.addEventListener('input', function () {
+            setDeleteValidation(false);
+        });
+        caseDeleteInput.addEventListener('keydown', function (event) {
+            if (event.key !== 'Enter') return;
+            event.preventDefault();
+            if (setDeleteValidation(true)) caseDeleteConfirm.click();
+        });
+        caseDeleteCopy.addEventListener('click', copyCaseTitle);
+        caseDeleteConfirm.addEventListener('click', function () {
+            if (!pendingDeleteForm || !setDeleteValidation(true)) return;
+            const confirmation = pendingDeleteForm.querySelector('input[name="confirmation_name"]');
+            if (!confirmation) return;
+            confirmation.value = caseDeleteInput.value;
+            caseDeleteConfirm.disabled = true;
+            HTMLFormElement.prototype.submit.call(pendingDeleteForm);
+        });
+        caseDeleteElement.addEventListener('shown.bs.modal', function () {
+            caseDeleteInput.focus();
+        });
+        caseDeleteElement.addEventListener('hidden.bs.modal', resetDeleteModal);
+    }
 
     if (window.lucide) window.lucide.createIcons({ attrs: { 'stroke-width': 1.8 } });
 })();
