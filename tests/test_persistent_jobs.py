@@ -445,6 +445,15 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "Delete case" in case_page
     assert 'name="confirmation_name"' in case_page
     assert 'data-case-title="alice"' in case_page
+    assert 'id="caseDeleteModal"' in case_page
+    assert 'id="caseDeleteCopy"' in case_page
+    assert 'id="caseDeleteConfirmation"' in case_page
+    assert 'id="caseDeleteConfirm"' in case_page
+
+    deletion_script = client.get("/static/openledger.js").get_data(as_text=True)
+    assert "navigator.clipboard.writeText" in deletion_script
+    assert "window.prompt" not in deletion_script
+    assert "window.alert" not in deletion_script
 
     persona_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
     assert "Alice Example" in persona_page

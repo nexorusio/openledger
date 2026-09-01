@@ -60,6 +60,63 @@
 .identity-enrichment-body { display: grid; gap: 1rem; }
 .public-record-clear { display: flex; gap: .5rem; align-items: center; color: var(--ol-muted); }
 
+/* Destructive case confirmation */
+.case-delete-modal {
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--ol-danger) 32%, var(--ol-border));
+    border-radius: 14px;
+    background: var(--ol-surface);
+    color: var(--ol-text);
+    box-shadow: 0 24px 70px rgba(0, 0, 0, .36);
+}
+.case-delete-modal .modal-header,
+.case-delete-modal .modal-footer { border-color: var(--ol-border); }
+.case-delete-modal .modal-header { align-items: flex-start; }
+.case-delete-modal .modal-title { font-size: 1.2rem; font-weight: 700; }
+.case-delete-modal .modal-body { display: grid; gap: .8rem; }
+.case-delete-modal .form-label { margin: .15rem 0 -.35rem; font-weight: 600; }
+.case-delete-warning {
+    display: flex;
+    gap: .75rem;
+    align-items: flex-start;
+    padding: .8rem;
+    border: 1px solid color-mix(in srgb, var(--ol-danger) 35%, var(--ol-border));
+    border-radius: .65rem;
+    background: color-mix(in srgb, var(--ol-danger) 9%, var(--ol-surface));
+}
+.case-delete-warning svg { flex: 0 0 auto; width: 1.15rem; color: var(--ol-danger); }
+.case-delete-warning p { margin: 0; color: var(--ol-muted); line-height: 1.5; }
+.case-delete-reference {
+    display: flex;
+    gap: .55rem;
+    align-items: stretch;
+}
+.case-delete-reference code {
+    min-width: 0;
+    flex: 1;
+    padding: .6rem .7rem;
+    border: 1px solid var(--ol-border);
+    border-radius: .5rem;
+    background: var(--ol-surface-muted);
+    color: var(--ol-text);
+    font-family: inherit;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+    user-select: all;
+}
+.case-delete-reference .btn { display: inline-flex; gap: .4rem; align-items: center; }
+.case-delete-reference svg,
+.case-delete-modal .modal-footer svg { width: 1rem; }
+.case-delete-copy-status {
+    min-height: 1rem;
+    margin: -.4rem 0 0;
+    color: var(--ol-muted);
+    font-size: .72rem;
+}
+.case-delete-error { margin: -.35rem 0 0; color: var(--ol-danger); font-size: .76rem; }
+.case-delete-modal .modal-footer { gap: .45rem; }
+.case-delete-modal .modal-footer .btn { display: inline-flex; gap: .45rem; align-items: center; }
+
 :root {
     --ol-accent: #0f8b8d;
     --ol-accent-strong: #087274;
