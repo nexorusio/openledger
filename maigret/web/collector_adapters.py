@@ -664,6 +664,15 @@ _PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
     r"whatsapp)\b)",
     re.IGNORECASE,
 )
+_PERSON_ROLE_LABEL_PATTERN = re.compile(
+    r"\b(?:advisers?|advisors?|ceo|cfo|chair|chairman|chairperson|chairwoman|"
+    r"chief executive officer|chief financial officer|chief operating officer|"
+    r"chief technology officer|cio|cmo|coo|counsel|cto|directors?|employees?|"
+    r"executives?|founders?|heads? of|lawyers?|managers?|officers?|owners?|"
+    r"partners?|presidents?|professors?|secretar(?:y|ies)|staff members?|"
+    r"treasurers?|vice presidents?|vp)\b",
+    re.IGNORECASE,
+)
 _BUSINESS_LOCATION_CONTEXT_PATTERN = re.compile(
     r"\b(?:business|company|commercial|corporate|organization|organisation|"
     r"office|headquarters?|head office|registered office|branch|store|facility|"
@@ -707,6 +716,9 @@ def _contains_personal_organization_data(value: Any) -> bool:
         or _PRIVATE_ADDRESS_PATTERN.search(text)
         or _EMAIL_ADDRESS_PATTERN.search(text)
         or _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
+        # Organization context observations never carry officer/employee roles;
+        # named people belong in the provenance-linked Persona proposal workflow.
+        or _PERSON_ROLE_LABEL_PATTERN.search(text)
     ):
         return bool(text)
     for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(text):
