@@ -1782,6 +1782,51 @@ def test_google_places_job_persists_only_place_id_and_displays_live_address(
     assert "never becomes a Persona address" in page
 
 
+def test_google_places_live_display_does_not_reuse_older_job_candidates(
+    web_app, monkeypatch
+):
+    called = False
+
+    async def google_live_details(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"status": "observed", "places": [{"formatted_address": "stale"}]}
+
+    monkeypatch.setattr(
+        web_app, "run_google_places_live_details", google_live_details
+    )
+    monkeypatch.setattr(
+        web_app, "get_google_maps_api_key", lambda: "restricted-server-key"
+    )
+    case = {
+        "jobs": [
+            {
+                "id": "latest",
+                "kind": "affiliation",
+                "google_places_search": {
+                    "status": "not_found",
+                    "candidates": [],
+                },
+            },
+            {
+                "id": "older",
+                "kind": "affiliation",
+                "google_places_search": {
+                    "status": "observed",
+                    "subject_value": "Unistellar",
+                    "candidates": [{"place_id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE"}],
+                },
+            },
+        ]
+    }
+
+    result = web_app.load_case_google_places_live(case)
+
+    assert result["status"] == "not_run"
+    assert result["places"] == []
+    assert called is False
+
+
 def test_history_describes_investigation_type_target_and_context(
     client, persistent_store
 ):

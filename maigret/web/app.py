@@ -4478,64 +4478,72 @@ def cases_workspace():
 
 def load_case_google_places_live(case: Dict[str, Any]) -> Dict[str, Any]:
     """Resolve stored Place IDs for transient display; never write API content."""
-    for job in list(case.get('jobs') or [])[:50]:
-        if job.get('kind') != 'affiliation':
-            continue
-        search = job.get('google_places_search')
-        if not isinstance(search, dict):
-            continue
-        candidates = [
-            candidate
-            for candidate in list(search.get('candidates') or [])[:5]
-            if isinstance(candidate, dict) and candidate.get('place_id')
-        ]
-        if not candidates:
-            continue
-        specification = (job.get('options') or {}).get(
-            'investigation_spec'
-        ) or {}
-        organization_name = str(
-            specification.get('affiliation_name')
-            or search.get('subject_value')
-            or ''
-        ).strip()
-        api_key = get_google_maps_api_key()
-        if not api_key:
-            return {
-                'status': 'unavailable',
-                'reason': (
-                    'Stored Google Place IDs remain available, but the protected '
-                    'Google Places connection is not currently configured.'
-                ),
-                'places': [],
-                'attribution': 'Google Maps',
-                'durable_google_content_stored': False,
-            }
-        try:
-            return asyncio.run(
-                run_google_places_live_details(
-                    organization_name,
-                    [candidate['place_id'] for candidate in candidates],
-                    api_key,
-                )
+    jobs = list(case.get('jobs') or [])
+    job = jobs[0] if jobs else None
+    search = job.get('google_places_search') if isinstance(job, dict) else None
+    if not (
+        isinstance(job, dict)
+        and job.get('kind') == 'affiliation'
+        and isinstance(search, dict)
+    ):
+        return {
+            'status': 'not_run',
+            'reason': 'The latest case job has no Google Places search result.',
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+    candidates = [
+        candidate
+        for candidate in list(search.get('candidates') or [])[:5]
+        if isinstance(candidate, dict) and candidate.get('place_id')
+    ]
+    if not candidates:
+        return {
+            'status': 'not_run',
+            'reason': 'The latest Google Places search retained no Place ID.',
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+    specification = (job.get('options') or {}).get(
+        'investigation_spec'
+    ) or {}
+    organization_name = str(
+        specification.get('affiliation_name')
+        or search.get('subject_value')
+        or ''
+    ).strip()
+    api_key = get_google_maps_api_key()
+    if not api_key:
+        return {
+            'status': 'unavailable',
+            'reason': (
+                'Stored Google Place IDs remain available, but the protected '
+                'Google Places connection is not currently configured.'
+            ),
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+    try:
+        return asyncio.run(
+            run_google_places_live_details(
+                organization_name,
+                [candidate['place_id'] for candidate in candidates],
+                api_key,
             )
-        except Exception as error:
-            return {
-                'status': 'unavailable',
-                'reason': record_internal_error(
-                    'Live Google Places details were unavailable', error
-                ),
-                'places': [],
-                'attribution': 'Google Maps',
-                'durable_google_content_stored': False,
-            }
-    return {
-        'status': 'not_run',
-        'reason': 'No Google Place ID was retained for this case.',
-        'places': [],
-        'attribution': 'Google Maps',
-        'durable_google_content_stored': False,
-    }
+        )
+    except Exception as error:
+        return {
+            'status': 'unavailable',
+            'reason': record_internal_error(
+                'Live Google Places details were unavailable', error
+            ),
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
 
 
 @app.route('/cases/<case_id>')

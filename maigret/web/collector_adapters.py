@@ -130,24 +130,42 @@ GOOGLE_PLACES_TIMEOUT_SECONDS = 15
 GOOGLE_PLACES_MAX_RESPONSE_BYTES = 256_000
 MAX_GOOGLE_PLACES_CANDIDATES = 5
 _GOOGLE_PLACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,512}$")
-_GOOGLE_NON_BUSINESS_TYPES = frozenset(
+_GOOGLE_BUSINESS_LOCATION_TYPES = frozenset(
     {
-        "administrative_area_level_1",
-        "administrative_area_level_2",
-        "administrative_area_level_3",
-        "administrative_area_level_4",
-        "administrative_area_level_5",
-        "administrative_area_level_6",
-        "administrative_area_level_7",
-        "country",
-        "geocode",
-        "locality",
-        "political",
-        "postal_code",
-        "premise",
-        "route",
-        "street_address",
-        "subpremise",
+        "academic_department",
+        "accounting",
+        "association_or_organization",
+        "bank",
+        "business_center",
+        "community_center",
+        "consultant",
+        "corporate_office",
+        "coworking_space",
+        "educational_institution",
+        "employment_agency",
+        "engineering_consultant",
+        "farm",
+        "finance",
+        "general_contractor",
+        "government_office",
+        "insurance_agency",
+        "internet_service_provider",
+        "lawyer",
+        "local_government_office",
+        "manufacturer",
+        "marketing_consultant",
+        "non_profit_organization",
+        "ranch",
+        "real_estate_agency",
+        "research_institute",
+        "school",
+        "software_company",
+        "supplier",
+        "telecommunications_service_provider",
+        "television_studio",
+        "travel_agency",
+        "university",
+        "wholesaler",
     }
 )
 
@@ -2048,7 +2066,7 @@ def _normalize_google_place_live_detail(
     business_types = [
         place_type
         for place_type in types
-        if place_type not in _GOOGLE_NON_BUSINESS_TYPES
+        if place_type in _GOOGLE_BUSINESS_LOCATION_TYPES
     ]
     if (
         not display_name

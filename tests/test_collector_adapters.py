@@ -822,11 +822,26 @@ async def test_google_places_details_are_live_review_leads_and_block_private_dat
                 }
             ).encode(),
         ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "id": "ChIJPersonalListing123456",
+                    "displayName": {"text": "Alice Doe"},
+                    "formattedAddress": "8 Oak Road, Jakarta 12730",
+                    "types": ["establishment", "point_of_interest"],
+                }
+            ).encode(),
+        ),
     ]
 
     result = await run_google_places_live_details(
         "Unistellar",
-        ["ChIJCzjlUUSv4S4RCiu9uL4NlvE", "ChIJPrivateResidence123456"],
+        [
+            "ChIJCzjlUUSv4S4RCiu9uL4NlvE",
+            "ChIJPrivateResidence123456",
+            "ChIJPersonalListing123456",
+        ],
         "restricted-server-key",
         session_factory=lambda **options: _FakeSequenceSession(
             responses, calls, **options
