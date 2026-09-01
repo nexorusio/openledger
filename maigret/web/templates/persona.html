@@ -116,9 +116,16 @@
     </form>
     {% if claim.review_status == 'approved' %}</details>{% endif %}
     {% if claim.reviewed_by %}<small class="review-meta">Last reviewed by {{ claim.reviewed_by }} · {{ claim.reviewed_at }}</small>{% endif %}
-    {% if claim.field_name == 'company' and claim.review_status == 'approved' %}
+    {% if claim.field_name in ('company', 'occupation') and claim.review_status == 'approved' %}
     <form method="POST" action="{{ url_for('investigate_affiliation_claim', claim_id=claim.id) }}" class="affiliation-investigation-action">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% if claim.field_name == 'occupation' %}
+        <label class="affiliation-jurisdiction-field">
+            <span>Organization named by this role</span>
+            <input type="text" name="organization_name" maxlength="500" value="{{ claim.suggested_organization_target }}" placeholder="e.g. ILUNI FEB UI" autocomplete="organization" required>
+        </label>
+        <small>Confirm the exact organization named by the approved role. This opens a research case; it does not silently turn the role text into an approved affiliation fact.</small>
+        {% endif %}
         <label class="affiliation-jurisdiction-field">
             <span>Registered jurisdiction <small>(optional)</small></span>
             <input type="text" name="jurisdiction" maxlength="100" placeholder="Indonesia, ID, or US-DE" autocomplete="off">
@@ -131,7 +138,7 @@
             <input type="checkbox" name="enable_domain_context" value="1">
             <span>Collect current DNS context</span>
         </label>
-        <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="building-2"></i> Open affiliation case</button>
+        <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="building-2"></i> {{ 'Investigate organization from role' if claim.field_name == 'occupation' else 'Open affiliation case' }}</button>
         <small>Registry and DNS checks are independent. DNS remains observation-only and never establishes where the business operates.</small>
     </form>
     {% endif %}
@@ -171,10 +178,7 @@
         <a href="{{ url_for('case_workspace', case_id=persona.case_id) }}" class="btn btn-outline-secondary">Open case</a>
         <a href="{{ url_for('case_timeline_workspace', case_id=persona.case_id, persona_id=persona.id) }}" class="btn btn-outline-secondary"><i data-lucide="list-tree"></i> Timeline</a>
         <a href="{{ url_for('relationships_workspace', mode='persona', case_id=persona.case_id, persona_id=persona.id) }}" class="btn btn-outline-secondary"><i data-lucide="share-2"></i> Evidence graph</a>
-        <form method="POST" action="{{ url_for('refresh_persona', persona_id=persona.id) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button type="submit" class="btn btn-primary"><i data-lucide="refresh-cw"></i> Run investigation again</button>
-        </form>
+        <a href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}" class="btn btn-primary"><i data-lucide="refresh-cw"></i> Configure investigation</a>
         {% if approved_full_name %}
             {% if identity_enrichment and identity_enrichment.status in ('queued', 'running', 'cancel_requested') %}
             <a href="{{ url_for('live_results', job_id=identity_enrichment.job_id) }}" class="btn btn-outline-secondary"><i data-lucide="scan-search"></i> Public-record progress</a>

@@ -791,7 +791,11 @@ are allowed only with public_web evidence and must be explicitly published
 institutional or business contact addresses; never propose or infer a private
 residence. Use the company field for any explicit
 affiliation, including an employer, educational institution, association, or
-organization. Never propose finances, vehicles, criminal records, sensitive
+organization. When a cited source explicitly states a role or occupation at a
+named organization, return two separate proposals: occupation for the role and
+company for the exact organization name. Do not leave the organization only
+embedded inside the occupation value, and do not infer one from a role title.
+Never propose finances, vehicles, criminal records, sensitive
 traits, or relationships. For a cited
 coarse current location only, an approximate city or region map center may be
 included. These records always require human review. Return an empty list when
@@ -964,7 +968,10 @@ investigated username. Omit uncertain values instead of guessing. Do not infer o
 or residential addresses. Email and phone values must be exact and explicitly published by the
 cited source. Address values must be explicitly published institutional or business contact
 addresses. Use the company field for any explicit affiliation, including an employer, educational
-institution, association, or organization. Never propose finances, vehicles, criminal records,
+institution, association, or organization. When a cited source explicitly states a role or
+occupation at a named organization, return separate occupation and company proposals; do not leave
+the organization only embedded in the occupation value, and do not infer one from a role title.
+Never propose finances, vehicles, criminal records,
 sensitive traits, or interpersonal relationships. A summary must be a concise public-biographical description, not a
 speculative biography. Confidence measures source support, never identity certainty alone. Keep it
 at or below 85. For a coarse current_location only, latitude and longitude may contain an

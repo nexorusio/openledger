@@ -658,6 +658,8 @@ class CaseStore:
         affiliation_name: str,
         *,
         source_claim_id: Optional[str] = None,
+        source_claim_field: Optional[str] = None,
+        target_basis: Optional[str] = None,
         jurisdiction: Any = None,
         enable_domain_context: bool = False,
         enable_public_web_research: bool = False,
@@ -677,6 +679,16 @@ class CaseStore:
         source_claim_id = str(source_claim_id or "").strip() or None
         if source_claim_id and len(source_claim_id) > 100:
             raise ValueError("Invalid source claim identifier")
+        source_claim_field = str(source_claim_field or "").strip() or None
+        if source_claim_field not in {None, "company", "occupation"}:
+            raise ValueError("Invalid source claim field")
+        target_basis = str(target_basis or "").strip() or None
+        if target_basis not in {
+            None,
+            "approved_affiliation_claim",
+            "analyst_confirmed_role_organization",
+        }:
+            raise ValueError("Invalid organization target basis")
         now = utcnow()
         case_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
         specification = {
@@ -684,6 +696,8 @@ class CaseStore:
             "investigation_type": "affiliation",
             "affiliation_name": affiliation_name,
             "source_claim_id": source_claim_id,
+            "source_claim_field": source_claim_field,
+            "target_basis": target_basis,
             "legal_jurisdiction": legal_jurisdiction,
             "enable_domain_context": enable_domain_context,
             "enable_public_web_research": bool(enable_public_web_research),
@@ -738,6 +752,9 @@ class CaseStore:
                 "type": "queued",
                 "target_type": "affiliation",
                 "affiliation": affiliation_name,
+                "source_claim_id": source_claim_id,
+                "source_claim_field": source_claim_field,
+                "target_basis": target_basis,
                 "legal_jurisdiction": legal_jurisdiction,
                 "domain_context_requested": enable_domain_context,
                 "public_web_research_requested": bool(
@@ -1089,6 +1106,8 @@ class CaseStore:
             candidate = None
             affiliation_name = ""
             source_claim_id = None
+            source_claim_field = None
+            target_basis = None
             legal_jurisdiction = None
             enable_domain_context = False
             enable_public_web_research = bool(enable_public_web_research)
@@ -1099,6 +1118,10 @@ class CaseStore:
                 spec = dict(prior["options"] or {}).get("investigation_spec") or {}
                 affiliation_name = affiliation_name or str(spec.get("affiliation_name") or "")
                 source_claim_id = source_claim_id or spec.get("source_claim_id")
+                source_claim_field = source_claim_field or spec.get(
+                    "source_claim_field"
+                )
+                target_basis = target_basis or spec.get("target_basis")
                 legal_jurisdiction = legal_jurisdiction or spec.get(
                     "legal_jurisdiction"
                 )
@@ -1133,6 +1156,8 @@ class CaseStore:
                 "investigation_type": "affiliation",
                 "affiliation_name": affiliation_name[:500],
                 "source_claim_id": source_claim_id,
+                "source_claim_field": source_claim_field,
+                "target_basis": target_basis,
                 "legal_jurisdiction": legal_jurisdiction,
                 "enable_domain_context": enable_domain_context,
                 "enable_public_web_research": enable_public_web_research,
@@ -1279,7 +1304,12 @@ class CaseStore:
         )
         return job_id
 
-    def repeat_persona_investigation(self, persona_id: str) -> str:
+    def repeat_persona_investigation(
+        self,
+        persona_id: str,
+        usernames: Optional[Iterable[str]] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Queue a fresh collection for one existing persona in the same case."""
         now = utcnow()
         job_id = str(uuid.uuid4())
@@ -1316,34 +1346,54 @@ class CaseStore:
                 .mappings()
                 .first()
             )
+            explicit_plan = usernames is not None or options is not None
+            if explicit_plan and (usernames is None or options is None):
+                raise ValueError(
+                    "Persona reruns require both search targets and options"
+                )
             latest_options: Dict[str, Any] = (
                 dict(latest_job["options"] or {}) if latest_job else {}
             )
-            latest_usernames = (
-                list(latest_job["usernames"] or []) if latest_job else []
-            )
-            investigation_spec = latest_options.get("investigation_spec")
+            latest_usernames = list(latest_job["usernames"] or []) if latest_job else []
+            queued_options = dict(options or {}) if explicit_plan else latest_options
+            investigation_spec = queued_options.get("investigation_spec")
             grouped = (
                 isinstance(investigation_spec, dict)
                 and investigation_spec.get("processing_mode") == "same_subject"
             )
-            username = str(persona_row["display_name"]).strip()
-            usernames = (
-                [str(value).strip() for value in latest_usernames]
-                if grouped
-                else [username]
+            display_name = str(persona_row["display_name"]).strip()
+            queued_usernames = (
+                [str(value).strip() for value in list(usernames or [])]
+                if explicit_plan
+                else (
+                    [str(value).strip() for value in latest_usernames]
+                    if grouped
+                    else [display_name]
+                )
             )
-            usernames = [value for value in usernames if value]
-            if not usernames:
+            queued_usernames = [value for value in queued_usernames if value]
+            if not queued_usernames:
                 raise ValueError("No searchable account identifiers are available")
+            if explicit_plan:
+                specification = (
+                    dict(investigation_spec)
+                    if isinstance(investigation_spec, dict)
+                    else {}
+                )
+                specification.update(
+                    processing_mode="same_subject",
+                    subject_label=display_name,
+                    target_persona_id=persona_id,
+                )
+                queued_options["investigation_spec"] = specification
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,
                     case_id=persona_row["case_id"],
                     kind="refresh",
                     status="queued",
-                    usernames=usernames,
-                    options=latest_options,
+                    usernames=queued_usernames,
+                    options=queued_options,
                     progress={"checked": 0, "total": None, "found": 0},
                     result=None,
                     error=None,
@@ -1360,7 +1410,12 @@ class CaseStore:
             )
         self.append_event(
             job_id,
-            {"type": "queued", "usernames": usernames, "reason": "persona_refresh"},
+            {
+                "type": "queued",
+                "usernames": queued_usernames,
+                "reason": "persona_refresh",
+                "target_persona_id": persona_id,
+            },
         )
         return job_id
 
@@ -3286,13 +3341,26 @@ class CaseStore:
             investigation_spec = dict(job_row["options"] or {}).get(
                 "investigation_spec"
             )
-            grouped_persona_id = (
-                persona_rows[0]["id"]
+            target_persona_id = (
+                str(investigation_spec.get("target_persona_id") or "")
                 if isinstance(investigation_spec, dict)
+                else ""
+            )
+            grouped_persona_id = next(
+                (
+                    row["id"]
+                    for row in persona_rows
+                    if target_persona_id and row["id"] == target_persona_id
+                ),
+                None,
+            )
+            if (
+                grouped_persona_id is None
+                and isinstance(investigation_spec, dict)
                 and investigation_spec.get("processing_mode") == "same_subject"
                 and len(persona_rows) == 1
-                else None
-            )
+            ):
+                grouped_persona_id = persona_rows[0]["id"]
             if grouped_persona_id:
                 synchronized += self._upsert_persona_candidates(
                     connection,
@@ -3434,13 +3502,26 @@ class CaseStore:
             investigation_spec = dict(job_row["options"] or {}).get(
                 "investigation_spec"
             )
-            grouped_persona_id = (
-                persona_rows[0]["id"]
+            target_persona_id = (
+                str(investigation_spec.get("target_persona_id") or "")
                 if isinstance(investigation_spec, dict)
+                else ""
+            )
+            grouped_persona_id = next(
+                (
+                    row["id"]
+                    for row in persona_rows
+                    if target_persona_id and row["id"] == target_persona_id
+                ),
+                None,
+            )
+            if (
+                grouped_persona_id is None
+                and isinstance(investigation_spec, dict)
                 and investigation_spec.get("processing_mode") == "same_subject"
                 and len(persona_rows) == 1
-                else None
-            )
+            ):
+                grouped_persona_id = persona_rows[0]["id"]
             for candidate in candidates:
                 persona_id = grouped_persona_id or personas_by_name.get(
                     candidate["username"].casefold()

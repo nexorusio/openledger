@@ -1,15 +1,20 @@
 {% extends "base.html" %}
 
-{% block breadcrumb %}New investigation{% endblock %}
+{% block breadcrumb %}{{ 'Configure person investigation' if investigation_persona else 'New investigation' }}{% endblock %}
 
 {% block content %}
 <section class="page-heading">
     <div>
-        <p class="eyebrow">Username intelligence</p>
-        <h1>Investigation workspace</h1>
+        <p class="eyebrow">{{ 'Persona intelligence' if investigation_persona else 'Username intelligence' }}</p>
+        <h1>{{ 'Investigate ' ~ investigation_persona.display_name if investigation_persona else 'Investigation workspace' }}</h1>
         <p class="page-description">
+            {% if investigation_persona %}
+            Configure identifiers, source coverage, enrichment, and cited public-web research
+            before collecting more evidence for this existing Persona.
+            {% else %}
             Discover a username's public footprint across the OpenLedger source network,
             review claimed profiles, and generate a controlled AI-assisted assessment.
+            {% endif %}
         </p>
     </div>
     <span class="badge-soft">
@@ -53,13 +58,19 @@
     <article class="panel-card">
         <header class="panel-header">
             <div>
-                <h2>Start a new investigation</h2>
-                <p>Define the subject, account identifiers, and how results should be correlated.</p>
+                <h2>{{ 'Configure this person investigation' if investigation_persona else 'Start a new investigation' }}</h2>
+                <p>
+                    {% if investigation_persona %}
+                    Add or amend known identifiers and choose the same governed collectors available for a new investigation.
+                    {% else %}
+                    Define the subject, account identifiers, and how results should be correlated.
+                    {% endif %}
+                </p>
             </div>
             <span class="badge-soft">Live</span>
         </header>
         <div class="panel-body">
-            <form method="POST" action="{{ url_for('live_start') }}" id="investigation-builder">
+            <form method="POST" action="{{ url_for('configure_persona_investigation', persona_id=investigation_persona.id) if investigation_persona else url_for('live_start') }}" id="investigation-builder">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
                 <fieldset class="investigation-section">
@@ -76,25 +87,31 @@
                     </div>
 
                     <div class="identifier-list" id="identifier-list">
+                        {% for identifier in initial_identifiers %}
                         <div class="identifier-row">
-                            <label class="visually-hidden" for="identifier-type-1">Identifier type</label>
-                            <select class="form-select identifier-type" id="identifier-type-1" name="identifier_type" aria-label="Identifier type">
-                                <option value="username" selected>Username</option>
-                                <option value="social_handle">Social handle</option>
-                                <option value="profile_url">Profile URL</option>
-                                <option value="full_name">Full name</option>
-                                <option value="email">Email address</option>
-                                <option value="phone">Phone number</option>
+                            <label class="visually-hidden" for="identifier-type-{{ loop.index }}">Identifier type</label>
+                            <select class="form-select identifier-type" id="identifier-type-{{ loop.index }}" name="identifier_type" aria-label="Identifier type">
+                                <option value="username" {{ 'selected' if identifier.type == 'username' }}>Username</option>
+                                <option value="social_handle" {{ 'selected' if identifier.type == 'social_handle' }}>Social handle</option>
+                                <option value="profile_url" {{ 'selected' if identifier.type == 'profile_url' }}>Profile URL</option>
+                                <option value="full_name" {{ 'selected' if identifier.type == 'full_name' }}>Full name</option>
+                                <option value="email" {{ 'selected' if identifier.type == 'email' }}>Email address</option>
+                                <option value="phone" {{ 'selected' if identifier.type == 'phone' }}>Phone number</option>
                             </select>
-                            <label class="visually-hidden" for="identifier-value-1">Identifier value</label>
-                            <input class="form-control identifier-value" id="identifier-value-1" name="identifier_value"
-                                autocomplete="off" spellcheck="false" required placeholder="e.g. johndoe">
+                            <label class="visually-hidden" for="identifier-value-{{ loop.index }}">Identifier value</label>
+                            <input class="form-control identifier-value" id="identifier-value-{{ loop.index }}" name="identifier_value"
+                                autocomplete="off" spellcheck="false" required value="{{ identifier.value }}">
                             <span class="identifier-behavior">Exact account check</span>
-                            <button type="button" class="icon-button identifier-remove" aria-label="Remove identifier" disabled>
+                            <button type="button" class="icon-button identifier-remove" aria-label="Remove identifier" {{ 'disabled' if initial_identifiers | length == 1 }}>
                                 <i data-lucide="x"></i>
                             </button>
                         </div>
+                        {% endfor %}
                     </div>
+
+                    {% if investigation_persona %}
+                    <p class="form-text mt-2">The Persona display name and analyst-approved identifiers are prefilled. Pending or uncertain evidence is not silently reused; review it first or add it explicitly here.</p>
+                    {% endif %}
 
                     <div class="form-check investigation-check">
                         <input class="form-check-input" type="checkbox" id="generate-name-variants" name="generate_name_variants" checked>
@@ -134,15 +151,15 @@
                         <div class="mode-option">
                             <input type="radio" name="processing_mode" id="mode-subject" value="same_subject" checked>
                             <label for="mode-subject">
-                                <strong>One subject</strong>
-                                <small>Scan identifiers separately, then place their claims under one reviewable persona</small>
+                                <strong>{{ 'One existing Persona' if investigation_persona else 'One subject' }}</strong>
+                                <small>{{ 'Route every configured identifier and resulting proposal back to ' ~ investigation_persona.display_name if investigation_persona else 'Scan identifiers separately, then place their claims under one reviewable persona' }}</small>
                             </label>
                         </div>
                         <div class="mode-option">
-                            <input type="radio" name="processing_mode" id="mode-independent" value="independent">
+                            <input type="radio" name="processing_mode" id="mode-independent" value="independent" {{ 'disabled' if investigation_persona }}>
                             <label for="mode-independent">
                                 <strong>Independent subjects</strong>
-                                <small>Create a separate persona for every exact or generated account identifier</small>
+                                <small>{{ 'Start a new investigation to create separate Personas' if investigation_persona else 'Create a separate persona for every exact or generated account identifier' }}</small>
                             </label>
                         </div>
                     </div>
@@ -217,7 +234,7 @@
                 <div class="alert alert-danger investigation-form-error" id="investigation-form-error" role="alert" hidden></div>
 
                 <button type="submit" id="startBtn" class="btn btn-primary investigation-submit">
-                    Start investigation
+                    {{ 'Run configured investigation' if investigation_persona else 'Start investigation' }}
                 </button>
             </form>
 

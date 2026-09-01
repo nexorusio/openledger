@@ -398,6 +398,8 @@ def test_evidence_proposal_request_uses_strict_schema_without_web_search(monkeyp
     )
     assert "explicitly published" in normalized_instructions
     assert "educational institution" in normalized_instructions
+    assert "separate occupation and company proposals" in normalized_instructions
+    assert "do not infer one from a role title" in normalized_instructions
     assert "tools" not in captured["payload"]
 
 
@@ -459,6 +461,11 @@ def test_case_chat_proposal_request_supports_user_and_web_evidence_without_brows
         "properties"
     ]["evidence_basis"]
     assert set(evidence_basis["enum"]) == {"user_statement", "public_web"}
+    normalized_instructions = " ".join(
+        captured["payload"]["instructions"].split()
+    )
+    assert "return two separate proposals" in normalized_instructions
+    assert "do not infer one from a role title" in normalized_instructions
     assert "tools" not in captured["payload"]
 
 

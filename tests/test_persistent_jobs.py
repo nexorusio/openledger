@@ -697,7 +697,7 @@ def test_approving_place_without_coordinates_generates_and_persists_centroid(
     assert 'id="personaLocationMap"' in page
 
 
-def test_persona_refresh_queues_new_collection_in_the_same_case(
+def test_legacy_persona_refresh_requires_configuration_before_queueing(
     client, persistent_store
 ):
     job_id = persistent_store.create_investigation(["alice"], {"top_sites": 250})
@@ -724,12 +724,82 @@ def test_persona_refresh_queues_new_collection_in_the_same_case(
     )
 
     assert response.status_code == 302
+    assert response.location.endswith(f"/personas/{persona_id}/investigate")
+    assert len(persistent_store.get_case(case["id"])["jobs"]) == 1
+
+
+def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
+    client, persistent_store
+):
+    subject = "Ferdinata Suryanto"
+    job_id = persistent_store.create_investigation(
+        ["ferdinatasuryanto"],
+        {
+            "investigation_spec": {
+                "processing_mode": "same_subject",
+                "subject_label": subject,
+            }
+        },
+    )
+    source_job = persistent_store.claim_next("worker:persona-builder-source")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": ["ferdinatasuryanto"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    persona_id = persistent_store.get_case(source_job["case_id"])["personas"][0][
+        "id"
+    ]
+
+    builder = client.get(f"/personas/{persona_id}/investigate")
+    body = builder.get_data(as_text=True)
+    assert builder.status_code == 200
+    assert "Configure this person investigation" in body
+    assert f'value="{subject}"' in body
+    assert "Cited public-web research" in body
+    assert "Case source filters" in body
+    assert "Full check" in body
+    assert "Pending or uncertain evidence is not silently reused" in body
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "configured-persona-csrf"
+    response = client.post(
+        f"/personas/{persona_id}/investigate",
+        data={
+            "csrf_token": "configured-persona-csrf",
+            "identifier_type": ["full_name", "social_handle", "email"],
+            "identifier_value": [subject, "@ferdinata", "f@example.test"],
+            "processing_mode": "same_subject",
+            "generate_name_variants": "on",
+            "allow_ai_context": "on",
+            "enable_github_profile_enrichment": "on",
+            "enable_archived_url_evidence": "on",
+            "tags": ["social"],
+            "mode": "full",
+        },
+    )
+
+    assert response.status_code == 302
     refresh_job_id = response.location.rsplit("/", 1)[-1]
     refresh_job = persistent_store.get_job(refresh_job_id)
-    assert refresh_job["case_id"] == case["id"]
-    assert refresh_job["status"] == "queued"
+    specification = refresh_job["options"]["investigation_spec"]
     assert refresh_job["kind"] == "refresh"
-    assert refresh_job["options"]["top_sites"] == 250
+    assert refresh_job["case_id"] == source_job["case_id"]
+    assert refresh_job["options"]["all_sites"] is True
+    assert refresh_job["options"]["tags"] == ["social"]
+    assert specification["target_persona_id"] == persona_id
+    assert specification["subject_label"] == subject
+    assert specification["processing_mode"] == "same_subject"
+    assert specification["allow_ai_context"] is True
+    assert specification["enable_github_profile_enrichment"] is True
+    assert specification["enable_archived_url_evidence"] is True
+    assert "ferdinata" in refresh_job["usernames"]
+    assert "f@example.test" not in refresh_job["usernames"]
 
 
 def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
@@ -1794,6 +1864,96 @@ def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
         "official_website"
     ]["domain"] == "example.org"
     assert persistent_store.get_case(affiliation_job["case_id"])["personas"] == []
+
+
+def test_approved_role_can_open_an_analyst_confirmed_organization_case(
+    client, persistent_store
+):
+    source_job_id = persistent_store.create_investigation(["imanul"], {})
+    source_job = persistent_store.claim_next("worker:role-source")
+    role = "Head of the Digital Economy Division, ILUNI FEB UI"
+    result = {
+        "status": "completed",
+        "usernames": ["imanul"],
+        "individual_reports": [
+            {
+                "username": "imanul",
+                "claimed_profiles": [
+                    {
+                        "site_name": "FEB UI",
+                        "url": "https://feb.ui.ac.id/example",
+                        "confidence": "strong",
+                        "evidence": {"occupation": role},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(source_job_id, result)
+    persistent_store.sync_persona_claims(source_job_id, result)
+    persona = persistent_store.get_persona(
+        persistent_store.get_case(source_job["case_id"])["personas"][0]["id"]
+    )
+    occupation = next(
+        claim for claim in persona["claims"] if claim["field_name"] == "occupation"
+    )
+    unreviewed_page = client.get(f"/personas/{persona['id']}").get_data(
+        as_text=True
+    )
+    assert "Investigate organization from role" not in unreviewed_page
+
+    persistent_store.review_claim(occupation["id"], "approved", "analyst")
+    reviewed_page = client.get(f"/personas/{persona['id']}").get_data(
+        as_text=True
+    )
+    assert "Investigate organization from role" in reviewed_page
+    assert 'value="ILUNI FEB UI"' in reviewed_page
+    assert "does not silently turn the role text into an approved affiliation fact" in (
+        reviewed_page
+    )
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "role-organization-csrf"
+    rejected = client.post(
+        f"/claims/{occupation['id']}/investigate-affiliation",
+        data={
+            "csrf_token": "role-organization-csrf",
+            "organization_name": "Unrelated Organization",
+        },
+        follow_redirects=True,
+    )
+    assert "must match exact text in the approved role" in rejected.get_data(
+        as_text=True
+    )
+    assert len(persistent_store.list_jobs()) == 1
+
+    response = client.post(
+        f"/claims/{occupation['id']}/investigate-affiliation",
+        data={
+            "csrf_token": "role-organization-csrf",
+            "organization_name": "ILUNI FEB UI",
+            "jurisdiction": "ID",
+        },
+    )
+
+    assert response.status_code == 302
+    affiliation_job = persistent_store.get_job(response.location.rsplit("/", 1)[-1])
+    specification = affiliation_job["options"]["investigation_spec"]
+    assert specification["affiliation_name"] == "ILUNI FEB UI"
+    assert specification["source_claim_id"] == occupation["id"]
+    assert specification["source_claim_field"] == "occupation"
+    assert specification["target_basis"] == (
+        "analyst_confirmed_role_organization"
+    )
+    assert specification["legal_jurisdiction"]["code"] == "ID"
+    queued_event = persistent_store.get_events(affiliation_job["job_id"])[0][
+        "event"
+    ]
+    assert queued_event["source_claim_id"] == occupation["id"]
+    assert queued_event["source_claim_field"] == "occupation"
+    assert queued_event["target_basis"] == (
+        "analyst_confirmed_role_organization"
+    )
 
 
 def _persistent_approved_full_name(store, name="Alice Example"):
