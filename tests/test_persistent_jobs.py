@@ -1534,7 +1534,8 @@ def test_affiliation_job_retains_cited_linkedin_and_map_observations_without_scr
         return {
             "analysis": (
                 "The cited LinkedIn company page publishes the Jakarta business "
-                "address, and the cited map listing points to the same organization."
+                "address, and the cited map listing points to the same organization. "
+                "Home address: 8 Private Road belongs to an employee."
             ),
             "sources": [
                 {"title": "Unistellar | LinkedIn", "url": linkedin_url},
@@ -1600,6 +1601,8 @@ def test_affiliation_job_retains_cited_linkedin_and_map_observations_without_scr
     completed = persistent_store.get_job(job_id)
     assert completed["status"] == "completed"
     assert completed["public_web_research"]["status"] == "observed"
+    assert completed["public_web_research"]["analysis"] == ""
+    assert "8 Private Road" not in json.dumps(completed)
     assert completed["public_web_finding_count"] == 2
     findings = completed["public_web_research"]["findings"]
     assert {finding["source_role"] for finding in findings} == {
@@ -1641,7 +1644,10 @@ def test_cited_research_extraction_failure_is_partial_not_an_evidence_gap(
 
     async def cited_research(**_kwargs):
         return {
-            "analysis": "A cited source may describe a Jakarta business location.",
+            "analysis": (
+                "A cited source may describe a Jakarta business location. "
+                "Employee personal data: alice@example.test."
+            ),
             "sources": [
                 {
                     "title": "Unistellar company profile",
@@ -1673,9 +1679,11 @@ def test_cited_research_extraction_failure_is_partial_not_an_evidence_gap(
     completed = persistent_store.get_job(job_id)
     research = completed["public_web_research"]
     assert research["status"] == "partial"
-    assert research["analysis"].startswith("A cited source")
+    assert research["analysis"] == ""
     assert research["findings"] == []
     assert "without recording a zero-result conclusion" in research["reason"]
+    assert "unvalidated model narrative was discarded" in research["reason"]
+    assert "alice@example.test" not in json.dumps(completed)
     assert "private structured extraction diagnostic" not in json.dumps(completed)
     events = [item["event"] for item in persistent_store.get_events(job_id)]
     assert any(
@@ -1845,6 +1853,22 @@ def test_history_describes_investigation_type_target_and_context(
     assert "Unistellar" in page
     assert "Indonesia · ID" in page
     assert "unistellar.co" in page
+
+
+def test_history_counts_identity_enrichment_proposal_fields(web_app):
+    context = web_app.build_investigation_history_context(
+        {
+            "kind": "identity_enrichment",
+            "status": "completed",
+            "options": {
+                "investigation_spec": {"confirmed_name": "Alice Example"}
+            },
+            "wikipedia_claim_count": 2,
+            "offshore_alert_count": 1,
+        }
+    )
+
+    assert context["finding_summary"] == "3 claim proposals"
 
 
 def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(

@@ -3015,19 +3015,25 @@ def run_persistent_affiliation_job(
             status = 'partial' if proposal_error else 'observed'
             reason = (
                 'Cited public-web research completed, but structured '
-                'organization observations were unavailable. The narrative and '
-                'citations were retained without recording a zero-result conclusion.'
+                'organization observations were unavailable. Citations were retained '
+                'without recording a zero-result conclusion; the unvalidated model '
+                'narrative was discarded.'
                 if proposal_error
                 else (
-                    'Cited public-web research completed. Every structured '
-                    'organization observation remains pending analyst verification.'
+                    'Cited public-web research completed. The unvalidated model '
+                    'narrative was discarded; every structured organization '
+                    'observation remains pending analyst verification.'
                 )
             )
             return {
                 'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
                 'status': status,
                 'reason': reason,
-                'analysis': str(response.get('analysis') or '')[:30_000],
+                # The raw model narrative is used transiently for structured
+                # extraction above. It is not privacy-normalized evidence and may
+                # repeat private addresses or employee data despite the prompt, so
+                # only the validated findings and citations cross the durable boundary.
+                'analysis': '',
                 'sources': list(response.get('sources') or [])[:100],
                 'findings': findings,
                 'proposal_error': proposal_error,
@@ -4413,7 +4419,12 @@ def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]
             ).split()
         )
         context_parts.append('Wikipedia and ICIJ public records')
-        proposal_count = int(entry.get('claim_proposal_count') or 0)
+        proposal_count = 0
+        for field_name in ('wikipedia_claim_count', 'offshore_alert_count'):
+            try:
+                proposal_count += max(0, int(entry.get(field_name) or 0))
+            except (TypeError, ValueError):
+                continue
         finding_summary = (
             f"{proposal_count} claim proposal"
             f"{'s' if proposal_count != 1 else ''}"
@@ -4869,7 +4880,7 @@ def suggested_role_organization(value):
             re.finditer(r"\s+(?:for|with)\s+", role, flags=re.IGNORECASE)
         )
         if contextual_separators:
-            candidate = role[contextual_separators[-1].end() :].strip()
+            candidate = role[contextual_separators[0].end() :].strip()
     if (
         not 2 <= len(candidate) <= 200
         or not any(character.isalpha() for character in candidate)
