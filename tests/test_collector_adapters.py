@@ -782,9 +782,12 @@ async def test_wikidata_exact_name_requires_review_when_case_context_conflicts()
     assert observation["status"] == "needs_selection"
     candidate = observation["organization_candidates"][0]
     assert candidate["context_status"] == "conflict"
-    assert "unistellar.co" in candidate["context_note"]
-    assert "example.org" in candidate["context_note"]
-    assert "Jurisdiction ID" in candidate["context_note"]
+    assert candidate["context_note"] == (
+        "Supplied website unistellar.co differs from Wikidata website example.org. "
+        "Jurisdiction ID requires analyst confirmation; an exact name is not "
+        "jurisdiction proof."
+    )
+    assert candidate["official_websites"] == ["https://example.org"]
     assert [item[1]["url"] for item in calls if item[0] == "get"] == [
         WIKIDATA_API_URL,
         WIKIDATA_API_URL,
