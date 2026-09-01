@@ -1890,6 +1890,18 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
             "latitude": None,
             "longitude": None,
         },
+        {
+            "observation_type": "company_profile",
+            "value": "Management-team: Alice Doe",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "Alice Doe is a team-member and joined the board.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
     ]
 
     assert normalize_public_web_organization_findings(
@@ -1914,11 +1926,21 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "title": "Alice Doe joins Acme's C-suite",
                 "url": "https://example.org/executives",
             },
+            {
+                "title": "Alice Doe joins Acme's board",
+                "url": "https://example.org/board",
+            },
+            {
+                "title": "Management-team: Alice Doe",
+                "url": "https://example.org/management",
+            },
         ]
     ) == [
         {"title": "example.org", "url": "https://example.org/company"},
         {"title": "example.org", "url": "https://example.org/leadership"},
         {"title": "example.org", "url": "https://example.org/executives"},
+        {"title": "example.org", "url": "https://example.org/board"},
+        {"title": "example.org", "url": "https://example.org/management"},
     ]
 
 

@@ -665,7 +665,7 @@ _PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _PERSON_ROLE_LABEL_PATTERN = re.compile(
-    r"\b(?:advisers?|advisors?|board members?|board of directors|c[- ]suite|"
+    r"\b(?:advisers?|advisors?|board|board members?|board of directors|c suite|"
     r"ceo|cfo|chair|chairman|chairperson|chairwoman|"
     r"chief [a-z][a-z -]{1,40} officer|"
     r"chief executive officer|chief financial officer|chief operating officer|"
@@ -714,6 +714,7 @@ def _looks_like_public_address(value: Any) -> bool:
 def _contains_personal_organization_data(value: Any) -> bool:
     """Reject person-level contact data from organization-only observations."""
     text = _bounded_text(value, limit=3000)
+    role_text = re.sub(r"[-‐‑‒–—_/]+", " ", text)
     if (
         not text
         or _PRIVATE_ADDRESS_PATTERN.search(text)
@@ -721,7 +722,7 @@ def _contains_personal_organization_data(value: Any) -> bool:
         or _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
         # Organization context observations never carry officer/employee roles;
         # named people belong in the provenance-linked Persona proposal workflow.
-        or _PERSON_ROLE_LABEL_PATTERN.search(text)
+        or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
     ):
         return bool(text)
     for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(text):
