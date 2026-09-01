@@ -1,383 +1,305 @@
-# Maigret
+<p align="center">
+  <img src="maigret/web/static/openledger-mark.svg" width="88" alt="OpenLedger mark">
+</p>
 
-<div align="center">
-  <div>
-    <a href="https://pypi.org/project/maigret/">
-        <img alt="PyPI version badge for Maigret" src="https://img.shields.io/pypi/v/maigret?style=flat-square" />
-    </a>
-    <a href="https://pepy.tech/project/maigret">
-      <img alt="Total downloads" src="https://static.pepy.tech/badge/maigret" />
-      <img alt="Downloads/month" src="https://static.pepy.tech/badge/maigret/month" />
-    </a>
-  </div>
-  <div>
-    <a href="https://github.com/soxoj/maigret">
-        <img alt="View count for Maigret project" src="https://komarev.com/ghpvc/?username=maigret&color=brightgreen&label=views&style=flat-square" />
-    </a>
-    <a href="https://github.com/soxoj/maigret">
-        <img alt="Minimum Python version required: 3.10+" src="https://img.shields.io/badge/Python-3.10%2B-brightgreen?style=flat-square" />
-    </a>
-    <a href="https://github.com/soxoj/maigret/blob/main/LICENSE">
-        <img alt="License badge for Maigret" src="https://img.shields.io/github/license/soxoj/maigret?style=flat-square" />
-    </a>
-  </div>
-  <br>
-  <div>
-    <img src="https://raw.githubusercontent.com/soxoj/maigret/main/static/maigret.png" height="300" alt="Maigret logo"/>
-  </div>
-  <br>
-  <div>
-    <a href="https://codewiki.google/github.com/soxoj/maigret">
-        <img alt="Ask Code Wiki about Maigret" src="https://img.shields.io/badge/Code_Wiki-ask_about_repo-yellow?logo=googlegemini" />
-    </a>
-    <a href="https://deepwiki.com/soxoj/maigret">
-        <img alt="Ask DeepWiki about Maigret" src="https://img.shields.io/badge/DeepWiki-ask_about_repo-yellow" />
-    </a>
-  </div>
-  <br>
-  <div>
-    <b>English</b> · <a href="README.zh-CN.md">简体中文</a>
-  </div>
-  <br>
-</div>
-
-**Maigret** collects a dossier on a person **by username only**, checking for accounts on a huge number of sites and gathering all the available information from web pages. No API keys required. **[AI profiling (demo)](#ai-analysis)**. 
-
-## Sponsors
+<h1 align="center">OpenLedger</h1>
 
 <p align="center">
-  <a href="https://www.ipcook.com/?ref=githubmaigret&utm_source=github&utm_medium=referral&utm_campaign=maigret">
-    <img src="https://github.com/user-attachments/assets/8c02d81a-8135-408d-a5e0-7558a1f49a2d" width="400" alt="IPcook">
-  </a>
+  Governed OSINT case intelligence for evidence-backed investigations.
 </p>
-
-<p>
-   <a href="https://www.ipcook.com/?ref=githubmaigret&utm_source=github&utm_medium=referral&utm_campaign=maigret"><b>IPcook</b></a> provides reliable residential proxies for online research, username discovery, and public data collection workflows. High success rates • 99.99% uptime • Response time under 0.5s • Monthly & Pay-as-you-go • Non-expiring traffic • Up to 10 free sub-accounts for team collaboration • Residential proxies from $0.3–$3.2/GB.<br>
-<b>Special Offer</b>: FREE 100MB trial available. Use code WELCOME20 for 20% off.
-</p>
-
-<br>
 
 <p align="center">
-  <a href="https://www.rapidproxy.io/?ref=soxoj">
-    <img src="https://github.com/user-attachments/assets/4ed589d1-37cb-4a40-9273-bff4d6f1a514" width="500" alt="RapidProxy">
-  </a>
+  <a href="https://github.com/nexorusio/openledger/actions/workflows/python-package.yml"><img alt="Linting and testing" src="https://github.com/nexorusio/openledger/actions/workflows/python-package.yml/badge.svg"></a>
+  <a href="https://github.com/nexorusio/openledger/actions/workflows/openledger-persistence.yml"><img alt="PostgreSQL persistence safety" src="https://github.com/nexorusio/openledger/actions/workflows/openledger-persistence.yml/badge.svg"></a>
+  <a href="https://github.com/nexorusio/openledger/actions/workflows/codeql-analysis.yml"><img alt="CodeQL" src="https://github.com/nexorusio/openledger/actions/workflows/codeql-analysis.yml/badge.svg"></a>
+  <a href="https://github.com/nexorusio/openledger/actions/workflows/osint-source-audit.yml"><img alt="Governed OSINT source audit" src="https://github.com/nexorusio/openledger/actions/workflows/osint-source-audit.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
 </p>
 
-<p>
-  <a href="https://www.rapidproxy.io/?ref=soxoj"><b>RapidProxy</b></a> provides high-performance residential proxies for Twitter scraping, Selenium automation, and web data extraction. 90M+ IPs • Smart rotation • Anti-block • Non-expiring traffic. <br>
-<b>Special Offer</b>: Try it free — Plans from $0.65/GB. Use code <b>RAPID10</b> for 10% off.
-</p>
+OpenLedger turns public-source findings into durable cases, reviewable Personas,
+evidence timelines, maps, and relationship leads. Collection and AI systems may
+propose evidence, but only a human analyst can approve a claim as part of the
+canonical case record.
 
-## Contents
+> [!IMPORTANT]
+> OpenLedger is intended for lawful, authorized investigations. A discovered
+> account, shared attribute, exact-name database result, or AI suggestion is not
+> proof of identity, association, wrongdoing, or current activity. Verify every
+> material conclusion against its underlying evidence and applicable policy.
 
-- [In one minute](#in-one-minute)
-- [Main features](#main-features)
-- [Demo](#demo)
-- [Installation](#installation)
-- [Usage](#usage)
-- [Contributing](#contributing)
-- [Commercial Use](#commercial-use)
-- [About](#about)
+## Why OpenLedger
 
-<a id="one-minute"></a>
-## In one minute
+Most username-search tools end with a report. OpenLedger adds the operational
+layer required to turn collection output into a governed investigation:
 
-Ensure you have Python 3.10 or higher.
+- durable cases and worker jobs backed by PostgreSQL;
+- typed Persona claims with evidence, confidence, and complete source lineage;
+- pending, approved, uncertain, and rejected review states;
+- case-scoped evidence timelines and persistent analyst chat;
+- maps and relationship projections built only from approved claims;
+- administrator and analyst roles;
+- bounded, independently degradable OSINT adapters; and
+- deployment, backup, migration, source-audit, and upstream-maintenance controls.
+
+## Core workspaces
+
+| Workspace | Purpose |
+|---|---|
+| New investigation | Plan bounded searches from usernames, profile URLs, names, email or phone context, and case-specific category/country filters. |
+| Cases | Retain investigation jobs, Personas, evidence, chat, review history, and lifecycle state. |
+| Persona | Review identity, contact and location, digital presence, affiliations, and risk-related proposals. |
+| Timeline | Read a time-ordered projection of investigation events, evidence observations, and analyst decisions. |
+| Relationships | Explore one Persona's evidence network or exact shared attributes across Personas. |
+| Case chat | Analyze retained case context, optionally research the public web with citations, and submit review-gated proposals. |
+| Settings | Configure system behavior, the server-side OpenAI connection, and analyst accounts. Administrator only. |
+
+## Evidence governance
+
+PostgreSQL is the canonical system of record. Reports, maps, graphs, collectors,
+and AI are adapters or projections around it; they do not own Persona facts.
+
+```mermaid
+flowchart TD
+    A[Collect observations] --> B[Normalize and attach provenance]
+    B --> C[Pending claim]
+    C -->|Approve| D[Canonical Persona fact]
+    C -->|Uncertain or reject| E[Retained audit record]
+    D --> F[Persona, map, timeline, relationships]
+```
+
+The principal rules are:
+
+1. Every derived claim retains its source engine, source record, evidence, and
+   observation history.
+2. New claims enter pending review. AI and collectors cannot approve them.
+3. Re-running a case may add evidence or refresh observation time, but it does
+   not erase a human decision.
+4. Rejected records remain auditable while staying out of default Persona,
+   map, and shared-relationship projections.
+5. Shared graph edges represent an exact approved attribute in common—not a
+   proven personal relationship.
+6. Extrapolations and hypotheses may remain in analysis or chat, but never
+   become Persona facts.
+
+See [Case intelligence architecture](docs/case-intelligence-architecture.md)
+for the complete data and review contract.
+
+## Collection and enrichment
+
+OpenLedger retains Maigret as its public-account discovery foundation and adds
+governed adapters through the existing worker and evidence model.
+
+| Source | OpenLedger use | Boundary |
+|---|---|---|
+| Maigret and Socid Extractor | Public account discovery and normalized profile evidence. | Account matches and extracted values remain reviewable evidence. |
+| User Scanner | Optional email-registration observations. | One-subject mode and explicit opt-in; notification-producing and adult modules remain disabled. |
+| GitHub public API | Enrich exact claimed GitHub user profiles. | Fixed origin, no credential, bounded profiles and response size. |
+| Unfurl | Decompose claimed profile URLs. | Pinned, offline, isolated runtime with remote lookups disabled. |
+| Wayback CDX | Record historical capture metadata for exact claimed URLs. | No wildcard search and no archived page download. |
+| Wikidata | Resolve an approved affiliation, its official website, and explicitly affiliated people. | Ambiguity requires selection; discovered claims remain pending. |
+| Wikipedia | Propose a biography summary, page identifier, and available lead image for an approved name. | Ambiguous pages require analyst selection. |
+| ICIJ Offshore Leaks | Alert on exact-name Officer candidates for an approved name. | Potential-match alert only; independent identity confirmation is mandatory. |
+
+The governed registry is [`config/osint-sources.json`](config/osint-sources.json).
+Admission rules, review intervals, runtime limits, and contract checks are
+documented in [Governed OSINT source maintenance](docs/osint-source-maintenance.md).
+
+## AI assistance
+
+OpenLedger reuses one server-side OpenAI connection configured by an
+administrator. The key is stored in a protected runtime file and is never
+returned to the browser.
+
+AI can:
+
+- summarize normalized case evidence;
+- perform optional public-web research with clickable citations;
+- answer questions in a persistent case conversation; and
+- propose allowlisted, cited Persona updates for analyst review.
+
+AI cannot approve or reject claims, silently merge identities, convert an
+inference into a fact, or bypass the evidence and review model. A cited research
+run with no usable citations is rejected instead of being saved as a successful
+assessment.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    U[Admin or analyst] --> C[Caddy and Flask application]
+    C --> P[(PostgreSQL canonical record)]
+    W[Durable worker] --> P
+    W --> S[Governed public sources]
+    C --> O[OpenAI Responses API]
+    C --> V[Read-only maps and graphs]
+```
+
+- **Web application:** Flask, Jinja, JavaScript, Leaflet, and a pinned
+  vis-network bundle.
+- **Canonical storage:** PostgreSQL 17 with Alembic migrations.
+- **Execution:** a separate durable worker claims jobs from PostgreSQL; closing
+  the browser does not stop collection.
+- **Deployment:** Docker Compose with Caddy, app, worker, migration, and private
+  database services.
+- **Reports:** mounted runtime files retained for compatibility; structured case
+  intelligence remains in PostgreSQL.
+- **Authentication:** protected local authentication schema with `admin` and
+  `analyst` roles. Analysts cannot access Settings or user management.
+
+## Production installation
+
+The supported deployment target is an Ubuntu or Debian server with at least
+2 GB RAM (4 GB recommended), a domain pointing to the server, and inbound TCP
+ports 22, 80, and 443. UDP 443 is optional for HTTP/3.
 
 ```bash
-pip install maigret
-maigret YOUR_USERNAME
+sudo apt-get update
+sudo apt-get install -y git
+sudo git clone https://github.com/nexorusio/openledger.git /opt/openledger
+cd /opt/openledger
+sudo bash deploy/install.sh
 ```
 
-No install? Try the [community Telegram bot](https://sites.google.com/view/maigret-bot-link) or a [Cloud Shell](#cloud-shells). 
+The installer configures Docker when needed, generates protected application
+and database secrets, asks for the initial administrator, builds the services,
+runs database migrations, and waits for the health check. After signing in,
+connect the existing OpenAI account from **Settings → AI connections**. Never
+place an API key in Git, screenshots, logs, or support messages.
 
-Want a web UI? See [how to launch it](#web-interface).
+For prerequisites, backup responsibilities, password recovery, custom AI
+endpoints, map endpoints, and security notes, read the
+[deployment guide](deploy/README.md).
 
-See also: [Quick start](https://maigret.readthedocs.io/en/latest/quick-start.html). 
+### Update a deployed server
 
-## Main features
-
-- Supports 3,000+ sites ([see full list](https://github.com/soxoj/maigret/blob/main/sites.md)). A default run checks the 500 highest-ranked sites by traffic; pass `-a` to scan everything, or `--tags` to narrow by category/country.
-- Embeddable in Python projects — import `maigret` and run searches programmatically (see [library usage](https://maigret.readthedocs.io/en/latest/library-usage.html)).
-- [Extracts](https://github.com/soxoj/socid_extractor) all available information about the account owner from profile pages and site APIs, including links to other accounts.
-- Performs recursive search using discovered usernames and other IDs.
-- Allows filtering by tags (site categories, countries).
-- Detects and partially bypasses blocks, censorship, and CAPTCHA.
-- Fetches an [auto-updated site database](https://maigret.readthedocs.io/en/latest/settings.html#database-auto-update) from GitHub each run (once per 24 hours), and falls back to the built-in database if offline.
-- Works with Tor and I2P websites; able to check domains.
-- Ships with a [web interface](#web-interface) for browsing results as a graph and downloading reports in every format from a single page.
-- Optional [AI analysis mode](#ai-analysis) (`--ai`) that turns raw findings into a short investigation summary using an OpenAI-compatible API.
-
-For the complete feature list, see the [features documentation](https://maigret.readthedocs.io/en/latest/features.html).
-
-### Used by
-
-Professional OSINT and social-media analysis tools built on Maigret:
-
-<a href="https://github.com/SocialLinks-IO/sociallinks-api"><img height="60" alt="Social Links API" src="https://github.com/user-attachments/assets/789747b2-d7a0-4d4e-8868-ffc4427df660"></a>
-<a href="https://sociallinks.io/products/sl-crimewall"><img height="60" alt="Social Links Crimewall" src="https://github.com/user-attachments/assets/0b18f06c-2f38-477b-b946-1be1a632a9d1"></a>
-<a href="https://usersearch.ai/"><img height="60" alt="UserSearch" src="https://github.com/user-attachments/assets/66daa213-cf7d-40cf-9267-42f97cf77580"></a>
-
-## Demo
-
-### Video
-
-<a href="https://asciinema.org/a/Ao0y7N0TTxpS0pisoprQJdylZ">
-  <img src="https://asciinema.org/a/Ao0y7N0TTxpS0pisoprQJdylZ.svg" alt="asciicast" width="600">
-</a>
-
-### Reports
-
-[PDF report](https://raw.githubusercontent.com/soxoj/maigret/main/static/report_alexaimephotographycars.pdf), [HTML report](https://htmlpreview.github.io/?https://raw.githubusercontent.com/soxoj/maigret/main/static/report_alexaimephotographycars.html)
-
-![HTML report screenshot](https://raw.githubusercontent.com/soxoj/maigret/main/static/report_alexaimephotography_html_screenshot.png)
-
-![XMind 8 report screenshot](https://raw.githubusercontent.com/soxoj/maigret/main/static/report_alexaimephotography_xmind_screenshot.png)
-
-[Full console output](https://raw.githubusercontent.com/soxoj/maigret/main/static/recursive_search.md)
-
-## Installation
-
-Already ran the [In one minute](#one-minute) steps? You're set. Below are alternative methods.
-
-Don't want to install anything? Use the [community Telegram bot](https://sites.google.com/view/maigret-bot-link).
-
-### Windows
-
-Download `maigret_standalone.exe` from [Releases](https://github.com/soxoj/maigret/releases). You can launch it two ways:
-
-- **Double-click it** — Maigret will ask for a username, run a default search, and wait at the end so the report links stay visible.
-- **Run it from a terminal** — open Command Prompt (press `Win+R`, type `cmd`, hit Enter) or PowerShell to pass extra options:
-
-```cmd
-cd %USERPROFILE%\Downloads
-maigret_standalone.exe USERNAME
-maigret_standalone.exe USERNAME --html       :: also save an HTML report
-maigret_standalone.exe --help                :: list all options
-```
-
-Video guide: https://youtu.be/qIgwTZOmMmM.
-
-<a id="cloud-shells"></a>
-### Cloud Shells
-
-Run Maigret in the browser via cloud shells or Jupyter notebooks:
-
-<a href="https://console.cloud.google.com/cloudshell/open?git_repo=https://github.com/soxoj/maigret&tutorial=cloudshell-tutorial.md"><img src="https://user-images.githubusercontent.com/27065646/92304704-8d146d80-ef80-11ea-8c29-0deaabb1c702.png" alt="Open in Cloud Shell" height="50"></a>
-<a href="https://repl.it/github/soxoj/maigret"><img src="https://replit.com/badge/github/soxoj/maigret" alt="Run on Replit" height="50"></a>
-
-<a href="https://colab.research.google.com/gist/soxoj/879b51bc3b2f8b695abb054090645000/maigret-collab.ipynb"><img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab" height="45"></a>
-<a href="https://mybinder.org/v2/gist/soxoj/9d65c2f4d3bec5dd25949197ea73cf3a/HEAD"><img src="https://mybinder.org/badge_logo.svg" alt="Open In Binder" height="45"></a>
-
-### Local installation (pip)
+Run updates only after the desired pull request has been merged to `main`:
 
 ```bash
-# install from pypi
-pip3 install maigret
-
-# usage
-maigret username
+cd /opt/openledger
+sudo bash deploy/update.sh
 ```
 
-### From source
+The updater refuses a dirty repository, pulls `main` with a fast-forward-only
+update, validates a PostgreSQL backup, rebuilds the application image, applies
+Alembic migrations, and restarts the stack while preserving accounts, settings,
+reports, database state, and the configured OpenAI key.
+
+Check service state and logs with:
 
 ```bash
-# or clone and install manually
-git clone https://github.com/soxoj/maigret && cd maigret
-
-# build and install
-pip3 install .
-
-# usage
-maigret username
+cd /opt/openledger/deploy
+sudo docker compose ps
+sudo docker compose logs --tail=200
 ```
 
-### Docker
+Backups under `runtime/backups`, reports, settings, and secrets must also be
+copied to encrypted, access-controlled storage outside the server. A backup on
+the same machine is not disaster recovery.
 
-Two image variants are published:
+## Development
 
-- `soxoj/maigret:latest` — CLI mode (default)
-- `soxoj/maigret:web` — auto-launches the [web interface](#web-interface)
+OpenLedger supports Python 3.10–3.14. Poetry is the reference development
+environment.
 
 ```bash
-# official image (CLI)
-docker pull soxoj/maigret
-
-# CLI usage
-docker run -v /mydir:/app/reports soxoj/maigret:latest username --html
-
-# Web UI (open http://localhost:5000)
-docker run -p 5000:5000 soxoj/maigret:web
-
-# Web UI on a custom port
-docker run -e PORT=8080 -p 8080:8080 soxoj/maigret:web
-
-# manual build
-docker build -t maigret .                  # CLI image (default target)
-docker build --target web -t maigret-web . # Web UI image
+git clone https://github.com/nexorusio/openledger.git
+cd openledger
+python -m pip install --upgrade pip poetry
+poetry install --with dev
+poetry run pytest -m "not slow" tests
 ```
 
-### Troubleshooting
-
-Build errors? See the [troubleshooting guide](https://maigret.readthedocs.io/en/latest/installation.html#troubleshooting).
-
-PDF reports (`--pdf`) are an optional extra — install with `pip install 'maigret[pdf]'`. They need system-level graphics libraries on Linux/macOS; see the [PDF reports section](https://maigret.readthedocs.io/en/latest/installation.html#optional-pdf-reports-maigret-pdf) for per-OS install steps.
-
-## Usage
-
-### Examples
+Useful validation commands:
 
 ```bash
-# make HTML, PDF, and XMind reports
-maigret user --html
-maigret user --pdf
-maigret user --xmind # legacy XML with a manifest for XMind 2022+ readers
+# Full test suite used by CI
+poetry run pytest tests
 
-# machine-readable exports
-maigret user --json ndjson   # newline-delimited JSON (also: --json simple)
-maigret user --csv
-maigret user --txt
-maigret user --graph         # interactive D3 graph (HTML)
-maigret user --neo4j         # Neo4j Cypher script (graph database)
+# Governed source registry (offline/static contract)
+poetry run python .github/scripts/check_osint_sources.py
 
-# search on sites marked with tags photo & dating
-maigret user --tags photo,dating
+# Public contract checks; intentionally performs bounded network requests
+poetry run python .github/scripts/check_osint_sources.py --live
 
-# search on sites marked with tag us
-maigret user --tags us
-
-# highlight sites whose page also mentions specific keywords
-maigret user --keywords python rust
-# keyword-matched sites are shown with "[++]" in bright green
-
-# search for three usernames on all available sites
-maigret user1 user2 user3 -a
-
-# AI-assisted investigation summary (needs OPENAI_API_KEY)
-maigret user --ai
+# Deployment configuration
+DOMAIN=openledger.example.test \
+FLASK_SECRET_KEY=development-only-secret \
+docker compose -f deploy/compose.yaml config --quiet
 ```
 
-`--neo4j` writes a `*_neo4j.cypher` script of the results graph; import it with `cypher-shell -u neo4j -p <password> < report_user_neo4j.cypher` or paste it into the Neo4j Browser. Re-imports are idempotent. See the [Neo4j export docs](https://maigret.readthedocs.io/en/latest/command-line-options.html#neo4j-export).
-
-Run `maigret --help` for all options. Docs: [CLI options](https://maigret.readthedocs.io/en/latest/command-line-options.html), [more examples](https://maigret.readthedocs.io/en/latest/usage-examples.html). Running into 403s or timeouts? See [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
-
-<a id="web-interface"></a>
-### Web interface
-
-Maigret has a built-in web UI with a results graph and downloadable reports.
-
-Don't want to run it yourself? Deploy the published `soxoj/maigret:web` Docker image as a hosted app in one click:
-
-<a href="https://render.com/deploy?repo=https://github.com/soxoj/maigret&path=utils/render.yaml"><img src="https://render.com/images/deploy-to-render-button.svg" alt="Deploy to Render" height="40"></a>
-
-Runs on Render's free tier (spins down after 15 min idle, spins back up on the next request). No login is set up on the instance, so anyone with the URL can use it.
-
-<details>
-<summary>Web Interface Screenshots</summary>
-
-![Web interface: how to start](https://raw.githubusercontent.com/soxoj/maigret/main/static/web_interface_screenshot_start.png)
-
-![Web interface: results](https://raw.githubusercontent.com/soxoj/maigret/main/static/web_interface_screenshot.png)
-
-</details>
-
-```console
-maigret --web 5000
-```
-
-Open http://127.0.0.1:5000, enter a username, and view results.
-
-### Python library
-
-**Maigret can be embedded in your own Python projects.** The CLI is a thin wrapper around an async function you can call directly — build custom pipelines, feed results into your own tooling, or run it inside a larger OSINT workflow.
-
-See the full [library usage guide](https://maigret.readthedocs.io/en/latest/library-usage.html) for a working example, async patterns, and how to filter sites by tag.
-
-### Useful CLI flags
-
-- `--parse URL` — parse a profile page, extract IDs/usernames, and use them to kick off a recursive search.
-- `--permute` — generate likely username variants from two or more inputs (e.g. `john doe` → `johndoe`, `j.doe`, …) and search for all of them.
-- `--self-check [--auto-disable]` — verify `usernameClaimed` / `usernameUnclaimed` pairs against live sites for maintainers auditing the database.
-- `--ai` / `--ai-model` — run the [AI analysis](#ai-analysis) over the search results and stream a short investigation summary to the terminal.
-
-<a id="ai-analysis"></a>
-### AI analysis
-
-[![asciicast](https://asciinema.org/a/979404.svg)](https://asciinema.org/a/979404)
-
-`--ai` collects the search results, builds an internal Markdown report, and sends it to an OpenAI-compatible chat completion endpoint to produce a short, neutral investigation summary (likely real name, location, occupation, interests, languages, confidence, follow-up leads). Per-site progress is suppressed and the model's output is streamed to stdout.
+The Flask module can be launched for a limited local UI smoke test without
+authentication or persistent case storage:
 
 ```bash
-export OPENAI_API_KEY=sk-...
-maigret user --ai
-
-# pick a different model
-maigret user --ai --ai-model gpt-4o-mini
+FLASK_DEBUG=true poetry run python -m maigret.web.app
 ```
 
-The key can also be set as `openai_api_key` in `settings.json`. The endpoint defaults to `https://api.openai.com/v1`, but `openai_api_base_url` in `settings.json` can point to any OpenAI-compatible API (Azure OpenAI, OpenRouter, a local server, …). See the [settings docs](https://maigret.readthedocs.io/en/latest/settings.html) for the full list of options.
+Use PostgreSQL and the supported Compose stack when testing durable cases,
+workers, authentication, migrations, or deployment behavior.
 
-### Tor / I2P / proxies
+## Repository map
 
-Maigret can route checks through a proxy, Tor, or I2P — useful for `.onion` / `.i2p` sites and for bypassing WAFs that block datacenter IPs.
+| Path | Responsibility |
+|---|---|
+| `maigret/web/app.py` | Flask routes, investigation orchestration, AI boundaries, and workspaces. |
+| `maigret/web/worker.py` | Durable PostgreSQL-backed job execution. |
+| `maigret/web/case_store.py` | Canonical cases, Personas, claims, evidence, reviews, chat, and projections. |
+| `maigret/web/collector_adapters.py` | Bounded source adapters and claim normalization. |
+| `maigret/web/persona_intelligence.py` | Persona schemas, claim extraction, labels, and grouping. |
+| `maigret/web/templates/` and `maigret/web/static/` | OpenLedger interface and relationship visualizations. |
+| `migrations/` | Alembic database migrations. |
+| `config/osint-sources.json` | Governed active-source registry. |
+| `deploy/` | Installation, Compose, update, authentication, and recovery tooling. |
+| `docs/` | Architecture, security, source governance, and upstream-maintenance decisions. |
 
-```bash
-# any HTTP/SOCKS proxy
-maigret user --proxy socks5://127.0.0.1:1080
+## Security model
 
-# Tor (default gateway socks5://127.0.0.1:9050)
-maigret user --tor-proxy socks5://127.0.0.1:9050
+The supported deployment includes HTTPS, secure session cookies, CSRF
+protection, sign-in rate limiting, trusted-host validation, content security
+policy, an unprivileged application UID, a non-public database service, and
+protected runtime secrets. Password changes and account removal invalidate
+existing sessions.
 
-# I2P (default gateway http://127.0.0.1:4444)
-maigret user --i2p-proxy http://127.0.0.1:4444
-```
+These controls do not replace a client's identity provider, case-level access
+policy, data-classification rules, audit export, legal authorization, or
+retention schedule. Complete those controls before using OpenLedger for
+multi-team or sensitive production investigations. Security-relevant changes
+should include tests and must pass CodeQL and the PostgreSQL/container safety
+workflow.
 
-Start your Tor / I2P daemon before running the command — Maigret does not manage these gateways.
+Please report vulnerabilities privately to the repository owner rather than
+opening a public issue containing exploit details, credentials, or case data.
 
-### Cloudflare bypass
+## Upstream maintenance
 
-> **Experimental.** The Cloudflare webgate is under active development; the configuration schema, CLI behaviour, and the set of routed sites may change without backwards-compatibility guarantees.
+OpenLedger is a customized downstream distribution of
+[Maigret](https://github.com/soxoj/maigret). It preserves Maigret's MIT license,
+CLI foundation, and attribution while adding the OpenLedger case-intelligence
+product, security model, persistence, UI, and deployment system.
 
-A subset of sites in the database require a real browser to solve a JavaScript challenge. Maigret can offload these checks to a local [FlareSolverr](https://github.com/FlareSolverr/FlareSolverr) instance:
+A scheduled workflow checks Maigret upstream. Only the site database, its paired
+metadata, and the generated site catalogue are eligible for guarded unattended
+integration. Upstream code changes remain reviewable pull requests and cannot
+replace OpenLedger-specific security or product files. See
+[Maigret upstream maintenance](docs/upstream-maintenance.md).
 
-```bash
-docker run -d -p 8191:8191 --name flaresolverr ghcr.io/flaresolverr/flaresolverr:latest
-maigret --cloudflare-bypass <username>
-```
-
-The bypass is opt-in (`--cloudflare-bypass` or `cloudflare_bypass.enabled` in `settings.json`) and only fires for sites whose `protection` field matches. See the [feature docs](https://maigret.readthedocs.io/en/latest/features.html#cloudflare-bypass) for backend options and configuration.
+The retained Maigret CLI and library documentation remains under
+[`docs/source/`](docs/source/). OpenLedger's supported production path is the
+Docker Compose application described above.
 
 ## Contributing
 
-Add or fix new sites surgically in `data.json` (no `json.load`/`json.dump`), then run `./utils/update_site_data.py` to regenerate `sites.md` and the database metadata, and open a pull request. For more details, see the [CONTRIBUTING guide](https://github.com/soxoj/maigret/blob/main/CONTRIBUTING.md) and [development docs](https://maigret.readthedocs.io/en/latest/development.html). Release history: [CHANGELOG.md](CHANGELOG.md).
+1. Branch from the latest `main`.
+2. Keep changes backward-compatible with existing PostgreSQL data and runtime
+   secrets whenever practical.
+3. Preserve evidence provenance, pending human review, privacy boundaries, and
+   source-scoped failure behavior.
+4. Add regression tests and run the relevant local checks.
+5. Open a pull request; do not commit deployment secrets, reports, backups, or
+   real investigation data.
 
-## Commercial Use
+## License and attribution
 
-The open-source Maigret is MIT-licensed and free for commercial use without restriction — but site checks break over time and need active maintenance.
-
-For serious commercial use — with a **daily-updated site database** or a **username-check API** — reach out: 📧 [maigret@soxoj.com](mailto:maigret@soxoj.com)
-
-- Private site database — 5 000+ sites, updated daily (separate from the public open-source database)
-- Username check API — integrate Maigret into your product
-
-## About
-
-### Disclaimer
-
-**For educational and lawful purposes only.** You are responsible for complying with all applicable laws (GDPR, CCPA, etc.) in your jurisdiction. The authors bear no responsibility for misuse.
-
-### Feedback
-
-[Open an issue](https://github.com/soxoj/maigret/issues) · [GitHub Discussions](https://github.com/soxoj/maigret/discussions) · [Telegram](https://t.me/soxoj)
-
-### SOWEL classification
-
-OSINT techniques used:
-- [SOTL-2.2. Search For Accounts On Other Platforms](https://sowel.soxoj.com/other-platform-accounts)
-- [SOTL-6.1. Check Logins Reuse To Find Another Account](https://sowel.soxoj.com/logins-reuse)
-- [SOTL-6.2. Check Nicknames Reuse To Find Another Account](https://sowel.soxoj.com/nicknames-reuse) 
-
-### License
-
-MIT © [Maigret](https://github.com/soxoj/maigret)
+This repository is distributed under the [MIT License](LICENSE) originating
+with Maigret, copyright © 2020–2026 Soxoj. OpenLedger is a Nexorus downstream
+distribution and is not the upstream Maigret project.
