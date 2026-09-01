@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 import time
 from threading import Timer
@@ -952,6 +953,188 @@ def test_affiliation_worker_persists_pending_people(web_app, persistent_store, m
     assert persistent_store.get_events(job_id)[-1]["event"]["redirect"] == f"/cases/{job['case_id']}"
 
 
+def test_affiliation_domain_context_is_observation_only_and_explains_limits(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Example Organization", enable_domain_context=True
+    )
+    job = persistent_store.claim_next("worker:domain-context")
+
+    async def fake_discovery(*_args, **_kwargs):
+        return _affiliation_worker_observation()
+
+    async def fake_dns(website, *_args, **_kwargs):
+        assert website["domain"] == "example.org"
+        return {
+            "source_engine": "cloudflare_dns_context",
+            "source_url": "https://cloudflare-dns.com/dns-query",
+            "status": "observed",
+            "reason": "Current public DNS records.",
+            "domain": "example.org",
+            "website_url": "https://example.org",
+            "registration_lookup_url": (
+                "https://lookup.icann.org/en/lookup?name=example.org"
+            ),
+            "records": {
+                "a": [{"value": "93.184.216.34", "ttl": 300}],
+                "aaaa": [],
+                "mx": [{"value": "mail.example.org", "priority": 10, "ttl": 300}],
+                "ns": [{"value": "ns1.example.org", "ttl": 300}],
+            },
+            "record_count": 3,
+        }
+
+    monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", fake_discovery)
+    monkeypatch.setattr(web_app, "run_cloudflare_dns_context", fake_dns)
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["website_context_source"] == "wikidata_official_website"
+    assert completed["dns_observation"]["record_count"] == 3
+    assert any(
+        finding["category"] == "technical_domain_context"
+        and "do not establish" in finding["limitation"]
+        for finding in completed["business_context_findings"]
+    )
+    case_page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "Business context audit" in case_page
+    assert "DNS and registration metadata describe technical administration" in case_page
+    assert "Research operating context" in case_page
+
+    chat_page = client.get(
+        f"/cases/{job['case_id']}/chat?mode=business_context"
+    ).get_data(as_text=True)
+    assert "Research the public operating context" in chat_page
+    assert 'data-initial-research="true"' in chat_page
+    assert "Do not infer where the business operates from DNS" in chat_page
+
+
+def test_dns_context_failure_does_not_discard_affiliation_people(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Example Organization",
+        enable_domain_context=True,
+        official_website="https://example.org",
+    )
+    job = persistent_store.claim_next("worker:dns-failure")
+
+    async def fake_discovery(*_args, **_kwargs):
+        return _affiliation_worker_observation()
+
+    async def failed_dns(*_args, **_kwargs):
+        raise RuntimeError("private DNS upstream diagnostic")
+
+    monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", fake_discovery)
+    monkeypatch.setattr(web_app, "run_cloudflare_dns_context", failed_dns)
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["affiliation_status"] == "partial"
+    assert completed["affiliated_person_count"] == 1
+    assert completed["dns_observation"]["status"] == "unavailable"
+    assert "private DNS upstream diagnostic" not in json.dumps(completed)
+    assert len(persistent_store.get_case(job["case_id"])["personas"]) == 1
+
+
+def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar", jurisdiction="FR"
+    )
+    job = persistent_store.claim_next("worker:jurisdiction")
+
+    async def failed_wikidata(*_args, **_kwargs):
+        raise RuntimeError("private upstream diagnostic")
+
+    async def empty_gleif(*_args, **_kwargs):
+        return {
+            "source_engine": "gleif_lei_registry",
+            "status": "not_found",
+            "reason": (
+                "GLEIF returned no jurisdiction-matched LEI record. This does "
+                "not prove that the entity is not registered."
+            ),
+            "candidates": [],
+            "selected_entity": None,
+        }
+
+    async def france_registry(*_args, **_kwargs):
+        entity = {
+            "id": "812339356",
+            "identifier_type": "siren",
+            "legal_name": "UNISTELLAR",
+            "legal_jurisdiction": "FR",
+            "jurisdiction_label": "France",
+            "headquarters_identifier": "81233935600030",
+            "entity_status": "active",
+            "last_update_date": "2026-08-01T00:00:00Z",
+            "legal_address": {
+                "lines": ["5 AVENUE DU GENERAL LECLERC"],
+                "city": "Marseille",
+                "region": "93",
+                "country": "FR",
+                "postal_code": "13003",
+            },
+            "people": [
+                {
+                    "display_name": "Arnaud Malvache",
+                    "role": "Président de SAS",
+                },
+                {
+                    "display_name": "Laurent Marfisi",
+                    "role": "Directeur Général",
+                },
+            ],
+            "exact_name_match": True,
+            "source_url": (
+                "https://annuaire-entreprises.data.gouv.fr/entreprise/812339356"
+            ),
+        }
+        return {
+            "source_engine": "fr_company_registry",
+            "status": "observed",
+            "reason": "Public records from the French National Enterprise Directory.",
+            "candidates": [entity],
+            "selected_entity": entity,
+        }
+
+    monkeypatch.setattr(
+        web_app, "run_wikidata_affiliation_discovery", failed_wikidata
+    )
+    monkeypatch.setattr(web_app, "run_gleif_legal_entity_search", empty_gleif)
+    monkeypatch.setattr(
+        web_app, "run_fr_business_registry_search", france_registry
+    )
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["affiliation_status"] == "partial"
+    assert completed["registry_candidate_count"] == 1
+    assert completed["affiliated_person_count"] == 2
+    assert completed["claim_proposal_count"] == 6
+    assert "private upstream diagnostic" not in json.dumps(completed)
+    case = persistent_store.get_case(job["case_id"])
+    assert len(case["personas"]) == 2
+    for persona_summary in case["personas"]:
+        persona = persistent_store.get_persona(persona_summary["id"])
+        assert all(
+            claim["review_status"] == "pending" for claim in persona["claims"]
+        )
+
+    page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "French National Enterprise Directory" in page
+    assert "SIREN 812339356" in page
+    assert "GLEIF covers entities issued a Legal Entity Identifier" in page
+    assert "automatically approved" in page
+
+
 def test_affiliation_source_failure_is_not_rendered_as_zero_people(
     client, persistent_store
 ):
@@ -1003,10 +1186,24 @@ def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
     assert "Open affiliation case" in client.get(f"/personas/{persona['id']}").get_data(as_text=True)
     with client.session_transaction() as session:
         session["csrf_token"] = "affiliation-csrf"
-    response = client.post(f"/claims/{company['id']}/investigate-affiliation", data={"csrf_token": "affiliation-csrf"})
+    response = client.post(
+        f"/claims/{company['id']}/investigate-affiliation",
+        data={
+            "csrf_token": "affiliation-csrf",
+            "jurisdiction": "France",
+            "enable_domain_context": "1",
+            "official_website": "https://example.org",
+        },
+    )
     job_id = response.location.rsplit("/", 1)[-1]
     affiliation_job = persistent_store.get_job(job_id)
     assert affiliation_job["kind"] == "affiliation"
+    assert affiliation_job["options"]["investigation_spec"][
+        "legal_jurisdiction"
+    ]["code"] == "FR"
+    assert affiliation_job["options"]["investigation_spec"][
+        "official_website"
+    ]["domain"] == "example.org"
     assert persistent_store.get_case(affiliation_job["case_id"])["personas"] == []
 
 

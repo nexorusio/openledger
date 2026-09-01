@@ -53,8 +53,19 @@ from maigret.web.case_store import (
     database_url_from_environment,
 )
 from maigret.web.collector_adapters import (
+    CLOUDFLARE_DNS_ENGINE,
+    FR_BUSINESS_REGISTRY_ENGINE,
+    GLEIF_ENGINE,
+    build_business_context_assessment,
     claimed_profile_url_targets,
+    extract_fr_registry_affiliated_people,
+    extract_wikidata_affiliation_people,
     github_profile_targets,
+    normalize_legal_jurisdiction,
+    normalize_official_website_url,
+    run_cloudflare_dns_context,
+    run_fr_business_registry_search,
+    run_gleif_legal_entity_search,
     run_github_public_profile,
     run_icij_offshore_match,
     run_unfurl_url_analysis,
@@ -2676,31 +2687,135 @@ def run_persistent_affiliation_job(
     specification = (job.get('options') or {}).get('investigation_spec') or {}
     affiliation_name = str(specification.get('affiliation_name') or '').strip()
     selected_entity_id = str(specification.get('wikidata_entity_id') or '').strip() or None
+    legal_jurisdiction = specification.get('legal_jurisdiction')
+    if isinstance(legal_jurisdiction, dict):
+        legal_jurisdiction = normalize_legal_jurisdiction(
+            legal_jurisdiction.get('code')
+        )
+    else:
+        legal_jurisdiction = normalize_legal_jurisdiction(legal_jurisdiction)
+    domain_context_requested = bool(specification.get('enable_domain_context'))
+    explicit_website = specification.get('official_website')
+    if isinstance(explicit_website, dict):
+        explicit_website = normalize_official_website_url(
+            explicit_website.get('url')
+        )
+    else:
+        explicit_website = normalize_official_website_url(explicit_website)
     sink = PersistentEventSink(store, job_id)
-    sink.put({'type': 'collector_started', 'collector': 'wikidata-affiliation', 'target_type': 'affiliation', 'targets': 1})
+    source_specs = [
+        (
+            'wikidata-affiliation',
+            run_wikidata_affiliation_discovery(
+                affiliation_name, selected_entity_id=selected_entity_id
+            ),
+        )
+    ]
+    if legal_jurisdiction:
+        source_specs.append(
+            (
+                'gleif-registry',
+                run_gleif_legal_entity_search(
+                    affiliation_name, legal_jurisdiction
+                ),
+            )
+        )
+        if legal_jurisdiction['code'] == 'FR':
+            source_specs.append(
+                (
+                    'fr-company-registry',
+                    run_fr_business_registry_search(
+                        affiliation_name, legal_jurisdiction
+                    ),
+                )
+            )
+    for source_name, _coroutine in source_specs:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': source_name,
+                'target_type': 'legal_entity',
+                'targets': 1,
+            }
+        )
+    if domain_context_requested:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': 'cloudflare-dns-context',
+                'target_type': 'organization_domain',
+                'targets': 1,
+            }
+        )
     runtime_job = {'cancelled': False}
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    task = loop.create_task(
-        run_wikidata_affiliation_discovery(
-            affiliation_name, selected_entity_id=selected_entity_id
+
+    async def collect_sources():
+        base_results = await asyncio.gather(
+            *(coroutine for _source_name, coroutine in source_specs),
+            return_exceptions=True,
         )
-    )
+        website_context = explicit_website
+        website_context_source = 'operator_input' if explicit_website else ''
+        if domain_context_requested and not website_context:
+            wikidata_result = base_results[0] if base_results else None
+            organization = (
+                wikidata_result.get('organization')
+                if isinstance(wikidata_result, dict)
+                else None
+            )
+            for website in list(
+                (organization.get('official_websites') or [])
+                if isinstance(organization, dict)
+                else []
+            )[:5]:
+                try:
+                    website_context = normalize_official_website_url(website)
+                except ValueError:
+                    continue
+                if website_context:
+                    website_context_source = 'wikidata_official_website'
+                    break
+        dns_result = None
+        if domain_context_requested:
+            if website_context:
+                try:
+                    dns_result = await run_cloudflare_dns_context(website_context)
+                except Exception as error:
+                    dns_result = error
+            else:
+                dns_result = {
+                    'source_engine': CLOUDFLARE_DNS_ENGINE,
+                    'status': 'not_run',
+                    'reason': (
+                        'No official website URL was available. Supply one and rerun '
+                        'domain context before drawing a DNS conclusion.'
+                    ),
+                    'records': {},
+                    'record_count': 0,
+                }
+        return base_results, dns_result, website_context, website_context_source
+
+    task = loop.create_task(collect_sources())
     watcher = loop.create_task(
         watch_persistent_job_stop(
             store, job_id, task, runtime_job, shutdown_check=shutdown_check
         )
     )
-    observation = None
-    source_message = ''
+    source_results = None
+    dns_result = None
+    website_context = explicit_website
+    website_context_source = 'operator_input' if explicit_website else ''
     try:
-        observation = loop.run_until_complete(task)
+        (
+            source_results,
+            dns_result,
+            website_context,
+            website_context_source,
+        ) = loop.run_until_complete(task)
     except asyncio.CancelledError:
         pass
-    except Exception as error:
-        source_message = record_internal_error(
-            'Wikidata affiliation source failed', error, session=job_id
-        )
     finally:
         if not watcher.done():
             watcher.cancel()
@@ -2722,24 +2837,88 @@ def run_persistent_affiliation_job(
         )
         sink.put({'type': 'done', 'status': status})
         return
-    if observation is None:
-        result = {
-            'status': 'completed',
-            'usernames': [],
-            'discovery_status': 'unavailable',
-            'source_message': source_message or 'Wikidata was unavailable.',
-            'organization_candidates': [],
-            'organization': None,
-            'affiliated_person_count': 0,
-            'claim_proposal_count': 0,
-        }
-        store.finish(job_id, result)
-        sink.put({'type': 'collector_error', 'collector': 'wikidata-affiliation', 'message': result['source_message']})
-        sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
-        return
+
+    source_observations = {}
+    source_errors = []
+    for index, (source_name, _coroutine) in enumerate(source_specs):
+        source_result = (
+            source_results[index]
+            if isinstance(source_results, list) and index < len(source_results)
+            else RuntimeError('The public source did not return a result')
+        )
+        if not isinstance(source_result, (dict, BaseException)):
+            source_result = RuntimeError(
+                'The public source returned an invalid observation'
+            )
+        if isinstance(source_result, BaseException):
+            public_message = record_internal_error(
+                f'{source_name} affiliation source failed',
+                source_result,
+                session=job_id,
+            )
+            engine = {
+                'gleif-registry': GLEIF_ENGINE,
+                'fr-company-registry': FR_BUSINESS_REGISTRY_ENGINE,
+            }.get(source_name, 'wikidata_affiliation')
+            source_result = {
+                'source_engine': engine,
+                'status': 'unavailable',
+                'reason': public_message,
+                'organization_candidates': [],
+                'organization': None,
+                'people': [],
+                'candidates': [],
+                'selected_entity': None,
+            }
+            source_errors.append(
+                {'collector': source_name, 'message': public_message}
+            )
+        source_observations[source_name] = source_result
+
+    if domain_context_requested:
+        if isinstance(dns_result, BaseException) or not isinstance(
+            dns_result, dict
+        ):
+            public_message = record_internal_error(
+                'cloudflare-dns-context affiliation source failed',
+                dns_result
+                if isinstance(dns_result, BaseException)
+                else RuntimeError('The DNS source returned an invalid observation'),
+                session=job_id,
+            )
+            dns_result = {
+                'source_engine': CLOUDFLARE_DNS_ENGINE,
+                'status': 'unavailable',
+                'reason': public_message,
+                'records': {},
+                'record_count': 0,
+            }
+            source_errors.append(
+                {'collector': 'cloudflare-dns-context', 'message': public_message}
+            )
+        source_observations['cloudflare-dns-context'] = dns_result
+
+    observation = source_observations['wikidata-affiliation']
+    registry_observations = [
+        source_observations[source_name]
+        for source_name, _coroutine in source_specs
+        if source_name != 'wikidata-affiliation'
+    ]
     synchronized = {'personas': 0, 'claims': 0}
+    wikidata_people = extract_wikidata_affiliation_people(observation)
+    registry_people = []
+    for registry_observation in registry_observations:
+        registry_people.extend(
+            extract_fr_registry_affiliated_people(registry_observation)
+        )
+    if wikidata_people or registry_people:
+        synchronized = store.sync_affiliation_discovery(
+            job_id,
+            observation,
+            registry_observations=registry_observations,
+        )
+
     if observation.get('status') == 'observed':
-        synchronized = store.sync_affiliation_discovery(job_id, observation)
         organization = observation.get('organization') or {}
         sink.put(
             {'type': 'affiliation_entity', 'entity_id': organization.get('id'),
@@ -2748,22 +2927,152 @@ def run_persistent_affiliation_job(
         for person in list(observation.get('people') or [])[:50]:
             if isinstance(person, dict):
                 sink.put({'type': 'affiliated_person', 'entity_id': person.get('id'), 'label': person.get('label'), 'url': person.get('url')})
+    for registry_observation in registry_observations:
+        for candidate in list(registry_observation.get('candidates') or [])[:5]:
+            if isinstance(candidate, dict):
+                sink.put(
+                    {
+                        'type': 'registry_entity',
+                        'entity_id': candidate.get('id'),
+                        'label': candidate.get('legal_name'),
+                        'url': candidate.get('source_url'),
+                        'source_engine': registry_observation.get(
+                            'source_engine'
+                        ),
+                    }
+                )
+        for person in extract_fr_registry_affiliated_people(
+            registry_observation
+        ):
+            sink.put(
+                {
+                    'type': 'affiliated_person',
+                    'entity_id': person.get('registry_person_key'),
+                    'label': person.get('display_name'),
+                    'url': (
+                        registry_observation.get('selected_entity') or {}
+                    ).get('source_url'),
+                }
+            )
+
+    source_statuses = [
+        str(source_observation.get('status') or 'unavailable')
+        for source_observation in source_observations.values()
+        if source_observation.get('status') != 'not_run'
+    ]
+    has_useful_result = any(
+        status in {'observed', 'needs_selection', 'partial'}
+        for status in source_statuses
+    )
+    has_unavailable_source = any(
+        status in {'rate_limited', 'unavailable', 'partial'}
+        for status in source_statuses
+    )
+    if has_useful_result and has_unavailable_source:
+        affiliation_status = 'partial'
+    elif 'observed' in source_statuses:
+        affiliation_status = 'observed'
+    elif 'needs_selection' in source_statuses:
+        affiliation_status = 'needs_selection'
+    elif source_statuses and all(
+        status == 'not_found' for status in source_statuses
+    ):
+        affiliation_status = 'not_found'
+    else:
+        affiliation_status = 'unavailable'
+
+    registry_candidate_count = sum(
+        len(registry_observation.get('candidates') or [])
+        for registry_observation in registry_observations
+    )
+    unique_people = {
+        ' '.join(str(person.get('display_name') or '').split()).casefold()
+        for person in wikidata_people + registry_people
+        if str(person.get('display_name') or '').strip()
+    }
     result = {
         'status': 'completed',
         'usernames': [],
         'discovery_status': observation.get('status'),
+        'affiliation_status': affiliation_status,
         'source_message': str(observation.get('reason') or '')[:1000],
         'organization_candidates': list(observation.get('organization_candidates') or [])[:5],
         'organization': observation.get('organization'),
-        'affiliated_person_count': len(observation.get('people') or []),
+        'legal_jurisdiction': legal_jurisdiction,
+        'registry_observations': registry_observations,
+        'registry_candidate_count': registry_candidate_count,
+        'registry_person_count': len(registry_people),
+        'domain_context_requested': domain_context_requested,
+        'website_context': website_context,
+        'website_context_source': website_context_source,
+        'dns_observation': dns_result if domain_context_requested else None,
+        'business_context_findings': build_business_context_assessment(
+            registry_observations,
+            website=website_context,
+            website_source=website_context_source,
+            dns_observation=(
+                dns_result if isinstance(dns_result, dict) else None
+            ),
+        ),
+        'affiliated_person_count': len(unique_people),
         'persona_proposal_count': synchronized['personas'],
         'claim_proposal_count': synchronized['claims'],
         'source_engine': observation.get('source_engine'),
         'source_record_id': observation.get('source_record_id'),
+        'source_errors': source_errors,
     }
     store.finish(job_id, result)
-    event_type = 'collector_completed' if observation.get('status') in {'observed', 'needs_selection'} else 'collector_error'
-    sink.put({'type': event_type, 'collector': 'wikidata-affiliation', 'observations': 1, 'found': result['affiliated_person_count'], 'message': result['source_message']})
+    for source_name, _coroutine in source_specs:
+        source_observation = source_observations[source_name]
+        source_status = source_observation.get('status')
+        event_type = (
+            'collector_error'
+            if source_status in {'rate_limited', 'unavailable'}
+            else 'collector_completed'
+        )
+        found = (
+            len(source_observation.get('people') or [])
+            if source_name == 'wikidata-affiliation'
+            else len(source_observation.get('candidates') or [])
+        )
+        people_found = (
+            len(extract_wikidata_affiliation_people(source_observation))
+            if source_name == 'wikidata-affiliation'
+            else len(extract_fr_registry_affiliated_people(source_observation))
+        )
+        sink.put(
+            {
+                'type': event_type,
+                'collector': source_name,
+                'observations': 1,
+                'found': found,
+                'people_found': people_found,
+                'message': str(source_observation.get('reason') or '')[:1000],
+            }
+        )
+    if domain_context_requested:
+        source_status = dns_result.get('status') if isinstance(dns_result, dict) else 'unavailable'
+        sink.put(
+            {
+                'type': (
+                    'collector_error'
+                    if source_status in {'rate_limited', 'unavailable'}
+                    else 'collector_completed'
+                ),
+                'collector': 'cloudflare-dns-context',
+                'observations': 1 if source_status not in {'not_run'} else 0,
+                'found': (
+                    int(dns_result.get('record_count') or 0)
+                    if isinstance(dns_result, dict)
+                    else 0
+                ),
+                'message': (
+                    str(dns_result.get('reason') or '')[:1000]
+                    if isinstance(dns_result, dict)
+                    else 'The public DNS context source was unavailable.'
+                ),
+            }
+        )
     sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
 
 
@@ -3366,11 +3675,40 @@ def case_chat_workspace(case_id):
     if not case:
         flash('That case does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
+    initial_prompt = ''
+    initial_research_enabled = False
+    if request.args.get('mode') == 'business_context':
+        affiliation_job = next(
+            (job for job in case.get('jobs', []) if job.get('kind') == 'affiliation'),
+            None,
+        )
+        specification = (
+            (affiliation_job.get('options') or {}).get('investigation_spec') or {}
+            if affiliation_job
+            else {}
+        )
+        affiliation_name = ' '.join(
+            str(specification.get('affiliation_name') or '').split()
+        )[:500]
+        if affiliation_name:
+            initial_prompt = (
+                f'Research the public operating context of {affiliation_name}. '
+                'Find its official website and exact publicly stated business or '
+                'institutional addresses, legal registration, headquarters, business '
+                'activities, and jurisdictions using direct citations. Separate legal '
+                'registry facts, statements published by the organization, and technical '
+                'domain infrastructure. Explain the basis and limitations of every '
+                'conclusion. Do not infer where the business operates from DNS, hosting, '
+                'nameserver, mail-provider, registrar, or domain-registration geography.'
+            )
+            initial_research_enabled = True
     return render_template(
         'case_chat.html',
         case=case,
         messages=case_store.list_case_chat_messages(case_id, limit=500),
         ai_enabled=bool(get_openai_api_key()),
+        initial_prompt=initial_prompt,
+        initial_research_enabled=initial_research_enabled,
     )
 
 
@@ -3824,7 +4162,13 @@ def investigate_affiliation_claim(claim_id):
         return redirect(url_for('persona_workspace', persona_id=claim['persona_id']))
     try:
         job_id = case_store.create_affiliation_investigation(
-            claim['display_value'], source_claim_id=claim_id
+            claim['display_value'],
+            source_claim_id=claim_id,
+            jurisdiction=request.form.get('jurisdiction', ''),
+            enable_domain_context=(
+                request.form.get('enable_domain_context') == '1'
+            ),
+            official_website=request.form.get('official_website', ''),
         )
     except ValueError as error:
         flash(str(error), 'danger')
@@ -3849,6 +4193,32 @@ def select_affiliation_entity(case_id):
     except ValueError as error:
         flash(str(error), 'warning')
         return redirect(url_for('case_workspace', case_id=case_id))
+    return redirect(url_for('live_results', job_id=job_id))
+
+
+@app.route('/cases/<case_id>/affiliation/domain-context', methods=['POST'])
+def rerun_affiliation_domain_context(case_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('case_workspace', case_id=case_id))
+    if case_store is None:
+        flash('Affiliation investigations require persistent storage.', 'warning')
+        return redirect(url_for('cases_workspace'))
+    try:
+        job_id = case_store.queue_affiliation_context(
+            case_id,
+            official_website=request.form.get('official_website', ''),
+        )
+    except KeyError:
+        flash('That affiliation case no longer exists.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    except ValueError as error:
+        flash(str(error), 'warning')
+        return redirect(url_for('case_workspace', case_id=case_id))
+    flash(
+        'Domain context queued. DNS findings remain technical observations only.',
+        'success',
+    )
     return redirect(url_for('live_results', job_id=job_id))
 
 
@@ -4039,6 +4409,9 @@ def live_results(job_id):
             'archived_profile_count', 0
         ),
         completed_affiliated_person_count=(result or {}).get('affiliated_person_count', 0),
+        completed_registry_candidate_count=(result or {}).get(
+            'registry_candidate_count', 0
+        ),
         completed_offshore_alert_count=(result or {}).get('offshore_alert_count', 0),
     )
 

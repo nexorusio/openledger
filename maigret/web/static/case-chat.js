@@ -11,6 +11,13 @@
     const submit = document.getElementById('caseChatSubmit');
     const errorBox = document.getElementById('caseChatError');
 
+    if (root.dataset.initialPrompt && !textarea.value.trim()) {
+        textarea.value = root.dataset.initialPrompt;
+    }
+    if (root.dataset.initialResearch === 'true') {
+        research.checked = true;
+    }
+
     function icon(name) {
         const element = document.createElement('i');
         element.setAttribute('data-lucide', name);

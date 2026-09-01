@@ -1436,6 +1436,139 @@ def test_affiliation_selection_accepts_only_a_stored_candidate(store):
     assert selected["options"]["investigation_spec"]["wikidata_entity_id"] == "Q95"
 
 
+def _fr_affiliation_observation():
+    entity = {
+        "id": "812339356",
+        "identifier_type": "siren",
+        "legal_name": "UNISTELLAR",
+        "legal_jurisdiction": "FR",
+        "headquarters_identifier": "81233935600030",
+        "entity_status": "active",
+        "last_update_date": "2026-08-01T00:00:00Z",
+        "exact_name_match": True,
+        "source_url": (
+            "https://annuaire-entreprises.data.gouv.fr/entreprise/812339356"
+        ),
+        "people": [
+            {"display_name": "Arnaud Malvache", "role": "Président de SAS"},
+            {"display_name": "Laurent Marfisi", "role": "Directeur Général"},
+        ],
+    }
+    return {
+        "source_engine": "fr_company_registry",
+        "status": "observed",
+        "jurisdiction": {
+            "code": "FR",
+            "label": "France",
+            "country_code": "FR",
+        },
+        "candidates": [entity],
+        "selected_entity": entity,
+    }
+
+
+def test_jurisdiction_registry_people_are_pending_and_provenance_linked(store):
+    job_id = store.create_affiliation_investigation(
+        "Unistellar", jurisdiction="France"
+    )
+    job = store.claim_next("worker:fr-registry")
+    specification = job["options"]["investigation_spec"]
+    assert specification["schema_version"] == 2
+    assert specification["legal_jurisdiction"] == {
+        "code": "FR",
+        "label": "France",
+        "country_code": "FR",
+    }
+    assert job["progress"]["total"] == 4
+
+    wikidata_unavailable = {
+        "source_engine": "wikidata_affiliation",
+        "status": "unavailable",
+        "organization": None,
+        "people": [],
+    }
+    synchronized = store.sync_affiliation_discovery(
+        job_id,
+        wikidata_unavailable,
+        registry_observations=[_fr_affiliation_observation()],
+    )
+    assert synchronized == {"personas": 2, "claims": 6}
+    assert store.sync_affiliation_discovery(
+        job_id,
+        wikidata_unavailable,
+        registry_observations=[_fr_affiliation_observation()],
+    ) == {"personas": 0, "claims": 6}
+
+    case = store.get_case(job["case_id"])
+    assert case["title"] == "Affiliation: UNISTELLAR · FR"
+    assert store.build_relationship_graph(case["id"])["edges"] == []
+    for summary in case["personas"]:
+        persona = store.get_persona(summary["id"])
+        assert {claim["field_name"] for claim in persona["claims"]} == {
+            "full_name",
+            "company",
+            "occupation",
+        }
+        assert all(
+            claim["review_status"] == "pending" for claim in persona["claims"]
+        )
+        assert all(
+            claim["source_engine"] == "fr_company_registry"
+            for claim in persona["claims"]
+        )
+        assert all(
+            claim["evidence"][0]["details"]["human_review_required"] is True
+            for claim in persona["claims"]
+        )
+
+
+def test_affiliation_entity_selection_preserves_jurisdiction(store):
+    job_id = store.create_affiliation_investigation(
+        "Example Organization", jurisdiction="US-DE"
+    )
+    job = store.claim_next("worker:selection-jurisdiction")
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "organization_candidates": [
+                {"id": "Q95", "label": "Example Organization"}
+            ],
+        },
+    )
+    selected = store.get_job(
+        store.queue_affiliation_entity(job["case_id"], "Q95")
+    )
+    specification = selected["options"]["investigation_spec"]
+    assert specification["schema_version"] == 2
+    assert specification["legal_jurisdiction"]["code"] == "US-DE"
+    assert selected["progress"]["total"] == 3
+
+
+def test_affiliation_domain_context_is_explicit_and_preserved_on_rerun(store):
+    job_id = store.create_affiliation_investigation(
+        "Example Organization",
+        jurisdiction="FR",
+        enable_domain_context=True,
+        official_website="https://example.org/about",
+    )
+    job = store.claim_next("worker:domain-context")
+    specification = job["options"]["investigation_spec"]
+    assert specification["enable_domain_context"] is True
+    assert specification["official_website"] == {
+        "url": "https://example.org/about",
+        "domain": "example.org",
+    }
+    assert job["progress"]["total"] == 5
+    store.finish(job_id, {"status": "completed"})
+
+    rerun = store.get_job(store.queue_affiliation_context(job["case_id"]))
+    rerun_specification = rerun["options"]["investigation_spec"]
+    assert rerun_specification["enable_domain_context"] is True
+    assert rerun_specification["official_website"]["domain"] == "example.org"
+    assert rerun["progress"]["total"] == 5
+
+
 def _approved_full_name(store, name="Alice Example"):
     job_id = store.create_investigation(["alice"], {})
     job = store.claim_next("worker:identity-source")

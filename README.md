@@ -97,6 +97,9 @@ governed adapters through the existing worker and evidence model.
 | Unfurl | Decompose claimed profile URLs. | Pinned, offline, isolated runtime with remote lookups disabled. |
 | Wayback CDX | Record historical capture metadata for exact claimed URLs. | No wildcard search and no archived page download. |
 | Wikidata | Resolve an approved affiliation, its official website, and explicitly affiliated people. | Ambiguity requires selection; discovered claims remain pending. |
+| GLEIF Global LEI Index | Search legal entities by approved affiliation name and ISO jurisdiction. | Candidate evidence only; a missing LEI match does not prove that a business is unregistered. |
+| French National Enterprise Directory | Search France-registered entities and public leadership records. | Only one exact legal-name match may propose people; birth and nationality data are not retained. |
+| Cloudflare DNS-over-HTTPS | Collect current A, AAAA, MX and NS records for one opted-in official website domain. | Observation-only technical context; DNS, hosting and registrar geography never establish where a business operates. |
 | Wikipedia | Propose a biography summary, page identifier, and available lead image for an approved name. | Ambiguous pages require analyst selection. |
 | ICIJ Offshore Leaks | Alert on exact-name Officer candidates for an approved name. | Potential-match alert only; independent identity confirmation is mandatory. |
 

@@ -268,9 +268,10 @@ Persona updates use a separate strict extraction pass and server validation:
 
 ## Affiliation-led cases
 
-An approved `company` claim can open a separate affiliation-led case. The
-workflow uses the existing PostgreSQL queue and worker. The governed
-`wikidata_affiliation` adapter resolves up to five label or alias candidates,
+An approved `company` claim can open a separate affiliation-led case and may
+include an optional legal jurisdiction. The workflow uses the existing
+PostgreSQL queue and worker. The governed `wikidata_affiliation` adapter
+resolves up to five label or alias candidates,
 reads the selected entity's official website (`P856`), and runs one bounded
 SPARQL query for at most fifty people connected by explicit employment,
 education, membership, affiliation, founder, executive, chair, director, or
@@ -283,6 +284,33 @@ enters as pending `full_name`, backward-compatible `company`, and Wikidata
 identifier claims retaining entity and relation lineage. Only analyst-approved
 shared affiliation claims can enter the existing Relationships projection, and
 they do not establish a personal relationship.
+
+When a jurisdiction is supplied, the independent GLEIF adapter searches the
+global LEI index by organization name and country and retains up to five
+jurisdiction-matched entity candidates. A missing LEI result is never presented
+as proof that the business is unregistered. Country-level France searches also
+query the French National Enterprise Directory. Only one exact legal-name
+match can propose public natural-person leaders as pending `full_name`,
+backward-compatible `company`, and `occupation` claims. The adapter deliberately
+discards upstream birth and nationality data. Each proposal retains its SIREN,
+public role, source URL, and review restrictions; registry evidence never enters
+canonical Persona or relationship views automatically.
+
+An optional domain-context pass accepts one explicitly supplied official website,
+or the selected organization's `P856` website when available. The worker queries
+only Cloudflare's fixed DNS-over-HTTPS endpoint for bounded `A`, `AAAA`, `MX`, and
+`NS` results. These records remain technical observations with no claim mapping.
+The case workspace presents registered location, registry activity, website
+association, and DNS routing as separate evidence classes; every displayed
+statement includes its source basis and limitation. In particular, hosting,
+nameserver, mail-provider, registrar, and domain-registration geography never
+become evidence that the organization operates in that place.
+
+For organization-published addresses and broader operating context, the case
+workspace opens the existing persistent chat with a bounded research brief and
+public-web citations enabled. The brief requires direct citations and explicitly
+separates legal records, self-published statements, and infrastructure. It does
+not create an organization address claim on a Persona automatically.
 
 ## Confirmed-name public-record enrichment
 

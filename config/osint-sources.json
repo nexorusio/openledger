@@ -174,6 +174,172 @@
       }
     },
     {
+      "id": "gleif_lei_registry",
+      "display_name": "GLEIF Global LEI Index",
+      "status": "active",
+      "capability": "jurisdiction_scoped_legal_entity_candidate_search",
+      "integration_mode": "native_public_api",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://www.gleif.org/en/lei-data/gleif-api",
+      "usage_terms": "https://www.gleif.org/en/meta/lei-data-terms-of-use",
+      "endpoint_origin": "https://api.gleif.org",
+      "api_version": "JSON-API-v1",
+      "network_classification": "fixed_public_api",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "approved_affiliation_claim_and_legal_jurisdiction",
+        "accepted_target": "exact_analyst_approved_affiliation_name_scoped_to_iso_3166_jurisdiction",
+        "maximum_targets_per_investigation": 1
+      },
+      "guardrails": {
+        "fixed_network_origin": true,
+        "redirects_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000,
+        "maximum_search_rows": 20,
+        "maximum_candidates": 5,
+        "jurisdiction_filter_required": true,
+        "lei_coverage_warning_required": true,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": [],
+      "observation_only_fields": [
+        "lei",
+        "legal_name",
+        "other_names",
+        "legal_jurisdiction",
+        "legal_address",
+        "headquarters_address",
+        "entity_status",
+        "registration_status",
+        "corroboration_level"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "live_contract_target": "Apple Inc.",
+        "owner": "OpenLedger maintainers"
+      }
+    },
+    {
+      "id": "fr_company_registry",
+      "display_name": "French National Enterprise Directory",
+      "status": "active",
+      "capability": "france_legal_entity_and_public_leader_search",
+      "integration_mode": "native_public_api",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://recherche-entreprises.api.gouv.fr/docs/",
+      "usage_terms": "https://annuaire-entreprises.data.gouv.fr/donnees/conditions-generales-utilisation",
+      "endpoint_origin": "https://recherche-entreprises.api.gouv.fr",
+      "api_version": "v1-public-search",
+      "network_classification": "fixed_public_api",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "approved_affiliation_claim_and_fr_jurisdiction",
+        "accepted_target": "exact_analyst_approved_affiliation_name_scoped_to_france",
+        "maximum_targets_per_investigation": 1
+      },
+      "guardrails": {
+        "fixed_network_origin": true,
+        "redirects_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000,
+        "maximum_search_rows": 20,
+        "maximum_candidates": 5,
+        "maximum_public_leaders": 25,
+        "unique_exact_entity_required_for_people_proposals": true,
+        "date_of_birth_and_nationality_storage_allowed": false,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": ["full_name", "company", "occupation"],
+      "observation_only_fields": [
+        "siren",
+        "siret",
+        "legal_name",
+        "legal_form_code",
+        "legal_address",
+        "primary_activity_code",
+        "primary_activity_label",
+        "registered_establishments",
+        "entity_status",
+        "creation_date",
+        "public_registry_role"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "live_contract_target": "812339356",
+        "owner": "OpenLedger maintainers"
+      }
+    },
+    {
+      "id": "cloudflare_dns_context",
+      "display_name": "Cloudflare DNS-over-HTTPS domain context",
+      "status": "active",
+      "capability": "official_organization_domain_technical_context",
+      "integration_mode": "native_public_api",
+      "catalog_reference": "https://osintframework.com/",
+      "official_documentation": "https://developers.cloudflare.com/1.1.1.1/encryption/dns-over-https/make-api-requests/dns-json/",
+      "usage_terms": "https://developers.cloudflare.com/1.1.1.1/terms-of-use/",
+      "endpoint_origin": "https://cloudflare-dns.com",
+      "api_version": "dns-json-current-contract",
+      "network_classification": "fixed_public_api",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "official_website_url_from_operator_or_selected_organization",
+        "accepted_target": "one_exact_public_official_website_domain",
+        "maximum_targets_per_investigation": 1
+      },
+      "guardrails": {
+        "fixed_network_origin": true,
+        "redirects_allowed": false,
+        "timeout_seconds": 20,
+        "maximum_response_bytes": 128000,
+        "maximum_record_types": 4,
+        "maximum_records_per_type": 20,
+        "maximum_records_total": 40,
+        "query_types": ["A", "AAAA", "MX", "NS"],
+        "website_content_fetched": false,
+        "domain_variants_generated": false,
+        "operating_location_inference_allowed": false,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": [],
+      "observation_only_fields": [
+        "official_website_domain",
+        "a_records",
+        "aaaa_records",
+        "mx_records",
+        "ns_records",
+        "record_ttl",
+        "icann_registration_lookup"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-08-31",
+        "review_due_by": "2026-11-29",
+        "live_contract_target": "example.com",
+        "owner": "OpenLedger maintainers"
+      }
+    },
+    {
       "id": "wikidata_affiliation",
       "display_name": "Wikidata organization and affiliation graph",
       "status": "active",

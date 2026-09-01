@@ -24,7 +24,9 @@
 <div class="case-chat-shell"
      id="caseChat"
      data-endpoint="{{ url_for('case_chat_message', case_id=case.id) }}"
-     data-csrf-token="{{ csrf_token }}">
+     data-csrf-token="{{ csrf_token }}"
+     data-initial-prompt="{{ initial_prompt or '' }}"
+     data-initial-research="{{ 'true' if initial_research_enabled else 'false' }}">
     <section class="panel-card case-chat-panel">
         <div class="case-chat-thread" id="caseChatThread" aria-live="polite">
             {% for message in messages %}
