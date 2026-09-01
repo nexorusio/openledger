@@ -1928,6 +1928,18 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
             "longitude": None,
         },
         {
+            "observation_type": "company_profile",
+            "value": "+33\u200b1\u200b23\u200b45\u200b67\u200b89",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing exposes a zero-width-spaced phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
             "observation_type": "business_activity",
             "value": "Think tank",
             "source_url": "https://uncited.example/organization",
@@ -2027,15 +2039,28 @@ def test_public_web_financial_figures_and_timestamps_are_not_phone_contacts():
                 "confidence": 60,
                 "latitude": None,
                 "longitude": None,
-            }
+            },
+            {
+                "observation_type": "business_activity",
+                "value": "Reporting cut-off: 01.09.2026 12.30",
+                "source_url": cited_url,
+                "source_title": "Unistellar results",
+                "source_role": "news_or_institutional",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited company results publish this timestamp.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
         ],
         sources=[{"title": "Unistellar results", "url": cited_url}],
     )
 
-    assert len(findings) == 1
+    assert len(findings) == 2
     assert findings[0]["value"] == (
         "2026 revenue: $1,234,567,890 (€ 1.234.567.890)"
     )
+    assert findings[1]["value"] == "Reporting cut-off: 01.09.2026 12.30"
 
 
 def test_public_web_citation_titles_do_not_retain_personal_contact_data():
@@ -2098,6 +2123,14 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "url": "https://example.org/phone-unicode-space",
             },
             {
+                "title": "+33\u200b1\u200b23\u200b45\u200b67\u200b89",
+                "url": "https://example.org/phone-zero-width-space",
+            },
+            {
+                "title": "Unistellar update 01.09.2026 12.30",
+                "url": "https://example.org/company-update",
+            },
+            {
                 "title": "LinkedIn member",
                 "url": "https://www.linkedin.com/in/alice-doe/",
             },
@@ -2105,12 +2138,28 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "title": "LinkedIn member",
                 "url": "https://www.linkedin.com/%69n/alice-doe/",
             },
+            {
+                "title": "LinkedIn member",
+                "url": (
+                    "https://www.linkedin.com/company/../in/alice-doe/"
+                ),
+            },
+            {
+                "title": "LinkedIn member",
+                "url": (
+                    "https://www.linkedin.com/company/%2e%2e/in/alice-doe/"
+                ),
+            },
         ]
     ) == [
         {
             "title": "Unistellar company profile",
             "url": "https://www.linkedin.com/company/unistellar/",
-        }
+        },
+        {
+            "title": "Unistellar update 01.09.2026 12.30",
+            "url": "https://example.org/company-update",
+        },
     ]
 
 

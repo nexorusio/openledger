@@ -658,7 +658,8 @@ _PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
     r"(?<![\w$€£¥])\+?\d[\d.\s()-]{5,40}\d(?!\w)"
 )
 _DATE_LIKE_NUMBER_PATTERN = re.compile(
-    r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}(?:\s+\d{1,2})?$"
+    r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}"
+    r"(?:[T\s]+\d{1,2}(?:(?::|\.)\d{2}(?:(?::|\.)\d{2})?)?)?$"
 )
 _GROUPED_FINANCIAL_NUMBER_PATTERN = re.compile(
     r"^\d{1,3}(?:[ .]\d{3}){2,}$"
@@ -736,7 +737,10 @@ def _contains_personal_organization_data(value: Any) -> bool:
         or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
     ):
         return bool(text)
-    phone_text = unicodedata.normalize("NFKC", text)
+    phone_text = "".join(
+        " " if unicodedata.category(character) == "Cf" else character
+        for character in unicodedata.normalize("NFKC", text)
+    )
     for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(phone_text):
         candidate = match.group(0).strip()
         digit_count = sum(character.isdigit() for character in candidate)
@@ -774,6 +778,7 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
         parsed_source = urlparse(source_url)
         source_domain = (parsed_source.hostname or "").casefold().rstrip(".")
         decoded_path = unicodedata.normalize("NFKC", unquote(parsed_source.path))
+        decoded_path_segments = decoded_path.replace("\\", "/").split("/")
         personal_profile_url = bool(
             (
                 source_domain == "linkedin.com"
@@ -782,6 +787,11 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
             and (
                 decoded_path.casefold().startswith(("/in/", "/pub/"))
                 or "%" in decoded_path
+                or "\\" in decoded_path
+                or any(
+                    segment in {".", ".."}
+                    for segment in decoded_path_segments
+                )
             )
         )
         if personal_profile_url or (
