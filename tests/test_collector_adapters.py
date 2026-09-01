@@ -1940,6 +1940,30 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
             "longitude": None,
         },
         {
+            "observation_type": "company_profile",
+            "value": "+\u200b376\u200b123\u200b456",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing exposes a short international phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Contact 01.13.2026 89.01",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The number has an impossible date and time shape.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
             "observation_type": "business_activity",
             "value": "Think tank",
             "source_url": "https://uncited.example/organization",
@@ -2125,6 +2149,14 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
             {
                 "title": "+33\u200b1\u200b23\u200b45\u200b67\u200b89",
                 "url": "https://example.org/phone-zero-width-space",
+            },
+            {
+                "title": "+\u200b376\u200b123\u200b456",
+                "url": "https://example.org/phone-short-zero-width-space",
+            },
+            {
+                "title": "Contact 01.13.2026 89.01",
+                "url": "https://example.org/impossible-date-phone",
             },
             {
                 "title": "Unistellar update 01.09.2026 12.30",

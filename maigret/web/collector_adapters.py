@@ -658,8 +658,11 @@ _PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
     r"(?<![\w$€£¥])\+?\d[\d.\s()-]{5,40}\d(?!\w)"
 )
 _DATE_LIKE_NUMBER_PATTERN = re.compile(
-    r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}"
-    r"(?:[T\s]+\d{1,2}(?:(?::|\.)\d{2}(?:(?::|\.)\d{2})?)?)?$"
+    r"^(?P<first>\d{1,4})(?P<date_separator>[-/.])"
+    r"(?P<second>\d{1,2})(?P=date_separator)(?P<third>\d{1,4})"
+    r"(?:[T\s]+(?P<hour>\d{1,2})"
+    r"(?:(?P<time_separator>[:.])(?P<minute>\d{2})"
+    r"(?:(?P=time_separator)(?P<time_second>\d{2}))?)?)?$"
 )
 _GROUPED_FINANCIAL_NUMBER_PATTERN = re.compile(
     r"^\d{1,3}(?:[ .]\d{3}){2,}$"
@@ -702,6 +705,39 @@ _ADDRESS_CONTEXT_PATTERN = re.compile(
 )
 
 
+def _is_semantically_valid_date_like_number(value: str) -> bool:
+    match = _DATE_LIKE_NUMBER_PATTERN.fullmatch(value)
+    if match is None:
+        return False
+    first = match.group("first")
+    second = match.group("second")
+    third = match.group("third")
+    date_orders = []
+    if len(first) == 4 and len(third) <= 2:
+        date_orders.append((int(first), int(second), int(third)))
+    elif len(third) == 4 and len(first) <= 2:
+        # Accept both day-first and month-first public date conventions.
+        date_orders.extend(
+            (
+                (int(third), int(second), int(first)),
+                (int(third), int(first), int(second)),
+            )
+        )
+    else:
+        return False
+
+    hour = int(match.group("hour") or 0)
+    minute = int(match.group("minute") or 0)
+    time_second = int(match.group("time_second") or 0)
+    for year, month, day in date_orders:
+        try:
+            datetime(year, month, day, hour, minute, time_second)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
 def _looks_like_public_address(value: Any) -> bool:
     text = _bounded_text(value, limit=1000)
     return bool(
@@ -738,15 +774,16 @@ def _contains_personal_organization_data(value: Any) -> bool:
     ):
         return bool(text)
     phone_text = "".join(
-        " " if unicodedata.category(character) == "Cf" else character
+        character
         for character in unicodedata.normalize("NFKC", text)
+        if unicodedata.category(character) != "Cf"
     )
     for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(phone_text):
         candidate = match.group(0).strip()
         digit_count = sum(character.isdigit() for character in candidate)
         currency_prefix = phone_text[max(0, match.start() - 4) : match.start()]
         if (
-            _DATE_LIKE_NUMBER_PATTERN.fullmatch(candidate)
+            _is_semantically_valid_date_like_number(candidate)
             or _GROUPED_FINANCIAL_NUMBER_PATTERN.fullmatch(candidate)
             or re.search(r"[$€£¥]\s*$", currency_prefix)
         ):
