@@ -4855,6 +4855,8 @@ def suggested_role_organization(value):
         segments = [segment.strip() for segment in role.split(",")]
         candidate = ", ".join(segments[1:]).strip()
         if len(segments) > 2:
+            if len(segments) != 3:
+                return ""
             suffix = re.sub(r"[^a-z0-9]+", " ", segments[-1].casefold()).strip()
             if suffix not in {
                 "ag",

@@ -391,6 +391,9 @@ def test_role_organization_suggestion_preserves_legal_suffix_and_fails_ambiguous
     assert web_app.suggested_role_organization(
         "Co-founder, CEO, Acme Widgets"
     ) == ""
+    assert web_app.suggested_role_organization(
+        "Co-founder, CEO, Acme Widgets, Inc."
+    ) == ""
 
 
 def test_application_login_replaces_browser_authentication(client, web_app):
