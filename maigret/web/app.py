@@ -2707,7 +2707,10 @@ def run_persistent_affiliation_job(
         (
             'wikidata-affiliation',
             run_wikidata_affiliation_discovery(
-                affiliation_name, selected_entity_id=selected_entity_id
+                affiliation_name,
+                selected_entity_id=selected_entity_id,
+                official_website=explicit_website,
+                legal_jurisdiction=legal_jurisdiction,
             ),
         )
     ]
@@ -2918,12 +2921,13 @@ def run_persistent_affiliation_job(
             registry_observations=registry_observations,
         )
 
-    if observation.get('status') == 'observed':
+    if observation.get('status') in {'observed', 'partial'}:
         organization = observation.get('organization') or {}
-        sink.put(
-            {'type': 'affiliation_entity', 'entity_id': organization.get('id'),
-             'label': organization.get('label'), 'url': organization.get('url')}
-        )
+        if organization.get('id') and organization.get('label'):
+            sink.put(
+                {'type': 'affiliation_entity', 'entity_id': organization.get('id'),
+                 'label': organization.get('label'), 'url': organization.get('url')}
+            )
         for person in list(observation.get('people') or [])[:50]:
             if isinstance(person, dict):
                 sink.put({'type': 'affiliated_person', 'entity_id': person.get('id'), 'label': person.get('label'), 'url': person.get('url')})
@@ -3027,7 +3031,7 @@ def run_persistent_affiliation_job(
         source_status = source_observation.get('status')
         event_type = (
             'collector_error'
-            if source_status in {'rate_limited', 'unavailable'}
+            if source_status in {'rate_limited', 'unavailable', 'partial'}
             else 'collector_completed'
         )
         found = (
