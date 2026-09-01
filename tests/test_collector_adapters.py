@@ -1878,6 +1878,18 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
             "latitude": None,
             "longitude": None,
         },
+        {
+            "observation_type": "company_profile",
+            "value": "C-suite: Alice Doe",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The page lists Alice Doe in the leadership team.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
     ]
 
     assert normalize_public_web_organization_findings(
@@ -1898,10 +1910,15 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "title": "Alice Doe – CEO at Acme",
                 "url": "https://example.org/leadership",
             },
+            {
+                "title": "Alice Doe joins Acme's C-suite",
+                "url": "https://example.org/executives",
+            },
         ]
     ) == [
         {"title": "example.org", "url": "https://example.org/company"},
         {"title": "example.org", "url": "https://example.org/leadership"},
+        {"title": "example.org", "url": "https://example.org/executives"},
     ]
 
 

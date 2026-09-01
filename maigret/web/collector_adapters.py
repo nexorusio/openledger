@@ -665,12 +665,15 @@ _PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _PERSON_ROLE_LABEL_PATTERN = re.compile(
-    r"\b(?:advisers?|advisors?|ceo|cfo|chair|chairman|chairperson|chairwoman|"
+    r"\b(?:advisers?|advisors?|board members?|board of directors|c[- ]suite|"
+    r"ceo|cfo|chair|chairman|chairperson|chairwoman|"
+    r"chief [a-z][a-z -]{1,40} officer|"
     r"chief executive officer|chief financial officer|chief operating officer|"
     r"chief technology officer|cio|cmo|coo|counsel|cto|directors?|employees?|"
-    r"executives?|founders?|heads? of|lawyers?|managers?|officers?|owners?|"
-    r"partners?|presidents?|professors?|secretar(?:y|ies)|staff members?|"
-    r"treasurers?|vice presidents?|vp)\b",
+    r"executive team|executives?|founders?|heads? of|lawyers?|leadership|"
+    r"management team|managers?|officers?|owners?|partners?|personnel|"
+    r"presidents?|professors?|secretar(?:y|ies)|staff members?|team members?|"
+    r"treasurers?|vice[- ]presidents?|vp)\b",
     re.IGNORECASE,
 )
 _BUSINESS_LOCATION_CONTEXT_PATTERN = re.compile(
