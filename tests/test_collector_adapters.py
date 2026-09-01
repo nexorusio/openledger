@@ -1934,6 +1934,14 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "title": "Management-team: Alice Doe",
                 "url": "https://example.org/management",
             },
+            {
+                "title": "Management―team: Alice Doe",
+                "url": "https://example.org/management-horizontal-bar",
+            },
+            {
+                "title": "Alice Doe is a team－member",
+                "url": "https://example.org/team-fullwidth-hyphen",
+            },
         ]
     ) == [
         {"title": "example.org", "url": "https://example.org/company"},
@@ -1941,6 +1949,14 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
         {"title": "example.org", "url": "https://example.org/executives"},
         {"title": "example.org", "url": "https://example.org/board"},
         {"title": "example.org", "url": "https://example.org/management"},
+        {
+            "title": "example.org",
+            "url": "https://example.org/management-horizontal-bar",
+        },
+        {
+            "title": "example.org",
+            "url": "https://example.org/team-fullwidth-hyphen",
+        },
     ]
 
 
