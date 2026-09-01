@@ -379,6 +379,20 @@ def test_investigation_builder_explains_identifier_capabilities(client):
     assert 'Query plan' in body
 
 
+def test_role_organization_suggestion_preserves_legal_suffix_and_fails_ambiguous(
+    web_app,
+):
+    assert web_app.suggested_role_organization(
+        "CEO, Acme Widgets, Inc."
+    ) == "Acme Widgets, Inc."
+    assert web_app.suggested_role_organization(
+        "Director at Acme Widgets, Inc."
+    ) == "Acme Widgets, Inc."
+    assert web_app.suggested_role_organization(
+        "Co-founder, CEO, Acme Widgets"
+    ) == ""
+
+
 def test_application_login_replaces_browser_authentication(client, web_app):
     web_app.app.config['AUTH_REQUIRED'] = True
     web_app.save_auth_credentials('operator', 'correct-horse-battery-staple')

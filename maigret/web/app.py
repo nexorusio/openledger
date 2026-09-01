@@ -4041,6 +4041,11 @@ def persona_display_identifier_type(persona):
             if isinstance(options.get("investigation_spec"), dict)
             else {}
         )
+        target_persona_id = str(
+            specification.get("target_persona_id") or ""
+        )
+        if target_persona_id and target_persona_id != persona.get("id"):
+            continue
         for identifier in list(specification.get("identifiers") or [])[:24]:
             if not isinstance(identifier, dict):
                 continue
@@ -4841,14 +4846,42 @@ def suggested_role_organization(value):
     if not role:
         return ""
     candidate = ""
-    if "," in role:
-        candidate = role.rsplit(",", 1)[-1].strip()
+    at_separators = list(
+        re.finditer(r"\s+at\s+", role, flags=re.IGNORECASE)
+    )
+    if at_separators:
+        candidate = role[at_separators[-1].end() :].strip()
+    elif "," in role:
+        segments = [segment.strip() for segment in role.split(",")]
+        candidate = ", ".join(segments[1:]).strip()
+        if len(segments) > 2:
+            suffix = re.sub(r"[^a-z0-9]+", " ", segments[-1].casefold()).strip()
+            if suffix not in {
+                "ag",
+                "bv",
+                "corp",
+                "corporation",
+                "gmbh",
+                "inc",
+                "incorporated",
+                "limited",
+                "llc",
+                "llp",
+                "ltd",
+                "nv",
+                "plc",
+                "pte ltd",
+                "sa",
+                "sarl",
+                "tbk",
+            }:
+                return ""
     else:
-        separators = list(
-            re.finditer(r"\s+(?:at|for|with)\s+", role, flags=re.IGNORECASE)
+        contextual_separators = list(
+            re.finditer(r"\s+(?:for|with)\s+", role, flags=re.IGNORECASE)
         )
-        if separators:
-            candidate = role[separators[-1].end() :].strip()
+        if contextual_separators:
+            candidate = role[contextual_separators[-1].end() :].strip()
     if (
         not 2 <= len(candidate) <= 200
         or not any(character.isalpha() for character in candidate)

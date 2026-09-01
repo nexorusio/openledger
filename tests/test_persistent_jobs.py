@@ -856,6 +856,56 @@ def test_persona_rerun_preserves_exact_username_origin(client, persistent_store)
     ]
 
 
+def test_persona_prefill_ignores_another_personas_targeted_refresh(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(
+        ["alice", "bob"],
+        {
+            "investigation_spec": {
+                "processing_mode": "independent",
+                "subject_label": "alice",
+                "identifiers": [
+                    {"type": "username", "value": "alice"},
+                    {"type": "username", "value": "bob"},
+                ],
+            }
+        },
+    )
+    source_job = persistent_store.claim_next("worker:prefill-scope-source")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "usernames": ["alice", "bob"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    personas = {
+        persona["display_name"]: persona["id"]
+        for persona in persistent_store.get_case(source_job["case_id"])[
+            "personas"
+        ]
+    }
+    persistent_store.repeat_persona_investigation(
+        personas["alice"],
+        ["bob"],
+        {
+            "investigation_spec": {
+                "processing_mode": "same_subject",
+                "identifiers": [{"type": "full_name", "value": "bob"}],
+            }
+        },
+    )
+
+    bob_builder = client.get(
+        f"/personas/{personas['bob']}/investigate"
+    ).get_data(as_text=True)
+    assert '<option value="username" selected>Username</option>' in bob_builder
+    assert '<option value="full_name" selected>' not in bob_builder
+
+
 def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
     client, persistent_store
 ):
