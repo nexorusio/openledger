@@ -46,7 +46,7 @@ from maigret.checking import build_cloudflare_bypass_config
 from maigret.result import MaigretCheckStatus
 from maigret.sites import MaigretDatabase
 from maigret.report import generate_report_context
-from maigret.utils import is_country_tag
+from maigret.utils import is_country_tag, is_plausible_username
 from maigret.web.case_store import (
     ActiveInvestigationError,
     TERMINAL_STATUSES,
@@ -4024,6 +4024,55 @@ def scan_stop(job_id):
     return {'ok': True}
 
 
+def persona_display_identifier_type(persona):
+    """Classify a Persona label from its originating plan and reviewed evidence."""
+    display_name = " ".join(str(persona.get("display_name") or "").split())
+    normalized_display = display_name.casefold()
+    case = (
+        case_store.get_case(persona.get("case_id"))
+        if case_store is not None and persona.get("case_id")
+        else None
+    )
+    jobs = list((case or {}).get("jobs") or [])
+    for job in jobs:
+        options = job.get("options") if isinstance(job.get("options"), dict) else {}
+        specification = (
+            options.get("investigation_spec")
+            if isinstance(options.get("investigation_spec"), dict)
+            else {}
+        )
+        for identifier in list(specification.get("identifiers") or [])[:24]:
+            if not isinstance(identifier, dict):
+                continue
+            identifier_type = str(identifier.get("type") or "")
+            identifier_value = " ".join(
+                str(identifier.get("value") or "").split()
+            )
+            if (
+                identifier_value.casefold() == normalized_display
+                and identifier_type in {"username", "social_handle", "full_name"}
+            ):
+                return identifier_type
+    affiliation_origin = any(job.get("kind") == "affiliation" for job in jobs)
+    for claim in persona.get("claims", []):
+        if (
+            claim.get("field_name") == "full_name"
+            and " ".join(str(claim.get("display_value") or "").split()).casefold()
+            == normalized_display
+            and (
+                claim.get("review_status") == "approved"
+                or (
+                    affiliation_origin
+                    and claim.get("review_status") not in {"rejected", "uncertain"}
+                )
+            )
+        ):
+            return "full_name"
+    if display_name and is_plausible_username(display_name):
+        return "username"
+    return "full_name"
+
+
 def investigation_builder_context(persona=None):
     """Build the shared New investigation and Persona-rerun form context."""
     refresh_job_results_from_disk()
@@ -4048,11 +4097,18 @@ def investigation_builder_context(persona=None):
             continue
     initial_identifiers = [{"type": "username", "value": ""}]
     if persona:
+        display_identifier_type = persona_display_identifier_type(persona)
         initial_identifiers = [
-            {"type": "full_name", "value": persona["display_name"]}
+            {
+                "type": display_identifier_type,
+                "value": persona["display_name"],
+            }
         ]
         seen = {
-            ("full_name", str(persona["display_name"]).strip().casefold())
+            (
+                display_identifier_type,
+                str(persona["display_name"]).strip().casefold(),
+            )
         }
         for claim in persona.get("claims", []):
             if claim.get("review_status") != "approved":
@@ -5128,16 +5184,24 @@ def investigate_affiliation_claim(claim_id):
                 url_for('persona_workspace', persona_id=claim['persona_id'])
             )
         normalized_organization = " ".join(str(organization_name).split())
-        normalized_role = " ".join(str(claim['display_value']).split())
-        if normalized_organization.casefold() not in normalized_role.casefold():
+        expected_organization = suggested_role_organization(
+            claim['display_value']
+        )
+        if (
+            not expected_organization
+            or normalized_organization.casefold()
+            != expected_organization.casefold()
+        ):
             flash(
-                'The organization target must match exact text in the approved '
-                'role. Amend the role first if its evidence is incomplete.',
+                'The organization target must match the bounded organization '
+                'segment in the approved role. Amend the role first if its '
+                'evidence is incomplete.',
                 'warning',
             )
             return redirect(
                 url_for('persona_workspace', persona_id=claim['persona_id'])
             )
+        organization_name = expected_organization
     try:
         job_id = case_store.create_affiliation_investigation(
             organization_name,

@@ -116,13 +116,13 @@
     </form>
     {% if claim.review_status == 'approved' %}</details>{% endif %}
     {% if claim.reviewed_by %}<small class="review-meta">Last reviewed by {{ claim.reviewed_by }} · {{ claim.reviewed_at }}</small>{% endif %}
-    {% if claim.field_name in ('company', 'occupation') and claim.review_status == 'approved' %}
+    {% if claim.review_status == 'approved' and (claim.field_name == 'company' or (claim.field_name == 'occupation' and claim.suggested_organization_target)) %}
     <form method="POST" action="{{ url_for('investigate_affiliation_claim', claim_id=claim.id) }}" class="affiliation-investigation-action">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {% if claim.field_name == 'occupation' %}
         <label class="affiliation-jurisdiction-field">
             <span>Organization named by this role</span>
-            <input type="text" name="organization_name" maxlength="500" value="{{ claim.suggested_organization_target }}" placeholder="e.g. ILUNI FEB UI" autocomplete="organization" required>
+            <input type="text" name="organization_name" maxlength="500" value="{{ claim.suggested_organization_target }}" autocomplete="organization" readonly required>
         </label>
         <small>Confirm the exact organization named by the approved role. This opens a research case; it does not silently turn the role text into an approved affiliation fact.</small>
         {% endif %}

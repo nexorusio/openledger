@@ -802,6 +802,60 @@ def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
     assert "f@example.test" not in refresh_job["usernames"]
 
 
+def test_persona_rerun_preserves_exact_username_origin(client, persistent_store):
+    username = "john.doe"
+    job_id = persistent_store.create_investigation(
+        [username],
+        {
+            "investigation_spec": {
+                "processing_mode": "independent",
+                "subject_label": username,
+                "identifiers": [{"type": "username", "value": username}],
+            }
+        },
+    )
+    source_job = persistent_store.claim_next("worker:username-rerun-source")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": [username],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    persona_id = persistent_store.get_case(source_job["case_id"])["personas"][0][
+        "id"
+    ]
+
+    page = client.get(f"/personas/{persona_id}/investigate").get_data(
+        as_text=True
+    )
+    assert '<option value="username" selected>Username</option>' in page
+    assert f'value="{username}"' in page
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "username-rerun-csrf"
+    response = client.post(
+        f"/personas/{persona_id}/investigate",
+        data={
+            "csrf_token": "username-rerun-csrf",
+            "identifier_type": "username",
+            "identifier_value": username,
+            "processing_mode": "same_subject",
+            "generate_name_variants": "on",
+            "mode": "fast",
+        },
+    )
+
+    refresh = persistent_store.get_job(response.location.rsplit("/", 1)[-1])
+    assert refresh["usernames"] == [username]
+    assert refresh["options"]["investigation_spec"]["identifiers"] == [
+        {"type": "username", "value": username}
+    ]
+
+
 def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
     client, persistent_store
 ):
@@ -1918,11 +1972,11 @@ def test_approved_role_can_open_an_analyst_confirmed_organization_case(
         f"/claims/{occupation['id']}/investigate-affiliation",
         data={
             "csrf_token": "role-organization-csrf",
-            "organization_name": "Unrelated Organization",
+            "organization_name": "ILUNI",
         },
         follow_redirects=True,
     )
-    assert "must match exact text in the approved role" in rejected.get_data(
+    assert "must match the bounded organization segment" in rejected.get_data(
         as_text=True
     )
     assert len(persistent_store.list_jobs()) == 1
