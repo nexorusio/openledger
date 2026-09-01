@@ -660,6 +660,7 @@ class CaseStore:
         source_claim_id: Optional[str] = None,
         jurisdiction: Any = None,
         enable_domain_context: bool = False,
+        enable_public_web_research: bool = False,
         official_website: Any = None,
     ) -> str:
         from maigret.web.collector_adapters import (
@@ -684,6 +685,7 @@ class CaseStore:
             "source_claim_id": source_claim_id,
             "legal_jurisdiction": legal_jurisdiction,
             "enable_domain_context": enable_domain_context,
+            "enable_public_web_research": bool(enable_public_web_research),
             "official_website": normalized_website,
         }
         case_title = f"Affiliation: {affiliation_name}"
@@ -714,7 +716,9 @@ class CaseStore:
                             if legal_jurisdiction
                             and legal_jurisdiction["code"] == "FR"
                             else 3 if legal_jurisdiction else 2
-                        ) + (2 if enable_domain_context else 0),
+                        )
+                        + (2 if enable_domain_context else 0)
+                        + (1 if enable_public_web_research else 0),
                         "found": 0,
                     },
                     result=None,
@@ -733,6 +737,9 @@ class CaseStore:
                 "affiliation": affiliation_name,
                 "legal_jurisdiction": legal_jurisdiction,
                 "domain_context_requested": enable_domain_context,
+                "public_web_research_requested": bool(
+                    enable_public_web_research
+                ),
             },
         )
         return job_id
@@ -884,7 +891,20 @@ class CaseStore:
                 case_statement = case_statement.with_for_update()
             if not connection.execute(case_statement).first():
                 raise KeyError(case_id)
-            prior_jobs = list(
+            if connection.scalar(
+                select(investigation_jobs.c.id)
+                .where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.kind == "affiliation",
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                )
+                .limit(1)
+            ):
+                raise ValueError(
+                    "Wait for the current affiliation investigation before "
+                    "confirming an organization"
+                )
+            selected_row = (
                 connection.execute(
                     select(
                         investigation_jobs.c.id,
@@ -897,13 +917,14 @@ class CaseStore:
                         investigation_jobs.c.status == "completed",
                     )
                     .order_by(investigation_jobs.c.created_at.desc())
-                    .limit(10)
-                ).mappings()
+                    .limit(1)
+                )
+                .mappings()
+                .first()
             )
             selected_candidate = None
-            selected_row = None
-            for prior in prior_jobs:
-                result = dict(prior["result"] or {})
+            if selected_row:
+                result = dict(selected_row["result"] or {})
                 for candidate in list(
                     result.get("organization_resolution_candidates") or []
                 )[:15]:
@@ -912,13 +933,11 @@ class CaseStore:
                         and candidate.get("candidate_key") == candidate_key
                     ):
                         selected_candidate = candidate
-                        selected_row = prior
                         break
-                if selected_candidate:
-                    break
             if not selected_candidate or not selected_row:
                 raise ValueError(
-                    "The selected organization is not a stored candidate for this case"
+                    "The selected organization is not a candidate from the current "
+                    "completed affiliation investigation"
                 )
             if selected_candidate.get("selectable") is not True:
                 raise ValueError(
@@ -1026,7 +1045,13 @@ class CaseStore:
             )
         return selection
 
-    def queue_affiliation_entity(self, case_id: str, entity_id: str) -> str:
+    def queue_affiliation_entity(
+        self,
+        case_id: str,
+        entity_id: str,
+        *,
+        enable_public_web_research: bool = False,
+    ) -> str:
         entity_id = str(entity_id or "").strip().upper()
         if not re.fullmatch(r"Q[1-9][0-9]{0,19}", entity_id):
             raise ValueError("Select a valid Wikidata organization")
@@ -1059,6 +1084,7 @@ class CaseStore:
             source_claim_id = None
             legal_jurisdiction = None
             enable_domain_context = False
+            enable_public_web_research = bool(enable_public_web_research)
             official_website = None
             selected_organization = None
             for prior in prior_jobs:
@@ -1070,6 +1096,9 @@ class CaseStore:
                 )
                 enable_domain_context = enable_domain_context or bool(
                     spec.get("enable_domain_context")
+                )
+                enable_public_web_research = enable_public_web_research or bool(
+                    spec.get("enable_public_web_research")
                 )
                 official_website = official_website or spec.get("official_website")
                 selected_organization = selected_organization or spec.get(
@@ -1095,6 +1124,7 @@ class CaseStore:
                 "source_claim_id": source_claim_id,
                 "legal_jurisdiction": legal_jurisdiction,
                 "enable_domain_context": enable_domain_context,
+                "enable_public_web_research": enable_public_web_research,
                 "official_website": official_website,
                 "wikidata_entity_id": entity_id,
                 "selected_entity_label": selected_label,
@@ -1107,6 +1137,7 @@ class CaseStore:
                 else 3 if legal_jurisdiction else 2
             )
             total_sources += 2 if enable_domain_context else 0
+            total_sources += 1 if enable_public_web_research else 0
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id, case_id=case_id, kind="affiliation", status="queued",
@@ -1130,7 +1161,11 @@ class CaseStore:
         return job_id
 
     def queue_affiliation_context(
-        self, case_id: str, *, official_website: Any = None
+        self,
+        case_id: str,
+        *,
+        official_website: Any = None,
+        enable_public_web_research: bool = False,
     ) -> str:
         """Rerun an affiliation case with an explicit domain-context opt-in."""
         from maigret.web.collector_adapters import normalize_official_website_url
@@ -1180,6 +1215,10 @@ class CaseStore:
                 "investigation_type": "affiliation",
                 "affiliation_name": affiliation_name[:500],
                 "enable_domain_context": True,
+                "enable_public_web_research": bool(
+                    enable_public_web_research
+                    or prior_spec.get("enable_public_web_research")
+                ),
                 "official_website": (
                     normalized_website or prior_spec.get("official_website")
                 ),
@@ -1189,7 +1228,9 @@ class CaseStore:
                 if isinstance(legal_jurisdiction, dict)
                 and legal_jurisdiction.get("code") == "FR"
                 else 3 if legal_jurisdiction else 2
-            ) + 2
+            ) + 2 + (
+                1 if specification["enable_public_web_research"] else 0
+            )
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,

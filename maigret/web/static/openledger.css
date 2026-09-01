@@ -82,6 +82,7 @@
 .business-context-finding dl > div { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: .65rem; }
 .business-context-finding dt { color: var(--ol-muted); font-size: .7rem; text-transform: uppercase; }
 .business-context-finding dd { margin: 0; font-size: .78rem; }
+.public-web-research-analysis { white-space: pre-wrap; }
 .domain-context-card { display: grid; gap: .75rem; }
 .domain-context-card > header > div { display: grid; gap: .2rem; }
 .domain-context-card small { color: var(--ol-muted); }

@@ -314,8 +314,22 @@ organization/contact/location sections, or bounded multilingual address markers
 become pending organization-location observations with the exact page URL.
 Residential labels are blocked. These observations remain separate from legal
 records and technical infrastructure, and are never copied to a person's
-location. Broader operating-context research remains available through the
-persistent cited case chat.
+location.
+
+If the existing server-side OpenAI key and AI web-enrichment setting are
+available, the affiliation job also runs one cited public-web research turn for
+the exact organization. This reuses the persistent case-chat research boundary;
+it does not directly scrape LinkedIn, Google Maps, or another external profile.
+A strict second pass can propose bounded organization identity, profile,
+address, headquarters, or activity observations only when each proposal uses an
+exact citation returned by that turn. Server validation rejects ambiguous,
+uncited, private, residential, or malformed findings and marks every accepted
+finding pending. Third-party profile and map evidence is confidence-capped and
+cannot prove registration, ownership, completeness, or current accuracy.
+Organization observations never create a Persona or become canonical facts
+without analyst review. Failure remains isolated to this optional research
+source, and the same workflow remains available through persistent cited case
+chat for analyst-directed follow-up.
 
 ## Confirmed-name public-record enrichment
 

@@ -255,6 +255,43 @@
             <p class="form-text">No direct registered, website, or technical context finding was retained. This is an evidence gap, not a conclusion that the entity has no operations.</p>
             {% endif %}
 
+            {% if affiliation_job.public_web_research %}
+            {% set public_research = affiliation_job.public_web_research %}
+            <article class="domain-context-card public-web-organization-research">
+                <header>
+                    <div><strong>Cited external company-profile research</strong><small>{{ public_research.reason }}</small></div>
+                    <span class="badge-soft {{ 'success' if public_research.status == 'observed' else 'warning' }}">{{ public_research.status | replace('_', ' ') | title }}</span>
+                </header>
+                {% if public_research.analysis %}<p class="public-web-research-analysis">{{ public_research.analysis }}</p>{% endif %}
+                {% if public_research.findings %}
+                <div class="business-context-list">
+                    {% for finding in public_research.findings %}
+                    <article class="business-context-finding">
+                        <header>
+                            <span class="badge-soft">{{ finding.observation_type | replace('_', ' ') | title }}</span>
+                            <span class="badge-soft warning">Pending verification</span>
+                            <a href="{{ finding.source_url }}" target="_blank" rel="noopener noreferrer">Open cited evidence</a>
+                        </header>
+                        <strong>{{ finding.value }}</strong>
+                        <dl>
+                            <div><dt>Source</dt><dd>{{ finding.source_title }} · {{ finding.source_role | replace('_', ' ') | title }}</dd></div>
+                            <div><dt>Identity match</dt><dd>{{ finding.identity_match_basis | replace('_', ' ') }}</dd></div>
+                            <div><dt>Basis</dt><dd>{{ finding.basis }}</dd></div>
+                            <div><dt>Limitation</dt><dd>{{ finding.limitation }}</dd></div>
+                        </dl>
+                    </article>
+                    {% endfor %}
+                </div>
+                {% elif public_research.status == 'observed' %}
+                <p class="form-text">The cited search completed but produced no organization observation that passed the identity, privacy, and provenance contract.</p>
+                {% endif %}
+                {% if public_research.sources %}
+                <div><strong>Citation catalogue</strong><ul>{% for source in public_research.sources %}<li><a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title or source.url }}</a></li>{% endfor %}</ul></div>
+                {% endif %}
+                <p class="registry-coverage-note"><i data-lucide="shield-check"></i> OpenLedger used the configured cited web-search capability and did not send direct scraping requests to LinkedIn, Google Maps, or another external profile page. These observations never become Persona locations or canonical organization facts automatically.</p>
+            </article>
+            {% endif %}
+
             {% if affiliation_job.website_observation %}
             {% set website_evidence = affiliation_job.website_observation %}
             <article class="domain-context-card">

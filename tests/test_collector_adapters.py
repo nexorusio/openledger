@@ -16,6 +16,7 @@ from maigret.web.collector_adapters import (
     ICIJ_OFFSHORE_ENGINE,
     ICIJ_RECONCILE_URL,
     OFFICIAL_WEBSITE_ENGINE,
+    PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
     UNFURL_ENGINE,
     UNFURL_VERSION,
     USER_SCANNER_ENGINE,
@@ -48,6 +49,7 @@ from maigret.web.collector_adapters import (
     normalize_cloudflare_dns_context,
     normalize_official_website_url,
     normalize_official_website_public_content,
+    normalize_public_web_organization_findings,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
     normalize_wayback_capture_index,
@@ -890,6 +892,16 @@ async def test_wikidata_article_is_retained_but_cannot_be_selected_as_organizati
     responses = [
         _FakeResponse(status=200, body=json.dumps(search).encode()),
         _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        "Q13442814": {"claims": {"P279": []}}
+                    }
+                }
+            ).encode(),
+        ),
     ]
 
     observation = await run_wikidata_affiliation_discovery(
@@ -906,7 +918,102 @@ async def test_wikidata_article_is_retained_but_cannot_be_selected_as_organizati
         "not_verified_as_organization"
     )
     assert "type-verified Wikidata organization" in observation["reason"]
-    assert len([item for item in calls if item[0] == "get"]) == 2
+    assert len([item for item in calls if item[0] == "get"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_wikidata_organization_subclass_is_type_verified_before_selection():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900001",
+                "label": "Example Hospital",
+                "description": "public hospital",
+                "match": {"text": "Example Hospital"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900001": {
+                "labels": {"en": {"value": "Example Hospital"}},
+                "descriptions": {"en": {"value": "public hospital"}},
+                "claims": {
+                    "P31": [
+                        {
+                            "mainsnak": {
+                                "datavalue": {"value": {"id": "Q16917"}}
+                            }
+                        }
+                    ]
+                },
+            }
+        }
+    }
+    class_hierarchy = {
+        "entities": {
+            "Q16917": {
+                "claims": {
+                    "P279": [
+                        {
+                            "mainsnak": {
+                                "datavalue": {"value": {"id": "Q43229"}}
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    organization_class = {
+        "entities": {"Q43229": {"claims": {"P279": []}}}
+    }
+    relation_result = {"results": {"bindings": []}}
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(status=200, body=json.dumps(class_hierarchy).encode()),
+        _FakeResponse(status=200, body=json.dumps(organization_class).encode()),
+        _FakeResponse(status=200, body=json.dumps(relation_result).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Hospital",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "observed"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is True
+    assert candidate["organization_type_status"] == "verified_organization"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert requests[2]["params"]["ids"] == "Q16917"
+    assert requests[2]["params"]["props"] == "claims"
+
+
+@pytest.mark.asyncio
+async def test_wikidata_type_request_failure_is_not_negative_type_evidence():
+    calls = []
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(_wikidata_search()).encode()),
+        _FakeResponse(status=429, body=b"", headers={"Retry-After": "60"}),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Organization",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "rate_limited"
+    assert "type verification was unavailable" in observation["reason"]
+    assert observation["organization_candidates"][0].get(
+        "organization_eligible"
+    ) is None
 
 
 def _gleif_entities():
@@ -1421,6 +1528,145 @@ def test_unistellar_site_retains_people_email_and_link_without_inventing_address
     assert observation["linked_company_profiles"] == [
         "https://www.linkedin.com/company/unistellar"
     ]
+
+
+def test_cited_company_profiles_and_map_listings_remain_pending_observations():
+    linkedin_url = "https://www.linkedin.com/company/unistellar/"
+    maps_url = (
+        "https://www.google.com/maps/place/Unistellar/"
+        "@-6.2585928,106.8205345,980m/data=!3m1!1e3"
+    )
+    sources = [
+        {"title": "Unistellar | LinkedIn", "url": linkedin_url},
+        {"title": "Unistellar - Google Maps", "url": maps_url},
+    ]
+    proposals = [
+        {
+            "observation_type": "headquarters",
+            "value": "Jl Kemang Timur No. 28, Jakarta 12730, ID",
+            "source_url": linkedin_url,
+            "source_title": "Unistellar | LinkedIn",
+            "source_role": "other_public_source",
+            "identity_match_basis": "exact_name_and_official_website",
+            "reason": (
+                "The cited company profile uses the exact name and links to "
+                "unistellar.co while explicitly labelling Jakarta headquarters."
+            ),
+            "confidence": 84,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "business_address",
+            "value": "Jl Kemang Timur No. 28, Jakarta 12730, ID",
+            "source_url": maps_url,
+            "source_title": "Unistellar - Google Maps",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_and_location",
+            "reason": "The cited listing publishes this business address.",
+            "confidence": 80,
+            "latitude": -6.2585928,
+            "longitude": 106.8231094,
+        },
+    ]
+
+    findings = normalize_public_web_organization_findings(
+        "Unistellar",
+        proposals,
+        sources=sources,
+        official_website="https://www.unistellar.co/",
+    )
+
+    assert len(findings) == 2
+    assert {finding["source_role"] for finding in findings} == {
+        "professional_profile",
+        "map_listing",
+    }
+    assert all(
+        finding["source_engine"]
+        == PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE
+        for finding in findings
+    )
+    assert all(finding["review_status"] == "pending" for finding in findings)
+    assert all(
+        finding["automatic_approval_allowed"] is False for finding in findings
+    )
+    assert all(
+        finding["direct_platform_fetch_performed"] is False for finding in findings
+    )
+    assert all(finding["confidence"] == 75 for finding in findings)
+    assert findings[1]["latitude"] == -6.2585928
+    assert "not legal-registry" in findings[1]["limitation"]
+
+
+def test_public_web_headquarters_requires_an_explicit_source_label():
+    source_url = "https://directory.example/unistellar"
+    proposal = {
+        "observation_type": "headquarters",
+        "value": "Jakarta, Indonesia",
+        "source_url": source_url,
+        "source_title": "Unistellar listing",
+        "source_role": "public_directory",
+        "identity_match_basis": "exact_name_and_location",
+        "reason": "The listing publishes Jakarta as a business location.",
+        "confidence": 70,
+        "latitude": None,
+        "longitude": None,
+    }
+
+    assert normalize_public_web_organization_findings(
+        "Unistellar",
+        [proposal],
+        sources=[{"title": "Unistellar listing", "url": source_url}],
+    ) == []
+
+
+def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
+    cited_url = "https://example.org/company"
+    proposals = [
+        {
+            "observation_type": "business_address",
+            "value": "Home address: 8 Private Road, Jakarta 12730",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "A directory returned a matching name.",
+            "confidence": 90,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Unistellar",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "ambiguous",
+            "reason": "The name may refer to several organizations.",
+            "confidence": 40,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "business_activity",
+            "value": "Think tank",
+            "source_url": "https://uncited.example/organization",
+            "source_title": "Uncited",
+            "source_role": "other_public_source",
+            "identity_match_basis": "exact_name_only",
+            "reason": "No exact citation was returned.",
+            "confidence": 50,
+            "latitude": None,
+            "longitude": None,
+        },
+    ]
+
+    assert normalize_public_web_organization_findings(
+        "Unistellar",
+        proposals,
+        sources=[{"title": "Example", "url": cited_url}],
+    ) == []
 
 
 @pytest.mark.asyncio

@@ -124,6 +124,73 @@ CASE_CHAT_PROPOSAL_SCHEMA = {
     "additionalProperties": False,
 }
 
+ORGANIZATION_CONTEXT_PROPOSAL_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "proposals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "observation_type": {
+                        "type": "string",
+                        "enum": [
+                            "organization_identity",
+                            "company_profile",
+                            "business_address",
+                            "headquarters",
+                            "business_activity",
+                        ],
+                    },
+                    "value": {"type": "string"},
+                    "source_url": {"type": "string"},
+                    "source_title": {"type": "string"},
+                    "source_role": {
+                        "type": "string",
+                        "enum": [
+                            "official_organization",
+                            "legal_registry",
+                            "professional_profile",
+                            "map_listing",
+                            "public_directory",
+                            "news_or_institutional",
+                            "other_public_source",
+                        ],
+                    },
+                    "identity_match_basis": {
+                        "type": "string",
+                        "enum": [
+                            "exact_name_and_official_website",
+                            "exact_name_and_location",
+                            "exact_name_only",
+                            "ambiguous",
+                        ],
+                    },
+                    "reason": {"type": "string"},
+                    "confidence": {"type": "integer"},
+                    "latitude": {"type": ["number", "null"]},
+                    "longitude": {"type": ["number", "null"]},
+                },
+                "required": [
+                    "observation_type",
+                    "value",
+                    "source_url",
+                    "source_title",
+                    "source_role",
+                    "identity_match_basis",
+                    "reason",
+                    "confidence",
+                    "latitude",
+                    "longitude",
+                ],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["proposals"],
+    "additionalProperties": False,
+}
+
 
 class AIEnrichmentContractError(RuntimeError):
     """The enrichment response did not contain the required cited research."""
@@ -748,6 +815,93 @@ nothing qualifies."""
                 "name": "openledger_case_chat_persona_proposals",
                 "strict": True,
                 "schema": CASE_CHAT_PROPOSAL_SCHEMA,
+            }
+        },
+    }
+    timeout = aiohttp.ClientTimeout(total=timeout_seconds)
+    async with aiohttp.ClientSession(timeout=timeout) as session:
+        async with session.post(url, json=payload, headers=headers) as resp:
+            await _check_response(resp)
+            try:
+                response_data = await resp.json()
+            except (aiohttp.ContentTypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError(
+                    "OpenAI API returned an invalid JSON response"
+                ) from exc
+    return _parse_structured_response(response_data)
+
+
+async def get_organization_context_proposals(
+    api_key: str,
+    *,
+    organization_name: str,
+    legal_jurisdiction,
+    official_website,
+    research_answer: str,
+    sources,
+    model: str = "gpt-5.4",
+    api_base_url: str = DEFAULT_AI_API_BASE_URL,
+    timeout_seconds: int = 180,
+    allow_custom_endpoint: bool = False,
+    allow_private_endpoint: bool = False,
+):
+    """Extract bounded organization observations from one cited research turn."""
+    source_catalog = [
+        {
+            "title": str(source.get("title", ""))[:300],
+            "url": str(source.get("url", ""))[:2000],
+        }
+        for source in list(sources or [])[:100]
+        if isinstance(source, dict)
+    ]
+    if not source_catalog:
+        return []
+    url = _ai_api_url(
+        api_base_url,
+        "responses",
+        allow_custom_endpoint=allow_custom_endpoint,
+        allow_private_endpoint=allow_private_endpoint,
+    )
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+    instructions = """Extract only reviewable public organization observations
+explicitly supported by the research answer and one exact URL from the supplied
+citation catalogue. Never invent or repair a URL. Professional-network company
+pages and public map/business listings may be retained as cited third-party
+observations, but they are not legal-registry evidence and must not be described
+as content fetched directly by OpenLedger. A headquarters observation is allowed
+only when the cited source explicitly labels the location as headquarters. A map
+or directory address without that label is only a business_address. Do not infer
+an address from coordinates, infrastructure, a map viewport, or a nearby place.
+Omit ambiguous identity matches, private or residential addresses, employee
+details, personal contact data, sensitive traits, and unsupported conclusions.
+Use exact_name_only cautiously and keep its confidence at or below 60; every
+other confidence must remain at or below 85. Latitude and longitude are allowed
+only when the cited source explicitly provides both for a business location.
+Return an empty list when no observation qualifies. All output remains pending
+human review and must never be presented as a canonical organization fact."""
+    structured_input = json.dumps(
+        {
+            "organization_name": str(organization_name)[:500],
+            "legal_jurisdiction": legal_jurisdiction,
+            "official_website": official_website,
+            "research_answer": str(research_answer)[:30_000],
+            "citation_catalogue": source_catalog,
+        },
+        ensure_ascii=False,
+    )
+    payload = {
+        "model": model,
+        "instructions": instructions,
+        "input": structured_input,
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "openledger_organization_context_proposals",
+                "strict": True,
+                "schema": ORGANIZATION_CONTEXT_PROPOSAL_SCHEMA,
             }
         },
     }

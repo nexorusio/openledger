@@ -1307,6 +1307,140 @@ def test_supplied_website_evidence_survives_wrong_wikidata_candidate(
     assert len(persistent_store.get_case(job["case_id"])["jobs"]) == 1
 
 
+def test_affiliation_job_retains_cited_linkedin_and_map_observations_without_scraping(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar",
+        enable_public_web_research=True,
+        official_website="https://www.unistellar.co/",
+    )
+    job = persistent_store.claim_next("worker:public-web-organization")
+    linkedin_url = "https://www.linkedin.com/company/unistellar/"
+    maps_url = (
+        "https://www.google.com/maps/place/Unistellar/"
+        "@-6.2585928,106.8205345,980m/data=!3m1!1e3"
+    )
+
+    async def no_wikidata_match(*_args, **_kwargs):
+        return {
+            "source_engine": "wikidata_affiliation",
+            "status": "not_found",
+            "reason": "No suitable knowledge entity.",
+            "organization_candidates": [],
+            "organization": None,
+            "people": [],
+        }
+
+    async def no_dns_records(*_args, **_kwargs):
+        return {
+            "source_engine": "cloudflare_dns_context",
+            "status": "observed",
+            "reason": "Current public DNS records.",
+            "domain": "unistellar.co",
+            "records": {},
+            "record_count": 0,
+        }
+
+    async def official_website_without_address(*_args, **_kwargs):
+        return _official_website_worker_observation(
+            linked_profiles=["https://www.linkedin.com/company/unistellar"]
+        )
+
+    async def cited_research(**kwargs):
+        assert kwargs["web_search_enabled"] is True
+        assert "LinkedIn" in kwargs["user_message"]
+        assert "Google Maps" in kwargs["user_message"]
+        return {
+            "analysis": (
+                "The cited LinkedIn company page publishes the Jakarta business "
+                "address, and the cited map listing points to the same organization."
+            ),
+            "sources": [
+                {"title": "Unistellar | LinkedIn", "url": linkedin_url},
+                {"title": "Unistellar - Google Maps", "url": maps_url},
+            ],
+            "web_search_completed": True,
+        }
+
+    async def organization_proposals(**kwargs):
+        assert kwargs["sources"][0]["url"] == linkedin_url
+        return [
+            {
+                "observation_type": "business_address",
+                "value": "Jl Kemang Timur No. 28, Jakarta 12730, ID",
+                "source_url": linkedin_url,
+                "source_title": "Unistellar | LinkedIn",
+                "source_role": "professional_profile",
+                "identity_match_basis": "exact_name_and_official_website",
+                "reason": (
+                    "The company page uses the exact name, links to unistellar.co, "
+                    "and publishes this primary business address."
+                ),
+                "confidence": 80,
+                "latitude": None,
+                "longitude": None,
+            },
+            {
+                "observation_type": "business_address",
+                "value": "Jl. Kemang Timur No.28, Jakarta 12730, Indonesia",
+                "source_url": maps_url,
+                "source_title": "Unistellar - Google Maps",
+                "source_role": "map_listing",
+                "identity_match_basis": "exact_name_and_location",
+                "reason": "The cited map listing publishes this business address.",
+                "confidence": 75,
+                "latitude": -6.2585928,
+                "longitude": 106.8231094,
+            },
+        ]
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(
+        web_app,
+        "load_settings",
+        lambda: {"openai_model": "gpt-5.6-terra", "ai_web_enrichment": True},
+    )
+    monkeypatch.setattr(
+        web_app, "run_wikidata_affiliation_discovery", no_wikidata_match
+    )
+    monkeypatch.setattr(web_app, "run_cloudflare_dns_context", no_dns_records)
+    monkeypatch.setattr(
+        web_app,
+        "run_official_website_public_content",
+        official_website_without_address,
+    )
+    monkeypatch.setattr(web_app, "get_case_chat_response", cited_research)
+    monkeypatch.setattr(
+        web_app, "get_organization_context_proposals", organization_proposals
+    )
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["public_web_research"]["status"] == "observed"
+    assert completed["public_web_finding_count"] == 2
+    findings = completed["public_web_research"]["findings"]
+    assert {finding["source_role"] for finding in findings} == {
+        "professional_profile",
+        "map_listing",
+    }
+    assert all(finding["review_status"] == "pending" for finding in findings)
+    assert all(
+        finding["direct_platform_fetch_performed"] is False
+        for finding in findings
+    )
+    assert persistent_store.get_case(job["case_id"])["personas"] == []
+
+    page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "Cited external company-profile research" in page
+    assert "Jl Kemang Timur No. 28, Jakarta 12730, ID" in page
+    assert linkedin_url in page
+    assert maps_url.replace("&", "&amp;") in page
+    assert "did not send direct scraping requests" in page
+
+
 def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(
     client, web_app, persistent_store, monkeypatch
 ):

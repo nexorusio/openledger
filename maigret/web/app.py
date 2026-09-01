@@ -39,6 +39,7 @@ from maigret.ai import (
     get_case_chat_claim_proposals,
     get_case_chat_response,
     get_enriched_ai_analysis,
+    get_organization_context_proposals,
     validate_openai_connection,
 )
 from maigret.checking import build_cloudflare_bypass_config
@@ -57,6 +58,7 @@ from maigret.web.collector_adapters import (
     FR_BUSINESS_REGISTRY_ENGINE,
     GLEIF_ENGINE,
     OFFICIAL_WEBSITE_ENGINE,
+    PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
     WIKIDATA_ENGINE,
     build_business_context_assessment,
     build_organization_resolution_candidates,
@@ -67,6 +69,7 @@ from maigret.web.collector_adapters import (
     github_profile_targets,
     normalize_legal_jurisdiction,
     normalize_official_website_url,
+    normalize_public_web_organization_findings,
     run_cloudflare_dns_context,
     run_fr_business_registry_search,
     run_gleif_legal_entity_search,
@@ -742,6 +745,14 @@ def get_openai_api_key():
         except OSError as error:
             record_internal_error('Failed to read the OpenAI key file', error)
     return os.getenv('OPENAI_API_KEY', '').strip()
+
+
+def affiliation_public_web_research_enabled() -> bool:
+    """Use the configured cited-web capability without introducing another key."""
+    return bool(
+        get_openai_api_key()
+        and load_settings().get('ai_web_enrichment', True)
+    )
 
 
 def get_openai_key_source():
@@ -2700,6 +2711,9 @@ def run_persistent_affiliation_job(
     else:
         legal_jurisdiction = normalize_legal_jurisdiction(legal_jurisdiction)
     domain_context_requested = bool(specification.get('enable_domain_context'))
+    public_web_research_requested = bool(
+        specification.get('enable_public_web_research')
+    )
     explicit_website = specification.get('official_website')
     if isinstance(explicit_website, dict):
         explicit_website = normalize_official_website_url(
@@ -2763,13 +2777,135 @@ def run_persistent_affiliation_job(
                 'targets': 1,
             }
         )
+    if public_web_research_requested:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': 'cited-public-web-organization-research',
+                'target_type': 'organization_name',
+                'targets': 1,
+            }
+        )
     runtime_job = {'cancelled': False}
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def collect_sources():
-        base_results = await asyncio.gather(
-            *(coroutine for _source_name, coroutine in source_specs),
+        async def collect_public_web_research():
+            if not public_web_research_requested:
+                return {
+                    'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                    'status': 'not_run',
+                    'reason': 'Cited public-web organization research was not enabled.',
+                    'analysis': '',
+                    'sources': [],
+                    'findings': [],
+                    'direct_platform_fetch_performed': False,
+                }
+            api_key = get_openai_api_key()
+            if not api_key:
+                return {
+                    'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                    'status': 'unavailable',
+                    'reason': 'The configured AI research service is unavailable.',
+                    'analysis': '',
+                    'sources': [],
+                    'findings': [],
+                    'direct_platform_fetch_performed': False,
+                }
+            ai_settings = load_settings()
+            model = ai_settings.get(
+                'openai_model',
+                os.getenv('OPENAI_MODEL', DEFAULT_SETTINGS['openai_model']),
+            )
+            jurisdiction_context = (
+                legal_jurisdiction.get('code')
+                if isinstance(legal_jurisdiction, dict)
+                else None
+            )
+            research_prompt = (
+                f'Research the public business identity and operating context of the '
+                f'exact organization name {affiliation_name!r}. Look for its official '
+                'website, public professional company profiles such as LinkedIn, and '
+                'public map or business listings such as Google Maps, plus credible '
+                'registry or institutional sources. Report exact publicly stated '
+                'business addresses and any location explicitly labelled headquarters. '
+                'Separate first-party, registry, professional-profile, map-listing, and '
+                'other third-party statements. Do not treat a search result, map pin, '
+                'profile, or matching name as legal proof. Do not include private or '
+                'residential addresses, employee personal data, or inferred locations. '
+                'Use direct citations for every factual statement.'
+            )
+            if jurisdiction_context:
+                research_prompt += (
+                    f' The operator supplied jurisdiction {jurisdiction_context}; use it '
+                    'only to disambiguate and never as proof of identity or registration.'
+                )
+            if explicit_website:
+                research_prompt += (
+                    f' The operator supplied official website {explicit_website["url"]}; '
+                    'use an exact domain match as identity evidence.'
+                )
+            response = await get_case_chat_response(
+                api_key=api_key,
+                case_context={
+                    'investigation_type': 'affiliation',
+                    'organization_name': affiliation_name,
+                    'legal_jurisdiction': legal_jurisdiction,
+                    'operator_supplied_official_website': explicit_website,
+                },
+                conversation=[],
+                user_message=research_prompt,
+                model=model,
+                web_search_enabled=True,
+                **ai_endpoint_options(),
+            )
+            proposal_error = ''
+            try:
+                raw_findings = await get_organization_context_proposals(
+                    api_key=api_key,
+                    organization_name=affiliation_name,
+                    legal_jurisdiction=legal_jurisdiction,
+                    official_website=explicit_website,
+                    research_answer=response['analysis'],
+                    sources=response.get('sources', []),
+                    model=model,
+                    **ai_endpoint_options(),
+                )
+                findings = normalize_public_web_organization_findings(
+                    affiliation_name,
+                    raw_findings,
+                    sources=response.get('sources', []),
+                    official_website=explicit_website,
+                )
+            except Exception as error:
+                proposal_error = record_internal_error(
+                    'Cited organization observation extraction failed',
+                    error,
+                    session=job_id,
+                )
+                findings = []
+            return {
+                'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                'status': 'observed',
+                'reason': (
+                    'Cited public-web research completed. Every structured '
+                    'organization observation remains pending analyst verification.'
+                ),
+                'analysis': str(response.get('analysis') or '')[:30_000],
+                'sources': list(response.get('sources') or [])[:100],
+                'findings': findings,
+                'proposal_error': proposal_error,
+                'direct_platform_fetch_performed': False,
+                'model': model,
+            }
+
+        base_results, public_web_result = await asyncio.gather(
+            asyncio.gather(
+                *(coroutine for _source_name, coroutine in source_specs),
+                return_exceptions=True,
+            ),
+            collect_public_web_research(),
             return_exceptions=True,
         )
         website_context = explicit_website
@@ -2836,6 +2972,7 @@ def run_persistent_affiliation_job(
             website_result,
             website_context,
             website_context_source,
+            public_web_result,
         )
 
     task = loop.create_task(collect_sources())
@@ -2847,6 +2984,7 @@ def run_persistent_affiliation_job(
     source_results = None
     dns_result = None
     website_result = None
+    public_web_result = None
     website_context = explicit_website
     website_context_source = 'operator_input' if explicit_website else ''
     try:
@@ -2856,6 +2994,7 @@ def run_persistent_affiliation_job(
             website_result,
             website_context,
             website_context_source,
+            public_web_result,
         ) = loop.run_until_complete(task)
     except asyncio.CancelledError:
         pass
@@ -2969,6 +3108,43 @@ def run_persistent_affiliation_job(
                 {'collector': 'official-website-content', 'message': public_message}
             )
         source_observations['official-website-content'] = website_result
+
+    if public_web_research_requested and (
+        isinstance(public_web_result, BaseException)
+        or not isinstance(public_web_result, dict)
+    ):
+        public_message = record_internal_error(
+            'cited-public-web organization research failed',
+            public_web_result
+            if isinstance(public_web_result, BaseException)
+            else RuntimeError('The cited research source returned an invalid result'),
+            session=job_id,
+        )
+        public_web_result = {
+            'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+            'status': 'unavailable',
+            'reason': public_message,
+            'analysis': '',
+            'sources': [],
+            'findings': [],
+            'direct_platform_fetch_performed': False,
+        }
+        source_errors.append(
+            {
+                'collector': 'cited-public-web-organization-research',
+                'message': public_message,
+            }
+        )
+    elif not isinstance(public_web_result, dict):
+        public_web_result = {
+            'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+            'status': 'not_run',
+            'reason': 'Cited public-web organization research was not enabled.',
+            'analysis': '',
+            'sources': [],
+            'findings': [],
+            'direct_platform_fetch_performed': False,
+        }
 
     observation = source_observations['wikidata-affiliation']
     registry_observations = [
@@ -3149,6 +3325,11 @@ def run_persistent_affiliation_job(
                 dns_result if isinstance(dns_result, dict) else None
             ),
         ),
+        'public_web_research_requested': public_web_research_requested,
+        'public_web_research': public_web_result,
+        'public_web_finding_count': len(
+            list(public_web_result.get('findings') or [])
+        ),
         'affiliated_person_count': len(unique_people),
         'persona_proposal_count': synchronized['personas'],
         'claim_proposal_count': synchronized['claims'],
@@ -3247,6 +3428,25 @@ def run_persistent_affiliation_job(
                     ),
                 }
             )
+    if public_web_research_requested:
+        research_status = str(
+            public_web_result.get('status') or 'unavailable'
+        )
+        sink.put(
+            {
+                'type': (
+                    'collector_error'
+                    if research_status in {'unavailable', 'rate_limited'}
+                    else 'collector_completed'
+                ),
+                'collector': 'cited-public-web-organization-research',
+                'observations': len(
+                    list(public_web_result.get('findings') or [])
+                ),
+                'found': len(list(public_web_result.get('findings') or [])),
+                'message': str(public_web_result.get('reason') or '')[:1000],
+            }
+        )
     sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
 
 
@@ -4342,6 +4542,9 @@ def investigate_affiliation_claim(claim_id):
             enable_domain_context=(
                 request.form.get('enable_domain_context') == '1'
             ),
+            enable_public_web_research=(
+                affiliation_public_web_research_enabled()
+            ),
             official_website=request.form.get('official_website', ''),
         )
     except ValueError as error:
@@ -4376,11 +4579,19 @@ def select_affiliation_entity(case_id):
                 )
                 return redirect(url_for('case_workspace', case_id=case_id))
             job_id = case_store.queue_affiliation_entity(
-                case_id, selection.get('entity_id', '')
+                case_id,
+                selection.get('entity_id', ''),
+                enable_public_web_research=(
+                    affiliation_public_web_research_enabled()
+                ),
             )
         else:
             job_id = case_store.queue_affiliation_entity(
-                case_id, request.form.get('entity_id', '')
+                case_id,
+                request.form.get('entity_id', ''),
+                enable_public_web_research=(
+                    affiliation_public_web_research_enabled()
+                ),
             )
     except KeyError:
         flash('That affiliation case no longer exists.', 'danger')
@@ -4403,6 +4614,9 @@ def rerun_affiliation_domain_context(case_id):
         job_id = case_store.queue_affiliation_context(
             case_id,
             official_website=request.form.get('official_website', ''),
+            enable_public_web_research=(
+                affiliation_public_web_research_enabled()
+            ),
         )
     except KeyError:
         flash('That affiliation case no longer exists.', 'danger')

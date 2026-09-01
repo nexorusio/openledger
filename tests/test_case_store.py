@@ -1518,6 +1518,67 @@ def test_source_neutral_selection_rejects_non_organization_candidate(store):
         )
 
 
+def test_source_neutral_selection_rejects_candidate_from_older_result(store):
+    first_job_id = store.create_affiliation_investigation(
+        "Example Organization"
+    )
+    first_job = store.claim_next("worker:first-organization-result")
+    old_candidate = {
+        "candidate_key": "wikidata_affiliation:Q95",
+        "label": "Example Organization",
+        "source_engine": "wikidata_affiliation",
+        "source_name": "Wikidata",
+        "identity_scope": "public_knowledge_entity",
+        "selectable": True,
+    }
+    store.finish(
+        first_job_id,
+        {
+            "status": "completed",
+            "organization_resolution_candidates": [old_candidate],
+        },
+    )
+    rerun_id = store.queue_affiliation_context(first_job["case_id"])
+    store.claim_next("worker:current-organization-result")
+    store.finish(
+        rerun_id,
+        {"status": "completed", "organization_resolution_candidates": []},
+    )
+
+    with pytest.raises(ValueError, match="current completed affiliation"):
+        store.select_affiliation_organization(
+            first_job["case_id"], old_candidate["candidate_key"], "analyst"
+        )
+
+    assert store.get_job(first_job_id).get("selected_organization") is None
+
+
+def test_source_neutral_selection_waits_for_active_affiliation_job(store):
+    job_id = store.create_affiliation_investigation("Example Organization")
+    job = store.claim_next("worker:active-organization-result")
+    candidate = {
+        "candidate_key": "wikidata_affiliation:Q95",
+        "label": "Example Organization",
+        "source_engine": "wikidata_affiliation",
+        "source_name": "Wikidata",
+        "identity_scope": "public_knowledge_entity",
+        "selectable": True,
+    }
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "organization_resolution_candidates": [candidate],
+        },
+    )
+    store.queue_affiliation_context(job["case_id"])
+
+    with pytest.raises(ValueError, match="current affiliation investigation"):
+        store.select_affiliation_organization(
+            job["case_id"], candidate["candidate_key"], "analyst"
+        )
+
+
 def test_analyst_selected_registry_entity_proposes_people_for_review(store):
     job_id = store.create_affiliation_investigation(
         "Unistellar", jurisdiction="FR"

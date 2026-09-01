@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import ipaddress
 import inspect
@@ -63,6 +64,8 @@ WIKIDATA_TIMEOUT_SECONDS = 30
 WIKIDATA_MAX_RESPONSE_BYTES = 1_000_000
 MAX_WIKIDATA_ENTITY_CANDIDATES = 5
 MAX_WIKIDATA_AFFILIATED_PEOPLE = 50
+MAX_WIKIDATA_CLASS_DEPTH = 4
+MAX_WIKIDATA_CLASS_IDS = 50
 
 WIKIPEDIA_ENGINE = "wikipedia_public_biography"
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
@@ -117,6 +120,8 @@ _WIKIDATA_ORGANIZATION_INSTANCE_IDS = frozenset(
     }
 )
 MAX_ORGANIZATION_RESOLUTION_CANDIDATES = 15
+PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE = "openai_public_web_research"
+MAX_PUBLIC_WEB_ORGANIZATION_FINDINGS = 20
 
 GLEIF_ENGINE = "gleif_lei_registry"
 GLEIF_API_URL = "https://api.gleif.org/api/v1/lei-records"
@@ -598,6 +603,11 @@ _PRIVATE_ADDRESS_PATTERN = re.compile(
     r"adresse personnelle|domicilio particular|endere[cç]o residencial)\b",
     re.IGNORECASE,
 )
+_HEADQUARTERS_LABEL_PATTERN = re.compile(
+    r"\b(?:headquarters?|head office|hq|kantor pusat|si[eè]ge(?: social)?|"
+    r"sede (?:central|principal)|hauptsitz)\b",
+    re.IGNORECASE,
+)
 _ADDRESS_CONTEXT_PATTERN = re.compile(
     r"(?:address|alamat|adresse|direcci[oó]n|endere[cç]o|indirizzo|anschrift|"
     r"contact|location|office|headquarter|registered[-_ ]office|si[eè]ge|sede|"
@@ -620,6 +630,208 @@ def _looks_like_public_address(value: Any) -> bool:
             )
         )
     )
+
+
+def normalize_public_web_organization_findings(
+    organization_name: str,
+    proposals: Any,
+    *,
+    sources: Any,
+    official_website: Any = None,
+) -> List[Dict[str, Any]]:
+    """Bind AI-extracted organization observations to exact web citations."""
+    organization_name = normalize_affiliation_name(organization_name)
+    citation_titles: Dict[str, str] = {}
+    for source in list(sources or [])[:100]:
+        if not isinstance(source, dict):
+            continue
+        source_url = _safe_public_url(source.get("url"))
+        if not source_url:
+            continue
+        citation_titles[source_url] = _bounded_text(
+            source.get("title"), limit=300
+        ) or urlparse(source_url).hostname or "Public web source"
+
+    if isinstance(official_website, dict):
+        official_website = official_website.get("url")
+    try:
+        normalized_official_website = normalize_official_website_url(
+            official_website
+        )
+    except ValueError:
+        normalized_official_website = None
+    official_domain = str(
+        (normalized_official_website or {}).get("domain") or ""
+    )
+
+    allowed_types = {
+        "organization_identity",
+        "company_profile",
+        "business_address",
+        "headquarters",
+        "business_activity",
+    }
+    allowed_source_roles = {
+        "official_organization",
+        "legal_registry",
+        "professional_profile",
+        "map_listing",
+        "public_directory",
+        "news_or_institutional",
+        "other_public_source",
+    }
+    allowed_match_bases = {
+        "exact_name_and_official_website",
+        "exact_name_and_location",
+        "exact_name_only",
+    }
+    output = []
+    seen = set()
+    for raw in list(proposals or [])[:100]:
+        if not isinstance(raw, dict):
+            continue
+        observation_type = str(raw.get("observation_type") or "").strip()
+        source_url = _safe_public_url(raw.get("source_url"))
+        match_basis = str(raw.get("identity_match_basis") or "").strip()
+        if (
+            observation_type not in allowed_types
+            or not source_url
+            or source_url not in citation_titles
+            or match_basis not in allowed_match_bases
+        ):
+            continue
+        value = _bounded_text(raw.get("value"), limit=1500)
+        reason = _bounded_text(raw.get("reason"), limit=2000)
+        if not value or not reason or _PRIVATE_ADDRESS_PATTERN.search(value):
+            continue
+        if observation_type == "business_address" and not _looks_like_public_address(
+            value
+        ):
+            continue
+        if observation_type == "headquarters" and (
+            len(value) < 2 or not _HEADQUARTERS_LABEL_PATTERN.search(reason)
+        ):
+            continue
+
+        parsed_source = urlparse(source_url)
+        source_domain = (parsed_source.hostname or "").casefold().rstrip(".")
+        source_role = str(raw.get("source_role") or "").strip()
+        if source_role not in allowed_source_roles:
+            continue
+        if source_domain == "linkedin.com" or source_domain.endswith(
+            ".linkedin.com"
+        ):
+            source_role = "professional_profile"
+        elif (
+            source_domain in {"google.com", "www.google.com", "maps.google.com"}
+            and parsed_source.path.startswith("/maps")
+        ) or source_domain == "maps.app.goo.gl":
+            source_role = "map_listing"
+        elif official_domain and _domains_equivalent(
+            source_domain, official_domain
+        ):
+            source_role = "official_organization"
+        elif source_role in {"official_organization", "legal_registry"}:
+            # Arbitrary web citations cannot acquire first-party or governed-registry
+            # authority from a model label. Dedicated adapters retain those scopes.
+            source_role = "other_public_source"
+
+        try:
+            confidence = int(raw.get("confidence"))
+        except (TypeError, ValueError):
+            continue
+        confidence = max(0, min(confidence, 85))
+        if match_basis == "exact_name_only":
+            confidence = min(confidence, 60)
+        if source_role in {"professional_profile", "map_listing", "public_directory"}:
+            confidence = min(confidence, 75)
+
+        latitude = raw.get("latitude")
+        longitude = raw.get("longitude")
+        if observation_type not in {"business_address", "headquarters"}:
+            latitude = longitude = None
+        elif latitude is None or longitude is None:
+            latitude = longitude = None
+        else:
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (TypeError, ValueError):
+                latitude = longitude = None
+            if (
+                latitude is not None
+                and not (-90 <= latitude <= 90 and -180 <= longitude <= 180)
+            ):
+                latitude = longitude = None
+
+        if source_role == "professional_profile":
+            limitation = (
+                "This is a third-party professional company profile and may be "
+                "self-reported, incomplete, or stale. OpenLedger did not directly "
+                "fetch or scrape the platform page; confirm the observation before use."
+            )
+        elif source_role == "map_listing":
+            limitation = (
+                "This is a third-party map/business listing, not legal-registry or "
+                "first-party website evidence. OpenLedger did not directly fetch or "
+                "scrape the map page; confirm the observation before use."
+            )
+        elif source_role == "official_organization":
+            limitation = (
+                "This cited first-party statement may describe a contact, office, "
+                "mailing, historical, or other operating context. It does not prove "
+                "legal registration or the complete operating footprint."
+            )
+        elif source_role == "legal_registry":
+            limitation = (
+                "This cited registry statement applies only to the identified public "
+                "record and jurisdiction. It does not prove every operating location."
+            )
+        else:
+            limitation = (
+                "This third-party public-web observation may be incomplete or stale "
+                "and requires corroboration before it becomes case fact."
+            )
+        if observation_type == "headquarters":
+            limitation += (
+                " The headquarters label is retained only as the cited source's label, "
+                "not as an independently verified conclusion."
+            )
+
+        fingerprint_source = (
+            f"{organization_name.casefold()}\0{observation_type}\0"
+            f"{value.casefold()}\0{source_url}"
+        )
+        fingerprint = hashlib.sha256(
+            fingerprint_source.encode("utf-8")
+        ).hexdigest()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        output.append(
+            {
+                "source_engine": PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                "source_record_id": f"public-web-organization:{fingerprint[:32]}",
+                "organization_name": organization_name,
+                "observation_type": observation_type,
+                "value": value,
+                "source_url": source_url,
+                "source_title": citation_titles[source_url],
+                "source_role": source_role,
+                "identity_match_basis": match_basis,
+                "basis": reason,
+                "limitation": limitation,
+                "confidence": confidence,
+                "latitude": latitude,
+                "longitude": longitude,
+                "review_status": "pending",
+                "automatic_approval_allowed": False,
+                "direct_platform_fetch_performed": False,
+            }
+        )
+        if len(output) >= MAX_PUBLIC_WEB_ORGANIZATION_FINDINGS:
+            break
+    return output
 
 
 def _address_context_attribute(node: Any) -> bool:
@@ -1211,9 +1423,21 @@ def normalize_wikidata_organization(entity_id: str, payload: Any) -> Dict[str, A
 
 
 def enrich_wikidata_organization_candidates(
-    candidates: Any, entity_payload: Any
+    candidates: Any,
+    entity_payload: Any,
+    *,
+    organization_class_ids: Any = None,
+    type_resolution_status: str = "ok",
 ) -> List[Dict[str, Any]]:
     """Attach bounded type evidence before a Wikidata item is selectable."""
+    verified_class_ids = set(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+    verified_class_ids.update(
+        str(value or "").strip().upper()
+        for value in list(organization_class_ids or [])[
+            :MAX_WIKIDATA_CLASS_IDS
+        ]
+        if _WIKIDATA_ID_PATTERN.fullmatch(str(value or "").strip().upper())
+    )
     output = []
     for raw_candidate in list(candidates or [])[:MAX_WIKIDATA_ENTITY_CANDIDATES]:
         if not isinstance(raw_candidate, dict):
@@ -1230,8 +1454,10 @@ def enrich_wikidata_organization_candidates(
             if isinstance(organization, dict)
             else []
         )
-        organization_eligible = bool(
-            set(instance_of).intersection(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+        organization_eligible = bool(set(instance_of).intersection(verified_class_ids))
+        type_unavailable = bool(
+            not organization_eligible
+            and type_resolution_status not in {"ok", "not_needed"}
         )
         candidate = dict(raw_candidate)
         candidate.update(
@@ -1242,24 +1468,131 @@ def enrich_wikidata_organization_candidates(
                     else []
                 ),
                 "instance_of": instance_of,
-                "organization_eligible": organization_eligible,
+                "organization_eligible": (
+                    None if type_unavailable else organization_eligible
+                ),
                 "organization_type_status": (
                     "verified_organization"
                     if organization_eligible
-                    else "not_verified_as_organization"
+                    else (
+                        "type_verification_unavailable"
+                        if type_unavailable
+                        else "not_verified_as_organization"
+                    )
                 ),
                 "type_note": (
                     "Wikidata type evidence identifies this item as an organization."
                     if organization_eligible
                     else (
-                        "Wikidata did not provide a supported organization type for "
-                        "this item. It cannot be selected as the case organization."
+                        "Wikidata type hierarchy verification was unavailable. "
+                        "Retry before treating this item as ineligible."
+                        if type_unavailable
+                        else (
+                            "Wikidata did not provide an organization type within "
+                            "the bounded subclass hierarchy. It cannot be selected "
+                            "as the case organization."
+                        )
                     )
                 ),
             }
         )
         output.append(candidate)
     return output
+
+
+def _wikidata_instance_ids(entity_payload: Any) -> List[str]:
+    entities = (
+        entity_payload.get("entities")
+        if isinstance(entity_payload, dict)
+        and isinstance(entity_payload.get("entities"), dict)
+        else {}
+    )
+    output = []
+    for entity in list(entities.values())[:MAX_WIKIDATA_ENTITY_CANDIDATES]:
+        if not isinstance(entity, dict):
+            continue
+        for raw in _wikidata_claim_values(entity, "P31")[:20]:
+            entity_id = raw.get("id") if isinstance(raw, dict) else None
+            entity_id = str(entity_id or "").strip().upper()
+            if (
+                _WIKIDATA_ID_PATTERN.fullmatch(entity_id)
+                and entity_id not in output
+            ):
+                output.append(entity_id)
+    return output[:MAX_WIKIDATA_CLASS_IDS]
+
+
+async def _resolve_wikidata_organization_classes(
+    session: Any, entity_payload: Any
+) -> tuple[str, set[str]]:
+    """Resolve a bounded P279 hierarchy for candidate P31 values."""
+    initial_ids = _wikidata_instance_ids(entity_payload)
+    unresolved = [
+        entity_id
+        for entity_id in initial_ids
+        if entity_id not in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
+    ]
+    if not unresolved:
+        return "not_needed", set()
+
+    graph: Dict[str, set[str]] = {}
+    visited = set()
+    frontier = unresolved[:MAX_WIKIDATA_CLASS_IDS]
+    for _depth in range(MAX_WIKIDATA_CLASS_DEPTH):
+        frontier = [
+            entity_id
+            for entity_id in frontier
+            if entity_id not in visited
+        ][:MAX_WIKIDATA_CLASS_IDS]
+        if not frontier:
+            break
+        visited.update(frontier)
+        status, payload, _retry_after = await _bounded_wikidata_json(
+            session,
+            WIKIDATA_API_URL,
+            params={
+                "action": "wbgetentities",
+                "ids": "|".join(frontier),
+                "props": "claims",
+                "format": "json",
+                "formatversion": "2",
+            },
+        )
+        if status != "ok":
+            return status, set()
+        entities = payload.get("entities") if isinstance(payload, dict) else None
+        if not isinstance(entities, dict):
+            return "invalid_response", set()
+        next_frontier = []
+        for entity_id in frontier:
+            entity = entities.get(entity_id)
+            if not isinstance(entity, dict):
+                graph[entity_id] = set()
+                continue
+            parents = set()
+            for raw in _wikidata_claim_values(entity, "P279")[:20]:
+                parent_id = raw.get("id") if isinstance(raw, dict) else None
+                parent_id = str(parent_id or "").strip().upper()
+                if _WIKIDATA_ID_PATTERN.fullmatch(parent_id):
+                    parents.add(parent_id)
+                    if (
+                        parent_id not in visited
+                        and len(visited) + len(next_frontier)
+                        < MAX_WIKIDATA_CLASS_IDS
+                    ):
+                        next_frontier.append(parent_id)
+            graph[entity_id] = parents
+        frontier = next_frontier
+
+    verified = set(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+    changed = True
+    while changed:
+        changed = False
+        for child_id, parent_ids in graph.items():
+            if child_id not in verified and parent_ids.intersection(verified):
+                verified.add(child_id)
+                changed = True
+    return "ok", verified.difference(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
 
 
 def _wikidata_binding_id(value: Any, pattern: re.Pattern[str]) -> str:
@@ -1617,6 +1950,7 @@ async def run_wikidata_affiliation_discovery(
     }
     candidates = []
     candidate_entity_payload = None
+    candidate_type_status = "not_needed"
     async with session_factory(timeout=timeout, headers=headers) as session:
         if not selected_entity_id:
             status, payload, _retry_after = await _bounded_wikidata_json(
@@ -1659,9 +1993,25 @@ async def run_wikidata_affiliation_discovery(
                     )
                 )
                 if detail_status != "ok":
-                    candidate_entity_payload = {}
+                    return _wikidata_diagnostic(
+                        affiliation_name,
+                        detail_status,
+                        (
+                            "Wikidata candidate type verification was unavailable. "
+                            "Retry before selecting or rejecting an organization."
+                        ),
+                        candidates,
+                    )
+                candidate_type_status, organization_class_ids = (
+                    await _resolve_wikidata_organization_classes(
+                        session, candidate_entity_payload
+                    )
+                )
                 candidates = enrich_wikidata_organization_candidates(
-                    candidates, candidate_entity_payload
+                    candidates,
+                    candidate_entity_payload,
+                    organization_class_ids=organization_class_ids,
+                    type_resolution_status=candidate_type_status,
                 )
             exact = [
                 candidate
@@ -1670,6 +2020,17 @@ async def run_wikidata_affiliation_discovery(
                 and candidate.get("organization_eligible") is True
             ]
             if len(exact) != 1:
+                if candidate_type_status not in {"ok", "not_needed"}:
+                    return _wikidata_diagnostic(
+                        affiliation_name,
+                        candidate_type_status,
+                        (
+                            "Wikidata organization subclass verification was "
+                            "unavailable. Retry before selecting or rejecting a "
+                            "candidate."
+                        ),
+                        candidates,
+                    )
                 return _wikidata_diagnostic(
                     affiliation_name,
                     "needs_selection" if candidates else "not_found",
@@ -1714,6 +2075,9 @@ async def run_wikidata_affiliation_discovery(
             None,
         )
         if selected_candidate is None:
+            candidate_type_status, organization_class_ids = (
+                await _resolve_wikidata_organization_classes(session, payload)
+            )
             selected_candidate = enrich_wikidata_organization_candidates(
                 [
                     {
@@ -1729,15 +2093,27 @@ async def run_wikidata_affiliation_discovery(
                     }
                 ],
                 payload,
+                organization_class_ids=organization_class_ids,
+                type_resolution_status=candidate_type_status,
             )[0]
             candidates = [selected_candidate]
         if selected_candidate.get("organization_eligible") is not True:
+            diagnostic_status = (
+                candidate_type_status
+                if candidate_type_status not in {"ok", "not_needed"}
+                else "needs_selection"
+            )
             return _wikidata_diagnostic(
                 affiliation_name,
-                "needs_selection",
+                diagnostic_status,
                 (
-                    "The selected Wikidata item is not type-verified as an "
-                    "organization. No affiliation lookup was run."
+                    "Wikidata organization subclass verification was unavailable. "
+                    "Retry before selecting or rejecting this item."
+                    if diagnostic_status != "needs_selection"
+                    else (
+                        "The selected Wikidata item is not type-verified as an "
+                        "organization. No affiliation lookup was run."
+                    )
                 ),
                 candidates,
             )
