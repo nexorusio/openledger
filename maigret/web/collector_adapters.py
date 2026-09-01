@@ -655,7 +655,13 @@ _EMAIL_ADDRESS_PATTERN = re.compile(
     r"\.[A-Za-z]{2,63}(?![A-Za-z0-9.-])"
 )
 _PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
-    r"(?<!\w)\+?\d(?:[\W_]*\d){6,14}(?!\w)"
+    r"(?<![\w$€£¥])\+?\d[\d.\s()-]{5,40}\d(?!\w)"
+)
+_DATE_LIKE_NUMBER_PATTERN = re.compile(
+    r"^\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}(?:\s+\d{1,2})?$"
+)
+_GROUPED_FINANCIAL_NUMBER_PATTERN = re.compile(
+    r"^\d{1,3}(?:[ .]\d{3}){2,}$"
 )
 _PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
     r"(?:\b(?:employee|staff member)(?:'s|’s)?\b|"
@@ -732,11 +738,20 @@ def _contains_personal_organization_data(value: Any) -> bool:
         return bool(text)
     phone_text = unicodedata.normalize("NFKC", text)
     for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(phone_text):
-        candidate = match.group(0)
+        candidate = match.group(0).strip()
         digit_count = sum(character.isdigit() for character in candidate)
+        currency_prefix = phone_text[max(0, match.start() - 4) : match.start()]
+        if (
+            _DATE_LIKE_NUMBER_PATTERN.fullmatch(candidate)
+            or _GROUPED_FINANCIAL_NUMBER_PATTERN.fullmatch(candidate)
+            or re.search(r"[$€£¥]\s*$", currency_prefix)
+        ):
+            continue
         if 7 <= digit_count <= 15 and candidate.startswith("+"):
             return True
-        if 10 <= digit_count <= 15:
+        if 10 <= digit_count <= 15 and any(
+            separator in candidate for separator in (" ", ".", "(", ")", "-")
+        ):
             return True
     return False
 
@@ -758,9 +773,16 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
         source_title = _bounded_text(source.get("title"), limit=300)
         parsed_source = urlparse(source_url)
         source_domain = (parsed_source.hostname or "").casefold().rstrip(".")
+        decoded_path = unicodedata.normalize("NFKC", unquote(parsed_source.path))
         personal_profile_url = bool(
-            (source_domain == "linkedin.com" or source_domain.endswith(".linkedin.com"))
-            and parsed_source.path.casefold().startswith(("/in/", "/pub/"))
+            (
+                source_domain == "linkedin.com"
+                or source_domain.endswith(".linkedin.com")
+            )
+            and (
+                decoded_path.casefold().startswith(("/in/", "/pub/"))
+                or "%" in decoded_path
+            )
         )
         if personal_profile_url or (
             source_title and _contains_personal_organization_data(source_title)

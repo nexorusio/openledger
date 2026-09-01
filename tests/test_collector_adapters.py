@@ -2008,6 +2008,36 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
     ) == []
 
 
+def test_public_web_financial_figures_and_timestamps_are_not_phone_contacts():
+    cited_url = "https://example.org/company-results"
+    findings = normalize_public_web_organization_findings(
+        "Unistellar",
+        [
+            {
+                "observation_type": "business_activity",
+                "value": "2026 revenue: $1,234,567,890 (€ 1.234.567.890)",
+                "source_url": cited_url,
+                "source_title": "Unistellar results",
+                "source_role": "news_or_institutional",
+                "identity_match_basis": "exact_name_only",
+                "reason": (
+                    "The cited company results report this financial figure at "
+                    "2026-09-01 12:30."
+                ),
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            }
+        ],
+        sources=[{"title": "Unistellar results", "url": cited_url}],
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["value"] == (
+        "2026 revenue: $1,234,567,890 (€ 1.234.567.890)"
+    )
+
+
 def test_public_web_citation_titles_do_not_retain_personal_contact_data():
     assert normalize_public_web_organization_sources(
         [
@@ -2070,6 +2100,10 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
             {
                 "title": "LinkedIn member",
                 "url": "https://www.linkedin.com/in/alice-doe/",
+            },
+            {
+                "title": "LinkedIn member",
+                "url": "https://www.linkedin.com/%69n/alice-doe/",
             },
         ]
     ) == [
