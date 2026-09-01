@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 54897)
-Total output lines: 5745
-
 from flask import (
     Flask,
     jsonify,
@@ -2707,7 +2704,508 @@ def finalize_stream_job(
                     if interrupted
                     else 'The investigation was cancelled before finding a profile.'
                 ),
-                'usernames': usernames…4897 tokens truncated…n=job_id,
+                'usernames': usernames,
+                'started_at': started_at,
+            },
+        )
+    else:
+        record_job_result(
+            job_id,
+            {
+                'status': 'failed',
+                'error': 'The investigation produced no reportable results.',
+                'usernames': usernames,
+                'started_at': started_at,
+            },
+        )
+    done_event.setdefault('status', terminal_status)
+    event_sink.put(done_event)
+
+
+def run_stream_job(job_id, usernames, options):
+    started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    job = live_jobs[job_id]
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    job['loop'] = loop
+    general_results = []
+    try:
+        general_results = loop.run_until_complete(
+            _stream_search(job, usernames, options)
+        )
+    except Exception as error:
+        public_error = record_internal_error(
+            'Live investigation failed', error, session=job_id
+        )
+        job['queue'].put({'type': 'error', 'message': public_error})
+    finally:
+        loop.close()
+
+    # Same report files + results page as the classic /search flow, so the
+    # live graph is a progress view, not a replacement for the report.
+    finalize_stream_job(
+        job_id,
+        usernames,
+        general_results,
+        started_at,
+        job['queue'],
+        collector_observations=job.get('collector_observations'),
+        cancelled=bool(job.get('cancelled')),
+    )
+
+
+class PersistentEventSink:
+    """Queue-compatible sink that commits progress before returning to a collector."""
+
+    def __init__(self, store: CaseStore, job_id: str):
+        self.store = store
+        self.job_id = job_id
+
+    def put(self, event):
+        self.store.append_event(self.job_id, event)
+
+
+async def watch_persistent_job_stop(
+    store: CaseStore,
+    job_id: str,
+    stream_task,
+    runtime_job: Dict[str, Any],
+    shutdown_check=None,
+):
+    """Actively interrupt an in-flight collector after a durable stop request."""
+    while not stream_task.done():
+        cancel_requested = store.is_cancel_requested(job_id)
+        shutdown_requested = bool(shutdown_check and shutdown_check())
+        if cancel_requested or shutdown_requested:
+            runtime_job['cancelled'] = cancel_requested and not shutdown_requested
+            stream_task.cancel()
+            return
+        await asyncio.sleep(PERSISTENT_CANCEL_POLL_SECONDS)
+
+
+def run_persistent_affiliation_job(
+    store: CaseStore, job: Dict[str, Any], shutdown_check=None
+):
+    job_id, case_id = job['job_id'], job['case_id']
+    specification = (job.get('options') or {}).get('investigation_spec') or {}
+    affiliation_name = str(specification.get('affiliation_name') or '').strip()
+    selected_entity_id = str(specification.get('wikidata_entity_id') or '').strip() or None
+    legal_jurisdiction = specification.get('legal_jurisdiction')
+    if isinstance(legal_jurisdiction, dict):
+        legal_jurisdiction = normalize_legal_jurisdiction(
+            legal_jurisdiction.get('code')
+        )
+    else:
+        legal_jurisdiction = normalize_legal_jurisdiction(legal_jurisdiction)
+    domain_context_requested = bool(specification.get('enable_domain_context'))
+    public_web_research_requested = bool(
+        specification.get('enable_public_web_research')
+    )
+    google_places_search_requested = bool(
+        specification.get('enable_google_places_search')
+    )
+    explicit_website = specification.get('official_website')
+    if isinstance(explicit_website, dict):
+        explicit_website = normalize_official_website_url(
+            explicit_website.get('url')
+        )
+    else:
+        explicit_website = normalize_official_website_url(explicit_website)
+    sink = PersistentEventSink(store, job_id)
+    source_specs = [
+        (
+            'wikidata-affiliation',
+            run_wikidata_affiliation_discovery(
+                affiliation_name,
+                selected_entity_id=selected_entity_id,
+                official_website=explicit_website,
+                legal_jurisdiction=legal_jurisdiction,
+            ),
+        )
+    ]
+    if legal_jurisdiction:
+        source_specs.append(
+            (
+                'gleif-registry',
+                run_gleif_legal_entity_search(
+                    affiliation_name, legal_jurisdiction
+                ),
+            )
+        )
+        if legal_jurisdiction['code'] == 'FR':
+            source_specs.append(
+                (
+                    'fr-company-registry',
+                    run_fr_business_registry_search(
+                        affiliation_name, legal_jurisdiction
+                    ),
+                )
+            )
+    for source_name, _coroutine in source_specs:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': source_name,
+                'target_type': 'legal_entity',
+                'targets': 1,
+            }
+        )
+    if domain_context_requested:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': 'official-website-content',
+                'target_type': 'organization_website',
+                'targets': 1,
+            }
+        )
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': 'cloudflare-dns-context',
+                'target_type': 'organization_domain',
+                'targets': 1,
+            }
+        )
+    if public_web_research_requested:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': 'cited-public-web-organization-research',
+                'target_type': 'organization_name',
+                'targets': 1,
+            }
+        )
+    if google_places_search_requested:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': 'google-places-business-search',
+                'target_type': 'organization_name',
+                'targets': 1,
+            }
+        )
+    runtime_job = {'cancelled': False}
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
+    async def collect_sources():
+        async def collect_google_places_search():
+            if not google_places_search_requested:
+                return {
+                    'source_engine': GOOGLE_PLACES_ENGINE,
+                    'status': 'not_run',
+                    'reason': 'Google Places business search was not enabled.',
+                    'candidates': [],
+                    'candidate_count': 0,
+                    'durable_google_content_stored': False,
+                }
+            api_key = get_google_maps_api_key()
+            if not api_key:
+                return {
+                    'source_engine': GOOGLE_PLACES_ENGINE,
+                    'status': 'unavailable',
+                    'reason': (
+                        'The protected Google Places connection is unavailable.'
+                    ),
+                    'candidates': [],
+                    'candidate_count': 0,
+                    'durable_google_content_stored': False,
+                }
+            return await run_google_places_business_search(
+                affiliation_name,
+                api_key,
+                legal_jurisdiction=legal_jurisdiction,
+            )
+
+        async def collect_public_web_research():
+            if not public_web_research_requested:
+                return {
+                    'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                    'status': 'not_run',
+                    'reason': 'Cited public-web organization research was not enabled.',
+                    'analysis': '',
+                    'sources': [],
+                    'findings': [],
+                    'direct_platform_fetch_performed': False,
+                }
+            api_key = get_openai_api_key()
+            if not api_key:
+                return {
+                    'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                    'status': 'unavailable',
+                    'reason': 'The configured AI research service is unavailable.',
+                    'analysis': '',
+                    'sources': [],
+                    'findings': [],
+                    'direct_platform_fetch_performed': False,
+                }
+            ai_settings = load_settings()
+            model = ai_settings.get(
+                'openai_model',
+                os.getenv('OPENAI_MODEL', DEFAULT_SETTINGS['openai_model']),
+            )
+            jurisdiction_context = (
+                legal_jurisdiction.get('code')
+                if isinstance(legal_jurisdiction, dict)
+                else None
+            )
+            research_prompt = (
+                f'Research the public business identity and operating context of the '
+                f'exact organization name {affiliation_name!r}. Look for its official '
+                'website, public professional company profiles such as LinkedIn, and '
+                'public map or business listings such as Google Maps, plus credible '
+                'registry or institutional sources. Report exact publicly stated '
+                'business addresses and any location explicitly labelled headquarters. '
+                'Separate first-party, registry, professional-profile, map-listing, and '
+                'other third-party statements. Do not treat a search result, map pin, '
+                'profile, or matching name as legal proof. Do not include private or '
+                'residential addresses, employee personal data, or inferred locations. '
+                'Use direct citations for every factual statement.'
+            )
+            if jurisdiction_context:
+                research_prompt += (
+                    f' The operator supplied jurisdiction {jurisdiction_context}; use it '
+                    'only to disambiguate and never as proof of identity or registration.'
+                )
+            if explicit_website:
+                research_prompt += (
+                    f' The operator supplied official website {explicit_website["url"]}; '
+                    'use an exact domain match as identity evidence.'
+                )
+            response = await get_case_chat_response(
+                api_key=api_key,
+                case_context={
+                    'investigation_type': 'affiliation',
+                    'organization_name': affiliation_name,
+                    'legal_jurisdiction': legal_jurisdiction,
+                    'operator_supplied_official_website': explicit_website,
+                },
+                conversation=[],
+                user_message=research_prompt,
+                model=model,
+                web_search_enabled=True,
+                **ai_endpoint_options(),
+            )
+            proposal_error = ''
+            try:
+                raw_findings = await get_organization_context_proposals(
+                    api_key=api_key,
+                    organization_name=affiliation_name,
+                    legal_jurisdiction=legal_jurisdiction,
+                    official_website=explicit_website,
+                    research_answer=response['analysis'],
+                    sources=response.get('sources', []),
+                    model=model,
+                    **ai_endpoint_options(),
+                )
+                findings = normalize_public_web_organization_findings(
+                    affiliation_name,
+                    raw_findings,
+                    sources=response.get('sources', []),
+                    official_website=explicit_website,
+                )
+            except Exception as error:
+                proposal_error = record_internal_error(
+                    'Cited organization observation extraction failed',
+                    error,
+                    session=job_id,
+                )
+                findings = []
+            status = 'partial' if proposal_error else 'observed'
+            reason = (
+                'Cited public-web research completed, but structured '
+                'organization observations were unavailable. The narrative and '
+                'citations were retained without recording a zero-result conclusion.'
+                if proposal_error
+                else (
+                    'Cited public-web research completed. Every structured '
+                    'organization observation remains pending analyst verification.'
+                )
+            )
+            return {
+                'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                'status': status,
+                'reason': reason,
+                'analysis': str(response.get('analysis') or '')[:30_000],
+                'sources': list(response.get('sources') or [])[:100],
+                'findings': findings,
+                'proposal_error': proposal_error,
+                'direct_platform_fetch_performed': False,
+                'model': model,
+            }
+
+        base_results, public_web_result, google_places_result = await asyncio.gather(
+            asyncio.gather(
+                *(coroutine for _source_name, coroutine in source_specs),
+                return_exceptions=True,
+            ),
+            collect_public_web_research(),
+            collect_google_places_search(),
+            return_exceptions=True,
+        )
+        website_context = explicit_website
+        website_context_source = 'operator_input' if explicit_website else ''
+        if domain_context_requested and not website_context:
+            wikidata_result = base_results[0] if base_results else None
+            organization = (
+                wikidata_result.get('organization')
+                if isinstance(wikidata_result, dict)
+                else None
+            )
+            for website in list(
+                (organization.get('official_websites') or [])
+                if isinstance(organization, dict)
+                else []
+            )[:5]:
+                try:
+                    website_context = normalize_official_website_url(website)
+                except ValueError:
+                    continue
+                if website_context:
+                    website_context_source = 'wikidata_official_website'
+                    break
+        dns_result = None
+        website_result = None
+        if domain_context_requested:
+            if website_context:
+                dns_result, website_result = await asyncio.gather(
+                    run_cloudflare_dns_context(website_context),
+                    run_official_website_public_content(
+                        affiliation_name, website_context
+                    ),
+                    return_exceptions=True,
+                )
+            else:
+                dns_result = {
+                    'source_engine': CLOUDFLARE_DNS_ENGINE,
+                    'status': 'not_run',
+                    'reason': (
+                        'No official website URL was available. Supply one and rerun '
+                        'domain context before drawing a DNS conclusion.'
+                    ),
+                    'records': {},
+                    'record_count': 0,
+                }
+                website_result = {
+                    'source_engine': OFFICIAL_WEBSITE_ENGINE,
+                    'status': 'not_run',
+                    'reason': (
+                        'No official website URL was available. Supply one and rerun '
+                        'website context before drawing a content conclusion.'
+                    ),
+                    'addresses': [],
+                    'location_observations': [],
+                    'contacts': [],
+                    'people': [],
+                    'linked_company_profiles': [],
+                    'collected_pages': [],
+                    'page_failures': [],
+                }
+        return (
+            base_results,
+            dns_result,
+            website_result,
+            website_context,
+            website_context_source,
+            public_web_result,
+            google_places_result,
+        )
+
+    task = loop.create_task(collect_sources())
+    watcher = loop.create_task(
+        watch_persistent_job_stop(
+            store, job_id, task, runtime_job, shutdown_check=shutdown_check
+        )
+    )
+    source_results = None
+    dns_result = None
+    website_result = None
+    public_web_result = None
+    google_places_result = None
+    website_context = explicit_website
+    website_context_source = 'operator_input' if explicit_website else ''
+    try:
+        (
+            source_results,
+            dns_result,
+            website_result,
+            website_context,
+            website_context_source,
+            public_web_result,
+            google_places_result,
+        ) = loop.run_until_complete(task)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        if not watcher.done():
+            watcher.cancel()
+        loop.run_until_complete(asyncio.gather(watcher, return_exceptions=True))
+        loop.close()
+
+    shutdown_requested = bool(shutdown_check and shutdown_check())
+    cancel_requested = store.is_cancel_requested(job_id)
+    if shutdown_requested or cancel_requested:
+        status = 'interrupted' if shutdown_requested else 'cancelled'
+        store.finish(
+            job_id,
+            {
+                'status': status,
+                'error': 'The affiliation investigation was stopped.',
+                'usernames': [],
+                'discovery_status': status,
+            },
+        )
+        sink.put({'type': 'done', 'status': status})
+        return
+
+    source_observations = {}
+    source_errors = []
+    for index, (source_name, _coroutine) in enumerate(source_specs):
+        source_result = (
+            source_results[index]
+            if isinstance(source_results, list) and index < len(source_results)
+            else RuntimeError('The public source did not return a result')
+        )
+        if not isinstance(source_result, (dict, BaseException)):
+            source_result = RuntimeError(
+                'The public source returned an invalid observation'
+            )
+        if isinstance(source_result, BaseException):
+            public_message = record_internal_error(
+                f'{source_name} affiliation source failed',
+                source_result,
+                session=job_id,
+            )
+            engine = {
+                'gleif-registry': GLEIF_ENGINE,
+                'fr-company-registry': FR_BUSINESS_REGISTRY_ENGINE,
+            }.get(source_name, 'wikidata_affiliation')
+            source_result = {
+                'source_engine': engine,
+                'status': 'unavailable',
+                'reason': public_message,
+                'organization_candidates': [],
+                'organization': None,
+                'people': [],
+                'candidates': [],
+                'selected_entity': None,
+            }
+            source_errors.append(
+                {'collector': source_name, 'message': public_message}
+            )
+        source_observations[source_name] = source_result
+
+    if domain_context_requested:
+        if isinstance(dns_result, BaseException) or not isinstance(
+            dns_result, dict
+        ):
+            public_message = record_internal_error(
+                'cloudflare-dns-context affiliation source failed',
+                dns_result
+                if isinstance(dns_result, BaseException)
+                else RuntimeError('The DNS source returned an invalid observation'),
+                session=job_id,
             )
             dns_result = {
                 'source_engine': CLOUDFLARE_DNS_ENGINE,
