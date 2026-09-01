@@ -15,6 +15,12 @@ def web_app(tmp_path):
     web_app_module.app.config["TESTING"] = True
     web_app_module.app.config["REPORTS_FOLDER"] = str(tmp_path / "reports")
     web_app_module.app.config["SETTINGS_FILE"] = str(tmp_path / "settings.json")
+    web_app_module.app.config["OPENAI_API_KEY_FILE"] = str(
+        tmp_path / "secrets" / "openai_api_key"
+    )
+    web_app_module.app.config["GOOGLE_MAPS_API_KEY_FILE"] = str(
+        tmp_path / "secrets" / "google_maps_api_key"
+    )
     web_app_module.app.config["AUTH_REQUIRED"] = False
     web_app_module.job_results.clear()
     web_app_module.live_jobs.clear()
@@ -1439,6 +1445,187 @@ def test_affiliation_job_retains_cited_linkedin_and_map_observations_without_scr
     assert linkedin_url in page
     assert maps_url.replace("&", "&amp;") in page
     assert "did not send direct scraping requests" in page
+
+
+def test_cited_research_extraction_failure_is_partial_not_an_evidence_gap(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar", enable_public_web_research=True
+    )
+    job = persistent_store.claim_next("worker:public-web-extraction-failure")
+
+    async def no_wikidata_match(*_args, **_kwargs):
+        return {
+            "source_engine": "wikidata_affiliation",
+            "status": "not_found",
+            "reason": "No suitable knowledge entity.",
+            "organization_candidates": [],
+            "organization": None,
+            "people": [],
+        }
+
+    async def cited_research(**_kwargs):
+        return {
+            "analysis": "A cited source may describe a Jakarta business location.",
+            "sources": [
+                {
+                    "title": "Unistellar company profile",
+                    "url": "https://example.org/unistellar",
+                }
+            ],
+            "web_search_completed": True,
+        }
+
+    async def failed_extraction(**_kwargs):
+        raise RuntimeError("private structured extraction diagnostic")
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(
+        web_app,
+        "load_settings",
+        lambda: {"openai_model": "gpt-5.6-terra", "ai_web_enrichment": True},
+    )
+    monkeypatch.setattr(
+        web_app, "run_wikidata_affiliation_discovery", no_wikidata_match
+    )
+    monkeypatch.setattr(web_app, "get_case_chat_response", cited_research)
+    monkeypatch.setattr(
+        web_app, "get_organization_context_proposals", failed_extraction
+    )
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    research = completed["public_web_research"]
+    assert research["status"] == "partial"
+    assert research["analysis"].startswith("A cited source")
+    assert research["findings"] == []
+    assert "without recording a zero-result conclusion" in research["reason"]
+    assert "private structured extraction diagnostic" not in json.dumps(completed)
+    events = [item["event"] for item in persistent_store.get_events(job_id)]
+    assert any(
+        event.get("collector") == "cited-public-web-organization-research"
+        and event.get("type") == "collector_error"
+        for event in events
+    )
+
+
+def test_google_places_job_persists_only_place_id_and_displays_live_address(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar", enable_google_places_search=True
+    )
+    job = persistent_store.claim_next("worker:google-places")
+    place_id = "ChIJCzjlUUSv4S4RCiu9uL4NlvE"
+
+    async def no_wikidata_match(*_args, **_kwargs):
+        return {
+            "source_engine": "wikidata_affiliation",
+            "status": "not_found",
+            "reason": "No suitable knowledge entity.",
+            "organization_candidates": [],
+            "organization": None,
+            "people": [],
+        }
+
+    async def google_search(*_args, **_kwargs):
+        return {
+            "source_engine": "google_places_business_search",
+            "status": "observed",
+            "reason": "One bounded Google Places lead.",
+            "subject_value": "Unistellar",
+            "candidates": [
+                {
+                    "place_id": place_id,
+                    "source_url": "https://www.google.com/maps/search/?api=1",
+                    "review_status": "pending",
+                    "automatic_approval_allowed": False,
+                    "durable_google_content_stored": False,
+                }
+            ],
+            "candidate_count": 1,
+            "durable_google_content_stored": False,
+        }
+
+    async def google_live_details(organization_name, place_ids, api_key):
+        assert organization_name == "Unistellar"
+        assert place_ids == [place_id]
+        assert api_key == "restricted-server-key"
+        return {
+            "status": "observed",
+            "reason": "Live Google Maps business details.",
+            "places": [
+                {
+                    "place_id": place_id,
+                    "display_name": "Unistellar",
+                    "formatted_address": (
+                        "Jl. Kemang Timur No. 28, Jakarta 12730, Indonesia"
+                    ),
+                    "business_status": "OPERATIONAL",
+                    "identity_match": "exact_name",
+                    "source_url": "https://maps.google.com/?cid=12345",
+                    "review_status": "pending",
+                    "limitation": "Live research lead only.",
+                }
+            ],
+            "attribution": "Google Maps",
+            "durable_google_content_stored": False,
+        }
+
+    monkeypatch.setattr(
+        web_app, "run_wikidata_affiliation_discovery", no_wikidata_match
+    )
+    monkeypatch.setattr(
+        web_app, "run_google_places_business_search", google_search
+    )
+    monkeypatch.setattr(
+        web_app, "run_google_places_live_details", google_live_details
+    )
+    monkeypatch.setattr(
+        web_app, "get_google_maps_api_key", lambda: "restricted-server-key"
+    )
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["google_places_candidate_count"] == 1
+    assert completed["google_places_search"]["candidates"][0]["place_id"] == place_id
+    assert "Jl. Kemang Timur" not in json.dumps(completed)
+    assert persistent_store.get_case(job["case_id"])["personas"] == []
+    events = [item["event"] for item in persistent_store.get_events(job_id)]
+    assert any(
+        event.get("collector") == "google-places-business-search"
+        and event.get("type") == "collector_completed"
+        for event in events
+    )
+
+    page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "Google Places business leads" in page
+    assert "Jl. Kemang Timur No. 28" in page
+    assert "durably retains only Place IDs" in page
+    assert "never becomes a Persona address" in page
+
+
+def test_history_describes_investigation_type_target_and_context(
+    client, persistent_store
+):
+    persistent_store.create_affiliation_investigation(
+        "Unistellar",
+        jurisdiction="ID",
+        official_website="https://www.unistellar.co/",
+    )
+
+    page = client.get("/history").get_data(as_text=True)
+
+    assert "<th>Investigation</th>" in page
+    assert "<th>Findings</th>" in page
+    assert "<th>Usernames</th>" not in page
+    assert "Organization affiliation" in page
+    assert "Unistellar" in page
+    assert "Indonesia · ID" in page
+    assert "unistellar.co" in page
 
 
 def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(

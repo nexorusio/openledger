@@ -123,6 +123,34 @@ MAX_ORGANIZATION_RESOLUTION_CANDIDATES = 15
 PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE = "openai_public_web_research"
 MAX_PUBLIC_WEB_ORGANIZATION_FINDINGS = 20
 
+GOOGLE_PLACES_ENGINE = "google_places_business_search"
+GOOGLE_PLACES_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+GOOGLE_PLACES_DETAILS_URL = "https://places.googleapis.com/v1/places"
+GOOGLE_PLACES_TIMEOUT_SECONDS = 15
+GOOGLE_PLACES_MAX_RESPONSE_BYTES = 256_000
+MAX_GOOGLE_PLACES_CANDIDATES = 5
+_GOOGLE_PLACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,512}$")
+_GOOGLE_NON_BUSINESS_TYPES = frozenset(
+    {
+        "administrative_area_level_1",
+        "administrative_area_level_2",
+        "administrative_area_level_3",
+        "administrative_area_level_4",
+        "administrative_area_level_5",
+        "administrative_area_level_6",
+        "administrative_area_level_7",
+        "country",
+        "geocode",
+        "locality",
+        "political",
+        "postal_code",
+        "premise",
+        "route",
+        "street_address",
+        "subpremise",
+    }
+)
+
 GLEIF_ENGINE = "gleif_lei_registry"
 GLEIF_API_URL = "https://api.gleif.org/api/v1/lei-records"
 GLEIF_TIMEOUT_SECONDS = 30
@@ -603,6 +631,12 @@ _PRIVATE_ADDRESS_PATTERN = re.compile(
     r"adresse personnelle|domicilio particular|endere[cç]o residencial)\b",
     re.IGNORECASE,
 )
+_BUSINESS_LOCATION_CONTEXT_PATTERN = re.compile(
+    r"\b(?:business|company|commercial|corporate|organization|organisation|"
+    r"office|headquarters?|head office|registered office|branch|store|facility|"
+    r"operations?|workplace|kantor|lokasi bisnis|si[eè]ge|sede)\b",
+    re.IGNORECASE,
+)
 _HEADQUARTERS_LABEL_PATTERN = re.compile(
     r"\b(?:headquarters?|head office|hq|kantor pusat|si[eè]ge(?: social)?|"
     r"sede (?:central|principal)|hauptsitz)\b",
@@ -702,14 +736,22 @@ def normalize_public_web_organization_findings(
             continue
         value = _bounded_text(raw.get("value"), limit=1500)
         reason = _bounded_text(raw.get("reason"), limit=2000)
-        if not value or not reason or _PRIVATE_ADDRESS_PATTERN.search(value):
+        if (
+            not value
+            or not reason
+            or _PRIVATE_ADDRESS_PATTERN.search(value)
+            or _PRIVATE_ADDRESS_PATTERN.search(reason)
+        ):
             continue
-        if observation_type == "business_address" and not _looks_like_public_address(
-            value
+        if observation_type == "business_address" and (
+            not _looks_like_public_address(value)
+            or not _BUSINESS_LOCATION_CONTEXT_PATTERN.search(reason)
         ):
             continue
         if observation_type == "headquarters" and (
-            len(value) < 2 or not _HEADQUARTERS_LABEL_PATTERN.search(reason)
+            len(value) < 2
+            or not _HEADQUARTERS_LABEL_PATTERN.search(reason)
+            or not _BUSINESS_LOCATION_CONTEXT_PATTERN.search(reason)
         ):
             continue
 
@@ -1576,7 +1618,8 @@ async def _resolve_wikidata_organization_classes(
                 if _WIKIDATA_ID_PATTERN.fullmatch(parent_id):
                     parents.add(parent_id)
                     if (
-                        parent_id not in visited
+                        parent_id not in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
+                        and parent_id not in visited
                         and len(visited) + len(next_frontier)
                         < MAX_WIKIDATA_CLASS_IDS
                     ):
@@ -1797,6 +1840,352 @@ async def _bounded_registry_json(
         return "ok", json.loads(body), retry_after
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise RuntimeError(f"{source_name} returned invalid JSON") from error
+
+
+async def _bounded_google_places_json(
+    request: Any,
+    *,
+    maximum_bytes: int = GOOGLE_PLACES_MAX_RESPONSE_BYTES,
+):
+    """Read one fixed-origin Google Places response without following redirects."""
+    async with request as response:
+        retry_after = str(response.headers.get("Retry-After") or "")[:40]
+        if response.status == 429:
+            return "rate_limited", None, retry_after
+        if response.status == 404:
+            return "not_found", None, retry_after
+        if response.status in {401, 403}:
+            raise RuntimeError(
+                "Google Places rejected the server credential or API restrictions"
+            )
+        if response.status != 200:
+            raise RuntimeError(
+                f"Google Places returned HTTP {int(response.status)}"
+            )
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    "Google Places returned an invalid response length"
+                ) from error
+            if declared_length < 0 or declared_length > maximum_bytes:
+                raise RuntimeError("Google Places returned an oversized response")
+        body = await response.content.read(maximum_bytes + 1)
+        if len(body) > maximum_bytes:
+            raise RuntimeError("Google Places returned an oversized response")
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Google Places returned invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("Google Places returned an invalid document")
+    return "ok", payload, retry_after
+
+
+def _google_places_source_url(place_id: str, organization_name: str) -> str:
+    return (
+        "https://www.google.com/maps/search/?api=1&query="
+        f"{quote(organization_name)}&query_place_id={quote(place_id)}"
+    )
+
+
+def normalize_google_places_search_candidates(
+    organization_name: str, payload: Any
+) -> List[Dict[str, Any]]:
+    """Retain only stable Place IDs; Google business content remains live-only."""
+    organization_name = normalize_affiliation_name(organization_name)
+    places = payload.get("places") if isinstance(payload, dict) else None
+    if places is None:
+        return []
+    if not isinstance(places, list):
+        raise ValueError("Google Places returned an invalid candidate list")
+    candidates = []
+    seen = set()
+    for place in places[:MAX_GOOGLE_PLACES_CANDIDATES]:
+        place_id = str(
+            place.get("id") if isinstance(place, dict) else ""
+        ).strip()
+        if not _GOOGLE_PLACE_ID_PATTERN.fullmatch(place_id) or place_id in seen:
+            continue
+        seen.add(place_id)
+        candidates.append(
+            {
+                "place_id": place_id,
+                "source_url": _google_places_source_url(
+                    place_id, organization_name
+                ),
+                "review_status": "pending",
+                "automatic_approval_allowed": False,
+                "durable_google_content_stored": False,
+            }
+        )
+    return candidates
+
+
+async def run_google_places_business_search(
+    organization_name: str,
+    api_key: str,
+    *,
+    legal_jurisdiction: Any = None,
+    timeout_seconds: int = GOOGLE_PLACES_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Run one bounded Places Text Search and persist only stable Place IDs."""
+    organization_name = normalize_affiliation_name(organization_name)
+    api_key = str(api_key or "").strip()
+    if not 8 <= len(api_key) <= 512 or any(
+        ord(character) < 33 for character in api_key
+    ):
+        raise ValueError("A valid Google Maps Platform API key is required")
+    if isinstance(legal_jurisdiction, dict):
+        legal_jurisdiction = normalize_legal_jurisdiction(
+            legal_jurisdiction.get("code")
+        )
+    else:
+        legal_jurisdiction = normalize_legal_jurisdiction(legal_jurisdiction)
+    query = organization_name
+    if legal_jurisdiction:
+        query += f", {legal_jurisdiction['label']}"
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "places.id",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    body = {
+        "textQuery": query,
+        "pageSize": MAX_GOOGLE_PLACES_CANDIDATES,
+        "languageCode": "en",
+    }
+    if legal_jurisdiction:
+        body["regionCode"] = legal_jurisdiction["country_code"]
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        status, payload, _retry_after = await _bounded_google_places_json(
+            session.post(
+                GOOGLE_PLACES_SEARCH_URL,
+                json=body,
+                allow_redirects=False,
+            )
+        )
+    candidates = (
+        normalize_google_places_search_candidates(organization_name, payload)
+        if status == "ok"
+        else []
+    )
+    if status == "ok":
+        status = "observed" if candidates else "not_found"
+    return {
+        "source_engine": GOOGLE_PLACES_ENGINE,
+        "subject_type": "organization_business_listing",
+        "subject_value": organization_name,
+        "jurisdiction": legal_jurisdiction,
+        "status": status,
+        "reason": (
+            "Google Places returned bounded business-listing leads. Only stable "
+            "Place IDs were retained; live business content requires analyst review."
+            if candidates
+            else (
+                "Google Places returned no bounded business-listing lead. This is "
+                "an evidence gap, not proof that the organization has no location."
+                if status == "not_found"
+                else "Google Places business search was temporarily unavailable."
+            )
+        ),
+        "source_url": GOOGLE_PLACES_SEARCH_URL,
+        "source_record_id": (
+            "google-places-search:"
+            f"{claim_fingerprint('company', query)}"
+        ),
+        "query_context": {
+            "organization_name": organization_name,
+            "jurisdiction_code": (
+                legal_jurisdiction.get("code") if legal_jurisdiction else None
+            ),
+        },
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "durable_google_content_stored": False,
+        "direct_consumer_page_scrape_performed": False,
+        "extra": {
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+            "stored_google_fields": ["place_id"],
+            "live_details_persisted": False,
+        },
+    }
+
+
+def _normalize_google_place_live_detail(
+    place_id: str, organization_name: str, payload: Any
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    returned_id = str(payload.get("id") or place_id).strip()
+    if returned_id != place_id:
+        return None
+    raw_display_name = payload.get("displayName")
+    display_name = _bounded_text(
+        raw_display_name.get("text")
+        if isinstance(raw_display_name, dict)
+        else raw_display_name,
+        limit=500,
+    )
+    formatted_address = _bounded_text(payload.get("formattedAddress"), limit=1000)
+    types = []
+    for raw_type in list(payload.get("types") or [])[:20]:
+        place_type = _bounded_text(raw_type, limit=100).casefold()
+        if re.fullmatch(r"[a-z][a-z0-9_]{1,99}", place_type) and place_type not in types:
+            types.append(place_type)
+    combined = f"{display_name} {formatted_address}"
+    business_types = [
+        place_type
+        for place_type in types
+        if place_type not in _GOOGLE_NON_BUSINESS_TYPES
+    ]
+    if (
+        not display_name
+        or not formatted_address
+        or not business_types
+        or _PRIVATE_ADDRESS_PATTERN.search(combined)
+    ):
+        return None
+    google_maps_uri = _safe_public_url(payload.get("googleMapsUri"))
+    if google_maps_uri:
+        parsed = urlparse(google_maps_uri)
+        hostname = (parsed.hostname or "").casefold().rstrip(".")
+        if hostname not in {"google.com", "www.google.com", "maps.google.com"}:
+            google_maps_uri = None
+    source_url = google_maps_uri or _google_places_source_url(
+        place_id, organization_name
+    )
+    identity = _affiliation_identity
+    name_match = (
+        "exact_name"
+        if identity(display_name) == identity(organization_name)
+        else "requires_analyst_confirmation"
+    )
+    return {
+        "place_id": place_id,
+        "display_name": display_name,
+        "formatted_address": formatted_address,
+        "business_status": _bounded_text(payload.get("businessStatus"), limit=80),
+        "types": types,
+        "source_url": source_url,
+        "identity_match": name_match,
+        "review_status": "pending",
+        "automatic_approval_allowed": False,
+        "live_google_content": True,
+        "durable_google_content_stored": False,
+        "limitation": (
+            "This live Google Maps business listing is a research lead, not a "
+            "legal-registry record, first-party statement, verified headquarters, "
+            "or complete operating footprint. It is not stored as case evidence."
+        ),
+    }
+
+
+async def run_google_places_live_details(
+    organization_name: str,
+    place_ids: Any,
+    api_key: str,
+    *,
+    timeout_seconds: int = GOOGLE_PLACES_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Fetch bounded Place Details for immediate display without persistence."""
+    organization_name = normalize_affiliation_name(organization_name)
+    api_key = str(api_key or "").strip()
+    if not 8 <= len(api_key) <= 512 or any(
+        ord(character) < 33 for character in api_key
+    ):
+        raise ValueError("A valid Google Maps Platform API key is required")
+    normalized_ids = []
+    for raw_id in list(place_ids or [])[:MAX_GOOGLE_PLACES_CANDIDATES]:
+        place_id = str(raw_id or "").strip()
+        if (
+            _GOOGLE_PLACE_ID_PATTERN.fullmatch(place_id)
+            and place_id not in normalized_ids
+        ):
+            normalized_ids.append(place_id)
+    if not normalized_ids:
+        return {
+            "status": "not_run",
+            "reason": "No stored Google Place ID was available for live display.",
+            "places": [],
+            "attribution": "Google Maps",
+            "durable_google_content_stored": False,
+        }
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": (
+            "id,displayName,formattedAddress,businessStatus,types,googleMapsUri"
+        ),
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+
+    async def fetch_one(session: Any, place_id: str):
+        status, payload, _retry_after = await _bounded_google_places_json(
+            session.get(
+                f"{GOOGLE_PLACES_DETAILS_URL}/{place_id}",
+                allow_redirects=False,
+            )
+        )
+        if status != "ok":
+            return None
+        return _normalize_google_place_live_detail(
+            place_id, organization_name, payload
+        )
+
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        results = await asyncio.gather(
+            *(fetch_one(session, place_id) for place_id in normalized_ids),
+            return_exceptions=True,
+        )
+    places = [result for result in results if isinstance(result, dict)]
+    failed = sum(1 for result in results if not isinstance(result, dict))
+    return {
+        "status": "partial" if failed and places else "observed" if places else "unavailable",
+        "reason": (
+            "Live Google Maps business details are displayed for analyst review "
+            "and are not persisted by OpenLedger."
+            if places
+            else "Live Google Maps business details were unavailable or did not pass the business-location safeguards."
+        ),
+        "places": places,
+        "attribution": "Google Maps",
+        "durable_google_content_stored": False,
+    }
+
+
+async def validate_google_places_connection(
+    api_key: str,
+    *,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> bool:
+    """Verify Places Text Search access before storing a submitted key."""
+    result = await run_google_places_business_search(
+        "Google Sydney",
+        api_key,
+        legal_jurisdiction="AU-NSW",
+        session_factory=session_factory,
+    )
+    if result["status"] not in {"observed", "not_found"}:
+        raise RuntimeError("Google Places connection verification was unavailable")
+    return True
 
 
 def _wikidata_diagnostic(name: str, status: str, reason: str, candidates=None):

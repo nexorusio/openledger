@@ -1436,6 +1436,26 @@ def test_affiliation_selection_accepts_only_a_stored_candidate(store):
     assert selected["options"]["investigation_spec"]["wikidata_entity_id"] == "Q95"
 
 
+def test_affiliation_reruns_preserve_optional_google_places_search(store):
+    job_id = store.create_affiliation_investigation(
+        "Example Organization", enable_google_places_search=True
+    )
+    queued = store.get_job(job_id)
+    assert queued["progress"]["total"] == 3
+    assert queued["options"]["investigation_spec"][
+        "enable_google_places_search"
+    ] is True
+    job = store.claim_next("worker:google-places-flag")
+    store.finish(job_id, {"status": "completed"})
+
+    rerun = store.get_job(store.queue_affiliation_context(job["case_id"]))
+
+    assert rerun["progress"]["total"] == 5
+    assert rerun["options"]["investigation_spec"][
+        "enable_google_places_search"
+    ] is True
+
+
 def test_source_neutral_organization_selection_is_persisted_and_audited(store):
     job_id = store.create_affiliation_investigation(
         "Example Organization",

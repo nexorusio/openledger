@@ -661,6 +661,7 @@ class CaseStore:
         jurisdiction: Any = None,
         enable_domain_context: bool = False,
         enable_public_web_research: bool = False,
+        enable_google_places_search: bool = False,
         official_website: Any = None,
     ) -> str:
         from maigret.web.collector_adapters import (
@@ -686,6 +687,7 @@ class CaseStore:
             "legal_jurisdiction": legal_jurisdiction,
             "enable_domain_context": enable_domain_context,
             "enable_public_web_research": bool(enable_public_web_research),
+            "enable_google_places_search": bool(enable_google_places_search),
             "official_website": normalized_website,
         }
         case_title = f"Affiliation: {affiliation_name}"
@@ -718,7 +720,8 @@ class CaseStore:
                             else 3 if legal_jurisdiction else 2
                         )
                         + (2 if enable_domain_context else 0)
-                        + (1 if enable_public_web_research else 0),
+                        + (1 if enable_public_web_research else 0)
+                        + (1 if enable_google_places_search else 0),
                         "found": 0,
                     },
                     result=None,
@@ -739,6 +742,9 @@ class CaseStore:
                 "domain_context_requested": enable_domain_context,
                 "public_web_research_requested": bool(
                     enable_public_web_research
+                ),
+                "google_places_search_requested": bool(
+                    enable_google_places_search
                 ),
             },
         )
@@ -1051,6 +1057,7 @@ class CaseStore:
         entity_id: str,
         *,
         enable_public_web_research: bool = False,
+        enable_google_places_search: bool = False,
     ) -> str:
         entity_id = str(entity_id or "").strip().upper()
         if not re.fullmatch(r"Q[1-9][0-9]{0,19}", entity_id):
@@ -1085,6 +1092,7 @@ class CaseStore:
             legal_jurisdiction = None
             enable_domain_context = False
             enable_public_web_research = bool(enable_public_web_research)
+            enable_google_places_search = bool(enable_google_places_search)
             official_website = None
             selected_organization = None
             for prior in prior_jobs:
@@ -1099,6 +1107,9 @@ class CaseStore:
                 )
                 enable_public_web_research = enable_public_web_research or bool(
                     spec.get("enable_public_web_research")
+                )
+                enable_google_places_search = enable_google_places_search or bool(
+                    spec.get("enable_google_places_search")
                 )
                 official_website = official_website or spec.get("official_website")
                 selected_organization = selected_organization or spec.get(
@@ -1125,6 +1136,7 @@ class CaseStore:
                 "legal_jurisdiction": legal_jurisdiction,
                 "enable_domain_context": enable_domain_context,
                 "enable_public_web_research": enable_public_web_research,
+                "enable_google_places_search": enable_google_places_search,
                 "official_website": official_website,
                 "wikidata_entity_id": entity_id,
                 "selected_entity_label": selected_label,
@@ -1138,6 +1150,7 @@ class CaseStore:
             )
             total_sources += 2 if enable_domain_context else 0
             total_sources += 1 if enable_public_web_research else 0
+            total_sources += 1 if enable_google_places_search else 0
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id, case_id=case_id, kind="affiliation", status="queued",
@@ -1166,6 +1179,7 @@ class CaseStore:
         *,
         official_website: Any = None,
         enable_public_web_research: bool = False,
+        enable_google_places_search: bool = False,
     ) -> str:
         """Rerun an affiliation case with an explicit domain-context opt-in."""
         from maigret.web.collector_adapters import normalize_official_website_url
@@ -1219,6 +1233,10 @@ class CaseStore:
                     enable_public_web_research
                     or prior_spec.get("enable_public_web_research")
                 ),
+                "enable_google_places_search": bool(
+                    enable_google_places_search
+                    or prior_spec.get("enable_google_places_search")
+                ),
                 "official_website": (
                     normalized_website or prior_spec.get("official_website")
                 ),
@@ -1230,7 +1248,7 @@ class CaseStore:
                 else 3 if legal_jurisdiction else 2
             ) + 2 + (
                 1 if specification["enable_public_web_research"] else 0
-            )
+            ) + (1 if specification["enable_google_places_search"] else 0)
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,

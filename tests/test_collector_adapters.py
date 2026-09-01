@@ -13,6 +13,9 @@ from maigret.web.collector_adapters import (
     GITHUB_API_BASE_URL,
     GITHUB_API_VERSION,
     GITHUB_ENGINE,
+    GOOGLE_PLACES_ENGINE,
+    GOOGLE_PLACES_DETAILS_URL,
+    GOOGLE_PLACES_SEARCH_URL,
     ICIJ_OFFSHORE_ENGINE,
     ICIJ_RECONCILE_URL,
     OFFICIAL_WEBSITE_ENGINE,
@@ -44,6 +47,7 @@ from maigret.web.collector_adapters import (
     normalize_github_public_profile,
     normalize_fr_business_entities,
     normalize_gleif_legal_entities,
+    normalize_google_places_search_candidates,
     normalize_icij_offshore_matches,
     normalize_legal_jurisdiction,
     normalize_cloudflare_dns_context,
@@ -60,6 +64,8 @@ from maigret.web.collector_adapters import (
     run_github_public_profile,
     run_fr_business_registry_search,
     run_gleif_legal_entity_search,
+    run_google_places_business_search,
+    run_google_places_live_details,
     run_cloudflare_dns_context,
     run_icij_offshore_match,
     run_official_website_public_content,
@@ -67,6 +73,7 @@ from maigret.web.collector_adapters import (
     run_wikidata_affiliation_discovery,
     run_wikipedia_person_enrichment,
     user_scanner_email_targets,
+    validate_google_places_connection,
 )
 
 
@@ -719,6 +726,153 @@ class _TimeoutResponse:
 
 
 @pytest.mark.asyncio
+async def test_google_places_text_search_keeps_only_place_ids_and_fixed_origin():
+    calls = []
+    response = _FakeResponse(
+        status=200,
+        body=json.dumps(
+            {
+                "places": [
+                    {
+                        "id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE",
+                        "displayName": {"text": "must not be retained"},
+                        "formattedAddress": "must not be retained",
+                    }
+                ]
+            }
+        ).encode(),
+    )
+
+    observation = await run_google_places_business_search(
+        "Unistellar",
+        "restricted-server-key",
+        legal_jurisdiction="ID",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [response], calls, **options
+        ),
+    )
+
+    assert observation["source_engine"] == GOOGLE_PLACES_ENGINE
+    assert observation["status"] == "observed"
+    assert observation["query_context"]["jurisdiction_code"] == "ID"
+    assert observation["durable_google_content_stored"] is False
+    assert observation["candidates"] == [
+        {
+            "place_id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE",
+            "source_url": (
+                "https://www.google.com/maps/search/?api=1&query=Unistellar&"
+                "query_place_id=ChIJCzjlUUSv4S4RCiu9uL4NlvE"
+            ),
+            "review_status": "pending",
+            "automatic_approval_allowed": False,
+            "durable_google_content_stored": False,
+        }
+    ]
+    session_options = next(value for kind, value in calls if kind == "session")
+    assert session_options["headers"]["X-Goog-Api-Key"] == "restricted-server-key"
+    assert session_options["headers"]["X-Goog-FieldMask"] == "places.id"
+    request = next(value for kind, value in calls if kind == "post")
+    assert request["url"] == GOOGLE_PLACES_SEARCH_URL
+    assert request["allow_redirects"] is False
+    assert request["json"]["textQuery"] == "Unistellar, Indonesia"
+    assert request["json"]["regionCode"] == "ID"
+    assert "restricted-server-key" not in json.dumps(request)
+
+
+def test_google_places_candidate_normalization_rejects_invalid_or_duplicate_ids():
+    assert normalize_google_places_search_candidates(
+        "Unistellar",
+        {
+            "places": [
+                {"id": "short"},
+                {"id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE"},
+                {"id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE"},
+            ]
+        },
+    )[0]["place_id"] == "ChIJCzjlUUSv4S4RCiu9uL4NlvE"
+
+
+@pytest.mark.asyncio
+async def test_google_places_details_are_live_review_leads_and_block_private_data():
+    calls = []
+    responses = [
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE",
+                    "displayName": {"text": "Unistellar"},
+                    "formattedAddress": (
+                        "Jl. Kemang Timur No. 28, Jakarta 12730, Indonesia"
+                    ),
+                    "businessStatus": "OPERATIONAL",
+                    "types": ["establishment", "finance", "point_of_interest"],
+                    "googleMapsUri": "https://maps.google.com/?cid=12345",
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "id": "ChIJPrivateResidence123456",
+                    "displayName": {"text": "Private residence"},
+                    "formattedAddress": "8 Private Road, Jakarta 12730",
+                    "types": ["establishment", "point_of_interest"],
+                }
+            ).encode(),
+        ),
+    ]
+
+    result = await run_google_places_live_details(
+        "Unistellar",
+        ["ChIJCzjlUUSv4S4RCiu9uL4NlvE", "ChIJPrivateResidence123456"],
+        "restricted-server-key",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert result["status"] == "partial"
+    assert result["durable_google_content_stored"] is False
+    assert len(result["places"]) == 1
+    place = result["places"][0]
+    assert place["display_name"] == "Unistellar"
+    assert place["formatted_address"].startswith("Jl. Kemang Timur")
+    assert place["review_status"] == "pending"
+    assert place["automatic_approval_allowed"] is False
+    assert place["source_url"] == "https://maps.google.com/?cid=12345"
+    requests = [value for kind, value in calls if kind == "get"]
+    assert all(
+        request["url"].startswith(f"{GOOGLE_PLACES_DETAILS_URL}/")
+        and request["allow_redirects"] is False
+        for request in requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_google_places_connection_validation_uses_text_search():
+    calls = []
+    assert await validate_google_places_connection(
+        "restricted-server-key",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body=json.dumps(
+                        {"places": [{"id": "ChIJN1t_tDeuEmsRUsoyG83frY4"}]}
+                    ).encode(),
+                )
+            ],
+            calls,
+            **options,
+        ),
+    )
+    request = next(value for kind, value in calls if kind == "post")
+    assert request["url"] == GOOGLE_PLACES_SEARCH_URL
+
+
+@pytest.mark.asyncio
 async def test_wikidata_runtime_uses_only_fixed_bounded_endpoints():
     calls = []
     responses = [
@@ -966,15 +1120,11 @@ async def test_wikidata_organization_subclass_is_type_verified_before_selection(
             }
         }
     }
-    organization_class = {
-        "entities": {"Q43229": {"claims": {"P279": []}}}
-    }
     relation_result = {"results": {"bindings": []}}
     responses = [
         _FakeResponse(status=200, body=json.dumps(search).encode()),
         _FakeResponse(status=200, body=json.dumps(entity).encode()),
         _FakeResponse(status=200, body=json.dumps(class_hierarchy).encode()),
-        _FakeResponse(status=200, body=json.dumps(organization_class).encode()),
         _FakeResponse(status=200, body=json.dumps(relation_result).encode()),
     ]
 
@@ -992,6 +1142,7 @@ async def test_wikidata_organization_subclass_is_type_verified_before_selection(
     requests = [item[1] for item in calls if item[0] == "get"]
     assert requests[2]["params"]["ids"] == "Q16917"
     assert requests[2]["params"]["props"] == "claims"
+    assert len(requests) == 4
 
 
 @pytest.mark.asyncio
@@ -1633,6 +1784,21 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
             "identity_match_basis": "exact_name_only",
             "reason": "A directory returned a matching name.",
             "confidence": 90,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "business_address",
+            "value": "8 Private Road, Jakarta 12730",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_and_location",
+            "reason": (
+                "The directory says this is the founder's private residence, "
+                "not a company office."
+            ),
+            "confidence": 70,
             "latitude": None,
             "longitude": None,
         },

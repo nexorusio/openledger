@@ -255,6 +255,48 @@
             <p class="form-text">No direct registered, website, or technical context finding was retained. This is an evidence gap, not a conclusion that the entity has no operations.</p>
             {% endif %}
 
+            {% if affiliation_job.google_places_search and affiliation_job.google_places_search.status != 'not_run' %}
+            {% set places_search = affiliation_job.google_places_search %}
+            {% set live_places = case.google_places_live %}
+            <article class="domain-context-card google-places-business-leads">
+                <header>
+                    <div>
+                        <strong>Google Places business leads</strong>
+                        <small>{{ places_search.reason }}</small>
+                    </div>
+                    <span class="badge-soft {{ 'success' if places_search.status == 'observed' else 'warning' }}">{{ places_search.status | replace('_', ' ') | title }}</span>
+                </header>
+                {% if live_places.places %}
+                <div class="business-context-list">
+                    {% for place in live_places.places %}
+                    <article class="business-context-finding">
+                        <header>
+                            <span class="badge-soft">Google Maps business listing</span>
+                            <span class="badge-soft warning">Pending verification</span>
+                            <a href="{{ place.source_url }}" target="_blank" rel="noopener noreferrer">Open in Google Maps</a>
+                        </header>
+                        <strong>{{ place.display_name }}</strong>
+                        <dl>
+                            <div><dt>Published address</dt><dd>{{ place.formatted_address }}</dd></div>
+                            <div><dt>Identity match</dt><dd>{{ place.identity_match | replace('_', ' ') | title }}</dd></div>
+                            {% if place.business_status %}<div><dt>Listing status</dt><dd>{{ place.business_status | replace('_', ' ') | title }}</dd></div>{% endif %}
+                            <div><dt>Limitation</dt><dd>{{ place.limitation }}</dd></div>
+                        </dl>
+                    </article>
+                    {% endfor %}
+                </div>
+                {% elif places_search.candidates %}
+                <p class="form-text">{{ live_places.reason }}</p>
+                <ul>
+                    {% for candidate in places_search.candidates %}
+                    <li><a href="{{ candidate.source_url }}" target="_blank" rel="noopener noreferrer">Open Google Maps candidate {{ loop.index }}</a> <span class="badge-soft warning">Pending verification</span></li>
+                    {% endfor %}
+                </ul>
+                {% endif %}
+                <p class="registry-coverage-note"><i data-lucide="map-pin"></i> Displayed live from <a href="https://maps.google.com/" target="_blank" rel="noopener noreferrer">Google Maps</a>. OpenLedger durably retains only Place IDs and provenance links—not the Google business name, address, coordinates, or status. A listing is not registry proof, a first-party statement, or a verified headquarters, and it never becomes a Persona address.</p>
+            </article>
+            {% endif %}
+
             {% if affiliation_job.public_web_research %}
             {% set public_research = affiliation_job.public_web_research %}
             <article class="domain-context-card public-web-organization-research">

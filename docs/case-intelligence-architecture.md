@@ -331,6 +331,24 @@ without analyst review. Failure remains isolated to this optional research
 source, and the same workflow remains available through persistent cited case
 chat for analyst-directed follow-up.
 
+If an administrator explicitly connects an operator-owned Google Maps Platform
+key, the affiliation job may also run one Places Text Search (New) request. This
+is an official API integration, not scraping of the consumer Google Maps page,
+and it is separate from address geocoding. The durable job result stores only at
+most five Place IDs and generated provenance links. The case workspace uses
+those IDs for transient Place Details display with Google Maps attribution;
+business names, addresses, coordinates, types, and statuses returned by Google
+are not written to PostgreSQL or report artifacts. Results remain third-party
+pending leads and cannot select the organization, create a Persona, populate a
+person location, or establish registration, headquarters, or a complete
+operating footprint.
+
+Investigation history derives a human-readable type, target, jurisdiction or
+domain context, and source-specific finding summary from each durable job. It
+does not assume every investigation is username-based; affiliation and
+confirmed-name enrichment jobs remain distinguishable without opening each
+case.
+
 ## Confirmed-name public-record enrichment
 
 Approving a `full_name` claim queues two independent, credential-free checks in
