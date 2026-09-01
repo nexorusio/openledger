@@ -257,7 +257,7 @@
                 'fr-company-registry': 'The French registry was unavailable; other affiliation sources remain usable.',
                 'cloudflare-dns-context': 'DNS context was unavailable; registry and affiliation evidence remain usable.',
             };
-            statusEl.textContent = errorMessages[ev.collector] || 'One evidence source was unavailable; continuing…';
+            statusEl.textContent = ev.message || errorMessages[ev.collector] || 'One evidence source was unavailable; continuing…';
         } else if (ev.type === 'risk_alert') {
             offshoreAlertCount = Number(ev.found || 0);
             const count = document.getElementById('stat-offshore-alerts');

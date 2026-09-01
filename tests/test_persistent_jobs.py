@@ -926,17 +926,32 @@ def _affiliation_worker_observation():
         "reason": "Explicit public statements.",
         "organization_candidates": [],
         "organization": {
-            "id": "Q95", "label": "Example Organization", "description": "Example",
-            "url": "https://www.wikidata.org/wiki/Q95", "official_websites": ["https://example.org"],
+            "id": "Q95",
+            "label": "Example Organization",
+            "description": "Example",
+            "url": "https://www.wikidata.org/wiki/Q95",
+            "official_websites": ["https://example.org"],
         },
-        "people": [{
-            "id": "Q1001", "label": "Alice Example", "url": "https://www.wikidata.org/wiki/Q1001",
-            "relations": [{"property_id": "P108", "label": "employer", "direction": "person_to_organization"}],
-        }],
+        "people": [
+            {
+                "id": "Q1001",
+                "label": "Alice Example",
+                "url": "https://www.wikidata.org/wiki/Q1001",
+                "relations": [
+                    {
+                        "property_id": "P108",
+                        "label": "employer",
+                        "direction": "person_to_organization",
+                    }
+                ],
+            }
+        ],
     }
 
 
-def test_affiliation_worker_persists_pending_people(web_app, persistent_store, monkeypatch):
+def test_affiliation_worker_persists_pending_people(
+    web_app, persistent_store, monkeypatch
+):
     job_id = persistent_store.create_affiliation_investigation("Example Organization")
     job = persistent_store.claim_next("worker:affiliation")
 
@@ -948,9 +963,58 @@ def test_affiliation_worker_persists_pending_people(web_app, persistent_store, m
     completed = persistent_store.get_job(job_id)
     assert completed["status"] == "completed"
     assert completed["affiliated_person_count"] == 1
-    persona = persistent_store.get_persona(persistent_store.get_case(job["case_id"])["personas"][0]["id"])
+    persona = persistent_store.get_persona(
+        persistent_store.get_case(job["case_id"])["personas"][0]["id"]
+    )
     assert all(claim["review_status"] == "pending" for claim in persona["claims"])
-    assert persistent_store.get_events(job_id)[-1]["event"]["redirect"] == f"/cases/{job['case_id']}"
+    assert (
+        persistent_store.get_events(job_id)[-1]["event"]["redirect"]
+        == f"/cases/{job['case_id']}"
+    )
+
+
+def test_affiliation_worker_retains_entity_when_people_lookup_is_partial(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation("Example Organization")
+    job = persistent_store.claim_next("worker:affiliation-partial")
+    observation = _affiliation_worker_observation()
+    observation.update(
+        {
+            "status": "partial",
+            "reason": (
+                "The organization resolved, but the bounded Wikidata affiliation "
+                "lookup timed out. No zero-result conclusion was recorded."
+            ),
+            "people": [],
+        }
+    )
+
+    async def fake_discovery(*_args, **_kwargs):
+        return observation
+
+    monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", fake_discovery)
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["affiliation_status"] == "partial"
+    assert completed["organization"]["id"] == "Q95"
+    assert completed["affiliated_person_count"] == 0
+    assert persistent_store.get_case(job["case_id"])["personas"] == []
+    events = [item["event"] for item in persistent_store.get_events(job_id)]
+    assert any(
+        event.get("type") == "affiliation_entity"
+        and event.get("entity_id") == "Q95"
+        for event in events
+    )
+    source_event = next(
+        event
+        for event in events
+        if event.get("collector") == "wikidata-affiliation"
+        and event.get("type") == "collector_error"
+    )
+    assert "No zero-result conclusion" in source_event["message"]
 
 
 def test_affiliation_domain_context_is_observation_only_and_explains_limits(
@@ -1135,8 +1199,9 @@ def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(
     assert "automatically approved" in page
 
 
+@pytest.mark.parametrize("discovery_status", ["rate_limited", "partial"])
 def test_affiliation_source_failure_is_not_rendered_as_zero_people(
-    client, persistent_store
+    client, persistent_store, discovery_status
 ):
     job_id = persistent_store.create_affiliation_investigation(
         "Example Organization"
@@ -1146,7 +1211,7 @@ def test_affiliation_source_failure_is_not_rendered_as_zero_people(
         job_id,
         {
             "status": "completed",
-            "discovery_status": "rate_limited",
+            "discovery_status": discovery_status,
             "source_message": (
                 "The organization resolved, but affiliation relations were unavailable."
             ),

@@ -496,35 +496,122 @@ async def test_wayback_request_is_fixed_exact_bounded_and_has_no_redirects():
 
 
 def _wikidata_search():
-    return {"search": [{"id": "Q95", "label": "Example Organization", "description": "Example", "match": {"text": "Example Organization"}}]}
+    return {
+        "search": [
+            {
+                "id": "Q95",
+                "label": "Example Organization",
+                "description": "Example",
+                "match": {"text": "Example Organization"},
+            }
+        ]
+    }
 
 
 def _wikidata_organization():
-    return {"entities": {"Q95": {"labels": {"en": {"value": "Example Organization"}}, "descriptions": {"en": {"value": "Example"}}, "claims": {"P856": [{"mainsnak": {"datavalue": {"value": "https://example.org"}}}]}}}}
+    return {
+        "entities": {
+            "Q95": {
+                "labels": {"en": {"value": "Example Organization"}},
+                "descriptions": {"en": {"value": "Example"}},
+                "claims": {
+                    "P856": [
+                        {"mainsnak": {"datavalue": {"value": "https://example.org"}}}
+                    ]
+                },
+            }
+        }
+    }
 
 
 def _wikidata_people():
-    return {"results": {"bindings": [{
-        "person": {"type": "uri", "value": "http://www.wikidata.org/entity/Q1001"},
-        "personLabel": {"type": "literal", "value": "Alice Example"},
-        "personDescription": {"type": "literal", "value": "Example person"},
-        "property": {"type": "uri", "value": "http://www.wikidata.org/prop/direct/P108"},
-        "direction": {"type": "literal", "value": "person_to_organization"},
-    }]}}
+    return {
+        "results": {
+            "bindings": [
+                {
+                    "person": {
+                        "type": "uri",
+                        "value": "http://www.wikidata.org/entity/Q1001",
+                    },
+                    "personLabel": {"type": "literal", "value": "Alice Example"},
+                    "personDescription": {"type": "literal", "value": "Example person"},
+                    "property": {
+                        "type": "uri",
+                        "value": "http://www.wikidata.org/prop/direct/P108",
+                    },
+                    "direction": {"type": "literal", "value": "person_to_organization"},
+                }
+            ]
+        }
+    }
+
+
+def _wikidata_unlabeled_people():
+    payload = _wikidata_people()
+    binding = payload["results"]["bindings"][0]
+    binding.pop("personLabel")
+    binding.pop("personDescription")
+    return payload
+
+
+def _wikidata_person_entities():
+    return {
+        "entities": {
+            "Q1001": {
+                "labels": {"en": {"value": "Alice Example"}},
+                "descriptions": {"en": {"value": "Example person"}},
+            }
+        }
+    }
 
 
 def test_wikidata_affiliation_values_are_bounded_pending_claim_inputs():
-    candidates = normalize_wikidata_entity_candidates("Example Organization", _wikidata_search())
+    candidates = normalize_wikidata_entity_candidates(
+        "Example Organization", _wikidata_search()
+    )
     assert candidates[0]["exact_match"] is True
     organization = normalize_wikidata_organization("Q95", _wikidata_organization())
     people = normalize_wikidata_affiliated_people(_wikidata_people())
-    proposals = extract_wikidata_affiliation_people({
-        "source_engine": WIKIDATA_ENGINE, "status": "observed",
-        "organization": organization, "people": people,
-    })
+    proposals = extract_wikidata_affiliation_people(
+        {
+            "source_engine": WIKIDATA_ENGINE,
+            "status": "observed",
+            "organization": organization,
+            "people": people,
+        }
+    )
     assert organization["official_websites"] == ["https://example.org"]
-    assert {claim["field_name"] for claim in proposals[0]["claims"]} == {"full_name", "company", "platform_identifier"}
-    assert all(claim["evidence"][0]["details"]["human_review_required"] is True for claim in proposals[0]["claims"])
+    assert {claim["field_name"] for claim in proposals[0]["claims"]} == {
+        "full_name",
+        "company",
+        "platform_identifier",
+    }
+    assert all(
+        claim["evidence"][0]["details"]["human_review_required"] is True
+        for claim in proposals[0]["claims"]
+    )
+
+
+def test_wikidata_people_labels_are_resolved_from_the_bounded_entity_api():
+    people = normalize_wikidata_affiliated_people(
+        _wikidata_unlabeled_people(), _wikidata_person_entities()
+    )
+
+    assert people == [
+        {
+            "id": "Q1001",
+            "label": "Alice Example",
+            "description": "Example person",
+            "url": "https://www.wikidata.org/wiki/Q1001",
+            "relations": [
+                {
+                    "property_id": "P108",
+                    "label": "employer",
+                    "direction": "person_to_organization",
+                }
+            ],
+        }
+    ]
 
 
 def test_wikidata_affiliation_rejects_malformed_binding_and_relation_documents():
@@ -536,12 +623,17 @@ def test_wikidata_affiliation_rejects_malformed_binding_and_relation_documents()
     people = _wikidata_people()
     normalized_people = normalize_wikidata_affiliated_people(people)
     normalized_people[0]["relations"][0]["direction"] = "unexpected"
-    assert extract_wikidata_affiliation_people({
-        "source_engine": WIKIDATA_ENGINE,
-        "status": "observed",
-        "organization": organization,
-        "people": normalized_people,
-    }) == []
+    assert (
+        extract_wikidata_affiliation_people(
+            {
+                "source_engine": WIKIDATA_ENGINE,
+                "status": "observed",
+                "organization": organization,
+                "people": normalized_people,
+            }
+        )
+        == []
+    )
 
 
 def test_wikidata_caps_distinct_people_without_dropping_their_relation_rows():
@@ -560,9 +652,7 @@ def test_wikidata_caps_distinct_people_without_dropping_their_relation_rows():
                     },
                     "property": {
                         "type": "uri",
-                        "value": (
-                            "http://www.wikidata.org/prop/direct/" + property_id
-                        ),
+                        "value": ("http://www.wikidata.org/prop/direct/" + property_id),
                     },
                     "direction": {
                         "type": "literal",
@@ -571,16 +661,16 @@ def test_wikidata_caps_distinct_people_without_dropping_their_relation_rows():
                 }
             )
 
-    people = normalize_wikidata_affiliated_people(
-        {"results": {"bindings": bindings}}
-    )
+    people = normalize_wikidata_affiliated_people({"results": {"bindings": bindings}})
     query = _wikidata_people_query("Q95")
 
     assert len(people) == 50
     assert len(people[0]["relations"]) == 2
     assert people[-1]["id"] == "Q1050"
-    assert "SELECT DISTINCT ?person WHERE" in query
-    assert "LIMIT 50" in query
+    assert "SELECT DISTINCT ?person ?property ?direction" in query
+    assert "SERVICE wikibase:label" not in query
+    assert "SELECT DISTINCT ?person WHERE" not in query
+    assert "ORDER BY" not in query
     assert "LIMIT 450" in query
 
 
@@ -605,24 +695,153 @@ class _FakeSequenceSession:
         return self.responses.pop(0)
 
 
+class _TimeoutResponse:
+    async def __aenter__(self):
+        raise TimeoutError()
+
+    async def __aexit__(self, *_args):
+        return False
+
+
 @pytest.mark.asyncio
 async def test_wikidata_runtime_uses_only_fixed_bounded_endpoints():
     calls = []
     responses = [
         _FakeResponse(status=200, body=json.dumps(_wikidata_search()).encode()),
         _FakeResponse(status=200, body=json.dumps(_wikidata_organization()).encode()),
-        _FakeResponse(status=200, body=json.dumps(_wikidata_people()).encode()),
+        _FakeResponse(
+            status=200, body=json.dumps(_wikidata_unlabeled_people()).encode()
+        ),
+        _FakeResponse(
+            status=200, body=json.dumps(_wikidata_person_entities()).encode()
+        ),
     ]
     observation = await run_wikidata_affiliation_discovery(
         "Example Organization",
-        session_factory=lambda **options: _FakeSequenceSession(responses, calls, **options),
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
     )
     assert observation["status"] == "observed"
     requests = [item[1] for item in calls if item[0] == "get"]
-    assert [item["url"] for item in requests] == [WIKIDATA_API_URL, WIKIDATA_API_URL, WIKIDATA_QUERY_URL]
+    assert [item["url"] for item in requests] == [
+        WIKIDATA_API_URL,
+        WIKIDATA_API_URL,
+        WIKIDATA_QUERY_URL,
+        WIKIDATA_API_URL,
+    ]
     assert all(item["allow_redirects"] is False for item in requests)
     assert "Authorization" not in calls[0][1]["headers"]
-    assert "LIMIT 50" in requests[-1]["params"]["query"]
+    query_request = requests[2]
+    assert "LIMIT 450" in query_request["params"]["query"]
+    assert "SERVICE wikibase:label" not in query_request["params"]["query"]
+    assert requests[3]["params"]["ids"] == "Q1001"
+    assert requests[3]["params"]["props"] == "labels|descriptions"
+
+
+@pytest.mark.asyncio
+async def test_wikidata_relation_timeout_preserves_the_resolved_organization():
+    calls = []
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(_wikidata_search()).encode()),
+        _FakeResponse(status=200, body=json.dumps(_wikidata_organization()).encode()),
+        _TimeoutResponse(),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Organization",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "partial"
+    assert observation["organization"]["id"] == "Q95"
+    assert observation["people"] == []
+    assert observation["extra"]["affiliation_people_status"] == "unavailable"
+    assert "No zero-result conclusion" in observation["reason"]
+
+
+@pytest.mark.asyncio
+async def test_wikidata_exact_name_requires_review_when_case_context_conflicts():
+    calls = []
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(_wikidata_search()).encode()),
+        _FakeResponse(status=200, body=json.dumps(_wikidata_organization()).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Organization",
+        official_website="https://unistellar.co",
+        legal_jurisdiction="ID",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "needs_selection"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["context_status"] == "conflict"
+    assert candidate["context_note"] == (
+        "Supplied website unistellar.co differs from Wikidata website example.org. "
+        "Jurisdiction ID requires analyst confirmation; an exact name is not "
+        "jurisdiction proof."
+    )
+    assert candidate["official_websites"] == ["https://example.org"]
+    assert [item[1]["url"] for item in calls if item[0] == "get"] == [
+        WIKIDATA_API_URL,
+        WIKIDATA_API_URL,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wikidata_matching_official_domain_can_resolve_without_jurisdiction():
+    calls = []
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(_wikidata_search()).encode()),
+        _FakeResponse(status=200, body=json.dumps(_wikidata_organization()).encode()),
+        _FakeResponse(
+            status=200, body=json.dumps(_wikidata_unlabeled_people()).encode()
+        ),
+        _FakeResponse(
+            status=200, body=json.dumps(_wikidata_person_entities()).encode()
+        ),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Organization",
+        official_website="https://www.example.org/about",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "observed"
+    assert observation["organization"]["id"] == "Q95"
+    assert observation["people"][0]["label"] == "Alice Example"
+
+
+@pytest.mark.asyncio
+async def test_wikidata_jurisdiction_pauses_exact_name_auto_selection():
+    calls = []
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(_wikidata_search()).encode()),
+        _FakeResponse(status=200, body=json.dumps(_wikidata_organization()).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Organization",
+        legal_jurisdiction="ID",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "needs_selection"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["context_status"] == "review_required"
+    assert "Jurisdiction ID" in candidate["context_note"]
+    assert "exact name alone is insufficient" in observation["reason"]
 
 
 def _gleif_entities():

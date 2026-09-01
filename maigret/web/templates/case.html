@@ -65,18 +65,18 @@
     <div class="panel-body affiliation-case-body">
         {% if affiliation_job.discovery_status == 'needs_selection' %}
         <strong>Select the correct organization</strong>
-        <p class="form-text">People extraction is paused until you choose one stored Wikidata candidate.</p>
+        <p class="form-text">{{ affiliation_job.source_message or 'People extraction is paused until you choose one stored Wikidata candidate.' }}</p>
         <div class="affiliation-candidate-list">
             {% for candidate in affiliation_job.organization_candidates %}
             <form method="POST" action="{{ url_for('select_affiliation_entity', case_id=case.id) }}" class="affiliation-candidate">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="entity_id" value="{{ candidate.id }}">
-                <span><strong>{{ candidate.label }}</strong><small>{{ candidate.description or 'No description available' }} · {{ candidate.id }}</small></span>
+                <span><strong>{{ candidate.label }}</strong><small>{{ candidate.description or 'No description available' }} · {{ candidate.id }}</small>{% if candidate.context_note %}<small>{{ candidate.context_note }}</small>{% endif %}</span>
                 <button type="submit" class="btn btn-sm btn-outline-secondary">Use this organization</button>
             </form>
             {% endfor %}
         </div>
-        {% elif affiliation_job.discovery_status in ('rate_limited', 'unavailable', 'not_found') %}
+        {% elif affiliation_job.discovery_status in ('rate_limited', 'unavailable', 'not_found', 'partial') %}
         <div class="alert alert-warning mb-3" role="alert">
             <strong>Affiliation source check incomplete</strong>
             <p class="mb-0">{{ affiliation_job.source_message or 'Wikidata did not return usable affiliation evidence.' }}</p>
@@ -227,7 +227,7 @@
             </div>
             <p class="form-text mb-0">Cited web research is the path for exact addresses published on an official site. OpenLedger keeps those statements separate from legal records and technical infrastructure.</p>
         </section>
-        {% if affiliation_job.status == 'completed' and combined_affiliation_status not in ('rate_limited', 'unavailable') %}
+        {% if affiliation_job.status == 'completed' and (affiliation_job.affiliated_person_count | default(0) > 0 or affiliation_job.registry_candidate_count | default(0) > 0 or combined_affiliation_status not in ('rate_limited', 'unavailable', 'partial')) %}
         <div class="persona-status-strip"><span><strong>{{ affiliation_job.registry_candidate_count | default(0) }}</strong> registry candidates</span><span><strong>{{ affiliation_job.affiliated_person_count | default(0) }}</strong> people observed</span><span><strong>{{ affiliation_job.claim_proposal_count | default(0) }}</strong> pending claims</span><span><strong>0</strong> automatically approved</span></div>
         {% endif %}
     </div>
