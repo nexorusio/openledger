@@ -164,6 +164,69 @@
             {% endif %}
         </section>
         {% endif %}
+
+        <section class="business-context-results" aria-labelledby="business-context-title">
+            <div class="registry-results-heading">
+                <div>
+                    <span class="eyebrow">Business context audit</span>
+                    <h3 id="business-context-title">What the evidence supports</h3>
+                </div>
+                <span class="badge-soft warning">No silent inference</span>
+            </div>
+            {% if affiliation_job.business_context_findings %}
+            <div class="business-context-list">
+                {% for finding in affiliation_job.business_context_findings %}
+                <article class="business-context-finding">
+                    <header>
+                        <span class="badge-soft">{{ finding.category | replace('_', ' ') | title }}</span>
+                        {% if finding.source_url %}<a href="{{ finding.source_url }}" target="_blank" rel="noopener noreferrer">Open evidence</a>{% endif %}
+                    </header>
+                    <strong>{{ finding.conclusion }}</strong>
+                    <dl>
+                        <div><dt>Basis</dt><dd>{{ finding.basis }}</dd></div>
+                        <div><dt>Limitation</dt><dd>{{ finding.limitation }}</dd></div>
+                    </dl>
+                </article>
+                {% endfor %}
+            </div>
+            {% elif affiliation_job.status == 'completed' %}
+            <p class="form-text">No direct registered, website, or technical context finding was retained. This is an evidence gap, not a conclusion that the entity has no operations.</p>
+            {% endif %}
+
+            {% if affiliation_job.dns_observation %}
+            {% set dns = affiliation_job.dns_observation %}
+            <article class="domain-context-card">
+                <header>
+                    <div><strong>Domain infrastructure · {{ dns.domain or 'website unavailable' }}</strong><small>{{ dns.reason }}</small></div>
+                    <span class="badge-soft {{ 'success' if dns.status == 'observed' else 'warning' }}">{{ dns.status | replace('_', ' ') | title }}</span>
+                </header>
+                {% if dns.records %}
+                <div class="domain-record-grid">
+                    {% for record_type in ['a', 'aaaa', 'mx', 'ns'] %}
+                    {% if dns.records[record_type] %}
+                    <div><span>{{ record_type | upper }}</span><ul>{% for record in dns.records[record_type] %}<li>{{ record.value }}{% if record.priority is defined %} · priority {{ record.priority }}{% endif %}</li>{% endfor %}</ul></div>
+                    {% endif %}
+                    {% endfor %}
+                </div>
+                {% endif %}
+                <p class="registry-coverage-note"><i data-lucide="triangle-alert"></i> DNS and registration metadata describe technical administration. They do not prove incorporation, ownership, staff location, or where the business operates.</p>
+                {% if dns.registration_lookup_url %}<a href="{{ dns.registration_lookup_url }}" target="_blank" rel="noopener noreferrer">Open ICANN registration lookup</a>{% endif %}
+            </article>
+            {% endif %}
+
+            <div class="business-context-actions">
+                <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('case_chat_workspace', case_id=case.id, mode='business_context') }}"><i data-lucide="search"></i> Research operating context</a>
+                <form method="POST" action="{{ url_for('rerun_affiliation_domain_context', case_id=case.id) }}" class="domain-context-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <label>
+                        <span>Official website URL <small>(optional if already resolved)</small></span>
+                        <input type="url" name="official_website" maxlength="2000" value="{{ affiliation_job.website_context.url if affiliation_job.website_context else '' }}" placeholder="https://example.org" autocomplete="off">
+                    </label>
+                    <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="network"></i> Run domain context</button>
+                </form>
+            </div>
+            <p class="form-text mb-0">Cited web research is the path for exact addresses published on an official site. OpenLedger keeps those statements separate from legal records and technical infrastructure.</p>
+        </section>
         {% if affiliation_job.status == 'completed' and combined_affiliation_status not in ('rate_limited', 'unavailable') %}
         <div class="persona-status-strip"><span><strong>{{ affiliation_job.registry_candidate_count | default(0) }}</strong> registry candidates</span><span><strong>{{ affiliation_job.affiliated_person_count | default(0) }}</strong> people observed</span><span><strong>{{ affiliation_job.claim_proposal_count | default(0) }}</strong> pending claims</span><span><strong>0</strong> automatically approved</span></div>
         {% endif %}

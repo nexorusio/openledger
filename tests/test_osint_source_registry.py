@@ -16,7 +16,7 @@ def test_osint_source_registry_passes_static_governance_audit():
     )
 
     assert result.returncode == 0, result.stderr
-    assert "Validated 8 governed OSINT source" in result.stdout
+    assert "Validated 9 governed OSINT source" in result.stdout
 
 
 def test_github_contract_matches_runtime_limits_and_review_boundary():
@@ -123,6 +123,15 @@ def test_legal_entity_sources_are_jurisdiction_scoped_and_review_gated():
         "company",
         "occupation",
     ]
+
+    dns = sources["cloudflare_dns_context"]
+    assert dns["endpoint_origin"] == "https://cloudflare-dns.com"
+    assert dns["access"]["credentials_required"] is False
+    assert dns["guardrails"]["query_types"] == ["A", "AAAA", "MX", "NS"]
+    assert dns["guardrails"]["website_content_fetched"] is False
+    assert dns["guardrails"]["domain_variants_generated"] is False
+    assert dns["guardrails"]["operating_location_inference_allowed"] is False
+    assert dns["claim_candidates"] == []
 
 
 def test_confirmed_name_sources_are_credential_free_bounded_and_review_gated():

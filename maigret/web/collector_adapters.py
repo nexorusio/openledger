@@ -12,7 +12,7 @@ import sys
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Iterable, List, Optional
-from urllib.parse import parse_qsl, urlparse
+from urllib.parse import parse_qsl, quote, urlparse
 
 import aiohttp
 import pycountry
@@ -109,6 +109,14 @@ FR_BUSINESS_REGISTRY_TIMEOUT_SECONDS = 30
 FR_BUSINESS_REGISTRY_MAX_RESPONSE_BYTES = 1_000_000
 MAX_FR_BUSINESS_CANDIDATES = 5
 MAX_FR_BUSINESS_PEOPLE = 25
+
+CLOUDFLARE_DNS_ENGINE = "cloudflare_dns_context"
+CLOUDFLARE_DNS_URL = "https://cloudflare-dns.com/dns-query"
+CLOUDFLARE_DNS_TIMEOUT_SECONDS = 20
+CLOUDFLARE_DNS_MAX_RESPONSE_BYTES = 128_000
+CLOUDFLARE_DNS_QUERY_TYPES = ("A", "AAAA", "MX", "NS")
+MAX_DNS_RECORDS_PER_TYPE = 20
+MAX_DNS_RECORDS_TOTAL = 40
 
 _LEI_PATTERN = re.compile(r"^[A-Z0-9]{20}$")
 _SIREN_PATTERN = re.compile(r"^[0-9]{9}$")
@@ -224,6 +232,47 @@ def _safe_public_url(value: Any) -> str:
         if not address.is_global or address.is_multicast or address.is_reserved:
             return ""
     return candidate
+
+
+def _normalize_dns_hostname(value: Any) -> str:
+    hostname = str(value or "").strip().rstrip(".").casefold()
+    if not hostname or len(hostname) > 253:
+        return ""
+    try:
+        hostname = hostname.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        return ""
+    labels = hostname.split(".")
+    if len(labels) < 2 or any(
+        not label
+        or len(label) > 63
+        or label.startswith("-")
+        or label.endswith("-")
+        or re.fullmatch(r"[a-z0-9-]+", label) is None
+        for label in labels
+    ):
+        return ""
+    return hostname
+
+
+def normalize_official_website_url(value: Any) -> Optional[Dict[str, str]]:
+    """Normalize an explicit public website without fetching its origin."""
+    safe_url = _safe_public_url(value)
+    if not safe_url:
+        if str(value or "").strip():
+            raise ValueError("Enter a valid public HTTP or HTTPS official website URL")
+        return None
+    parsed = urlparse(safe_url)
+    try:
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("Enter a valid official website port") from error
+    if port not in {None, 80, 443}:
+        raise ValueError("Official website URLs may use only standard web ports")
+    domain = _normalize_dns_hostname(parsed.hostname)
+    if not domain:
+        raise ValueError("Enter a public official website domain")
+    return {"url": safe_url, "domain": domain}
 
 
 def _bounded_mapping(value: Any, *, limit: int = 40) -> Dict[str, Any]:
@@ -407,6 +456,9 @@ def normalize_gleif_legal_entities(
                     registration.get("lastUpdateDate"), limit=40
                 ),
                 "legal_address": _bounded_address(entity.get("legalAddress")),
+                "headquarters_address": _bounded_address(
+                    entity.get("headquartersAddress")
+                ),
                 "exact_name_match": exact_name_match,
                 "source_url": source_url,
             }
@@ -439,6 +491,44 @@ def normalize_fr_business_entities(
         siret = str(headquarters.get("siret") or "").strip()
         if not _SIRET_PATTERN.fullmatch(siret):
             siret = ""
+        establishments = []
+        seen_establishments = set()
+        for establishment in list(raw.get("matching_etablissements") or [])[:20]:
+            if not isinstance(establishment, dict):
+                continue
+            establishment_siret = str(establishment.get("siret") or "").strip()
+            if (
+                not _SIRET_PATTERN.fullmatch(establishment_siret)
+                or establishment_siret in seen_establishments
+            ):
+                continue
+            establishment_address = _bounded_text(
+                establishment.get("adresse"), limit=500
+            )
+            if not establishment_address:
+                continue
+            seen_establishments.add(establishment_siret)
+            establishments.append(
+                {
+                    "siret": establishment_siret,
+                    "address": establishment_address,
+                    "city": _bounded_text(
+                        establishment.get("libelle_commune")
+                        or establishment.get("libelle_commune_etranger"),
+                        limit=200,
+                    ),
+                    "postal_code": _bounded_text(
+                        establishment.get("code_postal"), limit=40
+                    ),
+                    "status": (
+                        "active"
+                        if establishment.get("etat_administratif") == "A"
+                        else "ceased"
+                    ),
+                }
+            )
+            if len(establishments) >= 5:
+                break
         people = []
         people_seen = set()
         for leader in list(raw.get("dirigeants") or [])[:50]:
@@ -475,6 +565,19 @@ def normalize_fr_business_entities(
                 "creation_date": _bounded_text(raw.get("date_creation"), limit=40),
                 "last_update_date": _bounded_text(raw.get("date_mise_a_jour"), limit=40),
                 "legal_form_code": _bounded_text(raw.get("nature_juridique"), limit=40),
+                "primary_activity_code": _bounded_text(
+                    raw.get("activite_principale")
+                    or headquarters.get("activite_principale"),
+                    limit=40,
+                ),
+                "primary_activity_label": _bounded_text(
+                    raw.get("libelle_activite_principale")
+                    or headquarters.get("libelle_activite_principale"),
+                    limit=500,
+                ),
+                "employee_band": _bounded_text(
+                    raw.get("tranche_effectif_salarie"), limit=100
+                ),
                 "legal_address": {
                     "lines": [
                         _bounded_text(headquarters.get("adresse"), limit=500)
@@ -492,6 +595,7 @@ def normalize_fr_business_entities(
                         headquarters.get("code_postal"), limit=40
                     ),
                 },
+                "establishments": establishments,
                 "people": people,
                 "exact_name_match": _affiliation_identity(legal_name) == query_identity,
                 "source_url": (
@@ -1063,6 +1167,359 @@ async def run_fr_business_registry_search(
         ),
         candidates=candidates,
     )
+
+
+def normalize_cloudflare_dns_context(
+    website: Any, payloads: Any
+) -> Dict[str, Any]:
+    normalized_website = (
+        website
+        if isinstance(website, dict)
+        else normalize_official_website_url(website)
+    )
+    if not isinstance(normalized_website, dict):
+        raise ValueError("An official website is required for DNS context")
+    if not isinstance(payloads, dict):
+        raise ValueError("Cloudflare DNS returned an invalid response set")
+    domain = normalized_website["domain"]
+    dns_types = {"A": 1, "NS": 2, "MX": 15, "AAAA": 28}
+    records: Dict[str, List[Dict[str, Any]]] = {
+        query_type.casefold(): [] for query_type in CLOUDFLARE_DNS_QUERY_TYPES
+    }
+    total = 0
+    for query_type in CLOUDFLARE_DNS_QUERY_TYPES:
+        payload = payloads.get(query_type)
+        if not isinstance(payload, dict) or not isinstance(payload.get("Status"), int):
+            continue
+        answers = payload.get("Answer") or []
+        if not isinstance(answers, list):
+            continue
+        seen = set()
+        for answer in answers[:MAX_DNS_RECORDS_PER_TYPE]:
+            if not isinstance(answer, dict) or answer.get("type") != dns_types[query_type]:
+                continue
+            owner = _normalize_dns_hostname(answer.get("name")) or domain
+            raw_value = _bounded_text(answer.get("data"), limit=1000)
+            priority = None
+            if query_type in {"A", "AAAA"}:
+                try:
+                    address = ipaddress.ip_address(raw_value)
+                except ValueError:
+                    continue
+                if (
+                    (query_type == "A" and address.version != 4)
+                    or (query_type == "AAAA" and address.version != 6)
+                    or not address.is_global
+                    or address.is_multicast
+                    or address.is_reserved
+                ):
+                    continue
+                value = str(address)
+            elif query_type == "MX":
+                match = re.fullmatch(r"([0-9]{1,5})\s+(.+)", raw_value)
+                if not match:
+                    continue
+                priority = int(match.group(1))
+                value = _normalize_dns_hostname(match.group(2))
+                if not value:
+                    continue
+            else:
+                value = _normalize_dns_hostname(raw_value)
+                if not value:
+                    continue
+            identity = (owner, value, priority)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            try:
+                ttl = int(answer.get("TTL") or 0)
+            except (TypeError, ValueError):
+                ttl = 0
+            record = {
+                "owner": owner,
+                "value": value,
+                "ttl": max(0, min(ttl, 2_147_483_647)),
+            }
+            if priority is not None:
+                record["priority"] = priority
+            records[query_type.casefold()].append(record)
+            total += 1
+            if total >= MAX_DNS_RECORDS_TOTAL:
+                break
+        if total >= MAX_DNS_RECORDS_TOTAL:
+            break
+    return {
+        "website_url": normalized_website["url"],
+        "domain": domain,
+        "records": records,
+        "record_count": total,
+        "registration_lookup_url": (
+            "https://lookup.icann.org/en/lookup?name=" + quote(domain, safe="")
+        ),
+    }
+
+
+async def run_cloudflare_dns_context(
+    website: Any,
+    *,
+    timeout_seconds: int = CLOUDFLARE_DNS_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    normalized_website = (
+        website
+        if isinstance(website, dict)
+        else normalize_official_website_url(website)
+    )
+    if not isinstance(normalized_website, dict):
+        raise ValueError("An official website is required for DNS context")
+    normalized_website = normalize_official_website_url(normalized_website.get("url"))
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "application/dns-json",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    payloads = {}
+    failures = []
+    rate_limited = False
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        for query_type in CLOUDFLARE_DNS_QUERY_TYPES:
+            try:
+                status, payload, _retry_after = await _bounded_registry_json(
+                    session,
+                    CLOUDFLARE_DNS_URL,
+                    params={"name": normalized_website["domain"], "type": query_type},
+                    maximum_bytes=CLOUDFLARE_DNS_MAX_RESPONSE_BYTES,
+                    source_name="Cloudflare DNS",
+                )
+            except Exception:
+                failures.append(query_type)
+                continue
+            if status != "ok":
+                failures.append(query_type)
+                rate_limited = rate_limited or status == "rate_limited"
+                continue
+            payloads[query_type] = payload
+    normalized = normalize_cloudflare_dns_context(normalized_website, payloads)
+    if normalized["record_count"]:
+        status = "partial" if failures else "observed"
+        reason = (
+            "Current public DNS records were collected; some record types were unavailable."
+            if failures
+            else "Current public DNS records for the supplied official website domain."
+        )
+    elif payloads:
+        status = "partial" if failures else "not_found"
+        reason = (
+            "No usable A, AAAA, MX or NS records were returned; some queries were unavailable."
+            if failures
+            else "No usable A, AAAA, MX or NS records were returned."
+        )
+    else:
+        status = "rate_limited" if rate_limited else "unavailable"
+        reason = "The public DNS context source was unavailable."
+    return {
+        "source_engine": CLOUDFLARE_DNS_ENGINE,
+        "subject_type": "organization_domain",
+        "subject_value": normalized_website["domain"],
+        "status": status,
+        "source_url": CLOUDFLARE_DNS_URL,
+        "source_record_id": (
+            "cloudflare-dns:"
+            f"{claim_fingerprint('website', normalized_website['domain'])}"
+        ),
+        "reason": reason,
+        **normalized,
+        "query_failures": failures,
+        "extra": {
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+            "operating_location_inference_allowed": False,
+        },
+    }
+
+
+def _address_summary(address: Any) -> str:
+    if not isinstance(address, dict):
+        return ""
+    parts = [
+        *list(address.get("lines") or [])[:4],
+        address.get("city"),
+        address.get("region"),
+        address.get("postal_code"),
+        address.get("country"),
+    ]
+    return ", ".join(
+        dict.fromkeys(_bounded_text(part, limit=500) for part in parts if part)
+    )[:1500]
+
+
+def build_business_context_assessment(
+    registry_observations: Any,
+    *,
+    website: Any = None,
+    website_source: str = "",
+    dns_observation: Any = None,
+) -> List[Dict[str, Any]]:
+    """Build explicit, source-bounded context without inferring operations."""
+    findings = []
+    source_names = {
+        GLEIF_ENGINE: "GLEIF Global LEI Index",
+        FR_BUSINESS_REGISTRY_ENGINE: "French National Enterprise Directory",
+    }
+    for observation in list(registry_observations or [])[:10]:
+        if not isinstance(observation, dict):
+            continue
+        entity = observation.get("selected_entity")
+        if not isinstance(entity, dict):
+            continue
+        source_name = source_names.get(
+            observation.get("source_engine"),
+            str(observation.get("source_engine") or "Public registry"),
+        )
+        identifier = f"{str(entity.get('identifier_type') or '').upper()} {entity.get('id')}".strip()
+        address = _address_summary(entity.get("legal_address"))
+        jurisdiction = _bounded_text(
+            entity.get("jurisdiction_label") or entity.get("legal_jurisdiction"),
+            limit=200,
+        )
+        statement = (
+            f"{entity.get('legal_name')} has an exact-name candidate record in "
+            f"{jurisdiction or 'the selected jurisdiction'}"
+        )
+        if address:
+            statement += f" with a listed legal or registered address at {address}"
+        findings.append(
+            {
+                "category": "registered_legal_context",
+                "conclusion": statement + ".",
+                "basis": f"Direct public registry record {identifier} from {source_name}.",
+                "limitation": (
+                    "A legal or registered address does not prove every place where "
+                    "the business has staff, customers, assets, or day-to-day operations."
+                ),
+                "source_name": source_name,
+                "source_url": entity.get("source_url") or observation.get("source_url"),
+            }
+        )
+        headquarters = _address_summary(entity.get("headquarters_address"))
+        if headquarters and headquarters.casefold() != address.casefold():
+            findings.append(
+                {
+                    "category": "reported_headquarters_context",
+                    "conclusion": f"{source_name} lists a headquarters address at {headquarters}.",
+                    "basis": f"Structured headquarters field in public record {identifier}.",
+                    "limitation": (
+                        "A reported headquarters address is source evidence, not proof of "
+                        "the full geographic footprint or current physical presence."
+                    ),
+                    "source_name": source_name,
+                    "source_url": entity.get("source_url") or observation.get("source_url"),
+                }
+            )
+        activity = _bounded_text(entity.get("primary_activity_label"), limit=500)
+        activity_code = _bounded_text(entity.get("primary_activity_code"), limit=40)
+        if activity or activity_code:
+            activity_value = activity or "an unlabelled registered activity"
+            if activity_code:
+                activity_value += f" ({activity_code})"
+            findings.append(
+                {
+                    "category": "registered_activity_context",
+                    "conclusion": f"The registry classifies the entity's primary activity as {activity_value}.",
+                    "basis": f"Structured primary-activity field in public record {identifier}.",
+                    "limitation": (
+                        "A registry classification describes the filed principal activity; "
+                        "it may not describe every current product, market, or revenue source."
+                    ),
+                    "source_name": source_name,
+                    "source_url": entity.get("source_url") or observation.get("source_url"),
+                }
+            )
+        establishments = list(entity.get("establishments") or [])[:5]
+        if establishments:
+            locations = "; ".join(
+                f"{item.get('address')} ({item.get('status')})"
+                for item in establishments
+                if isinstance(item, dict) and item.get("address")
+            )[:2000]
+            if locations:
+                findings.append(
+                    {
+                        "category": "registered_establishment_context",
+                        "conclusion": f"The registry search returned establishment records at {locations}.",
+                        "basis": f"Bounded public establishment rows linked to {identifier}.",
+                        "limitation": (
+                            "Registered establishments may be historical, administrative, "
+                            "or differently scoped; verify status and current activity."
+                        ),
+                        "source_name": source_name,
+                        "source_url": entity.get("source_url") or observation.get("source_url"),
+                    }
+                )
+    normalized_website = None
+    try:
+        normalized_website = normalize_official_website_url(
+            website.get("url") if isinstance(website, dict) else website
+        )
+    except ValueError:
+        pass
+    if normalized_website:
+        source_label = (
+            "analyst-supplied case input"
+            if website_source == "operator_input"
+            else "the selected Wikidata organization record"
+        )
+        findings.append(
+            {
+                "category": "official_website_context",
+                "conclusion": f"{normalized_website['domain']} is the website domain supplied for this organization check.",
+                "basis": f"Website association from {source_label}.",
+                "limitation": (
+                    "This association is a research lead. Review the website and corroborate "
+                    "its ownership before treating it as an official operating channel."
+                ),
+                "source_name": source_label,
+                "source_url": normalized_website["url"],
+            }
+        )
+    if isinstance(dns_observation, dict):
+        records = dns_observation.get("records") or {}
+        record_labels = []
+        for record_type in ("a", "aaaa", "mx", "ns"):
+            values = [
+                item.get("value")
+                for item in list(records.get(record_type) or [])[:5]
+                if isinstance(item, dict) and item.get("value")
+            ]
+            if values:
+                record_labels.append(f"{record_type.upper()}: {', '.join(values)}")
+        if record_labels:
+            findings.append(
+                {
+                    "category": "technical_domain_context",
+                    "conclusion": (
+                        f"{dns_observation.get('domain')} currently advertises "
+                        + "; ".join(record_labels)
+                        + "."
+                    )[:2500],
+                    "basis": (
+                        "Current bounded A, AAAA, MX and NS queries through "
+                        "Cloudflare DNS-over-HTTPS."
+                    ),
+                    "limitation": (
+                        "DNS, hosting, mail and nameserver geography describe technical "
+                        "routing only. They do not establish incorporation, ownership, "
+                        "staff location, or where the business operates."
+                    ),
+                    "source_name": "Cloudflare DNS-over-HTTPS",
+                    "source_url": dns_observation.get("source_url"),
+                }
+            )
+    return findings[:20]
 
 
 def _wikidata_claim_candidate(field_name, value, confidence, person, organization, evidence_type, details):

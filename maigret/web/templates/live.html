@@ -6,7 +6,7 @@
     <div>
         <p class="eyebrow">Active investigation</p>
         <h1>{{ 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live discovery graph' }}</h1>
-        <p class="page-description">{{ 'The worker is resolving the organization, jurisdictional registry candidates and explicit public affiliation statements.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Claimed profiles and extracted identifiers appear as OpenLedger checks each source.' }}</p>
+        <p class="page-description">{{ 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Claimed profiles and extracted identifiers appear as OpenLedger checks each source.' }}</p>
     </div>
     <div class="heading-actions">
         <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Open reports' }}</a>
@@ -203,6 +203,7 @@
                 'wikidata-affiliation': 'Resolving the organization and explicit Wikidata affiliation statements…',
                 'gleif-registry': 'Searching the GLEIF index for jurisdiction-matched legal entities…',
                 'fr-company-registry': 'Searching the French National Enterprise Directory…',
+                'cloudflare-dns-context': 'Collecting current DNS context for the supplied official website…',
                 'public-record-enrichment': 'Checking Wikipedia and ICIJ using the approved full name…',
             };
             statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
@@ -240,6 +241,7 @@
                 'wikidata-affiliation': 'Affiliation evidence collected. Every proposal remains pending review.',
                 'gleif-registry': 'GLEIF legal-entity candidates collected. Every candidate remains unverified.',
                 'fr-company-registry': 'French registry evidence collected. Every people proposal remains pending review.',
+                'cloudflare-dns-context': 'DNS context collected as observation-only technical evidence.',
                 'public-record-enrichment': 'Public-record checks completed. Every proposal remains pending review.',
             };
             statusEl.textContent = completedMessages[ev.collector] || 'Additional evidence collected.';
@@ -253,6 +255,7 @@
                 'wikidata-affiliation': 'Wikidata was unavailable; the case remains intact.',
                 'gleif-registry': 'GLEIF was unavailable; other affiliation sources remain usable.',
                 'fr-company-registry': 'The French registry was unavailable; other affiliation sources remain usable.',
+                'cloudflare-dns-context': 'DNS context was unavailable; registry and affiliation evidence remain usable.',
             };
             statusEl.textContent = errorMessages[ev.collector] || 'One evidence source was unavailable; continuing…';
         } else if (ev.type === 'risk_alert') {

@@ -4,6 +4,8 @@ import pytest
 
 from maigret.result import MaigretCheckResult, MaigretCheckStatus
 from maigret.web.collector_adapters import (
+    CLOUDFLARE_DNS_ENGINE,
+    CLOUDFLARE_DNS_URL,
     FR_BUSINESS_REGISTRY_ENGINE,
     FR_BUSINESS_REGISTRY_URL,
     GLEIF_API_URL,
@@ -24,6 +26,7 @@ from maigret.web.collector_adapters import (
     WIKIPEDIA_API_URL,
     WIKIPEDIA_ENGINE,
     _wikidata_people_query,
+    build_business_context_assessment,
     claimed_profile_url_targets,
     extract_github_profile_claims,
     extract_fr_registry_affiliated_people,
@@ -38,6 +41,8 @@ from maigret.web.collector_adapters import (
     normalize_gleif_legal_entities,
     normalize_icij_offshore_matches,
     normalize_legal_jurisdiction,
+    normalize_cloudflare_dns_context,
+    normalize_official_website_url,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
     normalize_wayback_capture_index,
@@ -48,6 +53,7 @@ from maigret.web.collector_adapters import (
     run_github_public_profile,
     run_fr_business_registry_search,
     run_gleif_legal_entity_search,
+    run_cloudflare_dns_context,
     run_icij_offshore_match,
     run_wayback_capture_index,
     run_wikidata_affiliation_discovery,
@@ -640,6 +646,13 @@ def _gleif_entities():
                             "country": "FR",
                             "postalCode": "13003",
                         },
+                        "headquartersAddress": {
+                            "addressLines": ["7 Rue Example"],
+                            "city": "Marseille",
+                            "region": "FR-13",
+                            "country": "FR",
+                            "postalCode": "13003",
+                        },
                     },
                     "registration": {
                         "status": "ISSUED",
@@ -664,6 +677,19 @@ def _fr_business_entities():
                 "date_creation": "2015-07-06",
                 "date_mise_a_jour": "2026-08-01T00:00:00Z",
                 "nature_juridique": "5710",
+                "activite_principale": "26.70Z",
+                "libelle_activite_principale": (
+                    "Fabrication de matériels optique et photographique"
+                ),
+                "matching_etablissements": [
+                    {
+                        "siret": "81233935600048",
+                        "adresse": "12 RUE EXAMPLE 13003 MARSEILLE",
+                        "libelle_commune": "Marseille",
+                        "code_postal": "13003",
+                        "etat_administratif": "A",
+                    }
+                ],
                 "siege": {
                     "siret": "81233935600030",
                     "adresse": "5 AVENUE DU GENERAL LECLERC 13003 MARSEILLE",
@@ -716,8 +742,19 @@ def test_registry_normalization_is_bounded_and_drops_private_person_fields():
 
     assert gleif[0]["id"] == "9695005MSX1OYEMGDF46"
     assert gleif[0]["exact_name_match"] is True
+    assert gleif[0]["headquarters_address"]["lines"] == ["7 Rue Example"]
     assert france[0]["id"] == "812339356"
     assert france[0]["headquarters_identifier"] == "81233935600030"
+    assert france[0]["primary_activity_code"] == "26.70Z"
+    assert france[0]["establishments"] == [
+        {
+            "siret": "81233935600048",
+            "address": "12 RUE EXAMPLE 13003 MARSEILLE",
+            "city": "Marseille",
+            "postal_code": "13003",
+            "status": "active",
+        }
+    ]
     assert france[0]["people"] == [
         {"display_name": "Arnaud Malvache", "role": "Président de SAS"},
         {"display_name": "Laurent Marfisi", "role": "Directeur Général"},
@@ -810,6 +847,122 @@ async def test_registry_requests_use_only_fixed_bounded_credential_free_endpoint
 
     with pytest.raises(ValueError, match="country-level FR"):
         await run_fr_business_registry_search("Unistellar", "FR-IDF")
+
+
+def _cloudflare_dns_payload(record_type):
+    answers = {
+        "A": [{"name": "example.org", "type": 1, "TTL": 300, "data": "93.184.216.34"}],
+        "AAAA": [{"name": "example.org", "type": 28, "TTL": 300, "data": "2606:2800:220:1:248:1893:25c8:1946"}],
+        "MX": [{"name": "example.org", "type": 15, "TTL": 300, "data": "10 mail.example.org."}],
+        "NS": [{"name": "example.org", "type": 2, "TTL": 300, "data": "ns1.example.org."}],
+    }
+    return {"Status": 0, "Answer": answers[record_type]}
+
+
+def test_official_website_and_dns_context_are_bounded_observation_only():
+    website = normalize_official_website_url("https://Example.org/about")
+    context = normalize_cloudflare_dns_context(
+        website,
+        {
+            query_type: _cloudflare_dns_payload(query_type)
+            for query_type in ("A", "AAAA", "MX", "NS")
+        },
+    )
+
+    assert website == {
+        "url": "https://Example.org/about",
+        "domain": "example.org",
+    }
+    assert context["record_count"] == 4
+    assert context["records"]["mx"][0]["priority"] == 10
+    assert context["records"]["ns"][0]["value"] == "ns1.example.org"
+    assert context["registration_lookup_url"].endswith("name=example.org")
+    with pytest.raises(ValueError, match="standard web ports"):
+        normalize_official_website_url("https://example.org:8443")
+    with pytest.raises(ValueError, match="public HTTP or HTTPS"):
+        normalize_official_website_url("file:///etc/passwd")
+
+
+@pytest.mark.asyncio
+async def test_dns_context_uses_fixed_no_redirect_credential_free_queries():
+    calls = []
+    observation = await run_cloudflare_dns_context(
+        "https://example.org",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body=json.dumps(_cloudflare_dns_payload(query_type)).encode(),
+                )
+                for query_type in ("A", "AAAA", "MX", "NS")
+            ],
+            calls,
+            **options,
+        ),
+    )
+
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert len(requests) == 4
+    assert all(item["url"] == CLOUDFLARE_DNS_URL for item in requests)
+    assert all(item["allow_redirects"] is False for item in requests)
+    assert [item["params"]["type"] for item in requests] == [
+        "A",
+        "AAAA",
+        "MX",
+        "NS",
+    ]
+    assert all(item["params"]["name"] == "example.org" for item in requests)
+    assert "Authorization" not in calls[0][1]["headers"]
+    assert observation["source_engine"] == CLOUDFLARE_DNS_ENGINE
+    assert observation["status"] == "observed"
+    assert observation["extra"]["operating_location_inference_allowed"] is False
+
+
+def test_business_context_states_basis_and_never_converts_dns_to_operations():
+    jurisdiction = normalize_legal_jurisdiction("FR")
+    candidates = normalize_fr_business_entities(
+        "Unistellar", jurisdiction, _fr_business_entities()
+    )
+    registry_observation = {
+        "source_engine": FR_BUSINESS_REGISTRY_ENGINE,
+        "source_url": FR_BUSINESS_REGISTRY_URL,
+        "selected_entity": candidates[0],
+    }
+    dns_observation = {
+        "source_engine": CLOUDFLARE_DNS_ENGINE,
+        "source_url": CLOUDFLARE_DNS_URL,
+        "domain": "example.org",
+        "records": {
+            "a": [{"value": "93.184.216.34"}],
+            "aaaa": [],
+            "mx": [{"value": "mail.example.org"}],
+            "ns": [{"value": "ns1.example.org"}],
+        },
+    }
+
+    findings = build_business_context_assessment(
+        [registry_observation],
+        website="https://example.org",
+        website_source="operator_input",
+        dns_observation=dns_observation,
+    )
+    categories = {finding["category"] for finding in findings}
+    assert categories.issuperset(
+        {
+            "registered_legal_context",
+            "registered_activity_context",
+            "registered_establishment_context",
+            "official_website_context",
+            "technical_domain_context",
+        }
+    )
+    dns_finding = next(
+        finding
+        for finding in findings
+        if finding["category"] == "technical_domain_context"
+    )
+    assert "do not establish" in dns_finding["limitation"]
+    assert "operates in" not in dns_finding["conclusion"].casefold()
 
 
 def _wikipedia_pages(title="Alice Example"):

@@ -1545,6 +1545,30 @@ def test_affiliation_entity_selection_preserves_jurisdiction(store):
     assert selected["progress"]["total"] == 3
 
 
+def test_affiliation_domain_context_is_explicit_and_preserved_on_rerun(store):
+    job_id = store.create_affiliation_investigation(
+        "Example Organization",
+        jurisdiction="FR",
+        enable_domain_context=True,
+        official_website="https://example.org/about",
+    )
+    job = store.claim_next("worker:domain-context")
+    specification = job["options"]["investigation_spec"]
+    assert specification["enable_domain_context"] is True
+    assert specification["official_website"] == {
+        "url": "https://example.org/about",
+        "domain": "example.org",
+    }
+    assert job["progress"]["total"] == 5
+    store.finish(job_id, {"status": "completed"})
+
+    rerun = store.get_job(store.queue_affiliation_context(job["case_id"]))
+    rerun_specification = rerun["options"]["investigation_spec"]
+    assert rerun_specification["enable_domain_context"] is True
+    assert rerun_specification["official_website"]["domain"] == "example.org"
+    assert rerun["progress"]["total"] == 5
+
+
 def _approved_full_name(store, name="Alice Example"):
     job_id = store.create_investigation(["alice"], {})
     job = store.claim_next("worker:identity-source")

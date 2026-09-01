@@ -953,6 +953,93 @@ def test_affiliation_worker_persists_pending_people(web_app, persistent_store, m
     assert persistent_store.get_events(job_id)[-1]["event"]["redirect"] == f"/cases/{job['case_id']}"
 
 
+def test_affiliation_domain_context_is_observation_only_and_explains_limits(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Example Organization", enable_domain_context=True
+    )
+    job = persistent_store.claim_next("worker:domain-context")
+
+    async def fake_discovery(*_args, **_kwargs):
+        return _affiliation_worker_observation()
+
+    async def fake_dns(website, *_args, **_kwargs):
+        assert website["domain"] == "example.org"
+        return {
+            "source_engine": "cloudflare_dns_context",
+            "source_url": "https://cloudflare-dns.com/dns-query",
+            "status": "observed",
+            "reason": "Current public DNS records.",
+            "domain": "example.org",
+            "website_url": "https://example.org",
+            "registration_lookup_url": (
+                "https://lookup.icann.org/en/lookup?name=example.org"
+            ),
+            "records": {
+                "a": [{"value": "93.184.216.34", "ttl": 300}],
+                "aaaa": [],
+                "mx": [{"value": "mail.example.org", "priority": 10, "ttl": 300}],
+                "ns": [{"value": "ns1.example.org", "ttl": 300}],
+            },
+            "record_count": 3,
+        }
+
+    monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", fake_discovery)
+    monkeypatch.setattr(web_app, "run_cloudflare_dns_context", fake_dns)
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["website_context_source"] == "wikidata_official_website"
+    assert completed["dns_observation"]["record_count"] == 3
+    assert any(
+        finding["category"] == "technical_domain_context"
+        and "do not establish" in finding["limitation"]
+        for finding in completed["business_context_findings"]
+    )
+    case_page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "Business context audit" in case_page
+    assert "DNS and registration metadata describe technical administration" in case_page
+    assert "Research operating context" in case_page
+
+    chat_page = client.get(
+        f"/cases/{job['case_id']}/chat?mode=business_context"
+    ).get_data(as_text=True)
+    assert "Research the public operating context" in chat_page
+    assert 'data-initial-research="true"' in chat_page
+    assert "Do not infer where the business operates from DNS" in chat_page
+
+
+def test_dns_context_failure_does_not_discard_affiliation_people(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Example Organization",
+        enable_domain_context=True,
+        official_website="https://example.org",
+    )
+    job = persistent_store.claim_next("worker:dns-failure")
+
+    async def fake_discovery(*_args, **_kwargs):
+        return _affiliation_worker_observation()
+
+    async def failed_dns(*_args, **_kwargs):
+        raise RuntimeError("private DNS upstream diagnostic")
+
+    monkeypatch.setattr(web_app, "run_wikidata_affiliation_discovery", fake_discovery)
+    monkeypatch.setattr(web_app, "run_cloudflare_dns_context", failed_dns)
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["affiliation_status"] == "partial"
+    assert completed["affiliated_person_count"] == 1
+    assert completed["dns_observation"]["status"] == "unavailable"
+    assert "private DNS upstream diagnostic" not in json.dumps(completed)
+    assert len(persistent_store.get_case(job["case_id"])["personas"]) == 1
+
+
 def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(
     client, web_app, persistent_store, monkeypatch
 ):
@@ -1101,7 +1188,12 @@ def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
         session["csrf_token"] = "affiliation-csrf"
     response = client.post(
         f"/claims/{company['id']}/investigate-affiliation",
-        data={"csrf_token": "affiliation-csrf", "jurisdiction": "France"},
+        data={
+            "csrf_token": "affiliation-csrf",
+            "jurisdiction": "France",
+            "enable_domain_context": "1",
+            "official_website": "https://example.org",
+        },
     )
     job_id = response.location.rsplit("/", 1)[-1]
     affiliation_job = persistent_store.get_job(job_id)
@@ -1109,6 +1201,9 @@ def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
     assert affiliation_job["options"]["investigation_spec"][
         "legal_jurisdiction"
     ]["code"] == "FR"
+    assert affiliation_job["options"]["investigation_spec"][
+        "official_website"
+    ]["domain"] == "example.org"
     assert persistent_store.get_case(affiliation_job["case_id"])["personas"] == []
 
 

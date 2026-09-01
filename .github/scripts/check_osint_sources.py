@@ -432,6 +432,51 @@ def live_fr_company_registry_contract(source: dict) -> None:
     )
 
 
+def live_cloudflare_dns_contract(source: dict) -> None:
+    target = source["maintenance"].get("live_contract_target")
+    _require(
+        isinstance(target, str) and re.fullmatch(r"[a-z0-9.-]{3,253}", target),
+        "Cloudflare DNS live target is missing",
+    )
+    endpoint = source["endpoint_origin"]
+    _require(
+        endpoint == "https://cloudflare-dns.com",
+        "Cloudflare DNS endpoint origin changed",
+    )
+    query = urlencode({"name": target, "type": "A"})
+    request = Request(
+        f"{endpoint}/dns-query?{query}",
+        headers={
+            "Accept": "application/dns-json",
+            "User-Agent": "OpenLedger-OSINT-Contract-Audit/1.0 (+https://github.com/nexorusio/openledger)",
+        },
+    )
+    try:
+        with build_opener(NoRedirectHandler()).open(request, timeout=20) as response:
+            payload = response.read(128_001)
+    except (HTTPError, URLError) as error:
+        raise RuntimeError(
+            f"Cloudflare DNS live contract request failed: {error}"
+        ) from error
+    _require(len(payload) <= 128_000, "Cloudflare DNS response was oversized")
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as error:
+        raise RuntimeError("Cloudflare DNS returned invalid JSON") from error
+    _require(document.get("Status") == 0, "Cloudflare DNS status contract changed")
+    answers = document.get("Answer")
+    _require(
+        isinstance(answers, list)
+        and any(
+            isinstance(answer, dict)
+            and answer.get("type") == 1
+            and bool(str(answer.get("data") or ""))
+            for answer in answers
+        ),
+        "Cloudflare DNS A-record contract changed",
+    )
+
+
 def live_wikidata_contract(source: dict) -> None:
     target = source["maintenance"].get("live_contract_target")
     _require(
@@ -577,6 +622,9 @@ def main() -> int:
             live_gleif_contract(sources_by_id["gleif_lei_registry"])
             live_fr_company_registry_contract(
                 sources_by_id["fr_company_registry"]
+            )
+            live_cloudflare_dns_contract(
+                sources_by_id["cloudflare_dns_context"]
             )
             live_wikidata_contract(sources_by_id["wikidata_affiliation"])
             live_wikipedia_contract(sources_by_id["wikipedia_public_biography"])

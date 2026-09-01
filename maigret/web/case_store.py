@@ -659,14 +659,19 @@ class CaseStore:
         *,
         source_claim_id: Optional[str] = None,
         jurisdiction: Any = None,
+        enable_domain_context: bool = False,
+        official_website: Any = None,
     ) -> str:
         from maigret.web.collector_adapters import (
             normalize_affiliation_name,
             normalize_legal_jurisdiction,
+            normalize_official_website_url,
         )
 
         affiliation_name = normalize_affiliation_name(affiliation_name)
         legal_jurisdiction = normalize_legal_jurisdiction(jurisdiction)
+        normalized_website = normalize_official_website_url(official_website)
+        enable_domain_context = bool(enable_domain_context or normalized_website)
         source_claim_id = str(source_claim_id or "").strip() or None
         if source_claim_id and len(source_claim_id) > 100:
             raise ValueError("Invalid source claim identifier")
@@ -678,6 +683,8 @@ class CaseStore:
             "affiliation_name": affiliation_name,
             "source_claim_id": source_claim_id,
             "legal_jurisdiction": legal_jurisdiction,
+            "enable_domain_context": enable_domain_context,
+            "official_website": normalized_website,
         }
         case_title = f"Affiliation: {affiliation_name}"
         if legal_jurisdiction:
@@ -707,7 +714,7 @@ class CaseStore:
                             if legal_jurisdiction
                             and legal_jurisdiction["code"] == "FR"
                             else 3 if legal_jurisdiction else 2
-                        ),
+                        ) + (1 if enable_domain_context else 0),
                         "found": 0,
                     },
                     result=None,
@@ -725,6 +732,7 @@ class CaseStore:
                 "target_type": "affiliation",
                 "affiliation": affiliation_name,
                 "legal_jurisdiction": legal_jurisdiction,
+                "domain_context_requested": enable_domain_context,
             },
         )
         return job_id
@@ -890,6 +898,8 @@ class CaseStore:
             affiliation_name = ""
             source_claim_id = None
             legal_jurisdiction = None
+            enable_domain_context = False
+            official_website = None
             for prior in prior_jobs:
                 spec = dict(prior["options"] or {}).get("investigation_spec") or {}
                 affiliation_name = affiliation_name or str(spec.get("affiliation_name") or "")
@@ -897,6 +907,10 @@ class CaseStore:
                 legal_jurisdiction = legal_jurisdiction or spec.get(
                     "legal_jurisdiction"
                 )
+                enable_domain_context = enable_domain_context or bool(
+                    spec.get("enable_domain_context")
+                )
+                official_website = official_website or spec.get("official_website")
                 for item in list(dict(prior["result"] or {}).get("organization_candidates") or [])[:5]:
                     if isinstance(item, dict) and str(item.get("id") or "").upper() == entity_id:
                         candidate = item
@@ -912,6 +926,8 @@ class CaseStore:
                 "affiliation_name": affiliation_name[:500],
                 "source_claim_id": source_claim_id,
                 "legal_jurisdiction": legal_jurisdiction,
+                "enable_domain_context": enable_domain_context,
+                "official_website": official_website,
                 "wikidata_entity_id": entity_id,
                 "selected_entity_label": selected_label,
             }
@@ -921,6 +937,7 @@ class CaseStore:
                 and legal_jurisdiction.get("code") == "FR"
                 else 3 if legal_jurisdiction else 2
             )
+            total_sources += 1 if enable_domain_context else 0
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id, case_id=case_id, kind="affiliation", status="queued",
@@ -941,6 +958,97 @@ class CaseStore:
                 .values(title=title[:500], updated_at=now)
             )
         self.append_event(job_id, {"type": "queued", "target_type": "wikidata_entity", "entity_id": entity_id})
+        return job_id
+
+    def queue_affiliation_context(
+        self, case_id: str, *, official_website: Any = None
+    ) -> str:
+        """Rerun an affiliation case with an explicit domain-context opt-in."""
+        from maigret.web.collector_adapters import normalize_official_website_url
+
+        normalized_website = normalize_official_website_url(official_website)
+        now, job_id = utcnow(), str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            case_statement = select(cases.c.id).where(cases.c.id == case_id)
+            if self.engine.dialect.name == "postgresql":
+                case_statement = case_statement.with_for_update()
+            if not connection.execute(case_statement).first():
+                raise KeyError(case_id)
+            if connection.scalar(
+                select(investigation_jobs.c.id)
+                .where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                )
+                .limit(1)
+            ):
+                raise ValueError("This case already has an active investigation")
+            prior = (
+                connection.execute(
+                    select(investigation_jobs.c.options)
+                    .where(
+                        investigation_jobs.c.case_id == case_id,
+                        investigation_jobs.c.kind == "affiliation",
+                    )
+                    .order_by(investigation_jobs.c.created_at.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if not prior:
+                raise ValueError("This is not an affiliation case")
+            prior_spec = dict(prior["options"] or {}).get("investigation_spec") or {}
+            affiliation_name = " ".join(
+                str(prior_spec.get("affiliation_name") or "").split()
+            )
+            if not affiliation_name:
+                raise ValueError("The affiliation case has no reusable organization name")
+            legal_jurisdiction = prior_spec.get("legal_jurisdiction")
+            specification = {
+                **prior_spec,
+                "schema_version": 2,
+                "investigation_type": "affiliation",
+                "affiliation_name": affiliation_name[:500],
+                "enable_domain_context": True,
+                "official_website": (
+                    normalized_website or prior_spec.get("official_website")
+                ),
+            }
+            total_sources = (
+                4
+                if isinstance(legal_jurisdiction, dict)
+                and legal_jurisdiction.get("code") == "FR"
+                else 3 if legal_jurisdiction else 2
+            ) + 1
+            connection.execute(
+                insert(investigation_jobs).values(
+                    id=job_id,
+                    case_id=case_id,
+                    kind="affiliation",
+                    status="queued",
+                    usernames=[],
+                    options={"investigation_spec": specification},
+                    progress={"checked": 0, "total": total_sources, "found": 0},
+                    result=None,
+                    error=None,
+                    cancel_requested=False,
+                    attempts=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(updated_at=now)
+            )
+        self.append_event(
+            job_id,
+            {
+                "type": "queued",
+                "target_type": "organization_domain_context",
+                "domain_context_requested": True,
+            },
+        )
         return job_id
 
     def repeat_persona_investigation(self, persona_id: str) -> str:

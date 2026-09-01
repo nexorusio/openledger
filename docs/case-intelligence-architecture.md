@@ -296,6 +296,22 @@ discards upstream birth and nationality data. Each proposal retains its SIREN,
 public role, source URL, and review restrictions; registry evidence never enters
 canonical Persona or relationship views automatically.
 
+An optional domain-context pass accepts one explicitly supplied official website,
+or the selected organization's `P856` website when available. The worker queries
+only Cloudflare's fixed DNS-over-HTTPS endpoint for bounded `A`, `AAAA`, `MX`, and
+`NS` results. These records remain technical observations with no claim mapping.
+The case workspace presents registered location, registry activity, website
+association, and DNS routing as separate evidence classes; every displayed
+statement includes its source basis and limitation. In particular, hosting,
+nameserver, mail-provider, registrar, and domain-registration geography never
+become evidence that the organization operates in that place.
+
+For organization-published addresses and broader operating context, the case
+workspace opens the existing persistent chat with a bounded research brief and
+public-web citations enabled. The brief requires direct citations and explicitly
+separates legal records, self-published statements, and infrastructure. It does
+not create an organization address claim on a Persona automatically.
+
 ## Confirmed-name public-record enrichment
 
 Approving a `full_name` claim queues two independent, credential-free checks in

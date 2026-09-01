@@ -123,8 +123,16 @@
             <span>Registered jurisdiction <small>(optional)</small></span>
             <input type="text" name="jurisdiction" maxlength="100" placeholder="France, FR, or US-DE" autocomplete="off">
         </label>
+        <label class="affiliation-jurisdiction-field">
+            <span>Known official website <small>(optional)</small></span>
+            <input type="url" name="official_website" maxlength="2000" placeholder="https://example.org" autocomplete="off">
+        </label>
+        <label class="affiliation-domain-toggle">
+            <input type="checkbox" name="enable_domain_context" value="1">
+            <span>Collect current DNS context</span>
+        </label>
         <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="building-2"></i> Open affiliation case</button>
-        <small>Add a jurisdiction to search governed legal-entity registries. New people and claims remain pending.</small>
+        <small>Registry and DNS checks are independent. DNS remains observation-only and never establishes where the business operates.</small>
     </form>
     {% endif %}
 </article>

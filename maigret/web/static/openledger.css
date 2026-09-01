@@ -11,6 +11,7 @@
 .affiliation-jurisdiction-field { display: grid; gap: .35rem; min-width: min(100%, 16rem); color: var(--ol-muted); font-size: .82rem; }
 .affiliation-jurisdiction-field > span { font-weight: 600; }
 .affiliation-jurisdiction-field input { min-height: 2.25rem; border: 1px solid var(--ol-border); border-radius: .45rem; background: var(--ol-surface); color: var(--ol-text); padding: .45rem .65rem; }
+.affiliation-domain-toggle { display: flex; gap: .45rem; align-items: center; min-height: 2.25rem; color: var(--ol-muted); font-size: .78rem; font-weight: 600; }
 .affiliation-case-body { display: grid; gap: 1rem; }
 .affiliation-candidate-list { display: grid; gap: .75rem; }
 .affiliation-candidate { border: 1px solid var(--ol-border); border-radius: .75rem; padding: .9rem; display: flex; justify-content: space-between; gap: 1rem; align-items: center; }
@@ -30,6 +31,26 @@
 .registry-candidate-actions { display: flex; gap: .45rem; justify-content: flex-end; align-items: center; flex-wrap: wrap; text-align: right; }
 .registry-coverage-note { display: flex; gap: .45rem; margin: 0; color: var(--ol-muted); font-size: .82rem; }
 .registry-coverage-note i { flex: 0 0 auto; width: 1rem; height: 1rem; margin-top: .1rem; }
+.business-context-results { border-top: 1px solid var(--ol-border); padding-top: 1rem; display: grid; gap: .9rem; }
+.business-context-list { display: grid; gap: .75rem; }
+.business-context-finding, .domain-context-card { border: 1px solid var(--ol-border); border-radius: .75rem; padding: .9rem; background: var(--ol-surface-muted); }
+.business-context-finding > header, .domain-context-card > header { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
+.business-context-finding > strong { display: block; margin-top: .7rem; }
+.business-context-finding dl { display: grid; gap: .45rem; margin: .7rem 0 0; }
+.business-context-finding dl > div { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: .65rem; }
+.business-context-finding dt { color: var(--ol-muted); font-size: .7rem; text-transform: uppercase; }
+.business-context-finding dd { margin: 0; font-size: .78rem; }
+.domain-context-card { display: grid; gap: .75rem; }
+.domain-context-card > header > div { display: grid; gap: .2rem; }
+.domain-context-card small { color: var(--ol-muted); }
+.domain-record-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .65rem; }
+.domain-record-grid > div { border: 1px solid var(--ol-border); border-radius: .55rem; padding: .65rem; background: var(--ol-surface); }
+.domain-record-grid span { color: var(--ol-muted); font-size: .68rem; font-weight: 700; }
+.domain-record-grid ul { display: grid; gap: .2rem; margin: .35rem 0 0; padding-left: 1rem; overflow-wrap: anywhere; }
+.business-context-actions { display: flex; gap: .75rem; align-items: end; flex-wrap: wrap; }
+.domain-context-form { display: flex; gap: .6rem; align-items: end; flex: 1 1 34rem; }
+.domain-context-form label { display: grid; gap: .3rem; flex: 1 1 22rem; color: var(--ol-muted); font-size: .75rem; font-weight: 600; }
+.domain-context-form input { min-height: 2.25rem; border: 1px solid var(--ol-border); border-radius: .45rem; background: var(--ol-surface); color: var(--ol-text); padding: .45rem .65rem; }
 .offshore-alert { display: flex; gap: 1rem; align-items: flex-start; border: 1px solid rgba(239, 83, 80, .65); border-left: 4px solid #ef5350; border-radius: .8rem; padding: 1rem 1.1rem; margin-bottom: 1.25rem; background: rgba(239, 83, 80, .1); }
 .offshore-alert > i { color: #ff7773; flex: 0 0 auto; margin-top: .15rem; }
 .offshore-alert p { margin: .35rem 0 .75rem; color: var(--ol-muted); max-width: 80rem; }
@@ -4351,7 +4372,12 @@ textarea.form-control.compact-textarea {
     .affiliation-entity-summary,
     .registry-results-heading,
     .registry-source-card > header,
-    .registry-candidate { align-items: stretch; flex-direction: column; }
+    .registry-candidate,
+    .business-context-finding > header,
+    .domain-context-card > header,
+    .domain-context-form { align-items: stretch; flex-direction: column; }
+    .domain-record-grid { grid-template-columns: 1fr; }
+    .business-context-finding dl > div { grid-template-columns: 1fr; gap: .2rem; }
     .affiliation-source-links,
     .registry-candidate-actions { justify-content: flex-start; text-align: left; }
     .case-chat-message { width: 94%; }
