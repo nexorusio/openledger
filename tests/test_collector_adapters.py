@@ -28,9 +28,11 @@ from maigret.web.collector_adapters import (
     WIKIPEDIA_ENGINE,
     _wikidata_people_query,
     build_business_context_assessment,
+    build_organization_resolution_candidates,
     claimed_profile_url_targets,
     extract_github_profile_claims,
     extract_fr_registry_affiliated_people,
+    extract_registry_affiliated_people,
     extract_icij_offshore_claims,
     extract_official_website_affiliated_people,
     extract_profile_url_evidence_claims,
@@ -519,6 +521,13 @@ def _wikidata_organization():
                 "labels": {"en": {"value": "Example Organization"}},
                 "descriptions": {"en": {"value": "Example"}},
                 "claims": {
+                    "P31": [
+                        {
+                            "mainsnak": {
+                                "datavalue": {"value": {"id": "Q43229"}}
+                            }
+                        }
+                    ],
                     "P856": [
                         {"mainsnak": {"datavalue": {"value": "https://example.org"}}}
                     ]
@@ -848,6 +857,58 @@ async def test_wikidata_jurisdiction_pauses_exact_name_auto_selection():
     assert "exact name alone is insufficient" in observation["reason"]
 
 
+@pytest.mark.asyncio
+async def test_wikidata_article_is_retained_but_cannot_be_selected_as_organization():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q127199078",
+                "label": "Unistellar eVscopes",
+                "description": "scholarly article",
+                "match": {"text": "Unistellar eVscopes"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q127199078": {
+                "labels": {"en": {"value": "Unistellar eVscopes"}},
+                "descriptions": {"en": {"value": "scholarly article"}},
+                "claims": {
+                    "P31": [
+                        {
+                            "mainsnak": {
+                                "datavalue": {"value": {"id": "Q13442814"}}
+                            }
+                        }
+                    ]
+                },
+            }
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Unistellar eVscopes",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "needs_selection"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is False
+    assert candidate["organization_type_status"] == (
+        "not_verified_as_organization"
+    )
+    assert "type-verified Wikidata organization" in observation["reason"]
+    assert len([item for item in calls if item[0] == "get"]) == 2
+
+
 def _gleif_entities():
     return {
         "data": [
@@ -1010,12 +1071,54 @@ def test_fr_registry_people_require_one_exact_entity_and_remain_review_inputs():
         for claim in person["claims"]:
             assert claim["source_engine"] == FR_BUSINESS_REGISTRY_ENGINE
             details = claim["evidence"][0]["details"]
-            assert details["siren"] == "812339356"
+            assert details["registry_identifier"] == "812339356"
+            assert details["registry_identifier_type"] == "siren"
             assert details["human_review_required"] is True
             assert details["automatic_approval_allowed"] is False
 
     ambiguous = dict(observation, selected_entity=None)
     assert extract_fr_registry_affiliated_people(ambiguous) == []
+
+
+def test_registry_people_contract_is_source_neutral_for_governed_adapters():
+    observation = {
+        "source_engine": GLEIF_ENGINE,
+        "status": "observed",
+        "selected_entity": {
+            "id": "9695005MSX1OYEMGDF46",
+            "identifier_type": "lei",
+            "legal_name": "Example Global Organization",
+            "legal_jurisdiction": "ID",
+            "source_url": (
+                "https://api.gleif.org/api/v1/lei-records/"
+                "9695005MSX1OYEMGDF46"
+            ),
+            "analyst_selected": True,
+            "people": [
+                {"display_name": "Ayu Example", "role": "Managing Director"}
+            ],
+        },
+    }
+
+    people = extract_registry_affiliated_people(observation)
+
+    assert len(people) == 1
+    assert people[0]["registry_person_key"].startswith(
+        "registry:gleif_lei_registry:"
+    )
+    assert {claim["field_name"] for claim in people[0]["claims"]} == {
+        "full_name",
+        "company",
+        "occupation",
+    }
+    assert all(
+        claim["source_engine"] == GLEIF_ENGINE
+        for claim in people[0]["claims"]
+    )
+    assert all(
+        claim["evidence"][0]["source_name"] == "GLEIF Global LEI Index"
+        for claim in people[0]["claims"]
+    )
 
 
 @pytest.mark.asyncio
@@ -1170,6 +1273,23 @@ def _unistellar_official_website_html():
     </main></body></html>"""
 
 
+def _global_company_page_html():
+    return b"""<!doctype html><html><head><title>Global Example</title></head>
+    <body><main>
+      <p>10 Rue de Rivoli, 75001 Paris, France</p>
+      <p>Home address: 8 Private Road, 10000 Example</p>
+      <a href="/kontakt">Kontakt</a>
+      <a href="https://other.example/location">External location</a>
+    </main></body></html>"""
+
+
+def _global_contact_page_html():
+    return b"""<!doctype html><html><head><title>Kontakt</title></head>
+    <body><footer><div class="standort">
+      <span>Friedrichstrasse 123, 10117 Berlin, Germany</span>
+    </div></footer></body></html>"""
+
+
 def test_official_website_content_extracts_exact_cited_context_and_people():
     observation = normalize_official_website_public_content(
         "Example Organization",
@@ -1177,6 +1297,9 @@ def test_official_website_content_extracts_exact_cited_context_and_people():
         _official_website_html(),
     )
     people = extract_official_website_affiliated_people(observation)
+    organization_candidate = build_organization_resolution_candidates(
+        {}, website_observation=observation
+    )[0]
 
     assert observation["source_engine"] == OFFICIAL_WEBSITE_ENGINE
     assert observation["status"] == "observed"
@@ -1192,6 +1315,17 @@ def test_official_website_content_extracts_exact_cited_context_and_people():
     assert observation["people"] == [
         {"display_name": "Alice Example", "role": "Chief Executive Officer"}
     ]
+    assert observation["organization"]["name_observation_status"] == (
+        "published_name_match"
+    )
+    assert organization_candidate["selectable"] is True
+    assert organization_candidate["published_addresses"] == [
+        "Jl. Kemang Timur No. 28, Jakarta 12730, Indonesia"
+    ]
+    assert "page title or description" in organization_candidate["basis"]
+    assert "does not prove legal registration" in organization_candidate[
+        "limitation"
+    ]
     assert len(people) == 1
     assert {claim["field_name"] for claim in people[0]["claims"]} == {
         "full_name",
@@ -1202,6 +1336,53 @@ def test_official_website_content_extracts_exact_cited_context_and_people():
         claim["evidence"][0]["details"]["human_review_required"] is True
         for claim in people[0]["claims"]
     )
+
+
+@pytest.mark.asyncio
+async def test_official_website_crawls_bounded_same_domain_context_pages_with_lineage():
+    calls = []
+    observation = await run_official_website_public_content(
+        "Global Example",
+        "https://example.org",
+        host_resolver=lambda _hostname, _port: ["93.184.216.34"],
+        session_factory=lambda **options: _FakeSequenceSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body=_global_company_page_html(),
+                    headers={"Content-Type": "text/html"},
+                ),
+                _FakeResponse(
+                    status=200,
+                    body=_global_contact_page_html(),
+                    headers={"Content-Type": "text/html"},
+                ),
+            ],
+            calls,
+            **options,
+        ),
+    )
+
+    assert observation["addresses"] == [
+        "10 Rue de Rivoli, 75001 Paris, France",
+        "Friedrichstrasse 123, 10117 Berlin, Germany",
+    ]
+    assert observation["collected_pages"] == [
+        "https://example.org",
+        "https://example.org/kontakt",
+    ]
+    assert {
+        item["source_url"] for item in observation["location_observations"]
+    } == {"https://example.org", "https://example.org/kontakt"}
+    assert all(
+        item["verification_status"] == "pending"
+        for item in observation["location_observations"]
+    )
+    assert all(
+        "personal address" in item["limitation"]
+        for item in observation["location_observations"]
+    )
+    assert len([item for item in calls if item[0] == "get"]) == 2
 
 
 @pytest.mark.parametrize(

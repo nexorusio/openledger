@@ -358,7 +358,7 @@
       "trigger": {
         "operator_opt_in_required": true,
         "input_type": "official_website_url_from_operator_or_selected_organization",
-        "accepted_target": "one_exact_public_organization_website_page",
+        "accepted_target": "one_exact_public_organization_website_plus_bounded_same_domain_context_pages",
         "maximum_targets_per_investigation": 1
       },
       "guardrails": {
@@ -372,7 +372,8 @@
         "maximum_redirects": 1,
         "timeout_seconds": 20,
         "maximum_response_bytes": 750000,
-        "maximum_pages": 1,
+        "maximum_pages": 4,
+        "maximum_total_response_bytes": 3000000,
         "maximum_addresses": 10,
         "maximum_contacts": 10,
         "maximum_people": 25,
@@ -389,6 +390,7 @@
         "page_title",
         "organization_description",
         "exact_public_address",
+        "organization_location_observation_with_page_lineage",
         "organizational_email",
         "organizational_phone",
         "linked_public_company_profile"

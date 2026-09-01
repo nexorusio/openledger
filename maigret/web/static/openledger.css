@@ -19,6 +19,48 @@
 .affiliation-candidate small { color: var(--ol-muted); }
 .affiliation-entity-summary { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
 .affiliation-source-links { display: grid; gap: .4rem; text-align: right; }
+.organization-selection-summary {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: .75rem 1rem;
+    padding: 1rem;
+    border: 1px solid color-mix(in srgb, var(--ol-success) 48%, var(--ol-border));
+    border-left: 4px solid var(--ol-success);
+    border-radius: .75rem;
+    background: color-mix(in srgb, var(--ol-success) 7%, var(--ol-surface));
+}
+.organization-selection-summary h3 { margin: 0; }
+.organization-selection-summary p { margin: .3rem 0 0; color: var(--ol-muted); }
+.organization-selection-review { display: grid; gap: .35rem; justify-items: end; text-align: right; }
+.organization-selection-review small { color: var(--ol-muted); }
+.organization-selection-limitation { grid-column: 1 / -1; font-size: .8rem; }
+.organization-resolution { display: grid; gap: .9rem; padding-top: .1rem; }
+.organization-resolution-list { display: grid; gap: .75rem; }
+.organization-resolution-candidate {
+    display: grid;
+    gap: .75rem;
+    padding: .9rem;
+    border: 1px solid var(--ol-border);
+    border-radius: .75rem;
+    background: var(--ol-surface-muted);
+}
+.organization-resolution-candidate.selected {
+    border-color: color-mix(in srgb, var(--ol-success) 48%, var(--ol-border));
+}
+.organization-resolution-candidate > header {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    align-items: flex-start;
+}
+.organization-resolution-candidate > header > div:first-child { display: grid; gap: .2rem; }
+.organization-resolution-candidate small { color: var(--ol-muted); }
+.organization-resolution-candidate p { margin: 0; font-size: .8rem; }
+.organization-resolution-candidate dl { display: grid; gap: .4rem; margin: 0; }
+.organization-resolution-candidate dl > div { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: .65rem; }
+.organization-resolution-candidate dt { color: var(--ol-muted); font-size: .7rem; text-transform: uppercase; }
+.organization-resolution-candidate dd { margin: 0; font-size: .78rem; }
+.organization-resolution-actions { display: flex; gap: .55rem; align-items: center; justify-content: flex-end; flex-wrap: wrap; }
 .registry-results { border-top: 1px solid var(--ol-border); padding-top: 1rem; display: grid; gap: .9rem; }
 .registry-results-heading, .registry-source-card > header, .registry-candidate { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
 .registry-results-heading h3 { margin: .15rem 0 0; }
@@ -4427,6 +4469,7 @@ textarea.form-control.compact-textarea {
     .case-chat-options { grid-template-columns: 1fr; }
     .affiliation-candidate,
     .affiliation-entity-summary,
+    .organization-resolution-candidate > header,
     .registry-results-heading,
     .registry-source-card > header,
     .registry-candidate,
@@ -4436,7 +4479,10 @@ textarea.form-control.compact-textarea {
     .domain-record-grid { grid-template-columns: 1fr; }
     .business-context-finding dl > div { grid-template-columns: 1fr; gap: .2rem; }
     .affiliation-source-links,
+    .organization-resolution-actions,
     .registry-candidate-actions { justify-content: flex-start; text-align: left; }
+    .organization-selection-summary { grid-template-columns: 1fr; }
+    .organization-selection-review { justify-items: start; text-align: left; }
     .case-chat-message { width: 94%; }
     .case-chat-thread { max-height: none; min-height: 360px; padding: 14px; }
 }

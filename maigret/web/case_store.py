@@ -866,6 +866,166 @@ class CaseStore:
         )
         return job_id
 
+    def select_affiliation_organization(
+        self, case_id: str, candidate_key: str, reviewed_by: str
+    ) -> Dict[str, Any]:
+        """Persist one analyst-confirmed, source-neutral case organization."""
+        candidate_key = bounded_text(
+            candidate_key, "organization candidate", max_chars=500
+        )
+        reviewer = bounded_text(reviewed_by, "reviewer", max_chars=200)
+        now = utcnow()
+        selected_job_id = ""
+        selection: Dict[str, Any] = {}
+        selected_registry_observation = None
+        with self.engine.begin() as connection:
+            case_statement = select(cases.c.id).where(cases.c.id == case_id)
+            if self.engine.dialect.name == "postgresql":
+                case_statement = case_statement.with_for_update()
+            if not connection.execute(case_statement).first():
+                raise KeyError(case_id)
+            prior_jobs = list(
+                connection.execute(
+                    select(
+                        investigation_jobs.c.id,
+                        investigation_jobs.c.result,
+                        investigation_jobs.c.options,
+                    )
+                    .where(
+                        investigation_jobs.c.case_id == case_id,
+                        investigation_jobs.c.kind == "affiliation",
+                        investigation_jobs.c.status == "completed",
+                    )
+                    .order_by(investigation_jobs.c.created_at.desc())
+                    .limit(10)
+                ).mappings()
+            )
+            selected_candidate = None
+            selected_row = None
+            for prior in prior_jobs:
+                result = dict(prior["result"] or {})
+                for candidate in list(
+                    result.get("organization_resolution_candidates") or []
+                )[:15]:
+                    if (
+                        isinstance(candidate, dict)
+                        and candidate.get("candidate_key") == candidate_key
+                    ):
+                        selected_candidate = candidate
+                        selected_row = prior
+                        break
+                if selected_candidate:
+                    break
+            if not selected_candidate or not selected_row:
+                raise ValueError(
+                    "The selected organization is not a stored candidate for this case"
+                )
+            if selected_candidate.get("selectable") is not True:
+                raise ValueError(
+                    "This candidate is not verified as an organization and cannot be selected"
+                )
+            normalized_candidate = normalize_bounded_document(
+                selected_candidate, "organization candidate"
+            )
+            selection = {
+                **normalized_candidate,
+                "review_status": "approved",
+                "reviewed_by": reviewer,
+                "reviewed_at": _as_iso(now),
+                "automatic_approval_allowed": False,
+            }
+            selected_job_id = str(selected_row["id"])
+            result = dict(selected_row["result"] or {})
+            result["selected_organization"] = selection
+            for candidate in list(
+                result.get("organization_resolution_candidates") or []
+            )[:15]:
+                if isinstance(candidate, dict):
+                    candidate["selected"] = (
+                        candidate.get("candidate_key") == candidate_key
+                    )
+            if selection.get("identity_scope") == "registered_legal_entity":
+                registry_observations = list(
+                    result.get("registry_observations") or []
+                )[:5]
+                for index, registry_observation in enumerate(
+                    registry_observations
+                ):
+                    if (
+                        not isinstance(registry_observation, dict)
+                        or registry_observation.get("source_engine")
+                        != selection.get("source_engine")
+                    ):
+                        continue
+                    for entity in list(
+                        registry_observation.get("candidates") or []
+                    )[:5]:
+                        if (
+                            isinstance(entity, dict)
+                            and str(entity.get("id") or "")
+                            == str(selection.get("entity_id") or "")
+                        ):
+                            selected_registry_observation = {
+                                **registry_observation,
+                                "selected_entity": {
+                                    **entity,
+                                    "analyst_selected": True,
+                                },
+                            }
+                            registry_observations[index] = (
+                                selected_registry_observation
+                            )
+                            result["registry_observations"] = (
+                                registry_observations
+                            )
+                            break
+                    if selected_registry_observation:
+                        break
+            options = dict(selected_row["options"] or {})
+            specification = dict(options.get("investigation_spec") or {})
+            specification["selected_organization"] = selection
+            options["investigation_spec"] = specification
+            connection.execute(
+                update(investigation_jobs)
+                .where(investigation_jobs.c.id == selected_job_id)
+                .values(result=result, options=options, updated_at=now)
+            )
+            title = f"Affiliation: {selection['label']}"
+            legal_jurisdiction = specification.get("legal_jurisdiction")
+            if isinstance(legal_jurisdiction, dict) and legal_jurisdiction.get(
+                "code"
+            ):
+                title += f" · {legal_jurisdiction['code']}"
+            connection.execute(
+                update(cases)
+                .where(cases.c.id == case_id)
+                .values(title=title[:500], updated_at=now)
+            )
+        self.append_event(
+            selected_job_id,
+            {
+                "type": "organization_selected",
+                "candidate_key": selection["candidate_key"],
+                "label": selection["label"],
+                "source_engine": selection["source_engine"],
+                "source_record_id": selection.get("source_record_id"),
+                "identity_scope": selection["identity_scope"],
+                "reviewed_by": reviewer,
+            },
+        )
+        if selected_registry_observation:
+            self.sync_affiliation_discovery(
+                selected_job_id,
+                {
+                    "source_engine": "wikidata_affiliation",
+                    "status": "not_found",
+                    "organization": None,
+                    "people": [],
+                },
+                registry_observations=[selected_registry_observation],
+            )
+        return selection
+
     def queue_affiliation_entity(self, case_id: str, entity_id: str) -> str:
         entity_id = str(entity_id or "").strip().upper()
         if not re.fullmatch(r"Q[1-9][0-9]{0,19}", entity_id):
@@ -900,6 +1060,7 @@ class CaseStore:
             legal_jurisdiction = None
             enable_domain_context = False
             official_website = None
+            selected_organization = None
             for prior in prior_jobs:
                 spec = dict(prior["options"] or {}).get("investigation_spec") or {}
                 affiliation_name = affiliation_name or str(spec.get("affiliation_name") or "")
@@ -911,6 +1072,9 @@ class CaseStore:
                     spec.get("enable_domain_context")
                 )
                 official_website = official_website or spec.get("official_website")
+                selected_organization = selected_organization or spec.get(
+                    "selected_organization"
+                )
                 for item in list(dict(prior["result"] or {}).get("organization_candidates") or [])[:5]:
                     if isinstance(item, dict) and str(item.get("id") or "").upper() == entity_id:
                         candidate = item
@@ -919,6 +1083,10 @@ class CaseStore:
                     break
             if not candidate or not affiliation_name:
                 raise ValueError("The selected organization is not a stored candidate for this case")
+            if candidate.get("organization_eligible") is not True:
+                raise ValueError(
+                    "The selected Wikidata item is not type-verified as an organization"
+                )
             selected_label = " ".join(str(candidate.get("label") or affiliation_name).split())[:500]
             specification = {
                 "schema_version": 2,
@@ -930,6 +1098,7 @@ class CaseStore:
                 "official_website": official_website,
                 "wikidata_entity_id": entity_id,
                 "selected_entity_label": selected_label,
+                "selected_organization": selected_organization,
             }
             total_sources = (
                 4
@@ -2729,11 +2898,11 @@ class CaseStore:
         website_observations: Optional[list[Dict[str, Any]]] = None,
     ) -> Dict[str, int]:
         from maigret.web.collector_adapters import (
-            FR_BUSINESS_REGISTRY_ENGINE,
             OFFICIAL_WEBSITE_ENGINE,
+            REGISTRY_SOURCE_ENGINES,
             WIKIDATA_ENGINE,
-            extract_fr_registry_affiliated_people,
             extract_official_website_affiliated_people,
+            extract_registry_affiliated_people,
             extract_wikidata_affiliation_people,
         )
 
@@ -2741,7 +2910,7 @@ class CaseStore:
         registry_observations = list(registry_observations or [])[:5]
         for registry_observation in registry_observations:
             people.extend(
-                extract_fr_registry_affiliated_people(registry_observation)
+                extract_registry_affiliated_people(registry_observation)
             )
         website_observations = list(website_observations or [])[:2]
         for website_observation in website_observations:
@@ -2829,8 +2998,9 @@ class CaseStore:
                 .where(
                     personas.c.case_id == case_id,
                     persona_claims.c.field_name == "full_name",
-                    claim_observations.c.source_engine
-                    == FR_BUSINESS_REGISTRY_ENGINE,
+                    claim_observations.c.source_engine.in_(
+                        REGISTRY_SOURCE_ENGINES
+                    ),
                     claim_observations.c.source_record_id.is_not(None),
                 )
             ).mappings():
@@ -2870,7 +3040,7 @@ class CaseStore:
                         str(candidate.get("source_record_id"))
                         for candidate in claims
                         if candidate.get("source_engine")
-                        == FR_BUSINESS_REGISTRY_ENGINE
+                        in REGISTRY_SOURCE_ENGINES
                         and candidate.get("field_name") == "full_name"
                         and candidate.get("source_record_id")
                     ),

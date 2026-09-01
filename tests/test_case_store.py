@@ -1429,11 +1429,217 @@ def test_affiliation_discovery_is_pending_until_relationship_review(store):
 def test_affiliation_selection_accepts_only_a_stored_candidate(store):
     job_id = store.create_affiliation_investigation("Example Organization")
     job = store.claim_next("worker:test")
-    store.finish(job_id, {"status": "completed", "organization_candidates": [{"id": "Q95", "label": "Example Organization"}]})
+    store.finish(job_id, {"status": "completed", "organization_candidates": [{"id": "Q95", "label": "Example Organization", "organization_eligible": True}]})
     with pytest.raises(ValueError, match="not a stored candidate"):
         store.queue_affiliation_entity(job["case_id"], "Q999")
     selected = store.get_job(store.queue_affiliation_entity(job["case_id"], "Q95"))
     assert selected["options"]["investigation_spec"]["wikidata_entity_id"] == "Q95"
+
+
+def test_source_neutral_organization_selection_is_persisted_and_audited(store):
+    job_id = store.create_affiliation_investigation(
+        "Example Organization",
+        jurisdiction="ID",
+        official_website="https://example.org",
+    )
+    job = store.claim_next("worker:organization-selection")
+    website_candidate = {
+        "candidate_key": "official_website_public_content:example.org",
+        "label": "Example Organization",
+        "source_engine": "official_website_public_content",
+        "source_name": "Supplied organization website",
+        "source_record_id": "official-website:example.org",
+        "source_url": "https://example.org/",
+        "identity_scope": "first_party_operating_identity",
+        "identity_scope_label": "First-party operating identity",
+        "match_status": "operator_supplied_domain",
+        "selectable": True,
+        "basis": "The supplied website names the organization.",
+        "limitation": "This does not establish legal registration.",
+    }
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "organization_resolution_candidates": [website_candidate],
+        },
+    )
+
+    selected = store.select_affiliation_organization(
+        job["case_id"], website_candidate["candidate_key"], "analyst"
+    )
+
+    assert selected["source_engine"] == "official_website_public_content"
+    assert selected["review_status"] == "approved"
+    assert selected["automatic_approval_allowed"] is False
+    completed = store.get_job(job_id)
+    assert completed["selected_organization"]["candidate_key"] == website_candidate[
+        "candidate_key"
+    ]
+    assert completed["options"]["investigation_spec"]["selected_organization"][
+        "reviewed_by"
+    ] == "analyst"
+    assert completed["organization_resolution_candidates"][0]["selected"] is True
+    assert store.get_case(job["case_id"])["title"] == (
+        "Affiliation: Example Organization · ID"
+    )
+    assert store.get_events(job_id)[-1]["event"]["type"] == (
+        "organization_selected"
+    )
+    rerun = store.get_job(store.queue_affiliation_context(job["case_id"]))
+    assert rerun["options"]["investigation_spec"]["selected_organization"][
+        "candidate_key"
+    ] == website_candidate["candidate_key"]
+
+
+def test_source_neutral_selection_rejects_non_organization_candidate(store):
+    job_id = store.create_affiliation_investigation("Example Organization")
+    job = store.claim_next("worker:non-organization-selection")
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "organization_resolution_candidates": [
+                {
+                    "candidate_key": "wikidata_affiliation:Q127199078",
+                    "label": "Example Organization article",
+                    "source_engine": "wikidata_affiliation",
+                    "source_name": "Wikidata",
+                    "identity_scope": "public_knowledge_entity",
+                    "selectable": False,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(ValueError, match="not verified as an organization"):
+        store.select_affiliation_organization(
+            job["case_id"], "wikidata_affiliation:Q127199078", "analyst"
+        )
+
+
+def test_analyst_selected_registry_entity_proposes_people_for_review(store):
+    job_id = store.create_affiliation_investigation(
+        "Unistellar", jurisdiction="FR"
+    )
+    job = store.claim_next("worker:registry-selection")
+    registry_observation = _fr_affiliation_observation()
+    registry_observation["selected_entity"] = None
+    registry_observation["candidates"][0]["exact_name_match"] = False
+    registry_candidate = {
+        "candidate_key": "fr_company_registry:812339356",
+        "label": "UNISTELLAR",
+        "source_engine": "fr_company_registry",
+        "source_name": "French National Enterprise Directory",
+        "source_record_id": "fr-company-search:unistellar",
+        "source_url": (
+            "https://annuaire-entreprises.data.gouv.fr/entreprise/812339356"
+        ),
+        "entity_id": "812339356",
+        "identity_scope": "registered_legal_entity",
+        "identity_scope_label": "Registered legal entity",
+        "match_status": "requires_review",
+        "selectable": True,
+        "basis": "The public registry returned this candidate.",
+        "limitation": "The analyst must confirm the identity match.",
+    }
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "registry_observations": [registry_observation],
+            "organization_resolution_candidates": [registry_candidate],
+        },
+    )
+
+    store.select_affiliation_organization(
+        job["case_id"], registry_candidate["candidate_key"], "analyst"
+    )
+
+    case = store.get_case(job["case_id"])
+    assert len(case["personas"]) == 2
+    for persona_summary in case["personas"]:
+        persona = store.get_persona(persona_summary["id"])
+        assert all(
+            claim["review_status"] == "pending" for claim in persona["claims"]
+        )
+        assert all(
+            claim["evidence"][0]["details"]["analyst_selected_entity"] is True
+            for claim in persona["claims"]
+        )
+
+
+def test_registry_selection_and_people_sync_are_not_france_specific(store):
+    job_id = store.create_affiliation_investigation(
+        "Example Global Organization", jurisdiction="ID"
+    )
+    job = store.claim_next("worker:global-registry-selection")
+    entity = {
+        "id": "9695005MSX1OYEMGDF46",
+        "identifier_type": "lei",
+        "legal_name": "EXAMPLE GLOBAL ORGANIZATION",
+        "legal_jurisdiction": "ID",
+        "entity_status": "active",
+        "exact_name_match": False,
+        "source_url": (
+            "https://api.gleif.org/api/v1/lei-records/"
+            "9695005MSX1OYEMGDF46"
+        ),
+        "people": [
+            {"display_name": "Ayu Example", "role": "Managing Director"}
+        ],
+    }
+    registry_observation = {
+        "source_engine": "gleif_lei_registry",
+        "status": "observed",
+        "candidates": [entity],
+        "selected_entity": None,
+    }
+    registry_candidate = {
+        "candidate_key": "gleif_lei_registry:9695005MSX1OYEMGDF46",
+        "label": "EXAMPLE GLOBAL ORGANIZATION",
+        "source_engine": "gleif_lei_registry",
+        "source_name": "GLEIF Global LEI Index",
+        "source_record_id": "gleif-search:example-global-organization",
+        "source_url": entity["source_url"],
+        "entity_id": entity["id"],
+        "identity_scope": "registered_legal_entity",
+        "identity_scope_label": "Registered legal entity",
+        "match_status": "requires_review",
+        "selectable": True,
+        "basis": "The governed registry returned this candidate.",
+        "limitation": "The analyst must confirm the identity match.",
+    }
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "registry_observations": [registry_observation],
+            "organization_resolution_candidates": [registry_candidate],
+        },
+    )
+
+    store.select_affiliation_organization(
+        job["case_id"], registry_candidate["candidate_key"], "analyst"
+    )
+
+    case = store.get_case(job["case_id"])
+    assert [persona["display_name"] for persona in case["personas"]] == [
+        "Ayu Example"
+    ]
+    persona = store.get_persona(case["personas"][0]["id"])
+    assert {claim["field_name"] for claim in persona["claims"]} == {
+        "full_name",
+        "company",
+        "occupation",
+    }
+    assert all(
+        claim["source_engine"] == "gleif_lei_registry"
+        for claim in persona["claims"]
+    )
+    assert all(
+        claim["review_status"] == "pending" for claim in persona["claims"]
+    )
 
 
 def _fr_affiliation_observation():
@@ -1532,7 +1738,11 @@ def test_affiliation_entity_selection_preserves_jurisdiction(store):
         {
             "status": "completed",
             "organization_candidates": [
-                {"id": "Q95", "label": "Example Organization"}
+                {
+                    "id": "Q95",
+                    "label": "Example Organization",
+                    "organization_eligible": True,
+                }
             ],
         },
     )

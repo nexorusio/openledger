@@ -166,9 +166,10 @@ def test_public_website_source_is_ssrf_bounded_and_review_gated():
     assert website["guardrails"]["resolved_ip_pinning_required"] is True
     assert website["guardrails"]["sensitive_query_parameters_allowed"] is False
     assert website["guardrails"]["same_site_redirects_only"] is True
-    assert website["guardrails"]["maximum_pages"] == 1
+    assert website["guardrails"]["maximum_pages"] == 4
+    assert website["guardrails"]["maximum_total_response_bytes"] == 3000000
     assert website["guardrails"]["script_execution_allowed"] is False
     assert website["guardrails"]["automatic_approval_allowed"] is False
-    assert website["observation_only_fields"][-1] == (
-        "linked_public_company_profile"
+    assert "organization_location_observation_with_page_lineage" in (
+        website["observation_only_fields"]
     )

@@ -57,10 +57,12 @@ from maigret.web.collector_adapters import (
     FR_BUSINESS_REGISTRY_ENGINE,
     GLEIF_ENGINE,
     OFFICIAL_WEBSITE_ENGINE,
+    WIKIDATA_ENGINE,
     build_business_context_assessment,
+    build_organization_resolution_candidates,
     claimed_profile_url_targets,
-    extract_fr_registry_affiliated_people,
     extract_official_website_affiliated_people,
+    extract_registry_affiliated_people,
     extract_wikidata_affiliation_people,
     github_profile_targets,
     normalize_legal_jurisdiction,
@@ -2821,9 +2823,12 @@ def run_persistent_affiliation_job(
                         'website context before drawing a content conclusion.'
                     ),
                     'addresses': [],
+                    'location_observations': [],
                     'contacts': [],
                     'people': [],
                     'linked_company_profiles': [],
+                    'collected_pages': [],
+                    'page_failures': [],
                 }
         return (
             base_results,
@@ -2953,9 +2958,12 @@ def run_persistent_affiliation_job(
                 'reason': public_message,
                 'organization': None,
                 'addresses': [],
+                'location_observations': [],
                 'contacts': [],
                 'people': [],
                 'linked_company_profiles': [],
+                'collected_pages': [],
+                'page_failures': [],
             }
             source_errors.append(
                 {'collector': 'official-website-content', 'message': public_message}
@@ -2978,7 +2986,7 @@ def run_persistent_affiliation_job(
     registry_people = []
     for registry_observation in registry_observations:
         registry_people.extend(
-            extract_fr_registry_affiliated_people(registry_observation)
+            extract_registry_affiliated_people(registry_observation)
         )
     website_people = (
         extract_official_website_affiliated_people(website_result)
@@ -3017,7 +3025,7 @@ def run_persistent_affiliation_job(
                         ),
                     }
                 )
-        for person in extract_fr_registry_affiliated_people(
+        for person in extract_registry_affiliated_people(
             registry_observation
         ):
             sink.put(
@@ -3085,6 +3093,24 @@ def run_persistent_affiliation_job(
         for person in wikidata_people + registry_people + website_people
         if str(person.get('display_name') or '').strip()
     }
+    organization_resolution_candidates = build_organization_resolution_candidates(
+        observation,
+        registry_observations=registry_observations,
+        website_observation=(
+            website_result if isinstance(website_result, dict) else None
+        ),
+    )
+    selected_organization = specification.get('selected_organization')
+    if not isinstance(selected_organization, dict):
+        selected_organization = None
+    selected_candidate_key = str(
+        (selected_organization or {}).get('candidate_key') or ''
+    )
+    if selected_candidate_key:
+        for candidate in organization_resolution_candidates:
+            candidate['selected'] = (
+                candidate.get('candidate_key') == selected_candidate_key
+            )
     result = {
         'status': 'completed',
         'usernames': [],
@@ -3093,6 +3119,8 @@ def run_persistent_affiliation_job(
         'source_message': str(observation.get('reason') or '')[:1000],
         'organization_candidates': list(observation.get('organization_candidates') or [])[:5],
         'organization': observation.get('organization'),
+        'organization_resolution_candidates': organization_resolution_candidates,
+        'selected_organization': selected_organization,
         'legal_jurisdiction': legal_jurisdiction,
         'registry_observations': registry_observations,
         'registry_candidate_count': registry_candidate_count,
@@ -3145,7 +3173,7 @@ def run_persistent_affiliation_job(
         people_found = (
             len(extract_wikidata_affiliation_people(source_observation))
             if source_name == 'wikidata-affiliation'
-            else len(extract_fr_registry_affiliated_people(source_observation))
+            else len(extract_registry_affiliated_people(source_observation))
         )
         sink.put(
             {
@@ -4332,7 +4360,28 @@ def select_affiliation_entity(case_id):
         flash('Affiliation investigations require persistent storage.', 'warning')
         return redirect(url_for('cases_workspace'))
     try:
-        job_id = case_store.queue_affiliation_entity(case_id, request.form.get('entity_id', ''))
+        candidate_key = str(request.form.get('candidate_key') or '').strip()
+        if candidate_key:
+            selection = case_store.select_affiliation_organization(
+                case_id,
+                candidate_key,
+                session.get('username') or 'local-operator',
+            )
+            if selection.get('source_engine') != WIKIDATA_ENGINE:
+                flash(
+                    'Case organization confirmed from cited '
+                    f"{selection.get('source_name') or 'public-source'} evidence. "
+                    'Persona claims remain pending review.',
+                    'success',
+                )
+                return redirect(url_for('case_workspace', case_id=case_id))
+            job_id = case_store.queue_affiliation_entity(
+                case_id, selection.get('entity_id', '')
+            )
+        else:
+            job_id = case_store.queue_affiliation_entity(
+                case_id, request.form.get('entity_id', '')
+            )
     except KeyError:
         flash('That affiliation case no longer exists.', 'danger')
         return redirect(url_for('cases_workspace'))
