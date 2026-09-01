@@ -4850,12 +4850,48 @@ def suggested_role_organization(value):
         re.finditer(r"\s+at\s+", role, flags=re.IGNORECASE)
     )
     if at_separators:
-        candidate = role[at_separators[-1].end() :].strip()
+        candidate = role[at_separators[0].end() :].strip()
     elif "," in role:
         segments = [segment.strip() for segment in role.split(",")]
         candidate = ", ".join(segments[1:]).strip()
         if len(segments) > 2:
             if len(segments) != 3:
+                return ""
+            organization_base = re.sub(
+                r"[^a-z0-9]+", " ", segments[1].casefold()
+            ).strip()
+            if organization_base in {
+                "advisor",
+                "adviser",
+                "ceo",
+                "cfo",
+                "chair",
+                "chairman",
+                "chairwoman",
+                "chief executive officer",
+                "chief financial officer",
+                "chief operating officer",
+                "chief technology officer",
+                "cio",
+                "cmo",
+                "consultant",
+                "co founder",
+                "coo",
+                "cto",
+                "director",
+                "founder",
+                "head",
+                "manager",
+                "officer",
+                "owner",
+                "partner",
+                "president",
+                "professor",
+                "secretary",
+                "treasurer",
+                "vice president",
+                "vp",
+            }:
                 return ""
             suffix = re.sub(r"[^a-z0-9]+", " ", segments[-1].casefold()).strip()
             if suffix not in {

@@ -389,10 +389,16 @@ def test_role_organization_suggestion_preserves_legal_suffix_and_fails_ambiguous
         "Director at Acme Widgets, Inc."
     ) == "Acme Widgets, Inc."
     assert web_app.suggested_role_organization(
+        "Professor at University at Buffalo"
+    ) == "University at Buffalo"
+    assert web_app.suggested_role_organization(
         "Co-founder, CEO, Acme Widgets"
     ) == ""
     assert web_app.suggested_role_organization(
         "Co-founder, CEO, Acme Widgets, Inc."
+    ) == ""
+    assert web_app.suggested_role_organization(
+        "Co-founder, CEO, Inc."
     ) == ""
 
 
