@@ -5066,11 +5066,10 @@ def export_persona_pdf(persona_id):
     if case_store is None:
         flash('Persona PDF export requires persistent storage.', 'warning')
         return redirect(url_for('history'))
-    persona = case_store.get_persona(persona_id)
+    persona, generated_at = case_store.get_persona_export_snapshot(persona_id)
     if not persona:
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
-    generated_at = datetime.now(timezone.utc)
     try:
         pdf_bytes = generate_persona_pdf(
             persona,

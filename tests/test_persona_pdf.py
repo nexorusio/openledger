@@ -242,6 +242,29 @@ def test_font_markup_uses_actual_fallback_glyph_coverage():
     assert '<font name="ThaiFallback">ไท</font>' in markup
 
 
+def test_persona_styles_enable_complex_script_shaping_without_double_shaping_rtl(
+    monkeypatch,
+):
+    class IdentityReshaper:
+        @staticmethod
+        def reshape(value):
+            return value
+
+    monkeypatch.setattr(persona_pdf_module, "_arabic_reshaper", IdentityReshaper())
+    monkeypatch.setattr(persona_pdf_module, "_bidi_get_display", lambda value: value)
+    regular_font, bold_font, fallback_fonts = persona_pdf_module._register_fonts("नम")
+    styles = persona_pdf_module._styles(
+        regular_font,
+        bold_font,
+        fallback_fonts,
+    )
+
+    assert all(style.shaping == 1 for style in styles.values())
+    paragraph = persona_pdf_module._paragraph("مرحبا بالعالم", styles["body"])
+    paragraph.wrap(200, 400)
+    assert paragraph.style.shaping == 0
+
+
 def test_rtl_display_shapes_arabic_before_bidi_reordering(monkeypatch):
     calls = []
 

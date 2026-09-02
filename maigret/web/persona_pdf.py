@@ -469,6 +469,9 @@ class _RTLParagraph(Paragraph):
             return
         rtl_style = deepcopy(self._openledger_source_style)
         rtl_style.alignment = TA_RIGHT
+        # Arabic is explicitly reshaped and bidi-reordered above; applying
+        # HarfBuzz again to the visual presentation forms would double-shape it.
+        rtl_style.shaping = 0
         rtl_style.wordWrap = "LTR"
         lines = _wrap_rtl_lines(
             self._openledger_logical_text,
@@ -655,6 +658,7 @@ def _styles(
         ),
     }
     for style in styles.values():
+        style.shaping = 1
         style.openledger_primary_coverage = _font_coverage(style.fontName)
         style.openledger_fallback_fonts = tuple(fallback_fonts)
     return styles

@@ -2767,64 +2767,64 @@ class CaseStore:
         )
         return observation_id
 
-    def get_persona(self, persona_id: str) -> Optional[Dict[str, Any]]:
-        """Load a persona, its evidence-backed claims, and review history."""
-        with self.engine.connect() as connection:
-            row = (
-                connection.execute(
-                    select(
-                        personas,
-                        cases.c.title.label("case_title"),
-                        cases.c.status.label("case_status"),
-                    )
-                    .join(cases, cases.c.id == personas.c.case_id)
-                    .where(personas.c.id == persona_id)
+    def _get_persona_with_connection(
+        self, connection: Connection, persona_id: str
+    ) -> Optional[Dict[str, Any]]:
+        row = (
+            connection.execute(
+                select(
+                    personas,
+                    cases.c.title.label("case_title"),
+                    cases.c.status.label("case_status"),
                 )
-                .mappings()
-                .first()
+                .join(cases, cases.c.id == personas.c.case_id)
+                .where(personas.c.id == persona_id)
             )
-            if not row:
-                return None
-            claim_rows = list(
-                connection.execute(
-                    select(persona_claims)
-                    .where(persona_claims.c.persona_id == persona_id)
-                    .order_by(
-                        persona_claims.c.field_name,
-                        persona_claims.c.confidence.desc(),
-                        persona_claims.c.created_at,
-                    )
-                ).mappings()
-            )
-            evidence_by_claim: Dict[str, list] = {}
-            reviews_by_claim: Dict[str, list] = {}
-            claim_ids = [claim_row["id"] for claim_row in claim_rows]
-            if claim_ids:
-                for evidence_row in connection.execute(
-                    select(claim_evidence)
-                    .where(claim_evidence.c.claim_id.in_(claim_ids))
-                    .order_by(claim_evidence.c.observed_at.desc())
-                ).mappings():
-                    evidence_by_claim.setdefault(evidence_row["claim_id"], []).append(
-                        evidence_row
-                    )
-                for review_row in connection.execute(
-                    select(claim_reviews)
-                    .where(claim_reviews.c.claim_id.in_(claim_ids))
-                    .order_by(claim_reviews.c.created_at.desc())
-                ).mappings():
-                    reviews_by_claim.setdefault(review_row["claim_id"], []).append(
-                        review_row
-                    )
-            serialized_claims = []
-            for claim_row in claim_rows:
-                serialized_claims.append(
-                    self._serialize_claim(
-                        claim_row,
-                        evidence_by_claim.get(claim_row["id"], []),
-                        reviews_by_claim.get(claim_row["id"], []),
-                    )
+            .mappings()
+            .first()
+        )
+        if not row:
+            return None
+        claim_rows = list(
+            connection.execute(
+                select(persona_claims)
+                .where(persona_claims.c.persona_id == persona_id)
+                .order_by(
+                    persona_claims.c.field_name,
+                    persona_claims.c.confidence.desc(),
+                    persona_claims.c.created_at,
                 )
+            ).mappings()
+        )
+        evidence_by_claim: Dict[str, list] = {}
+        reviews_by_claim: Dict[str, list] = {}
+        claim_ids = [claim_row["id"] for claim_row in claim_rows]
+        if claim_ids:
+            for evidence_row in connection.execute(
+                select(claim_evidence)
+                .where(claim_evidence.c.claim_id.in_(claim_ids))
+                .order_by(claim_evidence.c.observed_at.desc())
+            ).mappings():
+                evidence_by_claim.setdefault(evidence_row["claim_id"], []).append(
+                    evidence_row
+                )
+            for review_row in connection.execute(
+                select(claim_reviews)
+                .where(claim_reviews.c.claim_id.in_(claim_ids))
+                .order_by(claim_reviews.c.created_at.desc())
+            ).mappings():
+                reviews_by_claim.setdefault(review_row["claim_id"], []).append(
+                    review_row
+                )
+        serialized_claims = []
+        for claim_row in claim_rows:
+            serialized_claims.append(
+                self._serialize_claim(
+                    claim_row,
+                    evidence_by_claim.get(claim_row["id"], []),
+                    reviews_by_claim.get(claim_row["id"], []),
+                )
+            )
         return {
             "id": row["id"],
             "case_id": row["case_id"],
@@ -2834,6 +2834,50 @@ class CaseStore:
             "created_at": _as_iso(row["created_at"]),
             "claims": serialized_claims,
         }
+
+    def get_persona(self, persona_id: str) -> Optional[Dict[str, Any]]:
+        """Load a persona, its evidence-backed claims, and review history."""
+        with self.engine.connect() as connection:
+            return self._get_persona_with_connection(connection, persona_id)
+
+    def get_persona_export_snapshot(
+        self, persona_id: str
+    ) -> tuple[Optional[Dict[str, Any]], datetime]:
+        """Load an export and timestamp from one consistent database snapshot."""
+        dialect = self.engine.dialect.name
+        connection = self.engine.connect()
+        if dialect == "postgresql":
+            connection = connection.execution_options(isolation_level="REPEATABLE READ")
+        elif dialect != "sqlite":
+            connection = connection.execution_options(isolation_level="SERIALIZABLE")
+        with connection:
+            if dialect == "sqlite":
+                # Reserve the writer briefly so the timestamp cannot precede a
+                # decision that becomes visible partway through the read.
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                generated_at = utcnow()
+            else:
+                connection.begin()
+                if dialect == "postgresql":
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    generated_at = connection.scalar(
+                        select(func.statement_timestamp())
+                    )
+                else:
+                    generated_at = utcnow()
+            try:
+                persona = self._get_persona_with_connection(connection, persona_id)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        if not isinstance(generated_at, datetime):
+            raise RuntimeError("Database did not provide an export snapshot timestamp")
+        if generated_at.tzinfo is None:
+            generated_at = generated_at.replace(tzinfo=timezone.utc)
+        else:
+            generated_at = generated_at.astimezone(timezone.utc)
+        return persona, generated_at
 
     def get_claim(self, claim_id: str) -> Optional[Dict[str, Any]]:
         """Load the bounded claim fields needed before an analyst review."""

@@ -57,6 +57,19 @@ def test_migrated_postgres_schema_runs_durable_job_lifecycle(postgres_store):
     assert completed["found_count"] == 2
 
 
+def test_postgres_persona_export_uses_a_timestamped_consistent_snapshot(
+    postgres_store,
+):
+    job_id = postgres_store.create_investigation(["alice"], {})
+    job = postgres_store.get_job(job_id)
+    persona_id = postgres_store.get_case(job["case_id"])["personas"][0]["id"]
+
+    persona, generated_at = postgres_store.get_persona_export_snapshot(persona_id)
+
+    assert persona["id"] == persona_id
+    assert generated_at.tzinfo is not None
+
+
 def test_postgres_allows_only_one_investigation_worker_lock(postgres_store):
     competing_store = CaseStore(POSTGRES_URL)
     first_lock = postgres_store.try_acquire_worker_lock()
