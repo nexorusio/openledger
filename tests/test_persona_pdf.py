@@ -127,6 +127,22 @@ def test_persona_pdf_paginates_long_approved_values():
     assert b"%%EOF" in pdf_bytes[-1024:]
 
 
+def test_persona_pdf_paginates_long_rtl_approved_values():
+    persona = _persona()
+    persona["claims"][0]["display_value"] = " ".join(
+        ["معلومات عامة موثقة من مصدر عام"] * 90
+    )
+
+    pdf_bytes = generate_persona_pdf(
+        persona,
+        generated_by="analyst",
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert b"%%EOF" in pdf_bytes[-1024:]
+
+
 def test_persona_export_uses_only_the_current_approval_note():
     persona = _persona()
     persona["claims"][0]["reviews"] = [
@@ -185,17 +201,115 @@ def test_persona_export_preserves_cjk_text_for_font_fallback():
     assert pdf_bytes.startswith(b"%PDF-")
 
 
-def test_persona_export_survives_an_unusable_optional_cjk_font(monkeypatch):
+def test_persona_export_preserves_multiscript_and_rtl_text():
+    persona = _persona()
+    persona["display_name"] = "علي כהן"
+    persona["claims"][0][
+        "display_value"
+    ] = "सार्वजनिक তথ্য สาธารณะ — معلومات عامة — מידע ציבורי"
+
+    snapshot = build_persona_export_snapshot(
+        persona,
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+        generated_by="analyst",
+    )
+    pdf_bytes = generate_persona_pdf(
+        persona,
+        generated_by="analyst",
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert snapshot["display_name"] == "علي כהן"
+    assert snapshot["approved_claims"][0]["value"] == (
+        "सार्वजनिक তথ্য สาธารณะ — معلومات عامة — מידע ציבורי"
+    )
+    assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_font_markup_uses_actual_fallback_glyph_coverage():
+    style = persona_pdf_module.ParagraphStyle(
+        "CoverageTest", fontName="Helvetica", fontSize=10
+    )
+    style.openledger_primary_coverage = frozenset(range(32, 127))
+    style.openledger_fallback_fonts = (
+        ("DevanagariFallback", frozenset({ord("न"), ord("म")})),
+        ("ThaiFallback", frozenset({ord("ไ"), ord("ท")})),
+    )
+
+    markup = persona_pdf_module._escaped_paragraph_text("Name नम ไทย", style)
+
+    assert '<font name="DevanagariFallback">नम</font>' in markup
+    assert '<font name="ThaiFallback">ไท</font>' in markup
+
+
+def test_rtl_display_shapes_arabic_before_bidi_reordering(monkeypatch):
+    calls = []
+
+    class Reshaper:
+        @staticmethod
+        def reshape(value):
+            calls.append(("reshape", value))
+            return f"shaped:{value}"
+
+    def reorder(value):
+        calls.append(("bidi", value))
+        return f"display:{value}"
+
+    monkeypatch.setattr(persona_pdf_module, "_arabic_reshaper", Reshaper())
+    monkeypatch.setattr(persona_pdf_module, "_bidi_get_display", reorder)
+
+    result = persona_pdf_module._rtl_display_line("مرحبا بالعالم")
+
+    assert result == "display:shaped:مرحبا بالعالم"
+    assert calls == [
+        ("reshape", "مرحبا بالعالم"),
+        ("bidi", "shaped:مرحبا بالعالم"),
+    ]
+
+
+def test_persona_export_degrades_safely_without_optional_rtl_extras(monkeypatch):
+    monkeypatch.setattr(persona_pdf_module, "_arabic_reshaper", None)
+    monkeypatch.setattr(persona_pdf_module, "_bidi_get_display", None)
+    persona = _persona()
+    persona["claims"][0]["display_value"] = "معلومات عامة"
+
+    pdf_bytes = generate_persona_pdf(
+        persona,
+        generated_by="analyst",
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_exact_provenance_url_is_not_bidi_reordered(monkeypatch):
+    def reject_reordering(value):
+        raise AssertionError(f"URL was passed to bidi rendering: {value}")
+
+    monkeypatch.setattr(persona_pdf_module, "_bidi_get_display", reject_reordering)
+    style = persona_pdf_module.ParagraphStyle(
+        "URLTest", fontName="Helvetica", fontSize=8
+    )
+    style.openledger_primary_coverage = frozenset(range(32, 127))
+    style.openledger_fallback_fonts = ()
+    source_url = "https://example.test/public?id=123&lang=ar"
+
+    paragraph = persona_pdf_module._source_url_paragraph(source_url, style)
+
+    assert "".join(fragment.text for fragment in paragraph.frags) == source_url
+    assert {
+        link[1]
+        for fragment in paragraph.frags
+        for link in getattr(fragment, "link", [])
+    } == {source_url}
+
+
+def test_persona_export_survives_an_unusable_optional_fallback_font(monkeypatch):
     monkeypatch.setattr(persona_pdf_module, "_font_paths", lambda: (None, None))
     monkeypatch.setattr(
         persona_pdf_module,
-        "_cjk_font_path",
-        lambda: "/invalid/cjk-font.ttf",
-    )
-    monkeypatch.setattr(
-        persona_pdf_module.pdfmetrics,
-        "getRegisteredFontNames",
-        lambda: ["Helvetica", "Helvetica-Bold"],
+        "_fallback_font_paths",
+        lambda: ("/invalid/fallback-font.ttf",),
     )
 
     def reject_font(*args, **kwargs):
@@ -203,6 +317,6 @@ def test_persona_export_survives_an_unusable_optional_cjk_font(monkeypatch):
 
     monkeypatch.setattr(persona_pdf_module, "TTFont", reject_font)
 
-    fonts = persona_pdf_module._register_fonts()
+    fonts = persona_pdf_module._register_fonts("न")
 
-    assert fonts == ("Helvetica", "Helvetica-Bold", None, None)
+    assert fonts == ("Helvetica", "Helvetica-Bold", ())

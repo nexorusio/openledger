@@ -7,6 +7,7 @@ RUN apt-get update && \
       build-essential \
       fonts-dejavu-core \
       fonts-droid-fallback \
+      fonts-noto-core \
       python3-dev \
       pkg-config \
       libcairo2-dev \

@@ -10,13 +10,16 @@ import os
 import re
 import threading
 import unicodedata
+from copy import deepcopy
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, Mapping, Optional
+from glob import glob
+from typing import Any, Dict, FrozenSet, Iterable, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape, quoteattr
 
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_LEFT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
+from reportlab.lib.geomutils import normalizeTRBL
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
@@ -31,6 +34,19 @@ from reportlab.platypus import (
 )
 
 from maigret.web.persona_intelligence import FIELD_GROUPS
+
+try:
+    import arabic_reshaper as _arabic_reshaper
+except ImportError:  # PDF extras are optional outside the production web image.
+    _arabic_reshaper = None
+
+try:
+    from bidi import get_display as _bidi_get_display
+except ImportError:  # pragma: no cover - compatibility with older python-bidi
+    try:
+        from bidi.algorithm import get_display as _bidi_get_display
+    except ImportError:  # PDF extras are optional outside the production web image.
+        _bidi_get_display = None
 
 _NAVY = colors.HexColor("#0C1B2A")
 _NAVY_LIGHT = colors.HexColor("#13283A")
@@ -58,21 +74,56 @@ def _font_paths() -> tuple[Optional[str], Optional[str]]:
     return regular, bold
 
 
-def _cjk_font_path() -> Optional[str]:
-    candidates = (
+def _fallback_font_paths() -> tuple[str, ...]:
+    """Return deterministic font candidates for code points missing from DejaVu."""
+    preferred = (
         "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
         "/usr/share/fonts-droid-fallback/truetype/DroidSansFallback.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansDevanagari-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansBengali-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansGurmukhi-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansGujarati-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansTamil-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansTelugu-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansKannada-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansMalayalam-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansSinhala-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansThai-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansLao-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansMyanmar-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansKhmer-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArmenian-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansGeorgian-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansEthiopic-Regular.ttf",
     )
-    return next((path for path in candidates if os.path.isfile(path)), None)
+    candidates = [*preferred, *sorted(glob("/usr/share/fonts/truetype/noto/*.ttf"))]
+    return tuple(dict.fromkeys(path for path in candidates if os.path.isfile(path)))
 
 
-def _register_fonts() -> tuple[str, str, Optional[str], Optional[str]]:
-    """Register production fonts, including an embedded CJK fallback."""
+def _font_coverage(font_name: str) -> FrozenSet[int]:
+    face = getattr(pdfmetrics.getFont(font_name), "face", None)
+    char_to_glyph = getattr(face, "charToGlyph", None)
+    if isinstance(char_to_glyph, dict):
+        return frozenset(
+            codepoint for codepoint, glyph in char_to_glyph.items() if glyph
+        )
+    # Built-in PDF fonts have no Unicode cmap. Treat only their portable ASCII
+    # repertoire as covered so installed fallbacks can handle everything else.
+    return frozenset(range(32, 127))
+
+
+FontFallback = Tuple[str, FrozenSet[int]]
+
+
+def _register_fonts(
+    required_text: str = "",
+) -> tuple[str, str, tuple[FontFallback, ...]]:
+    """Register only the embedded fallback fonts needed by this snapshot."""
     regular_path, bold_path = _font_paths()
-    cjk_font_path = _cjk_font_path()
     regular_name, bold_name = "Helvetica", "Helvetica-Bold"
-    cjk_regular_name = None
-    cjk_bold_name = None
+    fallbacks = []
     with _FONT_REGISTRATION_LOCK:
         registered = pdfmetrics.getRegisteredFontNames()
         if regular_path and bold_path:
@@ -81,21 +132,32 @@ def _register_fonts() -> tuple[str, str, Optional[str], Optional[str]]:
             if "OpenLedgerSans-Bold" not in registered:
                 pdfmetrics.registerFont(TTFont("OpenLedgerSans-Bold", bold_path))
             regular_name, bold_name = "OpenLedgerSans", "OpenLedgerSans-Bold"
-        registered = pdfmetrics.getRegisteredFontNames()
-        if cjk_font_path:
+
+        missing = {
+            ord(character)
+            for character in required_text
+            if ord(character) not in _font_coverage(regular_name)
+        }
+        for fallback_path in _fallback_font_paths():
+            if not missing:
+                break
+            digest = hashlib.sha256(fallback_path.encode("utf-8")).hexdigest()[:12]
+            fallback_name = f"OpenLedgerFallback-{digest}"
             try:
-                if "OpenLedgerCJK" not in registered:
-                    pdfmetrics.registerFont(TTFont("OpenLedgerCJK", cjk_font_path))
-                if "OpenLedgerCJK-Bold" not in registered:
-                    pdfmetrics.registerFont(TTFont("OpenLedgerCJK-Bold", cjk_font_path))
-                cjk_regular_name = "OpenLedgerCJK"
-                cjk_bold_name = "OpenLedgerCJK-Bold"
+                if fallback_name not in pdfmetrics.getRegisteredFontNames():
+                    pdfmetrics.registerFont(TTFont(fallback_name, fallback_path))
+                coverage = _font_coverage(fallback_name)
             except TTFError as error:
                 logging.warning(
-                    "Persona PDF CJK fallback font could not be registered: %s",
+                    "Persona PDF fallback font %s could not be registered: %s",
+                    fallback_path,
                     error,
                 )
-    return regular_name, bold_name, cjk_regular_name, cjk_bold_name
+                continue
+            if coverage & missing:
+                fallbacks.append((fallback_name, coverage))
+                missing -= coverage
+    return regular_name, bold_name, tuple(fallbacks)
 
 
 def _clean_text(value: Any) -> str:
@@ -241,49 +303,199 @@ def _safe_http_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
 
 
-def _is_cjk_character(character: str) -> bool:
-    codepoint = ord(character)
+def _contains_rtl(text: str) -> bool:
     return any(
-        start <= codepoint <= end
-        for start, end in (
-            (0x2E80, 0x33FF),
-            (0x3400, 0x4DBF),
-            (0x4E00, 0x9FFF),
-            (0xAC00, 0xD7AF),
-            (0xF900, 0xFAFF),
-            (0xFF00, 0xFFEF),
-            (0x20000, 0x2FA1F),
-        )
+        unicodedata.bidirectional(character) in {"R", "AL"} for character in text
     )
 
 
-def _escaped_paragraph_text(value: Any, style: ParagraphStyle) -> str:
-    cleaned = _clean_text(value)
-    cjk_font = getattr(style, "openledger_cjk_font", None)
-    if not cleaned or not cjk_font:
-        return escape(cleaned, entities={"'": "&apos;", '"': "&quot;"})
+def _contains_arabic(text: str) -> bool:
+    return any("ARABIC" in unicodedata.name(character, "") for character in text)
+
+
+def _rtl_display_line(text: str) -> str:
+    """Shape and reorder one already-wrapped logical RTL line for ReportLab."""
+    if not text or not _contains_rtl(text) or _bidi_get_display is None:
+        return text
+    if _contains_arabic(text):
+        if _arabic_reshaper is None:
+            return text
+        text = _arabic_reshaper.reshape(text)
+    return _bidi_get_display(text)
+
+
+def _font_for_character(character: str, style: ParagraphStyle) -> Optional[str]:
+    if character.isspace():
+        return None
+    codepoint = ord(character)
+    primary_coverage = getattr(style, "openledger_primary_coverage", frozenset())
+    if codepoint in primary_coverage:
+        return None
+    for font_name, coverage in getattr(style, "openledger_fallback_fonts", ()):  # type: ignore[attr-defined]
+        if codepoint in coverage:
+            return font_name
+    return None
+
+
+def _font_markup(cleaned: str, style: ParagraphStyle) -> str:
+    if not cleaned:
+        return ""
     fragments = []
     start = 0
-    current_is_cjk = _is_cjk_character(cleaned[0])
+    current_font = _font_for_character(cleaned[0], style)
     for index, character in enumerate(cleaned[1:], start=1):
-        character_is_cjk = _is_cjk_character(character)
-        if character_is_cjk == current_is_cjk:
+        font_name = _font_for_character(character, style)
+        if font_name == current_font:
             continue
         fragment = escape(cleaned[start:index], entities={"'": "&apos;", '"': "&quot;"})
         fragments.append(
-            f'<font name="{cjk_font}">{fragment}</font>' if current_is_cjk else fragment
+            f'<font name="{current_font}">{fragment}</font>'
+            if current_font
+            else fragment
         )
         start = index
-        current_is_cjk = character_is_cjk
+        current_font = font_name
     fragment = escape(cleaned[start:], entities={"'": "&apos;", '"': "&quot;"})
     fragments.append(
-        f'<font name="{cjk_font}">{fragment}</font>' if current_is_cjk else fragment
+        f'<font name="{current_font}">{fragment}</font>' if current_font else fragment
     )
     return "".join(fragments)
 
 
+def _escaped_paragraph_text(value: Any, style: ParagraphStyle) -> str:
+    cleaned = _clean_text(value)
+    return _font_markup(cleaned, style)
+
+
+def _rendered_width(text: str, style: ParagraphStyle) -> float:
+    width = 0.0
+    start = 0
+    current_font = _font_for_character(text[0], style) if text else None
+    for index, character in enumerate(text[1:], start=1):
+        font_name = _font_for_character(character, style)
+        if font_name == current_font:
+            continue
+        width += pdfmetrics.stringWidth(
+            text[start:index], current_font or style.fontName, style.fontSize
+        )
+        start = index
+        current_font = font_name
+    if text:
+        width += pdfmetrics.stringWidth(
+            text[start:], current_font or style.fontName, style.fontSize
+        )
+    return width
+
+
+def _split_oversized_rtl_word(
+    word: str, style: ParagraphStyle, max_width: float
+) -> list[str]:
+    chunks = []
+    current = ""
+    for character in word:
+        candidate = current + character
+        if current and _rendered_width(_rtl_display_line(candidate), style) > max_width:
+            chunks.append(current)
+            current = character
+        else:
+            current = candidate
+    if current:
+        chunks.append(current)
+    return chunks
+
+
+def _wrap_rtl_lines(
+    text: str, style: ParagraphStyle, available_width: float
+) -> list[str]:
+    top, right, bottom, left = normalizeTRBL(getattr(style, "borderPadding", 0))
+    del top, bottom
+    max_width = max(
+        1.0,
+        available_width - style.leftIndent - style.rightIndent - left - right,
+    )
+    rendered_lines = []
+    for explicit_line in text.split("\n"):
+        words = explicit_line.split()
+        if not words:
+            rendered_lines.append("")
+            continue
+        logical_lines = []
+        current = ""
+        for word in words:
+            candidate = f"{current} {word}" if current else word
+            if _rendered_width(_rtl_display_line(candidate), style) <= max_width:
+                current = candidate
+                continue
+            if current:
+                logical_lines.append(current)
+                current = ""
+            word_chunks = _split_oversized_rtl_word(word, style, max_width)
+            logical_lines.extend(word_chunks[:-1])
+            current = word_chunks[-1]
+        if current:
+            logical_lines.append(current)
+        rendered_lines.extend(_rtl_display_line(line) for line in logical_lines)
+    return rendered_lines
+
+
+class _RTLParagraph(Paragraph):
+    """Delay RTL shaping until the table or page provides the real line width."""
+
+    def __init__(
+        self,
+        logical_text: Optional[str],
+        style: ParagraphStyle,
+        bulletText: Optional[str] = None,
+        frags: Optional[Sequence[Any]] = None,
+        caseSensitive: int = 1,
+        encoding: str = "utf8",
+    ):
+        self._openledger_logical_text = logical_text
+        self._openledger_source_style = style
+        self._openledger_prepared_width = None
+        super().__init__(
+            "" if logical_text is not None else None,
+            style,
+            bulletText=bulletText,
+            frags=frags,
+            caseSensitive=caseSensitive,
+            encoding=encoding,
+        )
+
+    def _prepare(self, available_width: float) -> None:
+        if (
+            self._openledger_logical_text is None
+        ) or self._openledger_prepared_width == available_width:
+            return
+        rtl_style = deepcopy(self._openledger_source_style)
+        rtl_style.alignment = TA_RIGHT
+        rtl_style.wordWrap = "LTR"
+        lines = _wrap_rtl_lines(
+            self._openledger_logical_text,
+            rtl_style,
+            available_width,
+        )
+        markup = "<br/>".join(_font_markup(line, rtl_style) for line in lines) or "-"
+        Paragraph.__init__(self, markup, rtl_style)
+        self._openledger_prepared_width = available_width
+
+    def wrap(
+        self, available_width: float, available_height: float
+    ) -> tuple[float, float]:
+        self._prepare(available_width)
+        return super().wrap(available_width, available_height)
+
+    def split(self, available_width: float, available_height: float) -> list[Any]:
+        self._prepare(available_width)
+        return super().split(available_width, available_height)
+
+
 def _paragraph(value: Any, style: ParagraphStyle) -> Paragraph:
-    text = _escaped_paragraph_text(value, style)
+    cleaned = _clean_text(value)
+    if _contains_rtl(cleaned) and _bidi_get_display is not None:
+        if not _contains_arabic(cleaned) or _arabic_reshaper is not None:
+            return _RTLParagraph(cleaned, style)
+    text = _font_markup(cleaned, style)
     return Paragraph(text.replace("\n", "<br/> ") or "-", style)
 
 
@@ -305,11 +517,24 @@ def _format_time(value: str) -> str:
     return cleaned.replace("T", " ").replace("+00:00", " UTC") if cleaned else "-"
 
 
+def _iter_snapshot_text(value: Any) -> Iterable[str]:
+    if isinstance(value, Mapping):
+        for item in value.values():
+            yield from _iter_snapshot_text(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _iter_snapshot_text(item)
+    elif isinstance(value, str):
+        cleaned = _clean_text(value)
+        yield cleaned
+        if _contains_rtl(cleaned):
+            yield from (_rtl_display_line(line) for line in cleaned.split("\n"))
+
+
 def _styles(
     regular_font: str,
     bold_font: str,
-    cjk_regular_font: Optional[str],
-    cjk_bold_font: Optional[str],
+    fallback_fonts: Sequence[FontFallback],
 ) -> Dict[str, ParagraphStyle]:
     sample = getSampleStyleSheet()
     styles = {
@@ -430,9 +655,8 @@ def _styles(
         ),
     }
     for style in styles.values():
-        style.openledger_cjk_font = (
-            cjk_bold_font if style.fontName == bold_font else cjk_regular_font
-        )
+        style.openledger_primary_coverage = _font_coverage(style.fontName)
+        style.openledger_fallback_fonts = tuple(fallback_fonts)
     return styles
 
 
@@ -640,12 +864,12 @@ def generate_persona_pdf(
         generated_at=generated_at,
         generated_by=generated_by,
     )
-    regular_font, bold_font, cjk_regular_font, cjk_bold_font = _register_fonts()
+    required_text = "".join(_iter_snapshot_text(snapshot))
+    regular_font, bold_font, fallback_fonts = _register_fonts(required_text)
     styles = _styles(
         regular_font,
         bold_font,
-        cjk_regular_font,
-        cjk_bold_font,
+        fallback_fonts,
     )
     output = io.BytesIO()
     document = SimpleDocTemplate(

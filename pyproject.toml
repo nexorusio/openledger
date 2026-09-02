@@ -75,10 +75,10 @@ alembic = ">=1.16,<2.0"
 # Install PDF support with: pip install 'maigret[pdf]'
 # Skipped by default because the underlying `pycairo` has no Linux/macOS
 # wheels on PyPI and requires system libcairo + pkg-config to build.
-# arabic-reshaper and python-bidi are pulled in too — they're only used
-# by xhtml2pdf (RTL text shaping in PDFs), nothing in maigret core touches
-# them, and python-bidi v0.5+ is a Rust binding that can need cargo on
-# niche platforms.
+# arabic-reshaper and python-bidi provide RTL text shaping for both PDF report
+# paths. They remain optional outside PDF-enabled installs, and the Persona
+# exporter degrades safely when they are absent. python-bidi v0.5+ is a Rust
+# binding that can need cargo on niche platforms.
 pdf = ["xhtml2pdf", "arabic-reshaper", "python-bidi"]
 
 
