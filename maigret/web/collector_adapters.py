@@ -657,7 +657,12 @@ _EMAIL_ADDRESS_PATTERN = re.compile(
 _PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
     r"(?<![\w$€£¥])"
     r"(?P<number>(?:\+\s*\(?\s*)?\d[\d.\s()-]{5,40}\d)"
-    r"(?:\s*(?:ext(?:ension)?\.?|x|#)\s*\d{1,8})?(?!\w)",
+    r"(?:\s*(?:ext(?:ension)?|x|#)\s*[:.,;=-]?\s*\d{1,8})?(?!\w)",
+    re.IGNORECASE,
+)
+_PHONE_LABEL_PATTERN = re.compile(
+    r"\b(?:mobile|phone|tel(?:ephone)?|whatsapp)"
+    r"\s*(?:number|no\.?)?\s*[:=-]?\s*$",
     re.IGNORECASE,
 )
 _DATE_LIKE_NUMBER_PATTERN = re.compile(
@@ -815,6 +820,11 @@ def _contains_personal_organization_data(value: Any) -> bool:
         ):
             continue
         if 7 <= digit_count <= 15 and candidate.startswith("+"):
+            return True
+        phone_label_prefix = phone_text[max(0, match.start() - 48) : match.start()]
+        if 7 <= digit_count <= 15 and _PHONE_LABEL_PATTERN.search(
+            phone_label_prefix
+        ):
             return True
         if 10 <= digit_count <= 15 and any(
             separator in candidate for separator in (" ", ".", "(", ")", "-")
