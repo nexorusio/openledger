@@ -1886,23 +1886,43 @@ def enrich_wikidata_organization_candidates(
 def _bounded_wikidata_class_claim_ids(
     entity: Dict[str, Any], property_id: str
 ) -> tuple[List[str], bool]:
-    """Return bounded valid class IDs and whether any statements were omitted."""
+    """Return bounded class IDs and whether any class evidence is unresolved."""
     claims = entity.get("claims") if isinstance(entity.get("claims"), dict) else {}
     raw_claims = claims.get(property_id)
-    statement_limit_exhausted = bool(
-        isinstance(raw_claims, list)
-        and len(raw_claims) > MAX_WIKIDATA_PROPERTY_STATEMENTS
-    )
+    if raw_claims is None:
+        return [], False
+    if not isinstance(raw_claims, list):
+        return [], True
+
+    incomplete = len(raw_claims) > MAX_WIKIDATA_PROPERTY_STATEMENTS
     valid_ids = []
-    for raw in _wikidata_claim_values(entity, property_id):
-        entity_id = raw.get("id") if isinstance(raw, dict) else None
+    for statement in raw_claims[:MAX_WIKIDATA_PROPERTY_STATEMENTS]:
+        if not isinstance(statement, dict):
+            incomplete = True
+            continue
+        if statement.get("rank") == "deprecated":
+            continue
+        mainsnak = statement.get("mainsnak")
+        if not isinstance(mainsnak, dict):
+            incomplete = True
+            continue
+        snak_type = str(mainsnak.get("snaktype") or "value").strip().lower()
+        if snak_type == "novalue":
+            continue
+        if snak_type == "somevalue":
+            incomplete = True
+            continue
+        datavalue = mainsnak.get("datavalue")
+        value = datavalue.get("value") if isinstance(datavalue, dict) else None
+        entity_id = value.get("id") if isinstance(value, dict) else None
         entity_id = str(entity_id or "").strip().upper()
         if _WIKIDATA_ID_PATTERN.fullmatch(entity_id):
             valid_ids.append(entity_id)
+        else:
+            incomplete = True
     return (
         valid_ids[:MAX_WIKIDATA_CLASS_CLAIMS],
-        statement_limit_exhausted
-        or len(valid_ids) > MAX_WIKIDATA_CLASS_CLAIMS,
+        incomplete or len(valid_ids) > MAX_WIKIDATA_CLASS_CLAIMS,
     )
 
 
@@ -1987,7 +2007,12 @@ async def _resolve_wikidata_organization_classes(
         next_frontier_ids = set()
         for entity_id in frontier:
             entity = entities.get(entity_id)
-            if not isinstance(entity, dict):
+            if (
+                not isinstance(entity, dict)
+                or "missing" in entity
+                or "invalid" in entity
+            ):
+                truncated = True
                 graph[entity_id] = set()
                 continue
             parents = set()

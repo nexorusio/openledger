@@ -1383,6 +1383,96 @@ async def test_wikidata_p279_claim_limit_is_not_negative_type_evidence():
 
 
 @pytest.mark.asyncio
+async def test_wikidata_unknown_p31_value_is_not_negative_type_evidence():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900300",
+                "label": "Example Foundation",
+                "description": "research foundation",
+                "match": {"text": "Example Foundation"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900300": {
+                "labels": {"en": {"value": "Example Foundation"}},
+                "descriptions": {"en": {"value": "research foundation"}},
+                "claims": {
+                    "P31": [{"mainsnak": {"snaktype": "somevalue"}}]
+                },
+            }
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Foundation",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    assert len([item for item in calls if item[0] == "get"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "class_entity",
+    [
+        {"claims": {"P279": [{"mainsnak": {"snaktype": "somevalue"}}]}},
+        {"id": "Q900351", "missing": ""},
+    ],
+    ids=["unknown-parent", "missing-class"],
+)
+async def test_wikidata_incomplete_class_is_not_negative_type_evidence(
+    class_entity,
+):
+    calls = []
+    entity_payload = {
+        "entities": {
+            "Q900350": {
+                "claims": {
+                    "P31": [
+                        {
+                            "mainsnak": {
+                                "datavalue": {"value": {"id": "Q900351"}}
+                            }
+                        }
+                    ]
+                }
+            }
+        }
+    }
+    responses = [
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {"entities": {"Q900351": class_entity}}
+            ).encode(),
+        )
+    ]
+    session = _FakeSequenceSession(responses, calls)
+
+    status, verified_classes = await _resolve_wikidata_organization_classes(
+        session, entity_payload
+    )
+
+    assert status == "truncated"
+    assert verified_classes == set()
+    assert len([item for item in calls if item[0] == "get"]) == 1
+
+
+@pytest.mark.asyncio
 async def test_wikidata_class_id_limit_marks_dropped_parents_as_truncated():
     calls = []
 
