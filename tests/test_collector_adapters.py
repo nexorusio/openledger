@@ -2267,6 +2267,13 @@ def test_public_web_citation_titles_neutralize_contact_data_without_losing_sourc
                 "url": "https://example.org/company",
             },
             {
+                "title": "Public profile source",
+                "url": (
+                    "https://example.org/profile/alice-doe"
+                    "?email=alice@example.test"
+                ),
+            },
+            {
                 "title": "Alice Doe – CEO at Acme",
                 "url": "https://example.org/leadership",
             },
@@ -2405,19 +2412,71 @@ def test_public_web_citation_titles_neutralize_contact_data_without_losing_sourc
         "https://www.linkedin.com/company/unistellar/"
     ]["title"] == "Unistellar company profile"
     assert sources_by_url[
+        "https://www.linkedin.com/company/unistellar/"
+    ]["source_scope"] == "organization"
+    assert sources_by_url[
         "https://example.org/company-update"
     ]["title"] == "Unistellar update 01.09.2026 12.30"
     assert sources_by_url[
         "https://example.org/phone-slash-domestic"
     ]["title"] == "Public web source · example.org"
     assert sources_by_url[
+        "https://example.org/phone-slash-domestic"
+    ]["source_scope"] == "public_contact"
+    assert sources_by_url[
         "https://example.org/phone-slash-international"
     ]["title"] == "Public web source · example.org"
     assert sources_by_url[
         "https://www.linkedin.com/in/alice-doe/"
     ]["title"] == "Public professional profile source"
+    assert sources_by_url[
+        "https://www.linkedin.com/in/alice-doe/"
+    ]["source_scope"] == "public_contact"
+    assert sources_by_url[
+        "https://example.org/profile/alice-doe?email=alice@example.test"
+    ]["source_scope"] == "public_contact"
     assert all("alice@example.test" not in source["title"] for source in sources)
     assert all("030/12345678" not in source["title"] for source in sources)
+
+
+def test_public_contact_provenance_cannot_support_an_organization_observation():
+    source_url = "https://www.linkedin.com/in/alice-doe/"
+    findings = normalize_public_web_organization_findings(
+        "Unistellar",
+        [
+            {
+                "observation_type": "company_profile",
+                "value": "Unistellar",
+                "source_url": source_url,
+                "source_title": "Alice Doe profile",
+                "source_role": "professional_profile",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The profile mentions the organization name.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+            {
+                "observation_type": "public_contact",
+                "value": "Tel. 030/12345678",
+                "source_url": source_url,
+                "source_title": "Alice Doe profile",
+                "source_role": "professional_profile",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The named employee profile publishes this phone number.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+        ],
+        sources=[{"title": "Alice Doe profile", "url": source_url}],
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["observation_type"] == "public_contact"
+    assert findings[0]["source_scope"] == "public_contact"
+    assert findings[0]["contact_scope"] == "named_person"
+    assert findings[0]["automatic_approval_allowed"] is False
 
 
 @pytest.mark.asyncio

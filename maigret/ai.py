@@ -765,6 +765,7 @@ async def get_case_chat_claim_proposals(
         {
             "title": str(source.get("title", ""))[:300],
             "url": str(source.get("url", ""))[:2000],
+            "source_scope": str(source.get("source_scope", "organization"))[:32],
         }
         for source in list(sources or [])[:100]
         if isinstance(source, dict)
@@ -855,6 +856,7 @@ async def get_organization_context_proposals(
         {
             "title": str(source.get("title", ""))[:300],
             "url": str(source.get("url", ""))[:2000],
+            "source_scope": str(source.get("source_scope", "organization"))[:32],
         }
         for source in list(sources or [])[:100]
         if isinstance(source, dict)
@@ -886,6 +888,8 @@ published by a cited source as public_contact, including when it is associated
 with a named employee or officer. State that association in the reason and do
 not present the contact as an organization, identity, affiliation, or ownership
 fact. Do not infer or reconstruct a contact value.
+Treat a citation catalogued with source_scope public_contact only as provenance
+for a public_contact observation; it cannot support another observation type.
 Use exact_name_only cautiously and keep its confidence at or below 60; every
 other confidence must remain at or below 85. Latitude and longitude are allowed
 only when the cited source explicitly provides both for a business location.

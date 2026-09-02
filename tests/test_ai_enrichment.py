@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -548,4 +549,8 @@ def test_organization_context_proposals_use_citation_bound_strict_schema(monkeyp
     )
     assert "associated with a named employee or officer" in " ".join(
         captured["payload"]["instructions"].split()
+    )
+    structured_input = json.loads(captured["payload"]["input"])
+    assert structured_input["citation_catalogue"][0]["source_scope"] == (
+        "organization"
     )

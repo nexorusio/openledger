@@ -910,6 +910,7 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
         source_title = _bounded_text(source.get("title"), limit=300)
         parsed_source = urlparse(source_url)
         source_domain = (parsed_source.hostname or "").casefold().rstrip(".")
+        decoded_url = unicodedata.normalize("NFKC", unquote(source_url))
         decoded_path = unicodedata.normalize("NFKC", unquote(parsed_source.path))
         decoded_path_segments = decoded_path.replace("\\", "/").split("/")
         personal_profile_url = bool(
@@ -927,9 +928,21 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
                 )
             )
         )
+        title_has_person_data = bool(
+            source_title and _contains_personal_organization_data(source_title)
+        )
+        source_scope = (
+            "public_contact"
+            if (
+                personal_profile_url
+                or _EMAIL_ADDRESS_PATTERN.search(decoded_url)
+                or title_has_person_data
+            )
+            else "organization"
+        )
         if personal_profile_url:
             source_title = "Public professional profile source"
-        elif source_title and _contains_personal_organization_data(source_title):
+        elif title_has_person_data:
             source_title = (
                 f"Public web source · {source_domain}"
                 if source_domain
@@ -938,7 +951,13 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
         elif not source_title:
             source_title = source_domain or "Public web source"
         seen.add(source_url)
-        output.append({"title": source_title, "url": source_url})
+        output.append(
+            {
+                "title": source_title,
+                "url": source_url,
+                "source_scope": source_scope,
+            }
+        )
     return output
 
 
@@ -951,9 +970,9 @@ def normalize_public_web_organization_findings(
 ) -> List[Dict[str, Any]]:
     """Bind AI-extracted organization observations to exact web citations."""
     organization_name = normalize_affiliation_name(organization_name)
-    citation_titles: Dict[str, str] = {}
+    citation_sources: Dict[str, Dict[str, str]] = {}
     for source in normalize_public_web_organization_sources(sources):
-        citation_titles[source["url"]] = source["title"]
+        citation_sources[source["url"]] = source
 
     if isinstance(official_website, dict):
         official_website = official_website.get("url")
@@ -1000,7 +1019,7 @@ def normalize_public_web_organization_findings(
         if (
             observation_type not in allowed_types
             or not source_url
-            or source_url not in citation_titles
+            or source_url not in citation_sources
             or match_basis not in allowed_match_bases
         ):
             continue
@@ -1027,6 +1046,11 @@ def normalize_public_web_organization_findings(
             ) or _contains_personal_organization_data(reason):
                 continue
             contact_scope = None
+        source_scope = citation_sources[source_url].get(
+            "source_scope", "organization"
+        )
+        if source_scope == "public_contact" and observation_type != "public_contact":
+            continue
         if observation_type == "business_address" and (
             not _looks_like_public_address(value)
             or not _BUSINESS_LOCATION_CONTEXT_PATTERN.search(reason)
@@ -1148,7 +1172,8 @@ def normalize_public_web_organization_findings(
             "observation_type": observation_type,
             "value": value,
             "source_url": source_url,
-            "source_title": citation_titles[source_url],
+            "source_title": citation_sources[source_url]["title"],
+            "source_scope": source_scope,
             "source_role": source_role,
             "identity_match_basis": match_basis,
             "basis": reason,

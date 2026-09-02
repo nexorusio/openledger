@@ -316,7 +316,7 @@
                         </header>
                         <strong>{{ finding.value }}</strong>
                         <dl>
-                            <div><dt>Source</dt><dd>{{ finding.source_title }} · {{ finding.source_role | replace('_', ' ') | title }}</dd></div>
+                            <div><dt>Source</dt><dd>{{ finding.source_title }} · {{ finding.source_role | replace('_', ' ') | title }}{% if finding.source_scope == 'public_contact' %} · Public contact provenance{% endif %}</dd></div>
                             <div><dt>Identity match</dt><dd>{{ finding.identity_match_basis | replace('_', ' ') }}</dd></div>
                             {% if finding.contact_scope %}<div><dt>Contact scope</dt><dd>{{ finding.contact_scope | replace('_', ' ') | title }}</dd></div>{% endif %}
                             <div><dt>Basis</dt><dd>{{ finding.basis }}</dd></div>
@@ -329,7 +329,7 @@
                 <p class="form-text">The cited search completed but produced no organization observation that passed the identity, privacy, and provenance contract.</p>
                 {% endif %}
                 {% if public_research.sources %}
-                <div><strong>Citation catalogue</strong><ul>{% for source in public_research.sources %}<li><a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title or source.url }}</a></li>{% endfor %}</ul></div>
+                <div><strong>Citation catalogue</strong><ul>{% for source in public_research.sources %}<li><a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title or source.url }}</a>{% if source.source_scope == 'public_contact' %} <span class="badge-soft warning">Public contact provenance</span>{% endif %}</li>{% endfor %}</ul></div>
                 {% endif %}
                 <p class="registry-coverage-note"><i data-lucide="shield-check"></i> OpenLedger used the configured cited web-search capability and did not send direct scraping requests to LinkedIn, Google Maps, or another external profile page. These observations never become Persona locations or canonical organization facts automatically.</p>
             </article>
