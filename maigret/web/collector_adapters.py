@@ -655,7 +655,7 @@ _EMAIL_ADDRESS_PATTERN = re.compile(
     r"\.[A-Za-z]{2,63}(?![A-Za-z0-9.-])"
 )
 _PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
-    r"(?<![\w$€£¥])\+?\d[\d.\s()-]{5,40}\d(?!\w)"
+    r"(?<![\w$€£¥])(?:\+\s*\(?\s*)?\d[\d.\s()-]{5,40}\d(?!\w)"
 )
 _DATE_LIKE_NUMBER_PATTERN = re.compile(
     r"^(?P<first>\d{1,4})(?P<date_separator>[-/.])"
