@@ -662,7 +662,7 @@ _PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
 )
 _PHONE_LABEL_PATTERN = re.compile(
     r"\b(?:mobile|phone|tel(?:ephone)?|whatsapp)"
-    r"\s*(?:number|no\.?)?\s*[:=-]?\s*$",
+    r"\s*(?:number|no\.?)?\s*[:.,;=-]?\s*$",
     re.IGNORECASE,
 )
 _DATE_LIKE_NUMBER_PATTERN = re.compile(
