@@ -525,6 +525,15 @@ def _wikidata_search():
     }
 
 
+def _wikidata_item_claim(entity_id):
+    return {
+        "mainsnak": {
+            "snaktype": "value",
+            "datavalue": {"value": {"id": entity_id}},
+        }
+    }
+
+
 def _wikidata_organization():
     return {
         "entities": {
@@ -532,13 +541,7 @@ def _wikidata_organization():
                 "labels": {"en": {"value": "Example Organization"}},
                 "descriptions": {"en": {"value": "Example"}},
                 "claims": {
-                    "P31": [
-                        {
-                            "mainsnak": {
-                                "datavalue": {"value": {"id": "Q43229"}}
-                            }
-                        }
-                    ],
+                    "P31": [_wikidata_item_claim("Q43229")],
                     "P856": [
                         {"mainsnak": {"datavalue": {"value": "https://example.org"}}}
                     ]
@@ -1049,13 +1052,7 @@ async def test_wikidata_article_is_retained_but_cannot_be_selected_as_organizati
                 "labels": {"en": {"value": "Unistellar eVscopes"}},
                 "descriptions": {"en": {"value": "scholarly article"}},
                 "claims": {
-                    "P31": [
-                        {
-                            "mainsnak": {
-                                "datavalue": {"value": {"id": "Q13442814"}}
-                            }
-                        }
-                    ]
+                    "P31": [_wikidata_item_claim("Q13442814")]
                 },
             }
         }
@@ -1111,13 +1108,7 @@ async def test_wikidata_organization_subclass_is_type_verified_before_selection(
                 "labels": {"en": {"value": "Example Hospital"}},
                 "descriptions": {"en": {"value": "public hospital"}},
                 "claims": {
-                    "P31": [
-                        {
-                            "mainsnak": {
-                                "datavalue": {"value": {"id": "Q16917"}}
-                            }
-                        }
-                    ]
+                    "P31": [_wikidata_item_claim("Q16917")]
                 },
             }
         }
@@ -1126,13 +1117,7 @@ async def test_wikidata_organization_subclass_is_type_verified_before_selection(
         "entities": {
             "Q16917": {
                 "claims": {
-                    "P279": [
-                        {
-                            "mainsnak": {
-                                "datavalue": {"value": {"id": "Q43229"}}
-                            }
-                        }
-                    ]
+                    "P279": [_wikidata_item_claim("Q43229")]
                 }
             }
         }
@@ -1181,13 +1166,7 @@ async def test_wikidata_depth_limit_is_not_negative_type_evidence():
                 "labels": {"en": {"value": "Example Research Center"}},
                 "descriptions": {"en": {"value": "research center"}},
                 "claims": {
-                    "P31": [
-                        {
-                            "mainsnak": {
-                                "datavalue": {"value": {"id": "Q900101"}}
-                            }
-                        }
-                    ]
+                    "P31": [_wikidata_item_claim("Q900101")]
                 },
             }
         }
@@ -1208,15 +1187,7 @@ async def test_wikidata_depth_limit_is_not_negative_type_evidence():
                         "entities": {
                             child_id: {
                                 "claims": {
-                                    "P279": [
-                                        {
-                                            "mainsnak": {
-                                                "datavalue": {
-                                                    "value": {"id": parent_id}
-                                                }
-                                            }
-                                        }
-                                    ]
+                                    "P279": [_wikidata_item_claim(parent_id)]
                                 }
                             }
                         }
@@ -1251,9 +1222,7 @@ async def test_wikidata_p31_claim_limit_is_not_negative_type_evidence():
     calls = []
 
     def class_claim(entity_id):
-        return {
-            "mainsnak": {"datavalue": {"value": {"id": entity_id}}}
-        }
+        return _wikidata_item_claim(entity_id)
 
     retained_classes = [f"Q94{index:04d}" for index in range(20)]
     search = {
@@ -1315,9 +1284,7 @@ async def test_wikidata_p279_claim_limit_is_not_negative_type_evidence():
     calls = []
 
     def class_claim(entity_id):
-        return {
-            "mainsnak": {"datavalue": {"value": {"id": entity_id}}}
-        }
+        return _wikidata_item_claim(entity_id)
 
     retained_parents = [f"Q95{index:04d}" for index in range(20)]
     search = {
@@ -1426,6 +1393,84 @@ async def test_wikidata_unknown_p31_value_is_not_negative_type_evidence():
 
 
 @pytest.mark.asyncio
+async def test_wikidata_malformed_claims_container_is_incomplete():
+    session = _FakeSequenceSession([], [])
+
+    status, verified_classes = await _resolve_wikidata_organization_classes(
+        session,
+        {"entities": {"Q900325": {"claims": []}}},
+    )
+
+    assert status == "truncated"
+    assert verified_classes == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snak_type", [None, "unexpected"])
+async def test_wikidata_unrecognized_snak_type_is_incomplete(snak_type):
+    mainsnak = {
+        "datavalue": {"value": {"id": "Q43229"}},
+    }
+    if snak_type is not None:
+        mainsnak["snaktype"] = snak_type
+    session = _FakeSequenceSession([], [])
+    entity_payload = {
+        "entities": {
+            "Q900326": {
+                "labels": {"en": {"value": "Malformed type example"}},
+                "claims": {"P31": [{"mainsnak": mainsnak}]},
+            }
+        }
+    }
+
+    status, verified_classes = await _resolve_wikidata_organization_classes(
+        session,
+        entity_payload,
+    )
+
+    assert status == "truncated"
+    assert verified_classes == set()
+    assert normalize_wikidata_organization(
+        "Q900326", entity_payload
+    )["instance_of"] == []
+
+
+@pytest.mark.asyncio
+async def test_wikidata_missing_initial_candidate_is_not_negative_evidence():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900327",
+                "label": "Example Missing Organization",
+                "description": "organization",
+                "match": {"text": "Example Missing Organization"},
+            }
+        ]
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(
+            status=200,
+            body=json.dumps({"entities": {}}).encode(),
+        ),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Missing Organization",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    assert len([item for item in calls if item[0] == "get"]) == 2
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "class_entity",
     [
@@ -1442,13 +1487,7 @@ async def test_wikidata_incomplete_class_is_not_negative_type_evidence(
         "entities": {
             "Q900350": {
                 "claims": {
-                    "P31": [
-                        {
-                            "mainsnak": {
-                                "datavalue": {"value": {"id": "Q900351"}}
-                            }
-                        }
-                    ]
+                    "P31": [_wikidata_item_claim("Q900351")]
                 }
             }
         }
@@ -1477,9 +1516,7 @@ async def test_wikidata_class_id_limit_marks_dropped_parents_as_truncated():
     calls = []
 
     def parent_claim(parent_id):
-        return {
-            "mainsnak": {"datavalue": {"value": {"id": parent_id}}}
-        }
+        return _wikidata_item_claim(parent_id)
 
     first_layer = [f"Q91{index:04d}" for index in range(20)]
     second_layer = [f"Q92{index:04d}" for index in range(20)]
@@ -1583,8 +1620,8 @@ async def test_wikidata_keeps_verified_branch_when_later_class_fetch_fails():
                 "descriptions": {"en": {"value": "public institute"}},
                 "claims": {
                     "P31": [
-                        {"mainsnak": {"datavalue": {"value": {"id": "Q900021"}}}},
-                        {"mainsnak": {"datavalue": {"value": {"id": "Q900022"}}}},
+                        _wikidata_item_claim("Q900021"),
+                        _wikidata_item_claim("Q900022"),
                     ]
                 },
             }
@@ -1594,16 +1631,12 @@ async def test_wikidata_keeps_verified_branch_when_later_class_fetch_fails():
         "entities": {
             "Q900021": {
                 "claims": {
-                    "P279": [
-                        {"mainsnak": {"datavalue": {"value": {"id": "Q43229"}}}}
-                    ]
+                    "P279": [_wikidata_item_claim("Q43229")]
                 }
             },
             "Q900022": {
                 "claims": {
-                    "P279": [
-                        {"mainsnak": {"datavalue": {"value": {"id": "Q900023"}}}}
-                    ]
+                    "P279": [_wikidata_item_claim("Q900023")]
                 }
             },
         }

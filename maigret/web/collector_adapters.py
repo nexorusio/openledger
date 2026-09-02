@@ -1789,19 +1789,16 @@ def normalize_wikidata_organization(entity_id: str, payload: Any) -> Dict[str, A
             websites.append(value)
         if len(websites) >= 5:
             break
-    instance_of = []
-    for raw in _wikidata_claim_values(entity, "P31"):
-        value = raw.get("id") if isinstance(raw, dict) else None
-        value = str(value or "").strip().upper()
-        if _WIKIDATA_ID_PATTERN.fullmatch(value) and value not in instance_of:
-            instance_of.append(value)
+    instance_of, _instance_of_incomplete = (
+        _bounded_wikidata_class_claim_ids(entity, "P31")
+    )
     return {
         "id": entity_id,
         "label": label,
         "description": _wikidata_language_value(entity, "descriptions", 1000),
         "url": _wikidata_item_url(entity_id),
         "official_websites": websites,
-        "instance_of": instance_of[:20],
+        "instance_of": instance_of,
     }
 
 
@@ -1887,7 +1884,9 @@ def _bounded_wikidata_class_claim_ids(
     entity: Dict[str, Any], property_id: str
 ) -> tuple[List[str], bool]:
     """Return bounded class IDs and whether any class evidence is unresolved."""
-    claims = entity.get("claims") if isinstance(entity.get("claims"), dict) else {}
+    claims = entity.get("claims")
+    if not isinstance(claims, dict):
+        return [], True
     raw_claims = claims.get(property_id)
     if raw_claims is None:
         return [], False
@@ -1906,10 +1905,13 @@ def _bounded_wikidata_class_claim_ids(
         if not isinstance(mainsnak, dict):
             incomplete = True
             continue
-        snak_type = str(mainsnak.get("snaktype") or "value").strip().lower()
+        snak_type = str(mainsnak.get("snaktype") or "").strip().lower()
         if snak_type == "novalue":
             continue
         if snak_type == "somevalue":
+            incomplete = True
+            continue
+        if snak_type != "value":
             incomplete = True
             continue
         datavalue = mainsnak.get("datavalue")
@@ -1926,17 +1928,45 @@ def _bounded_wikidata_class_claim_ids(
     )
 
 
-def _wikidata_instance_ids(entity_payload: Any) -> tuple[List[str], bool]:
+def _wikidata_instance_ids(
+    entity_payload: Any, expected_entity_ids: Any = None
+) -> tuple[List[str], bool]:
     entities = (
         entity_payload.get("entities")
         if isinstance(entity_payload, dict)
-        and isinstance(entity_payload.get("entities"), dict)
-        else {}
+        else None
     )
+    if not isinstance(entities, dict):
+        return [], True
+
     output = []
     truncated = False
-    for entity in list(entities.values())[:MAX_WIKIDATA_ENTITY_CANDIDATES]:
-        if not isinstance(entity, dict):
+    if expected_entity_ids is None:
+        entity_items = list(entities.items())[:MAX_WIKIDATA_ENTITY_CANDIDATES]
+        truncated = len(entities) > len(entity_items)
+    else:
+        expected_ids = []
+        for raw_id in list(expected_entity_ids or []):
+            entity_id = str(raw_id or "").strip().upper()
+            if (
+                _WIKIDATA_ID_PATTERN.fullmatch(entity_id)
+                and entity_id not in expected_ids
+            ):
+                expected_ids.append(entity_id)
+        truncated = len(expected_ids) > MAX_WIKIDATA_ENTITY_CANDIDATES
+        expected_ids = expected_ids[:MAX_WIKIDATA_ENTITY_CANDIDATES]
+        entity_items = [
+            (entity_id, entities.get(entity_id))
+            for entity_id in expected_ids
+        ]
+
+    for _entity_id, entity in entity_items:
+        if (
+            not isinstance(entity, dict)
+            or "missing" in entity
+            or "invalid" in entity
+        ):
+            truncated = True
             continue
         instance_ids, entity_truncated = _bounded_wikidata_class_claim_ids(
             entity, "P31"
@@ -1949,10 +1979,12 @@ def _wikidata_instance_ids(entity_payload: Any) -> tuple[List[str], bool]:
 
 
 async def _resolve_wikidata_organization_classes(
-    session: Any, entity_payload: Any
+    session: Any, entity_payload: Any, *, expected_entity_ids: Any = None
 ) -> tuple[str, set[str]]:
     """Resolve a bounded P279 hierarchy for candidate P31 values."""
-    initial_ids, truncated = _wikidata_instance_ids(entity_payload)
+    initial_ids, truncated = _wikidata_instance_ids(
+        entity_payload, expected_entity_ids
+    )
     all_unresolved = [
         entity_id
         for entity_id in initial_ids
@@ -2800,7 +2832,11 @@ async def run_wikidata_affiliation_discovery(
                     )
                 candidate_type_status, organization_class_ids = (
                     await _resolve_wikidata_organization_classes(
-                        session, candidate_entity_payload
+                        session,
+                        candidate_entity_payload,
+                        expected_entity_ids=[
+                            candidate["id"] for candidate in candidates
+                        ],
                     )
                 )
                 candidates = enrich_wikidata_organization_candidates(
@@ -2872,7 +2908,11 @@ async def run_wikidata_affiliation_discovery(
         )
         if selected_candidate is None:
             candidate_type_status, organization_class_ids = (
-                await _resolve_wikidata_organization_classes(session, payload)
+                await _resolve_wikidata_organization_classes(
+                    session,
+                    payload,
+                    expected_entity_ids=[selected_entity_id],
+                )
             )
             selected_candidate = enrich_wikidata_organization_candidates(
                 [
