@@ -74,7 +74,9 @@
                         {% if result.case_id %}
                         <a href="{{ url_for('case_workspace', case_id=result.case_id) }}" class="btn btn-sm btn-outline-secondary">Case</a>
                         {% endif %}
-                        {% if result.status == 'completed' and result.kind != 'affiliation' %}
+                        {% if result.status == 'completed' and result.kind == 'identity_enrichment' and result.persona_id %}
+                        <a href="{{ url_for('persona_workspace', persona_id=result.persona_id) }}" class="btn btn-sm btn-outline-secondary">Open persona</a>
+                        {% elif result.status == 'completed' and result.kind not in ('affiliation', 'identity_enrichment') %}
                         <a href="{{ url_for('results', session_id=result.session_folder) }}" class="btn btn-sm btn-outline-secondary">Open findings</a>
                         {% elif result.status in ('queued', 'running', 'cancel_requested') %}
                         <a href="{{ url_for('live_results', job_id=result.job_id) }}" class="btn btn-sm btn-outline-secondary">Open live progress</a>
