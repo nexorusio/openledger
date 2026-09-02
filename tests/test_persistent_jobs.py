@@ -2188,6 +2188,34 @@ def _persistent_approved_full_name(store, name="Alice Example"):
     return persona_id, name_claim["id"]
 
 
+def test_completed_identity_enrichment_opens_persona_instead_of_results(
+    client, persistent_store
+):
+    persona_id, name_claim_id = _persistent_approved_full_name(persistent_store)
+    job_id = persistent_store.create_identity_enrichment(persona_id, name_claim_id)
+    persistent_store.claim_next("worker:identity-history")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "usernames": [],
+            "persona_id": persona_id,
+            "confirmed_name": "Alice Example",
+            "wikipedia_claim_count": 0,
+            "offshore_alert_count": 0,
+        },
+    )
+
+    history = client.get("/history").get_data(as_text=True)
+    assert f'href="/personas/{persona_id}"' in history
+    assert ">Open persona</a>" in history
+    assert f'href="/results/search_{job_id}"' not in history
+
+    legacy_results_url = client.get(f"/results/search_{job_id}")
+    assert legacy_results_url.status_code == 302
+    assert legacy_results_url.location.endswith(f"/personas/{persona_id}")
+
+
 def test_identity_worker_degrades_sources_and_persists_review_gated_alerts(
     client, web_app, persistent_store, monkeypatch
 ):

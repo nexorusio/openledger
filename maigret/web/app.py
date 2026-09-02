@@ -5700,6 +5700,13 @@ def results(session_id):
         )
         return redirect(url_for('index'))
 
+    if result_data.get('kind') == 'identity_enrichment':
+        persona_id = result_data.get('persona_id')
+        if persona_id:
+            return redirect(url_for('persona_workspace', persona_id=persona_id))
+        flash('This enrichment has no Persona workspace to open.', 'warning')
+        return redirect(url_for('history'))
+
     result_case = None
     if case_store is not None:
         case_id = result_data.get('case_id')
