@@ -466,10 +466,56 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     persona_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
     assert "Alice Example" in persona_page
     assert "90% confidence" in persona_page
+    assert f'/personas/{persona_id}/export.pdf' in persona_page
+    assert "Export persona PDF" in persona_page
     assert "No evidence extracted." in persona_page
     assert "AI proposes; the analyst decides" in persona_page
     assert "Review queue" in persona_page
     assert "Relationships" in persona_page
+
+
+def test_persona_pdf_route_exports_only_curated_records(client, persistent_store):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:pdf-test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {
+                            "fullname": "Alice Example",
+                            "email": "pending@example.test",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    full_name = next(
+        claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    persistent_store.review_claim(full_name["id"], "approved", "analyst")
+
+    response = client.get(f"/personas/{persona_id}/export.pdf")
+
+    assert response.status_code == 200
+    assert response.mimetype == "application/pdf"
+    assert response.data.startswith(b"%PDF-")
+    assert "attachment" in response.headers["Content-Disposition"]
+    assert "openledger-persona-alice-" in response.headers["Content-Disposition"]
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
 
 
 def test_case_timeline_renders_bounded_provenance_and_escapes_evidence(

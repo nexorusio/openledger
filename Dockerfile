@@ -5,6 +5,7 @@ RUN pip install --no-cache-dir --upgrade pip
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
       build-essential \
+      fonts-dejavu-core \
       python3-dev \
       pkg-config \
       libcairo2-dev \

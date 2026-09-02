@@ -285,6 +285,7 @@
                 <h2>{{ group.title }}</h2>
                 <p>{{ group.description }}</p>
             </div>
+            <a href="{{ url_for('export_persona_pdf', persona_id=persona.id) }}" class="btn btn-outline-secondary persona-export-button"><i data-lucide="file-down"></i> Export persona PDF</a>
         </header>
         <div class="panel-body persona-form">
             {% for field in group.fields %}
