@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import threading
 import unicodedata
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, Mapping, Optional
@@ -21,7 +22,6 @@ from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import (
-    KeepTogether,
     Paragraph,
     SimpleDocTemplate,
     Spacer,
@@ -40,6 +40,7 @@ _LINE = colors.HexColor("#D8E1E8")
 _PANEL = colors.HexColor("#F3F7F9")
 _APPROVED = colors.HexColor("#087A55")
 _PAGE_WIDTH = A4[0] - 36 * mm
+_FONT_REGISTRATION_LOCK = threading.Lock()
 
 
 def _font_paths() -> tuple[Optional[str], Optional[str]]:
@@ -56,16 +57,48 @@ def _font_paths() -> tuple[Optional[str], Optional[str]]:
     return regular, bold
 
 
-def _register_fonts() -> tuple[str, str]:
-    """Register a Unicode font installed by the production image."""
+def _cjk_font_paths() -> tuple[Optional[str], Optional[str]]:
+    regular_candidates = (
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+    )
+    bold_candidates = (
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
+        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf",
+    )
+    regular = next((path for path in regular_candidates if os.path.isfile(path)), None)
+    bold = next((path for path in bold_candidates if os.path.isfile(path)), None)
+    return regular, bold
+
+
+def _register_fonts() -> tuple[str, str, Optional[str], Optional[str]]:
+    """Register production fonts, including an embedded CJK fallback."""
     regular_path, bold_path = _font_paths()
-    if not regular_path or not bold_path:
-        return "Helvetica", "Helvetica-Bold"
-    if "OpenLedgerSans" not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont("OpenLedgerSans", regular_path))
-    if "OpenLedgerSans-Bold" not in pdfmetrics.getRegisteredFontNames():
-        pdfmetrics.registerFont(TTFont("OpenLedgerSans-Bold", bold_path))
-    return "OpenLedgerSans", "OpenLedgerSans-Bold"
+    cjk_regular_path, cjk_bold_path = _cjk_font_paths()
+    regular_name, bold_name = "Helvetica", "Helvetica-Bold"
+    cjk_regular_name = None
+    cjk_bold_name = None
+    with _FONT_REGISTRATION_LOCK:
+        registered = pdfmetrics.getRegisteredFontNames()
+        if regular_path and bold_path:
+            if "OpenLedgerSans" not in registered:
+                pdfmetrics.registerFont(TTFont("OpenLedgerSans", regular_path))
+            if "OpenLedgerSans-Bold" not in registered:
+                pdfmetrics.registerFont(TTFont("OpenLedgerSans-Bold", bold_path))
+            regular_name, bold_name = "OpenLedgerSans", "OpenLedgerSans-Bold"
+        registered = pdfmetrics.getRegisteredFontNames()
+        if cjk_regular_path and cjk_bold_path:
+            if "OpenLedgerCJK" not in registered:
+                pdfmetrics.registerFont(
+                    TTFont("OpenLedgerCJK", cjk_regular_path, subfontIndex=0)
+                )
+            if "OpenLedgerCJK-Bold" not in registered:
+                pdfmetrics.registerFont(
+                    TTFont("OpenLedgerCJK-Bold", cjk_bold_path, subfontIndex=0)
+                )
+            cjk_regular_name = "OpenLedgerCJK"
+            cjk_bold_name = "OpenLedgerCJK-Bold"
+    return regular_name, bold_name, cjk_regular_name, cjk_bold_name
 
 
 def _clean_text(value: Any) -> str:
@@ -103,10 +136,10 @@ def _display_value(claim: Mapping[str, Any]) -> str:
 
 
 def _approved_review_note(claim: Mapping[str, Any]) -> str:
-    for review in claim.get("reviews") or []:
-        if review.get("decision") == "approved" and review.get("note"):
-            return _clean_text(review["note"])
-    return ""
+    reviews = claim.get("reviews") or []
+    if not reviews or reviews[0].get("decision") != "approved":
+        return ""
+    return _clean_text(reviews[0].get("note"))
 
 
 def build_persona_export_snapshot(
@@ -211,14 +244,55 @@ def _safe_http_url(value: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.hostname)
 
 
+def _is_cjk_character(character: str) -> bool:
+    codepoint = ord(character)
+    return any(
+        start <= codepoint <= end
+        for start, end in (
+            (0x2E80, 0x33FF),
+            (0x3400, 0x4DBF),
+            (0x4E00, 0x9FFF),
+            (0xAC00, 0xD7AF),
+            (0xF900, 0xFAFF),
+            (0xFF00, 0xFFEF),
+            (0x20000, 0x2FA1F),
+        )
+    )
+
+
+def _escaped_paragraph_text(value: Any, style: ParagraphStyle) -> str:
+    cleaned = _clean_text(value)
+    cjk_font = getattr(style, "openledger_cjk_font", None)
+    if not cleaned or not cjk_font:
+        return escape(cleaned, entities={"'": "&apos;", '"': "&quot;"})
+    fragments = []
+    start = 0
+    current_is_cjk = _is_cjk_character(cleaned[0])
+    for index, character in enumerate(cleaned[1:], start=1):
+        character_is_cjk = _is_cjk_character(character)
+        if character_is_cjk == current_is_cjk:
+            continue
+        fragment = escape(cleaned[start:index], entities={"'": "&apos;", '"': "&quot;"})
+        fragments.append(
+            f'<font name="{cjk_font}">{fragment}</font>' if current_is_cjk else fragment
+        )
+        start = index
+        current_is_cjk = character_is_cjk
+    fragment = escape(cleaned[start:], entities={"'": "&apos;", '"': "&quot;"})
+    fragments.append(
+        f'<font name="{cjk_font}">{fragment}</font>' if current_is_cjk else fragment
+    )
+    return "".join(fragments)
+
+
 def _paragraph(value: Any, style: ParagraphStyle) -> Paragraph:
-    text = escape(_clean_text(value), entities={"'": "&apos;", '"': "&quot;"})
+    text = _escaped_paragraph_text(value, style)
     return Paragraph(text.replace("\n", "<br/> ") or "-", style)
 
 
 def _source_url_paragraph(value: str, style: ParagraphStyle) -> Paragraph:
     cleaned = str(value or "").strip()
-    visible = escape(_clean_text(cleaned), entities={"'": "&apos;", '"': "&quot;"})
+    visible = _escaped_paragraph_text(cleaned, style)
     if not visible:
         return Paragraph("No public URL recorded", style)
     if _safe_http_url(cleaned):
@@ -234,9 +308,14 @@ def _format_time(value: str) -> str:
     return cleaned.replace("T", " ").replace("+00:00", " UTC") if cleaned else "-"
 
 
-def _styles(regular_font: str, bold_font: str) -> Dict[str, ParagraphStyle]:
+def _styles(
+    regular_font: str,
+    bold_font: str,
+    cjk_regular_font: Optional[str],
+    cjk_bold_font: Optional[str],
+) -> Dict[str, ParagraphStyle]:
     sample = getSampleStyleSheet()
-    return {
+    styles = {
         "title": ParagraphStyle(
             "PersonaTitle",
             parent=sample["Title"],
@@ -282,6 +361,22 @@ def _styles(regular_font: str, bold_font: str) -> Dict[str, ParagraphStyle]:
             textColor=_INK,
             wordWrap="CJK",
             splitLongWords=1,
+        ),
+        "claim_value": ParagraphStyle(
+            "PersonaClaimValue",
+            parent=sample["BodyText"],
+            fontName=bold_font,
+            fontSize=10,
+            leading=14,
+            textColor=_INK,
+            wordWrap="LTR",
+            splitLongWords=1,
+            backColor=colors.white,
+            borderColor=_LINE,
+            borderWidth=0.5,
+            borderPadding=7,
+            spaceBefore=1.5 * mm,
+            spaceAfter=0,
         ),
         "body": ParagraphStyle(
             "PersonaBody",
@@ -337,6 +432,11 @@ def _styles(regular_font: str, bold_font: str) -> Dict[str, ParagraphStyle]:
             textColor=_INK,
         ),
     }
+    for style in styles.values():
+        style.openledger_cjk_font = (
+            cjk_bold_font if style.fontName == bold_font else cjk_regular_font
+        )
+    return styles
 
 
 def _metadata_table(snapshot: Mapping[str, Any], styles: Mapping[str, Any]) -> Table:
@@ -404,25 +504,6 @@ def _claim_flowables(
             ]
         )
     )
-    heading = Table(
-        [[_paragraph(claim["value"], styles["value"]), badge]],
-        colWidths=[_PAGE_WIDTH - 34 * mm, 30 * mm],
-    )
-    heading.setStyle(
-        TableStyle(
-            [
-                ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                ("LEFTPADDING", (0, 0), (0, 0), 7),
-                ("RIGHTPADDING", (0, 0), (0, 0), 8),
-                ("TOPPADDING", (0, 0), (-1, -1), 7),
-                ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
-                ("LINEBEFORE", (0, 0), (0, -1), 2, _TEAL),
-                ("BOX", (0, 0), (-1, -1), 0.5, _LINE),
-            ]
-        )
-    )
-
     metadata = [
         [
             _paragraph("Claim ID", styles["small_bold"]),
@@ -469,7 +550,9 @@ def _claim_flowables(
             ]
         )
     )
-    yield KeepTogether([heading, metadata_table])
+    yield badge
+    yield _paragraph(claim["value"], styles["claim_value"])
+    yield metadata_table
     if claim.get("approval_note"):
         yield Table(
             [
@@ -560,8 +643,13 @@ def generate_persona_pdf(
         generated_at=generated_at,
         generated_by=generated_by,
     )
-    regular_font, bold_font = _register_fonts()
-    styles = _styles(regular_font, bold_font)
+    regular_font, bold_font, cjk_regular_font, cjk_bold_font = _register_fonts()
+    styles = _styles(
+        regular_font,
+        bold_font,
+        cjk_regular_font,
+        cjk_bold_font,
+    )
     output = io.BytesIO()
     document = SimpleDocTemplate(
         output,

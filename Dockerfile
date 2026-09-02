@@ -6,6 +6,7 @@ RUN apt-get update && \
     apt-get install --no-install-recommends -y \
       build-essential \
       fonts-dejavu-core \
+      fonts-noto-cjk \
       python3-dev \
       pkg-config \
       libcairo2-dev \
