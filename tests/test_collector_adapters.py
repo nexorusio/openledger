@@ -2069,6 +2069,33 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
         },
         {
             "observation_type": "company_profile",
+            "value": "Tel. 030/12345678",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing publishes a slash-separated phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Tel. +49 (0)30 / 123 45 67",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": (
+                "The listing publishes an international slash-separated phone "
+                "number."
+            ),
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
             "value": "Contact 01.13.2026 89.01",
             "source_url": cited_url,
             "source_title": "Example",
@@ -2203,8 +2230,8 @@ def test_public_web_financial_figures_and_timestamps_are_not_phone_contacts():
     assert findings[1]["value"] == "Reporting cut-off: 01.09.2026 12.30"
 
 
-def test_public_web_citation_titles_do_not_retain_personal_contact_data():
-    assert normalize_public_web_organization_sources(
+def test_public_web_citation_titles_neutralize_contact_data_without_losing_sources():
+    sources = normalize_public_web_organization_sources(
         [
             {
                 "title": "Unistellar company profile",
@@ -2309,6 +2336,14 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 "url": "https://example.org/phone-abbreviated-label-period",
             },
             {
+                "title": "Tel. 030/12345678",
+                "url": "https://example.org/phone-slash-domestic",
+            },
+            {
+                "title": "Tel. +49 (0)30 / 123 45 67",
+                "url": "https://example.org/phone-slash-international",
+            },
+            {
                 "title": "Contact 01.13.2026 89.01",
                 "url": "https://example.org/impossible-date-phone",
             },
@@ -2337,16 +2372,27 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
                 ),
             },
         ]
-    ) == [
-        {
-            "title": "Unistellar company profile",
-            "url": "https://www.linkedin.com/company/unistellar/",
-        },
-        {
-            "title": "Unistellar update 01.09.2026 12.30",
-            "url": "https://example.org/company-update",
-        },
-    ]
+    )
+
+    sources_by_url = {source["url"]: source for source in sources}
+    assert len(sources_by_url) == len(sources)
+    assert sources_by_url[
+        "https://www.linkedin.com/company/unistellar/"
+    ]["title"] == "Unistellar company profile"
+    assert sources_by_url[
+        "https://example.org/company-update"
+    ]["title"] == "Unistellar update 01.09.2026 12.30"
+    assert sources_by_url[
+        "https://example.org/phone-slash-domestic"
+    ]["title"] == "Public web source · example.org"
+    assert sources_by_url[
+        "https://example.org/phone-slash-international"
+    ]["title"] == "Public web source · example.org"
+    assert sources_by_url[
+        "https://www.linkedin.com/in/alice-doe/"
+    ]["title"] == "Public professional profile source"
+    assert all("alice@example.test" not in source["title"] for source in sources)
+    assert all("030/12345678" not in source["title"] for source in sources)
 
 
 @pytest.mark.asyncio

@@ -665,6 +665,13 @@ _PHONE_LABEL_PATTERN = re.compile(
     r"\s*(?:number|no\.?)?\s*[:.,;=-]?\s*$",
     re.IGNORECASE,
 )
+_LABELED_PHONE_NUMBER_PATTERN = re.compile(
+    r"\b(?:mobile|phone|tel(?:ephone)?|whatsapp)"
+    r"\s*(?:number|no\.?)?\s*[:.,;=-]?\s*"
+    r"(?P<number>(?:\+\s*\(?\s*)?\d[\d.\s()/\-]{5,40}\d)"
+    r"(?:\s*(?:ext(?:ension)?|x|#)\s*[:.,;=-]?\s*\d{1,8})?(?!\w)",
+    re.IGNORECASE,
+)
 _DATE_LIKE_NUMBER_PATTERN = re.compile(
     r"^(?P<first>\d{1,4})(?P<date_separator>[-/.])"
     r"(?P<second>\d{1,2})(?P=date_separator)(?P<third>\d{1,4})"
@@ -809,6 +816,19 @@ def _contains_personal_organization_data(value: Any) -> bool:
     ):
         return bool(text)
     phone_text = _normalize_phone_scan_text(text)
+    # Slash-separated area-code formats are common in public directories (for
+    # example ``Tel. 030/12345678``). Keep slash support confined to an
+    # explicit phone label so dates, ratios, and other slash-delimited numbers
+    # do not become contact-data false positives.
+    for match in _LABELED_PHONE_NUMBER_PATTERN.finditer(phone_text):
+        candidate = match.group("number").strip()
+        digit_count = sum(character.isdigit() for character in candidate)
+        if (
+            7 <= digit_count <= 15
+            and not _is_semantically_valid_date_like_number(candidate)
+            and not _GROUPED_FINANCIAL_NUMBER_PATTERN.fullmatch(candidate)
+        ):
+            return True
     for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(phone_text):
         candidate = match.group("number").strip()
         digit_count = sum(character.isdigit() for character in candidate)
@@ -834,18 +854,20 @@ def _contains_personal_organization_data(value: Any) -> bool:
 
 
 def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, str]]:
-    """Retain only bounded public citations with privacy-safe display titles."""
+    """Retain bounded public citations with privacy-safe display titles.
+
+    A title that repeats person-level data is replaced rather than causing the
+    entire citation to disappear. Authorized investigators therefore retain
+    the exact public provenance URL while unreviewed contact data cannot leak
+    into an organization finding or citation label.
+    """
     output = []
     seen = set()
     for source in list(sources or [])[:100]:
         if not isinstance(source, dict):
             continue
         source_url = _safe_public_url(source.get("url"))
-        if (
-            not source_url
-            or source_url in seen
-            or _EMAIL_ADDRESS_PATTERN.search(unquote(source_url))
-        ):
+        if not source_url or source_url in seen:
             continue
         source_title = _bounded_text(source.get("title"), limit=300)
         parsed_source = urlparse(source_url)
@@ -867,12 +889,16 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
                 )
             )
         )
-        if personal_profile_url or (
-            source_title and _contains_personal_organization_data(source_title)
-        ):
-            continue
-        if not source_title:
-            source_title = urlparse(source_url).hostname or "Public web source"
+        if personal_profile_url:
+            source_title = "Public professional profile source"
+        elif source_title and _contains_personal_organization_data(source_title):
+            source_title = (
+                f"Public web source · {source_domain}"
+                if source_domain
+                else "Public web source"
+            )
+        elif not source_title:
+            source_title = source_domain or "Public web source"
         seen.add(source_url)
         output.append({"title": source_title, "url": source_url})
     return output
