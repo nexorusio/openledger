@@ -372,6 +372,33 @@ def test_persona_export_snapshot_blocks_concurrent_review_until_capture(
         if item["field_name"] == "full_name"
     )
     store.review_claim(claim["id"], "approved", "first-analyst")
+    tied_observed_at = utcnow()
+    with store.engine.begin() as connection:
+        connection.execute(
+            claim_evidence.insert(),
+            [
+                {
+                    "id": "00000000-0000-0000-0000-00000000000b",
+                    "claim_id": claim["id"],
+                    "evidence_type": "cited_public_web",
+                    "source_name": "Source B",
+                    "source_url": "https://example.test/b",
+                    "details": {},
+                    "fingerprint": "b" * 64,
+                    "observed_at": tied_observed_at,
+                },
+                {
+                    "id": "00000000-0000-0000-0000-00000000000a",
+                    "claim_id": claim["id"],
+                    "evidence_type": "cited_public_web",
+                    "source_name": "Source A",
+                    "source_url": "https://example.test/a",
+                    "details": {},
+                    "fingerprint": "a" * 64,
+                    "observed_at": tied_observed_at,
+                },
+            ],
+        )
 
     snapshot_loaded = threading.Event()
     release_snapshot = threading.Event()
@@ -403,6 +430,18 @@ def test_persona_export_snapshot_blocks_concurrent_review_until_capture(
         item for item in snapshot["claims"] if item["id"] == claim["id"]
     )
     assert exported_claim["review_status"] == "approved"
+    assert [
+        evidence["id"]
+        for evidence in exported_claim["evidence"]
+        if evidence["id"]
+        in {
+            "00000000-0000-0000-0000-00000000000a",
+            "00000000-0000-0000-0000-00000000000b",
+        }
+    ] == [
+        "00000000-0000-0000-0000-00000000000a",
+        "00000000-0000-0000-0000-00000000000b",
+    ]
     assert generated_at.tzinfo is not None
     current_claim = next(
         item

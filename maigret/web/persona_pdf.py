@@ -162,20 +162,32 @@ def _register_fonts(
 
 def _clean_text(value: Any) -> str:
     """Keep readable text while dropping control/private-use/emoji glyphs."""
-    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = unicodedata.normalize("NFC", str(value or ""))
     cleaned = []
-    for character in text:
+    for index, character in enumerate(text):
         if character in "\n\t":
             cleaned.append(character)
             continue
-        if unicodedata.category(character) in {
-            "Cc",
-            "Cf",
-            "Cs",
-            "Co",
-            "Cn",
-            "So",
-        }:
+        codepoint = ord(character)
+        category = unicodedata.category(character)
+        unsupported_emoji = (0x1F000 <= codepoint <= 0x1FFFF) or codepoint in {
+            0x20E3,
+            0xFE0E,
+            0xFE0F,
+        }
+        if character in {"\u200c", "\u200d"}:
+            previous_category = unicodedata.category(text[index - 1]) if index else ""
+            next_category = (
+                unicodedata.category(text[index + 1]) if index + 1 < len(text) else ""
+            )
+            if previous_category[:1] in {"L", "M"} and next_category[:1] in {
+                "L",
+                "M",
+            }:
+                cleaned.append(character)
+            else:
+                cleaned.append(" ")
+        elif category in {"Cc", "Cf", "Cs", "Co", "Cn"} or unsupported_emoji:
             cleaned.append(" ")
         else:
             cleaned.append(character)

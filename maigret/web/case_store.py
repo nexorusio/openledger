@@ -2793,6 +2793,7 @@ class CaseStore:
                     persona_claims.c.field_name,
                     persona_claims.c.confidence.desc(),
                     persona_claims.c.created_at,
+                    persona_claims.c.id,
                 )
             ).mappings()
         )
@@ -2803,7 +2804,10 @@ class CaseStore:
             for evidence_row in connection.execute(
                 select(claim_evidence)
                 .where(claim_evidence.c.claim_id.in_(claim_ids))
-                .order_by(claim_evidence.c.observed_at.desc())
+                .order_by(
+                    claim_evidence.c.observed_at.desc(),
+                    claim_evidence.c.id,
+                )
             ).mappings():
                 evidence_by_claim.setdefault(evidence_row["claim_id"], []).append(
                     evidence_row
@@ -2811,7 +2815,10 @@ class CaseStore:
             for review_row in connection.execute(
                 select(claim_reviews)
                 .where(claim_reviews.c.claim_id.in_(claim_ids))
-                .order_by(claim_reviews.c.created_at.desc())
+                .order_by(
+                    claim_reviews.c.created_at.desc(),
+                    claim_reviews.c.id.desc(),
+                )
             ).mappings():
                 reviews_by_claim.setdefault(review_row["claim_id"], []).append(
                     review_row

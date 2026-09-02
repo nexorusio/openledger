@@ -99,6 +99,20 @@ def test_persona_export_snapshot_contains_only_approved_records_and_provenance()
     assert exported_claims[0]["approval_note"] == ("Compared with the cited page.")
 
 
+def test_persona_export_preserves_meaningful_symbols_and_script_join_controls():
+    persona = _persona()
+    approved_value = "37° © ™ ❤ می\u200cرود\u202e\ue000👤"
+    persona["claims"][0]["display_value"] = approved_value
+
+    snapshot = build_persona_export_snapshot(
+        persona,
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+        generated_by="analyst",
+    )
+
+    assert snapshot["approved_claims"][0]["value"] == "37° © ™ ❤ می\u200cرود"
+
+
 def test_persona_pdf_is_self_contained_and_uses_safe_filename():
     generated_at = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
     pdf_bytes = generate_persona_pdf(
