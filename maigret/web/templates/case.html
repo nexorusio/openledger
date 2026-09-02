@@ -318,6 +318,7 @@
                         <dl>
                             <div><dt>Source</dt><dd>{{ finding.source_title }} · {{ finding.source_role | replace('_', ' ') | title }}</dd></div>
                             <div><dt>Identity match</dt><dd>{{ finding.identity_match_basis | replace('_', ' ') }}</dd></div>
+                            {% if finding.contact_scope %}<div><dt>Contact scope</dt><dd>{{ finding.contact_scope | replace('_', ' ') | title }}</dd></div>{% endif %}
                             <div><dt>Basis</dt><dd>{{ finding.basis }}</dd></div>
                             <div><dt>Limitation</dt><dd>{{ finding.limitation }}</dd></div>
                         </dl>

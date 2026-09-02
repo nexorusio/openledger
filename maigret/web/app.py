@@ -2960,8 +2960,10 @@ def run_persistent_affiliation_job(
                 'business addresses and any location explicitly labelled headquarters. '
                 'Separate first-party, registry, professional-profile, map-listing, and '
                 'other third-party statements. Do not treat a search result, map pin, '
-                'profile, or matching name as legal proof. Do not include private or '
-                'residential addresses, employee personal data, or inferred locations. '
+                'profile, or matching name as legal proof. Exclude private or '
+                'residential addresses and inferred locations. Preserve exact publicly '
+                'stated phones or emails as contact leads, explicitly distinguishing '
+                'organization contacts from contacts associated with a named person. '
                 'Use direct citations for every factual statement.'
             )
             if jurisdiction_context:
@@ -3034,9 +3036,9 @@ def run_persistent_affiliation_job(
                 'status': status,
                 'reason': reason,
                 # The raw model narrative is used transiently for structured
-                # extraction above. It is not privacy-normalized evidence and may
-                # repeat private addresses or employee data despite the prompt, so
-                # only the validated findings and citations cross the durable boundary.
+                # extraction above. It may repeat private, unsupported, or untyped
+                # information despite the prompt, so only validated typed findings
+                # and citations cross the durable boundary.
                 'analysis': '',
                 'sources': durable_sources,
                 'findings': findings,

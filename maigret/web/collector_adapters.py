@@ -796,25 +796,11 @@ def _normalize_phone_scan_text(value: str) -> str:
     return "".join(output)
 
 
-def _contains_personal_organization_data(value: Any) -> bool:
-    """Reject person-level contact data from organization-only observations."""
+def _contains_public_phone_number(value: Any) -> bool:
+    """Recognize bounded public phone representations without broad digit matching."""
     text = _bounded_text(value, limit=3000)
-    role_text = " ".join(
-        "".join(
-            character if character.isalnum() else " "
-            for character in unicodedata.normalize("NFKC", text)
-        ).split()
-    )
-    if (
-        not text
-        or _PRIVATE_ADDRESS_PATTERN.search(text)
-        or _EMAIL_ADDRESS_PATTERN.search(text)
-        or _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
-        # Organization context observations never carry officer/employee roles;
-        # named people belong in the provenance-linked Persona proposal workflow.
-        or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
-    ):
-        return bool(text)
+    if not text:
+        return False
     phone_text = _normalize_phone_scan_text(text)
     # Slash-separated area-code formats are common in public directories (for
     # example ``Tel. 030/12345678``). Keep slash support confined to an
@@ -851,6 +837,58 @@ def _contains_personal_organization_data(value: Any) -> bool:
         ):
             return True
     return False
+
+
+def _contains_public_contact_data(value: Any) -> bool:
+    text = _bounded_text(value, limit=3000)
+    return bool(
+        text
+        and (
+            _EMAIL_ADDRESS_PATTERN.search(text)
+            or _contains_public_phone_number(text)
+        )
+    )
+
+
+def _public_contact_scope(value: Any, reason: Any) -> str:
+    """Classify, but never infer, who a cited public contact appears to describe."""
+    text = _bounded_text(f"{value} {reason}", limit=4000)
+    role_text = " ".join(
+        "".join(
+            character if character.isalnum() else " "
+            for character in unicodedata.normalize("NFKC", text)
+        ).split()
+    )
+    if (
+        _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
+        or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
+    ):
+        return "named_person"
+    if _BUSINESS_LOCATION_CONTEXT_PATTERN.search(text):
+        return "organization"
+    return "unclear"
+
+
+def _contains_personal_organization_data(value: Any) -> bool:
+    """Keep person-level data out of organization-only observation types."""
+    text = _bounded_text(value, limit=3000)
+    role_text = " ".join(
+        "".join(
+            character if character.isalnum() else " "
+            for character in unicodedata.normalize("NFKC", text)
+        ).split()
+    )
+    if (
+        not text
+        or _PRIVATE_ADDRESS_PATTERN.search(text)
+        or _EMAIL_ADDRESS_PATTERN.search(text)
+        or _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
+        # Organization context observations never carry officer/employee roles;
+        # named people belong in the provenance-linked Persona proposal workflow.
+        or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
+    ):
+        return bool(text)
+    return _contains_public_phone_number(text)
 
 
 def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, str]]:
@@ -935,6 +973,7 @@ def normalize_public_web_organization_findings(
         "business_address",
         "headquarters",
         "business_activity",
+        "public_contact",
     }
     allowed_source_roles = {
         "official_organization",
@@ -967,13 +1006,27 @@ def normalize_public_web_organization_findings(
             continue
         value = _bounded_text(raw.get("value"), limit=1500)
         reason = _bounded_text(raw.get("reason"), limit=2000)
-        if (
-            not value
-            or not reason
-            or _contains_personal_organization_data(value)
-            or _contains_personal_organization_data(reason)
-        ):
+        if not value or not reason:
             continue
+        # A model may use an older organization observation type for an exact
+        # public phone or email. Preserve the cited lead, but reclassify it so it
+        # cannot masquerade as a company profile, activity, address, or fact.
+        if _contains_public_contact_data(value):
+            observation_type = "public_contact"
+        if observation_type == "public_contact":
+            if (
+                not _contains_public_contact_data(value)
+                or _PRIVATE_ADDRESS_PATTERN.search(value)
+                or _PRIVATE_ADDRESS_PATTERN.search(reason)
+            ):
+                continue
+            contact_scope = _public_contact_scope(value, reason)
+        else:
+            if _contains_personal_organization_data(
+                value
+            ) or _contains_personal_organization_data(reason):
+                continue
+            contact_scope = None
         if observation_type == "business_address" and (
             not _looks_like_public_address(value)
             or not _BUSINESS_LOCATION_CONTEXT_PATTERN.search(reason)
@@ -1037,7 +1090,14 @@ def normalize_public_web_organization_findings(
             ):
                 latitude = longitude = None
 
-        if source_role == "professional_profile":
+        if observation_type == "public_contact":
+            limitation = (
+                "This exact phone or email is retained as a cited public investigative "
+                "lead. It may describe an organization, a named person, or an unclear "
+                "contact context; it is not an identity, affiliation, ownership, or "
+                "organization fact and requires lawful analyst review before use."
+            )
+        elif source_role == "professional_profile":
             limitation = (
                 "This is a third-party professional company profile and may be "
                 "self-reported, incomplete, or stale. OpenLedger did not directly "
@@ -1081,27 +1141,28 @@ def normalize_public_web_organization_findings(
         if fingerprint in seen:
             continue
         seen.add(fingerprint)
-        output.append(
-            {
-                "source_engine": PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
-                "source_record_id": f"public-web-organization:{fingerprint[:32]}",
-                "organization_name": organization_name,
-                "observation_type": observation_type,
-                "value": value,
-                "source_url": source_url,
-                "source_title": citation_titles[source_url],
-                "source_role": source_role,
-                "identity_match_basis": match_basis,
-                "basis": reason,
-                "limitation": limitation,
-                "confidence": confidence,
-                "latitude": latitude,
-                "longitude": longitude,
-                "review_status": "pending",
-                "automatic_approval_allowed": False,
-                "direct_platform_fetch_performed": False,
-            }
-        )
+        finding = {
+            "source_engine": PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+            "source_record_id": f"public-web-organization:{fingerprint[:32]}",
+            "organization_name": organization_name,
+            "observation_type": observation_type,
+            "value": value,
+            "source_url": source_url,
+            "source_title": citation_titles[source_url],
+            "source_role": source_role,
+            "identity_match_basis": match_basis,
+            "basis": reason,
+            "limitation": limitation,
+            "confidence": confidence,
+            "latitude": latitude,
+            "longitude": longitude,
+            "review_status": "pending",
+            "automatic_approval_allowed": False,
+            "direct_platform_fetch_performed": False,
+        }
+        if contact_scope:
+            finding["contact_scope"] = contact_scope
+        output.append(finding)
         if len(output) >= MAX_PUBLIC_WEB_ORGANIZATION_FINDINGS:
             break
     return output

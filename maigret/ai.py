@@ -140,6 +140,7 @@ ORGANIZATION_CONTEXT_PROPOSAL_SCHEMA = {
                             "business_address",
                             "headquarters",
                             "business_activity",
+                            "public_contact",
                         ],
                     },
                     "value": {"type": "string"},
@@ -879,8 +880,12 @@ as content fetched directly by OpenLedger. A headquarters observation is allowed
 only when the cited source explicitly labels the location as headquarters. A map
 or directory address without that label is only a business_address. Do not infer
 an address from coordinates, infrastructure, a map viewport, or a nearby place.
-Omit ambiguous identity matches, private or residential addresses, employee
-details, personal contact data, sensitive traits, and unsupported conclusions.
+Omit ambiguous identity matches, private or residential addresses, sensitive
+traits, and unsupported conclusions. Retain an exact phone or email explicitly
+published by a cited source as public_contact, including when it is associated
+with a named employee or officer. State that association in the reason and do
+not present the contact as an organization, identity, affiliation, or ownership
+fact. Do not infer or reconstruct a contact value.
 Use exact_name_only cautiously and keep its confidence at or below 60; every
 other confidence must remain at or below 85. Latitude and longitude are allowed
 only when the cited source explicitly provides both for a business location.

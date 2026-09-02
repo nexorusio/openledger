@@ -1861,7 +1861,7 @@ def test_public_web_headquarters_requires_an_explicit_source_label():
     ) == []
 
 
-def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
+def test_public_web_findings_separate_contacts_from_organization_facts():
     cited_url = "https://example.org/company"
     proposals = [
         {
@@ -2180,11 +2180,36 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
         },
     ]
 
-    assert normalize_public_web_organization_findings(
+    findings = normalize_public_web_organization_findings(
         "Unistellar",
         proposals,
         sources=[{"title": "Example", "url": cited_url}],
-    ) == []
+    )
+
+    values = {finding["value"] for finding in findings}
+    assert "Tel. 030/12345678" in values
+    assert "Tel. +49 (0)30 / 123 45 67" in values
+    assert "Employee email: alice@example.test" in values
+    assert "Alice Doe · +33.1.23.45.67.89" in values
+    assert "Home address: 8 Private Road, Jakarta 12730" not in values
+    assert "8 Private Road, Jakarta 12730" not in values
+    assert "CEO: Alice Doe" not in values
+    assert "C-suite: Alice Doe" not in values
+    assert "Management-team: Alice Doe" not in values
+    assert all(
+        finding["observation_type"] == "public_contact" for finding in findings
+    )
+    assert all(finding["review_status"] == "pending" for finding in findings)
+    assert all(
+        finding["automatic_approval_allowed"] is False for finding in findings
+    )
+    assert all(
+        finding["contact_scope"] in {"organization", "named_person", "unclear"}
+        for finding in findings
+    )
+    assert all(
+        "lawful analyst review" in finding["limitation"] for finding in findings
+    )
 
 
 def test_public_web_financial_figures_and_timestamps_are_not_phone_contacts():

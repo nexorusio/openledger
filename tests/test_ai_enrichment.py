@@ -532,12 +532,20 @@ def test_organization_context_proposals_use_citation_bound_strict_schema(monkeyp
     assert response_format["name"] == "openledger_organization_context_proposals"
     assert response_format["strict"] is True
     item_schema = response_format["schema"]["properties"]["proposals"]["items"]
-    assert {"company_profile", "business_address", "headquarters"}.issubset(
+    assert {
+        "company_profile",
+        "business_address",
+        "headquarters",
+        "public_contact",
+    }.issubset(
         item_schema["properties"]["observation_type"]["enum"]
     )
     assert {"professional_profile", "map_listing"}.issubset(
         item_schema["properties"]["source_role"]["enum"]
     )
     assert "must not be described" in " ".join(
+        captured["payload"]["instructions"].split()
+    )
+    assert "associated with a named employee or officer" in " ".join(
         captured["payload"]["instructions"].split()
     )
