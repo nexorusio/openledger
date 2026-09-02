@@ -759,7 +759,11 @@ def _normalize_phone_scan_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKC", value)
     output = []
     for index, character in enumerate(normalized):
-        if unicodedata.category(character) != "Cf":
+        category = unicodedata.category(character)
+        if category == "Pd":
+            output.append("-")
+            continue
+        if category != "Cf":
             output.append(character)
             continue
         previous_character = output[-1] if output else ""
