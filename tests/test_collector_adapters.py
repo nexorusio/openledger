@@ -1247,6 +1247,142 @@ async def test_wikidata_depth_limit_is_not_negative_type_evidence():
 
 
 @pytest.mark.asyncio
+async def test_wikidata_p31_claim_limit_is_not_negative_type_evidence():
+    calls = []
+
+    def class_claim(entity_id):
+        return {
+            "mainsnak": {"datavalue": {"value": {"id": entity_id}}}
+        }
+
+    retained_classes = [f"Q94{index:04d}" for index in range(20)]
+    search = {
+        "search": [
+            {
+                "id": "Q900150",
+                "label": "Example Laboratory",
+                "description": "research laboratory",
+                "match": {"text": "Example Laboratory"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900150": {
+                "labels": {"en": {"value": "Example Laboratory"}},
+                "descriptions": {"en": {"value": "research laboratory"}},
+                "claims": {
+                    "P31": [
+                        *[
+                            class_claim(entity_id)
+                            for entity_id in retained_classes
+                        ],
+                        class_claim("Q43229"),
+                    ]
+                },
+            }
+        }
+    }
+    hierarchy = {
+        "entities": {
+            entity_id: {"claims": {"P279": []}}
+            for entity_id in retained_classes
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(status=200, body=json.dumps(hierarchy).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Laboratory",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert requests[2]["params"]["ids"].split("|") == retained_classes
+
+
+@pytest.mark.asyncio
+async def test_wikidata_p279_claim_limit_is_not_negative_type_evidence():
+    calls = []
+
+    def class_claim(entity_id):
+        return {
+            "mainsnak": {"datavalue": {"value": {"id": entity_id}}}
+        }
+
+    retained_parents = [f"Q95{index:04d}" for index in range(20)]
+    search = {
+        "search": [
+            {
+                "id": "Q900250",
+                "label": "Example Observatory",
+                "description": "research observatory",
+                "match": {"text": "Example Observatory"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900250": {
+                "labels": {"en": {"value": "Example Observatory"}},
+                "descriptions": {"en": {"value": "research observatory"}},
+                "claims": {"P31": [class_claim("Q900251")]},
+            }
+        }
+    }
+    hierarchy = {
+        "entities": {
+            "Q900251": {
+                "claims": {
+                    "P279": [
+                        *[
+                            class_claim(entity_id)
+                            for entity_id in retained_parents
+                        ],
+                        class_claim("Q43229"),
+                    ]
+                }
+            }
+        }
+    }
+    terminal_parents = {
+        "entities": {
+            entity_id: {"claims": {"P279": []}}
+            for entity_id in retained_parents
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(status=200, body=json.dumps(hierarchy).encode()),
+        _FakeResponse(status=200, body=json.dumps(terminal_parents).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Observatory",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert requests[3]["params"]["ids"].split("|") == retained_parents
+
+
+@pytest.mark.asyncio
 async def test_wikidata_class_id_limit_marks_dropped_parents_as_truncated():
     calls = []
 

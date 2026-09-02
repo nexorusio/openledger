@@ -66,6 +66,8 @@ MAX_WIKIDATA_ENTITY_CANDIDATES = 5
 MAX_WIKIDATA_AFFILIATED_PEOPLE = 50
 MAX_WIKIDATA_CLASS_DEPTH = 4
 MAX_WIKIDATA_CLASS_IDS = 50
+MAX_WIKIDATA_CLASS_CLAIMS = 20
+MAX_WIKIDATA_PROPERTY_STATEMENTS = 100
 
 WIKIPEDIA_ENGINE = "wikipedia_public_biography"
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
@@ -1747,7 +1749,9 @@ def normalize_wikidata_entity_candidates(
 def _wikidata_claim_values(entity: Dict[str, Any], property_id: str) -> List[Any]:
     claims = entity.get("claims") if isinstance(entity.get("claims"), dict) else {}
     output = []
-    for statement in list(claims.get(property_id) or [])[:100]:
+    statements = list(claims.get(property_id) or [])
+    statements = statements[:MAX_WIKIDATA_PROPERTY_STATEMENTS]
+    for statement in statements:
         if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
             continue
         mainsnak = statement.get("mainsnak")
@@ -1879,7 +1883,30 @@ def enrich_wikidata_organization_candidates(
     return output
 
 
-def _wikidata_instance_ids(entity_payload: Any) -> List[str]:
+def _bounded_wikidata_class_claim_ids(
+    entity: Dict[str, Any], property_id: str
+) -> tuple[List[str], bool]:
+    """Return bounded valid class IDs and whether any statements were omitted."""
+    claims = entity.get("claims") if isinstance(entity.get("claims"), dict) else {}
+    raw_claims = claims.get(property_id)
+    statement_limit_exhausted = bool(
+        isinstance(raw_claims, list)
+        and len(raw_claims) > MAX_WIKIDATA_PROPERTY_STATEMENTS
+    )
+    valid_ids = []
+    for raw in _wikidata_claim_values(entity, property_id):
+        entity_id = raw.get("id") if isinstance(raw, dict) else None
+        entity_id = str(entity_id or "").strip().upper()
+        if _WIKIDATA_ID_PATTERN.fullmatch(entity_id):
+            valid_ids.append(entity_id)
+    return (
+        valid_ids[:MAX_WIKIDATA_CLASS_CLAIMS],
+        statement_limit_exhausted
+        or len(valid_ids) > MAX_WIKIDATA_CLASS_CLAIMS,
+    )
+
+
+def _wikidata_instance_ids(entity_payload: Any) -> tuple[List[str], bool]:
     entities = (
         entity_payload.get("entities")
         if isinstance(entity_payload, dict)
@@ -1887,25 +1914,25 @@ def _wikidata_instance_ids(entity_payload: Any) -> List[str]:
         else {}
     )
     output = []
+    truncated = False
     for entity in list(entities.values())[:MAX_WIKIDATA_ENTITY_CANDIDATES]:
         if not isinstance(entity, dict):
             continue
-        for raw in _wikidata_claim_values(entity, "P31")[:20]:
-            entity_id = raw.get("id") if isinstance(raw, dict) else None
-            entity_id = str(entity_id or "").strip().upper()
-            if (
-                _WIKIDATA_ID_PATTERN.fullmatch(entity_id)
-                and entity_id not in output
-            ):
+        instance_ids, entity_truncated = _bounded_wikidata_class_claim_ids(
+            entity, "P31"
+        )
+        truncated = truncated or entity_truncated
+        for entity_id in instance_ids:
+            if entity_id not in output:
                 output.append(entity_id)
-    return output
+    return output, truncated
 
 
 async def _resolve_wikidata_organization_classes(
     session: Any, entity_payload: Any
 ) -> tuple[str, set[str]]:
     """Resolve a bounded P279 hierarchy for candidate P31 values."""
-    initial_ids = _wikidata_instance_ids(entity_payload)
+    initial_ids, truncated = _wikidata_instance_ids(entity_payload)
     all_unresolved = [
         entity_id
         for entity_id in initial_ids
@@ -1913,7 +1940,7 @@ async def _resolve_wikidata_organization_classes(
     ]
     unresolved = all_unresolved[:MAX_WIKIDATA_CLASS_IDS]
     if not unresolved:
-        return "not_needed", set()
+        return ("truncated" if truncated else "not_needed"), set()
 
     graph: Dict[str, set[str]] = {}
 
@@ -1930,7 +1957,7 @@ async def _resolve_wikidata_organization_classes(
 
     visited = set()
     frontier = unresolved
-    truncated = len(all_unresolved) > len(unresolved)
+    truncated = truncated or len(all_unresolved) > len(unresolved)
     for _depth in range(MAX_WIKIDATA_CLASS_DEPTH):
         frontier = [
             entity_id
@@ -1964,25 +1991,26 @@ async def _resolve_wikidata_organization_classes(
                 graph[entity_id] = set()
                 continue
             parents = set()
-            for raw in _wikidata_claim_values(entity, "P279")[:20]:
-                parent_id = raw.get("id") if isinstance(raw, dict) else None
-                parent_id = str(parent_id or "").strip().upper()
-                if _WIKIDATA_ID_PATTERN.fullmatch(parent_id):
-                    parents.add(parent_id)
-                    if (
-                        parent_id in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
-                        or parent_id in visited
-                        or parent_id in next_frontier_ids
-                    ):
-                        continue
-                    if (
-                        len(visited) + len(next_frontier)
-                        >= MAX_WIKIDATA_CLASS_IDS
-                    ):
-                        truncated = True
-                        continue
-                    next_frontier.append(parent_id)
-                    next_frontier_ids.add(parent_id)
+            parent_ids, entity_truncated = _bounded_wikidata_class_claim_ids(
+                entity, "P279"
+            )
+            truncated = truncated or entity_truncated
+            for parent_id in parent_ids:
+                parents.add(parent_id)
+                if (
+                    parent_id in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
+                    or parent_id in visited
+                    or parent_id in next_frontier_ids
+                ):
+                    continue
+                if (
+                    len(visited) + len(next_frontier)
+                    >= MAX_WIKIDATA_CLASS_IDS
+                ):
+                    truncated = True
+                    continue
+                next_frontier.append(parent_id)
+                next_frontier_ids.add(parent_id)
             graph[entity_id] = parents
         frontier = next_frontier
 
