@@ -691,16 +691,26 @@ _PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _PERSON_ROLE_LABEL_PATTERN = re.compile(
-    r"\b(?:advisers?|advisors?|board|board members?|board of directors|c suite|"
+    r"\b(?:advisers?|advisors?|board members?|board of directors|c suite|"
     r"ceo|cfo|chair|chairman|chairperson|chairwoman|"
     r"chief [a-z][a-z -]{1,40} officer|"
     r"chief executive officer|chief financial officer|chief operating officer|"
     r"chief technology officer|cio|cmo|coo|counsel|cto|directors?|employees?|"
     r"executive team|executives?|founders?|heads? of|lawyers?|leadership|"
-    r"management team|managers?|officers?|owners?|partners?|personnel|"
+    r"management team|managers?|officers?|owners?|personnel|"
     r"presidents?|professors?|secretar(?:y|ies)|staff members?|team members?|"
     r"treasurers?|vice[- ]presidents?|vp)\b",
     re.IGNORECASE,
+)
+_PERSON_NAME_TOKEN = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’.\-]{0,60}"
+_NAMED_AMBIGUOUS_PERSON_ROLE_PATTERN = re.compile(
+    rf"(?:\b{_PERSON_NAME_TOKEN}(?:\s+{_PERSON_NAME_TOKEN}){{1,5}}\b"
+    rf"(?:(?:\s*[,·:—-]\s*|\s+)(?:is\s+|serves?\s+as\s+|named\s+)?"
+    rf"(?:a\s+|managing\s+)?partner\b|"
+    rf".{{0,80}}\b(?:joins?|joined|appointed|elected|serves?\s+on)\b"
+    rf".{{0,80}}\bboard\b)|"
+    rf"\bpartners?\s*[:·—-]\s*{_PERSON_NAME_TOKEN}"
+    rf"(?:\s+{_PERSON_NAME_TOKEN}){{1,5}}\b)"
 )
 _BUSINESS_LOCATION_CONTEXT_PATTERN = re.compile(
     r"\b(?:business|company|commercial|corporate|organization|organisation|"
@@ -864,6 +874,7 @@ def _public_contact_scope(value: Any, reason: Any) -> str:
     if (
         _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
         or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
+        or _NAMED_AMBIGUOUS_PERSON_ROLE_PATTERN.search(text)
     ):
         return "named_person"
     if _BUSINESS_LOCATION_CONTEXT_PATTERN.search(text):
@@ -888,6 +899,7 @@ def _contains_personal_organization_data(value: Any) -> bool:
         # Organization context observations never carry officer/employee roles;
         # named people belong in the provenance-linked Persona proposal workflow.
         or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
+        or _NAMED_AMBIGUOUS_PERSON_ROLE_PATTERN.search(text)
     ):
         return bool(text)
     return _contains_public_phone_number(text)

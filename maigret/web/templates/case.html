@@ -292,6 +292,13 @@
                     <li><a href="{{ candidate.source_url }}" target="_blank" rel="noopener noreferrer">Open Google Maps candidate {{ loop.index }}</a> <span class="badge-soft warning">Pending verification</span></li>
                     {% endfor %}
                 </ul>
+                {% if live_places.status == 'ready' %}
+                <form method="POST" action="{{ url_for('case_google_places_live', case_id=case.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="map-pin"></i> Load live Google details</button>
+                    <small class="form-text">Explicit action required. This uses configured Google Places quota and is limited to once per case per minute.</small>
+                </form>
+                {% endif %}
                 {% endif %}
                 <p class="registry-coverage-note"><i data-lucide="map-pin"></i> Displayed live from <a href="https://maps.google.com/" target="_blank" rel="noopener noreferrer">Google Maps</a>. OpenLedger durably retains only Place IDs and provenance links—not the Google business name, address, coordinates, or status. A listing is not registry proof, a first-party statement, or a verified headquarters, and it never becomes a Persona address.</p>
             </article>

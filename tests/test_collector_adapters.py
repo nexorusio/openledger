@@ -2439,6 +2439,64 @@ def test_public_web_citation_titles_neutralize_contact_data_without_losing_sourc
     assert all("030/12345678" not in source["title"] for source in sources)
 
 
+def test_organization_language_is_not_mistaken_for_person_role_data():
+    partner_url = "https://example.org/hospital-partnership"
+    board_games_url = "https://example.org/products/board-games"
+    sources = normalize_public_web_organization_sources(
+        [
+            {"title": "Acme partners with hospitals", "url": partner_url},
+            {"title": "Board games manufacturer", "url": board_games_url},
+            {
+                "title": "Alice Doe joins Acme's board",
+                "url": "https://example.org/alice-board-appointment",
+            },
+        ]
+    )
+    sources_by_url = {source["url"]: source for source in sources}
+
+    assert sources_by_url[partner_url]["source_scope"] == "organization"
+    assert sources_by_url[board_games_url]["source_scope"] == "organization"
+    assert sources_by_url[
+        "https://example.org/alice-board-appointment"
+    ]["source_scope"] == "public_contact"
+
+    findings = normalize_public_web_organization_findings(
+        "Acme",
+        [
+            {
+                "observation_type": "business_activity",
+                "value": "Acme partners with hospitals.",
+                "source_url": partner_url,
+                "source_title": "Acme partners with hospitals",
+                "source_role": "news_or_institutional",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited source describes a hospital partnership.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+            {
+                "observation_type": "business_activity",
+                "value": "Acme manufactures board games.",
+                "source_url": board_games_url,
+                "source_title": "Board games manufacturer",
+                "source_role": "official_organization",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited source describes the product category.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+        ],
+        sources=sources,
+    )
+
+    assert [finding["value"] for finding in findings] == [
+        "Acme partners with hospitals.",
+        "Acme manufactures board games.",
+    ]
+
+
 def test_public_contact_source_scope_survives_repeated_normalization():
     source_url = "https://example.org/company"
     first_pass = normalize_public_web_organization_sources(

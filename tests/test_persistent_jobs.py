@@ -24,9 +24,11 @@ def web_app(tmp_path):
     web_app_module.app.config["AUTH_REQUIRED"] = False
     web_app_module.job_results.clear()
     web_app_module.live_jobs.clear()
+    web_app_module.google_places_live_requests.clear()
     yield web_app_module
     web_app_module.job_results.clear()
     web_app_module.live_jobs.clear()
+    web_app_module.google_places_live_requests.clear()
 
 
 @pytest.fixture
@@ -1693,7 +1695,7 @@ def test_cited_research_extraction_failure_is_partial_not_an_evidence_gap(
     )
 
 
-def test_google_places_job_persists_only_place_id_and_displays_live_address(
+def test_google_places_job_requires_explicit_rate_limited_live_details_action(
     client, web_app, persistent_store, monkeypatch
 ):
     job_id = persistent_store.create_affiliation_investigation(
@@ -1731,10 +1733,13 @@ def test_google_places_job_persists_only_place_id_and_displays_live_address(
             "durable_google_content_stored": False,
         }
 
+    live_detail_calls = []
+
     async def google_live_details(organization_name, place_ids, api_key):
         assert organization_name == "Unistellar"
         assert place_ids == [place_id]
         assert api_key == "restricted-server-key"
+        live_detail_calls.append(place_ids)
         return {
             "status": "observed",
             "reason": "Live Google Maps business details.",
@@ -1783,9 +1788,31 @@ def test_google_places_job_persists_only_place_id_and_displays_live_address(
         for event in events
     )
 
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "places-live-csrf"
+
     page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
     assert "Google Places business leads" in page
-    assert "Jl. Kemang Timur No. 28" in page
+    assert "Jl. Kemang Timur No. 28" not in page
+    assert "Load live Google details" in page
+    assert live_detail_calls == []
+
+    loaded = client.post(
+        f"/cases/{job['case_id']}/google-places-live",
+        data={"csrf_token": "places-live-csrf"},
+    )
+    assert loaded.status_code == 200
+    loaded_page = loaded.get_data(as_text=True)
+    assert "Jl. Kemang Timur No. 28" in loaded_page
+    assert live_detail_calls == [[place_id]]
+
+    repeated = client.post(
+        f"/cases/{job['case_id']}/google-places-live",
+        data={"csrf_token": "places-live-csrf"},
+    )
+    assert repeated.status_code == 429
+    assert "Wait one minute" in repeated.get_data(as_text=True)
+    assert live_detail_calls == [[place_id]]
     assert "durably retains only Place IDs" in page
     assert "never becomes a Persona address" in page
 

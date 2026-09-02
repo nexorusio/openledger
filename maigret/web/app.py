@@ -140,6 +140,8 @@ metadata_lock = Lock()
 auth_lock = Lock()
 login_attempts_lock = Lock()
 login_attempts: Dict[str, Any] = {}
+google_places_live_requests_lock = Lock()
+google_places_live_requests: Dict[str, float] = {}
 
 # Live (streaming) scan jobs, keyed by job_id. Each entry:
 #   {'queue': Queue, 'cancelled': bool, 'loop': event loop, 'task': asyncio task}
@@ -368,6 +370,7 @@ PASSWORD_HASH_ITERATIONS = 600_000
 PASSWORD_MIN_LENGTH = 12
 LOGIN_ATTEMPT_LIMIT = 8
 LOGIN_ATTEMPT_WINDOW_SECONDS = 15 * 60
+GOOGLE_PLACES_LIVE_RATE_LIMIT_SECONDS = 60
 LOG_CONTROL_CHARACTER_PATTERN = re.compile(r'[\x00-\x1f\x7f]+')
 
 
@@ -4493,8 +4496,26 @@ def cases_workspace():
     return render_template('cases.html', cases=case_store.list_cases())
 
 
-def load_case_google_places_live(case: Dict[str, Any]) -> Dict[str, Any]:
-    """Resolve stored Place IDs for transient display; never write API content."""
+def reserve_google_places_live_request(case_id: str) -> bool:
+    """Allow at most one paid Place Details action per case each minute."""
+    now = time.monotonic()
+    cutoff = now - GOOGLE_PLACES_LIVE_RATE_LIMIT_SECONDS
+    with google_places_live_requests_lock:
+        for stored_case_id, requested_at in list(
+            google_places_live_requests.items()
+        ):
+            if requested_at < cutoff:
+                google_places_live_requests.pop(stored_case_id, None)
+        if case_id in google_places_live_requests:
+            return False
+        google_places_live_requests[case_id] = now
+    return True
+
+
+def load_case_google_places_live(
+    case: Dict[str, Any], *, fetch_live: bool = False
+) -> Dict[str, Any]:
+    """Prepare or explicitly fetch transient Place Details without persistence."""
     jobs = list(case.get('jobs') or [])
     job = jobs[0] if jobs else None
     search = job.get('google_places_search') if isinstance(job, dict) else None
@@ -4543,6 +4564,17 @@ def load_case_google_places_live(case: Dict[str, Any]) -> Dict[str, Any]:
             'attribution': 'Google Maps',
             'durable_google_content_stored': False,
         }
+    if not fetch_live:
+        return {
+            'status': 'ready',
+            'reason': (
+                'Stored Place IDs are available. Select Load live Google details '
+                'to make an explicit, rate-limited Place Details request.'
+            ),
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
     try:
         return asyncio.run(
             run_google_places_live_details(
@@ -4573,6 +4605,42 @@ def case_workspace(case_id):
         flash('That case does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
     case['google_places_live'] = load_case_google_places_live(case)
+    return render_template('case.html', case=case)
+
+
+@app.route('/cases/<case_id>/google-places-live', methods=['POST'])
+def case_google_places_live(case_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('case_workspace', case_id=case_id))
+    if case_store is None:
+        flash('The case workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    case = case_store.get_case(case_id)
+    if not case:
+        flash('That case does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+
+    preview = load_case_google_places_live(case)
+    if preview['status'] != 'ready':
+        case['google_places_live'] = preview
+        return render_template('case.html', case=case)
+    if not reserve_google_places_live_request(case_id):
+        case['google_places_live'] = {
+            'status': 'rate_limited',
+            'reason': (
+                'Live Google details were requested recently for this case. '
+                'Wait one minute before requesting them again.'
+            ),
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+        return render_template('case.html', case=case), 429
+
+    case['google_places_live'] = load_case_google_places_live(
+        case, fetch_live=True
+    )
     return render_template('case.html', case=case)
 
 
