@@ -655,7 +655,10 @@ _EMAIL_ADDRESS_PATTERN = re.compile(
     r"\.[A-Za-z]{2,63}(?![A-Za-z0-9.-])"
 )
 _PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
-    r"(?<![\w$€£¥])(?:\+\s*\(?\s*)?\d[\d.\s()-]{5,40}\d(?!\w)"
+    r"(?<![\w$€£¥])"
+    r"(?P<number>(?:\+\s*\(?\s*)?\d[\d.\s()-]{5,40}\d)"
+    r"(?:\s*(?:ext(?:ension)?\.?|x|#)\s*\d{1,8})?(?!\w)",
+    re.IGNORECASE,
 )
 _DATE_LIKE_NUMBER_PATTERN = re.compile(
     r"^(?P<first>\d{1,4})(?P<date_separator>[-/.])"
@@ -802,7 +805,7 @@ def _contains_personal_organization_data(value: Any) -> bool:
         return bool(text)
     phone_text = _normalize_phone_scan_text(text)
     for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(phone_text):
-        candidate = match.group(0).strip()
+        candidate = match.group("number").strip()
         digit_count = sum(character.isdigit() for character in candidate)
         currency_prefix = phone_text[max(0, match.start() - 4) : match.start()]
         if (

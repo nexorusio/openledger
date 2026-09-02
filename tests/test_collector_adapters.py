@@ -2021,6 +2021,18 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
         },
         {
             "observation_type": "company_profile",
+            "value": "Reception +376 123 456x123",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing appends an extension to an international phone.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
             "value": "Contact 01.13.2026 89.01",
             "source_url": cited_url,
             "source_title": "Example",
@@ -2243,6 +2255,10 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
             {
                 "title": "+33\u20111\u201123\u201145\u201167\u201189",
                 "url": "https://example.org/phone-unicode-dashes",
+            },
+            {
+                "title": "Reception +376 123 456x123",
+                "url": "https://example.org/phone-with-extension",
             },
             {
                 "title": "Contact 01.13.2026 89.01",
