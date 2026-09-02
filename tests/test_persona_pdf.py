@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from maigret.web import persona_pdf as persona_pdf_module
 from maigret.web.persona_pdf import (
     build_persona_export_snapshot,
     generate_persona_pdf,
@@ -182,3 +183,26 @@ def test_persona_export_preserves_cjk_text_for_font_fallback():
 
     assert snapshot["display_name"] == "公開人物"
     assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_persona_export_survives_an_unusable_optional_cjk_font(monkeypatch):
+    monkeypatch.setattr(persona_pdf_module, "_font_paths", lambda: (None, None))
+    monkeypatch.setattr(
+        persona_pdf_module,
+        "_cjk_font_path",
+        lambda: "/invalid/cjk-font.ttf",
+    )
+    monkeypatch.setattr(
+        persona_pdf_module.pdfmetrics,
+        "getRegisteredFontNames",
+        lambda: ["Helvetica", "Helvetica-Bold"],
+    )
+
+    def reject_font(*args, **kwargs):
+        raise persona_pdf_module.TTFError("unsupported font outlines")
+
+    monkeypatch.setattr(persona_pdf_module, "TTFont", reject_font)
+
+    fonts = persona_pdf_module._register_fonts()
+
+    assert fonts == ("Helvetica", "Helvetica-Bold", None, None)

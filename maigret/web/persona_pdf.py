@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import threading
@@ -20,7 +21,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.pdfbase.ttfonts import TTFont, TTFError
 from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
@@ -57,24 +58,18 @@ def _font_paths() -> tuple[Optional[str], Optional[str]]:
     return regular, bold
 
 
-def _cjk_font_paths() -> tuple[Optional[str], Optional[str]]:
-    regular_candidates = (
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",
+def _cjk_font_path() -> Optional[str]:
+    candidates = (
+        "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        "/usr/share/fonts-droid-fallback/truetype/DroidSansFallback.ttf",
     )
-    bold_candidates = (
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc",
-        "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Bold.otf",
-    )
-    regular = next((path for path in regular_candidates if os.path.isfile(path)), None)
-    bold = next((path for path in bold_candidates if os.path.isfile(path)), None)
-    return regular, bold
+    return next((path for path in candidates if os.path.isfile(path)), None)
 
 
 def _register_fonts() -> tuple[str, str, Optional[str], Optional[str]]:
     """Register production fonts, including an embedded CJK fallback."""
     regular_path, bold_path = _font_paths()
-    cjk_regular_path, cjk_bold_path = _cjk_font_paths()
+    cjk_font_path = _cjk_font_path()
     regular_name, bold_name = "Helvetica", "Helvetica-Bold"
     cjk_regular_name = None
     cjk_bold_name = None
@@ -87,17 +82,19 @@ def _register_fonts() -> tuple[str, str, Optional[str], Optional[str]]:
                 pdfmetrics.registerFont(TTFont("OpenLedgerSans-Bold", bold_path))
             regular_name, bold_name = "OpenLedgerSans", "OpenLedgerSans-Bold"
         registered = pdfmetrics.getRegisteredFontNames()
-        if cjk_regular_path and cjk_bold_path:
-            if "OpenLedgerCJK" not in registered:
-                pdfmetrics.registerFont(
-                    TTFont("OpenLedgerCJK", cjk_regular_path, subfontIndex=0)
+        if cjk_font_path:
+            try:
+                if "OpenLedgerCJK" not in registered:
+                    pdfmetrics.registerFont(TTFont("OpenLedgerCJK", cjk_font_path))
+                if "OpenLedgerCJK-Bold" not in registered:
+                    pdfmetrics.registerFont(TTFont("OpenLedgerCJK-Bold", cjk_font_path))
+                cjk_regular_name = "OpenLedgerCJK"
+                cjk_bold_name = "OpenLedgerCJK-Bold"
+            except TTFError as error:
+                logging.warning(
+                    "Persona PDF CJK fallback font could not be registered: %s",
+                    error,
                 )
-            if "OpenLedgerCJK-Bold" not in registered:
-                pdfmetrics.registerFont(
-                    TTFont("OpenLedgerCJK-Bold", cjk_bold_path, subfontIndex=0)
-                )
-            cjk_regular_name = "OpenLedgerCJK"
-            cjk_bold_name = "OpenLedgerCJK-Bold"
     return regular_name, bold_name, cjk_regular_name, cjk_bold_name
 
 
