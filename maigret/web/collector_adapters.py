@@ -682,6 +682,7 @@ _DATE_LIKE_NUMBER_PATTERN = re.compile(
 _GROUPED_FINANCIAL_NUMBER_PATTERN = re.compile(
     r"^\d{1,3}(?:[ .]\d{3}){2,}$"
 )
+_DECIMAL_NUMBER_PATTERN = re.compile(r"^\d{1,3}\.\d{4,}$")
 _PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
     r"(?:\b(?:employee|staff member)(?:'s|’s)?\b|"
     r"\b(?:individual|personal|private)(?:'s|’s)?\s+"
@@ -822,6 +823,7 @@ def _contains_public_phone_number(value: Any) -> bool:
         if (
             _is_semantically_valid_date_like_number(candidate)
             or _GROUPED_FINANCIAL_NUMBER_PATTERN.fullmatch(candidate)
+            or _DECIMAL_NUMBER_PATTERN.fullmatch(candidate)
             or re.search(r"[$€£¥]\s*$", currency_prefix)
         ):
             continue
@@ -931,11 +933,17 @@ def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, st
         title_has_person_data = bool(
             source_title and _contains_personal_organization_data(source_title)
         )
+        existing_public_contact_scope = (
+            str(source.get("source_scope") or "").strip().casefold()
+            == "public_contact"
+        )
         source_scope = (
             "public_contact"
             if (
-                personal_profile_url
+                existing_public_contact_scope
+                or personal_profile_url
                 or _EMAIL_ADDRESS_PATTERN.search(decoded_url)
+                or _contains_public_phone_number(decoded_url)
                 or title_has_person_data
             )
             else "organization"

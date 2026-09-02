@@ -2439,6 +2439,73 @@ def test_public_web_citation_titles_neutralize_contact_data_without_losing_sourc
     assert all("030/12345678" not in source["title"] for source in sources)
 
 
+def test_public_contact_source_scope_survives_repeated_normalization():
+    source_url = "https://example.org/company"
+    first_pass = normalize_public_web_organization_sources(
+        [{"title": "Employee email alice@example.test", "url": source_url}]
+    )
+
+    assert first_pass == [
+        {
+            "title": "Public web source · example.org",
+            "url": source_url,
+            "source_scope": "public_contact",
+        }
+    ]
+    assert normalize_public_web_organization_sources(first_pass) == first_pass
+    assert normalize_public_web_organization_findings(
+        "Example",
+        [
+            {
+                "observation_type": "company_profile",
+                "value": "Example manufactures optical equipment.",
+                "source_url": source_url,
+                "source_title": "Public web source · example.org",
+                "source_role": "public_directory",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited page describes the organization.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            }
+        ],
+        sources=first_pass,
+    ) == []
+
+
+def test_phone_bearing_url_is_public_contact_provenance_only():
+    source_url = "https://example.org/contact?phone=202-555-0123"
+    sources = normalize_public_web_organization_sources(
+        [{"title": "Example contact page", "url": source_url}]
+    )
+
+    assert sources == [
+        {
+            "title": "Example contact page",
+            "url": source_url,
+            "source_scope": "public_contact",
+        }
+    ]
+    assert normalize_public_web_organization_findings(
+        "Example",
+        [
+            {
+                "observation_type": "company_profile",
+                "value": "Example manufactures optical equipment.",
+                "source_url": source_url,
+                "source_title": "Example contact page",
+                "source_role": "public_directory",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited page describes the organization.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            }
+        ],
+        sources=sources,
+    ) == []
+
+
 def test_public_contact_provenance_cannot_support_an_organization_observation():
     source_url = "https://www.linkedin.com/in/alice-doe/"
     findings = normalize_public_web_organization_findings(
