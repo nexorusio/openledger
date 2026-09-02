@@ -30,6 +30,7 @@ from maigret.web.collector_adapters import (
     WIKIDATA_QUERY_URL,
     WIKIPEDIA_API_URL,
     WIKIPEDIA_ENGINE,
+    _resolve_wikidata_organization_classes,
     _wikidata_people_query,
     build_business_context_assessment,
     build_organization_resolution_candidates,
@@ -1159,6 +1160,181 @@ async def test_wikidata_organization_subclass_is_type_verified_before_selection(
     assert requests[2]["params"]["ids"] == "Q16917"
     assert requests[2]["params"]["props"] == "claims"
     assert len(requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_wikidata_depth_limit_is_not_negative_type_evidence():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900100",
+                "label": "Example Research Center",
+                "description": "research center",
+                "match": {"text": "Example Research Center"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900100": {
+                "labels": {"en": {"value": "Example Research Center"}},
+                "descriptions": {"en": {"value": "research center"}},
+                "claims": {
+                    "P31": [
+                        {
+                            "mainsnak": {
+                                "datavalue": {"value": {"id": "Q900101"}}
+                            }
+                        }
+                    ]
+                },
+            }
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+    ]
+    for child_id, parent_id in zip(
+        ["Q900101", "Q900102", "Q900103", "Q900104"],
+        ["Q900102", "Q900103", "Q900104", "Q900105"],
+    ):
+        responses.append(
+            _FakeResponse(
+                status=200,
+                body=json.dumps(
+                    {
+                        "entities": {
+                            child_id: {
+                                "claims": {
+                                    "P279": [
+                                        {
+                                            "mainsnak": {
+                                                "datavalue": {
+                                                    "value": {"id": parent_id}
+                                                }
+                                            }
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ).encode(),
+            )
+        )
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Research Center",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    assert "subclass verification was unavailable" in observation["reason"]
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert [request["params"].get("ids") for request in requests[2:]] == [
+        "Q900101",
+        "Q900102",
+        "Q900103",
+        "Q900104",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wikidata_class_id_limit_marks_dropped_parents_as_truncated():
+    calls = []
+
+    def parent_claim(parent_id):
+        return {
+            "mainsnak": {"datavalue": {"value": {"id": parent_id}}}
+        }
+
+    first_layer = [f"Q91{index:04d}" for index in range(20)]
+    second_layer = [f"Q92{index:04d}" for index in range(20)]
+    third_layer = [f"Q93{index:04d}" for index in range(20)]
+    responses = [
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        "Q900200": {
+                            "claims": {
+                                "P279": [
+                                    parent_claim(parent_id)
+                                    for parent_id in first_layer
+                                ]
+                            }
+                        }
+                    }
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        child_id: {
+                            "claims": {"P279": [parent_claim(parent_id)]}
+                        }
+                        for child_id, parent_id in zip(
+                            first_layer, second_layer
+                        )
+                    }
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        child_id: {
+                            "claims": {"P279": [parent_claim(parent_id)]}
+                        }
+                        for child_id, parent_id in zip(
+                            second_layer, third_layer
+                        )
+                    }
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        entity_id: {"claims": {"P279": []}}
+                        for entity_id in third_layer[:9]
+                    }
+                }
+            ).encode(),
+        ),
+    ]
+    entity_payload = {
+        "entities": {
+            "Q900199": {
+                "claims": {"P31": [parent_claim("Q900200")]}
+            }
+        }
+    }
+    session = _FakeSequenceSession(responses, calls)
+
+    status, verified_classes = await _resolve_wikidata_organization_classes(
+        session, entity_payload
+    )
+
+    assert status == "truncated"
+    assert verified_classes == set()
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert len(requests[-1]["params"]["ids"].split("|")) == 9
 
 
 @pytest.mark.asyncio

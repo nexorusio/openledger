@@ -1898,7 +1898,7 @@ def _wikidata_instance_ids(entity_payload: Any) -> List[str]:
                 and entity_id not in output
             ):
                 output.append(entity_id)
-    return output[:MAX_WIKIDATA_CLASS_IDS]
+    return output
 
 
 async def _resolve_wikidata_organization_classes(
@@ -1906,11 +1906,12 @@ async def _resolve_wikidata_organization_classes(
 ) -> tuple[str, set[str]]:
     """Resolve a bounded P279 hierarchy for candidate P31 values."""
     initial_ids = _wikidata_instance_ids(entity_payload)
-    unresolved = [
+    all_unresolved = [
         entity_id
         for entity_id in initial_ids
         if entity_id not in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
     ]
+    unresolved = all_unresolved[:MAX_WIKIDATA_CLASS_IDS]
     if not unresolved:
         return "not_needed", set()
 
@@ -1928,7 +1929,8 @@ async def _resolve_wikidata_organization_classes(
         return verified.difference(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
 
     visited = set()
-    frontier = unresolved[:MAX_WIKIDATA_CLASS_IDS]
+    frontier = unresolved
+    truncated = len(all_unresolved) > len(unresolved)
     for _depth in range(MAX_WIKIDATA_CLASS_DEPTH):
         frontier = [
             entity_id
@@ -1955,6 +1957,7 @@ async def _resolve_wikidata_organization_classes(
         if not isinstance(entities, dict):
             return "invalid_response", resolved_classes()
         next_frontier = []
+        next_frontier_ids = set()
         for entity_id in frontier:
             entity = entities.get(entity_id)
             if not isinstance(entity, dict):
@@ -1967,16 +1970,26 @@ async def _resolve_wikidata_organization_classes(
                 if _WIKIDATA_ID_PATTERN.fullmatch(parent_id):
                     parents.add(parent_id)
                     if (
-                        parent_id not in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
-                        and parent_id not in visited
-                        and len(visited) + len(next_frontier)
-                        < MAX_WIKIDATA_CLASS_IDS
+                        parent_id in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
+                        or parent_id in visited
+                        or parent_id in next_frontier_ids
                     ):
-                        next_frontier.append(parent_id)
+                        continue
+                    if (
+                        len(visited) + len(next_frontier)
+                        >= MAX_WIKIDATA_CLASS_IDS
+                    ):
+                        truncated = True
+                        continue
+                    next_frontier.append(parent_id)
+                    next_frontier_ids.add(parent_id)
             graph[entity_id] = parents
         frontier = next_frontier
 
-    return "ok", resolved_classes()
+    return (
+        "truncated" if truncated or frontier else "ok",
+        resolved_classes(),
+    )
 
 
 def _wikidata_binding_id(value: Any, pattern: re.Pattern[str]) -> str:
