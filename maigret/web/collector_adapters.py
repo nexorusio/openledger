@@ -754,6 +754,32 @@ def _looks_like_public_address(value: Any) -> bool:
     )
 
 
+def _normalize_phone_scan_text(value: str) -> str:
+    """Remove invisible number separators without erasing token boundaries."""
+    normalized = unicodedata.normalize("NFKC", value)
+    output = []
+    for index, character in enumerate(normalized):
+        if unicodedata.category(character) != "Cf":
+            output.append(character)
+            continue
+        previous_character = output[-1] if output else ""
+        next_character = next(
+            (
+                candidate
+                for candidate in normalized[index + 1 :]
+                if unicodedata.category(candidate) != "Cf"
+            ),
+            "",
+        )
+        if next_character.isdigit() and (
+            previous_character.isdigit()
+            or previous_character in "+.()-"
+        ):
+            continue
+        output.append(" ")
+    return "".join(output)
+
+
 def _contains_personal_organization_data(value: Any) -> bool:
     """Reject person-level contact data from organization-only observations."""
     text = _bounded_text(value, limit=3000)
@@ -773,11 +799,7 @@ def _contains_personal_organization_data(value: Any) -> bool:
         or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
     ):
         return bool(text)
-    phone_text = "".join(
-        character
-        for character in unicodedata.normalize("NFKC", text)
-        if unicodedata.category(character) != "Cf"
-    )
+    phone_text = _normalize_phone_scan_text(text)
     for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(phone_text):
         candidate = match.group(0).strip()
         digit_count = sum(character.isdigit() for character in candidate)

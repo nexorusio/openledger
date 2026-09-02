@@ -1953,6 +1953,21 @@ def test_public_web_organization_findings_fail_closed_on_weak_or_private_data():
         },
         {
             "observation_type": "company_profile",
+            "value": "Call\u200b+\u200b376\u200b123\u200b456",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": (
+                "The listing separates a label and short international phone "
+                "number with zero-width characters."
+            ),
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
             "value": "Contact 01.13.2026 89.01",
             "source_url": cited_url,
             "source_title": "Example",
@@ -2153,6 +2168,12 @@ def test_public_web_citation_titles_do_not_retain_personal_contact_data():
             {
                 "title": "+\u200b376\u200b123\u200b456",
                 "url": "https://example.org/phone-short-zero-width-space",
+            },
+            {
+                "title": "Call\u200b+\u200b376\u200b123\u200b456",
+                "url": (
+                    "https://example.org/phone-labelled-short-zero-width-space"
+                ),
             },
             {
                 "title": "Contact 01.13.2026 89.01",
