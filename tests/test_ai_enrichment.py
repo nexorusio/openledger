@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 import pytest
 
@@ -12,6 +13,7 @@ from maigret.ai import (
     get_case_chat_claim_proposals,
     get_case_chat_response,
     get_enriched_ai_analysis,
+    get_organization_context_proposals,
     validate_ai_api_base_url,
 )
 
@@ -397,6 +399,8 @@ def test_evidence_proposal_request_uses_strict_schema_without_web_search(monkeyp
     )
     assert "explicitly published" in normalized_instructions
     assert "educational institution" in normalized_instructions
+    assert "separate occupation and company proposals" in normalized_instructions
+    assert "do not infer one from a role title" in normalized_instructions
     assert "tools" not in captured["payload"]
 
 
@@ -458,4 +462,95 @@ def test_case_chat_proposal_request_supports_user_and_web_evidence_without_brows
         "properties"
     ]["evidence_basis"]
     assert set(evidence_basis["enum"]) == {"user_statement", "public_web"}
+    normalized_instructions = " ".join(
+        captured["payload"]["instructions"].split()
+    )
+    assert "return two separate proposals" in normalized_instructions
+    assert "do not infer one from a role title" in normalized_instructions
     assert "tools" not in captured["payload"]
+
+
+def test_organization_context_proposals_use_citation_bound_strict_schema(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {"type": "output_text", "text": '{"proposals":[]}'}
+                        ],
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def post(self, url, *, json, headers):
+            captured.update(url=url, payload=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai.aiohttp, "ClientSession", FakeSession)
+    proposals = asyncio.run(
+        get_organization_context_proposals(
+            api_key="test-key",
+            organization_name="Unistellar",
+            legal_jurisdiction={"code": "ID"},
+            official_website={"url": "https://www.unistellar.co/"},
+            research_answer="A cited company profile publishes an address.",
+            sources=[
+                {
+                    "title": "Unistellar | LinkedIn",
+                    "url": "https://www.linkedin.com/company/unistellar/",
+                }
+            ],
+            model="gpt-5.6-terra",
+        )
+    )
+
+    assert proposals == []
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert "tools" not in captured["payload"]
+    response_format = captured["payload"]["text"]["format"]
+    assert response_format["name"] == "openledger_organization_context_proposals"
+    assert response_format["strict"] is True
+    item_schema = response_format["schema"]["properties"]["proposals"]["items"]
+    assert {
+        "company_profile",
+        "business_address",
+        "headquarters",
+        "public_contact",
+    }.issubset(
+        item_schema["properties"]["observation_type"]["enum"]
+    )
+    assert {"professional_profile", "map_listing"}.issubset(
+        item_schema["properties"]["source_role"]["enum"]
+    )
+    assert "must not be described" in " ".join(
+        captured["payload"]["instructions"].split()
+    )
+    assert "associated with a named employee or officer" in " ".join(
+        captured["payload"]["instructions"].split()
+    )
+    structured_input = json.loads(captured["payload"]["input"])
+    assert structured_input["citation_catalogue"][0]["source_scope"] == (
+        "organization"
+    )

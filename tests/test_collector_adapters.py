@@ -13,9 +13,13 @@ from maigret.web.collector_adapters import (
     GITHUB_API_BASE_URL,
     GITHUB_API_VERSION,
     GITHUB_ENGINE,
+    GOOGLE_PLACES_ENGINE,
+    GOOGLE_PLACES_DETAILS_URL,
+    GOOGLE_PLACES_SEARCH_URL,
     ICIJ_OFFSHORE_ENGINE,
     ICIJ_RECONCILE_URL,
     OFFICIAL_WEBSITE_ENGINE,
+    PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
     UNFURL_ENGINE,
     UNFURL_VERSION,
     USER_SCANNER_ENGINE,
@@ -26,6 +30,7 @@ from maigret.web.collector_adapters import (
     WIKIDATA_QUERY_URL,
     WIKIPEDIA_API_URL,
     WIKIPEDIA_ENGINE,
+    _resolve_wikidata_organization_classes,
     _wikidata_people_query,
     build_business_context_assessment,
     build_organization_resolution_candidates,
@@ -43,11 +48,14 @@ from maigret.web.collector_adapters import (
     normalize_github_public_profile,
     normalize_fr_business_entities,
     normalize_gleif_legal_entities,
+    normalize_google_places_search_candidates,
     normalize_icij_offshore_matches,
     normalize_legal_jurisdiction,
     normalize_cloudflare_dns_context,
     normalize_official_website_url,
     normalize_official_website_public_content,
+    normalize_public_web_organization_findings,
+    normalize_public_web_organization_sources,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
     normalize_wayback_capture_index,
@@ -58,6 +66,8 @@ from maigret.web.collector_adapters import (
     run_github_public_profile,
     run_fr_business_registry_search,
     run_gleif_legal_entity_search,
+    run_google_places_business_search,
+    run_google_places_live_details,
     run_cloudflare_dns_context,
     run_icij_offshore_match,
     run_official_website_public_content,
@@ -65,6 +75,7 @@ from maigret.web.collector_adapters import (
     run_wikidata_affiliation_discovery,
     run_wikipedia_person_enrichment,
     user_scanner_email_targets,
+    validate_google_places_connection,
 )
 
 
@@ -514,6 +525,15 @@ def _wikidata_search():
     }
 
 
+def _wikidata_item_claim(entity_id):
+    return {
+        "mainsnak": {
+            "snaktype": "value",
+            "datavalue": {"value": {"id": entity_id}},
+        }
+    }
+
+
 def _wikidata_organization():
     return {
         "entities": {
@@ -521,13 +541,7 @@ def _wikidata_organization():
                 "labels": {"en": {"value": "Example Organization"}},
                 "descriptions": {"en": {"value": "Example"}},
                 "claims": {
-                    "P31": [
-                        {
-                            "mainsnak": {
-                                "datavalue": {"value": {"id": "Q43229"}}
-                            }
-                        }
-                    ],
+                    "P31": [_wikidata_item_claim("Q43229")],
                     "P856": [
                         {"mainsnak": {"datavalue": {"value": "https://example.org"}}}
                     ]
@@ -717,6 +731,168 @@ class _TimeoutResponse:
 
 
 @pytest.mark.asyncio
+async def test_google_places_text_search_keeps_only_place_ids_and_fixed_origin():
+    calls = []
+    response = _FakeResponse(
+        status=200,
+        body=json.dumps(
+            {
+                "places": [
+                    {
+                        "id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE",
+                        "displayName": {"text": "must not be retained"},
+                        "formattedAddress": "must not be retained",
+                    }
+                ]
+            }
+        ).encode(),
+    )
+
+    observation = await run_google_places_business_search(
+        "Unistellar",
+        "restricted-server-key",
+        legal_jurisdiction="ID",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [response], calls, **options
+        ),
+    )
+
+    assert observation["source_engine"] == GOOGLE_PLACES_ENGINE
+    assert observation["status"] == "observed"
+    assert observation["query_context"]["jurisdiction_code"] == "ID"
+    assert observation["durable_google_content_stored"] is False
+    assert observation["candidates"] == [
+        {
+            "place_id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE",
+            "source_url": (
+                "https://www.google.com/maps/search/?api=1&query=Unistellar&"
+                "query_place_id=ChIJCzjlUUSv4S4RCiu9uL4NlvE"
+            ),
+            "review_status": "pending",
+            "automatic_approval_allowed": False,
+            "durable_google_content_stored": False,
+        }
+    ]
+    session_options = next(value for kind, value in calls if kind == "session")
+    assert session_options["headers"]["X-Goog-Api-Key"] == "restricted-server-key"
+    assert session_options["headers"]["X-Goog-FieldMask"] == "places.id"
+    request = next(value for kind, value in calls if kind == "post")
+    assert request["url"] == GOOGLE_PLACES_SEARCH_URL
+    assert request["allow_redirects"] is False
+    assert request["json"]["textQuery"] == "Unistellar, Indonesia"
+    assert request["json"]["regionCode"] == "ID"
+    assert "restricted-server-key" not in json.dumps(request)
+
+
+def test_google_places_candidate_normalization_rejects_invalid_or_duplicate_ids():
+    assert normalize_google_places_search_candidates(
+        "Unistellar",
+        {
+            "places": [
+                {"id": "short"},
+                {"id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE"},
+                {"id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE"},
+            ]
+        },
+    )[0]["place_id"] == "ChIJCzjlUUSv4S4RCiu9uL4NlvE"
+
+
+@pytest.mark.asyncio
+async def test_google_places_details_are_live_review_leads_and_block_private_data():
+    calls = []
+    responses = [
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE",
+                    "displayName": {"text": "Unistellar"},
+                    "formattedAddress": (
+                        "Jl. Kemang Timur No. 28, Jakarta 12730, Indonesia"
+                    ),
+                    "businessStatus": "OPERATIONAL",
+                    "types": ["establishment", "finance", "point_of_interest"],
+                    "googleMapsUri": "https://maps.google.com/?cid=12345",
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "id": "ChIJPrivateResidence123456",
+                    "displayName": {"text": "Private residence"},
+                    "formattedAddress": "8 Private Road, Jakarta 12730",
+                    "types": ["establishment", "point_of_interest"],
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "id": "ChIJPersonalListing123456",
+                    "displayName": {"text": "Alice Doe"},
+                    "formattedAddress": "8 Oak Road, Jakarta 12730",
+                    "types": ["establishment", "point_of_interest"],
+                }
+            ).encode(),
+        ),
+    ]
+
+    result = await run_google_places_live_details(
+        "Unistellar",
+        [
+            "ChIJCzjlUUSv4S4RCiu9uL4NlvE",
+            "ChIJPrivateResidence123456",
+            "ChIJPersonalListing123456",
+        ],
+        "restricted-server-key",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert result["status"] == "partial"
+    assert result["durable_google_content_stored"] is False
+    assert len(result["places"]) == 1
+    place = result["places"][0]
+    assert place["display_name"] == "Unistellar"
+    assert place["formatted_address"].startswith("Jl. Kemang Timur")
+    assert place["review_status"] == "pending"
+    assert place["automatic_approval_allowed"] is False
+    assert place["source_url"] == "https://maps.google.com/?cid=12345"
+    requests = [value for kind, value in calls if kind == "get"]
+    assert all(
+        request["url"].startswith(f"{GOOGLE_PLACES_DETAILS_URL}/")
+        and request["allow_redirects"] is False
+        for request in requests
+    )
+
+
+@pytest.mark.asyncio
+async def test_google_places_connection_validation_uses_text_search():
+    calls = []
+    assert await validate_google_places_connection(
+        "restricted-server-key",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [
+                _FakeResponse(
+                    status=200,
+                    body=json.dumps(
+                        {"places": [{"id": "ChIJN1t_tDeuEmsRUsoyG83frY4"}]}
+                    ).encode(),
+                )
+            ],
+            calls,
+            **options,
+        ),
+    )
+    request = next(value for kind, value in calls if kind == "post")
+    assert request["url"] == GOOGLE_PLACES_SEARCH_URL
+
+
+@pytest.mark.asyncio
 async def test_wikidata_runtime_uses_only_fixed_bounded_endpoints():
     calls = []
     responses = [
@@ -876,13 +1052,7 @@ async def test_wikidata_article_is_retained_but_cannot_be_selected_as_organizati
                 "labels": {"en": {"value": "Unistellar eVscopes"}},
                 "descriptions": {"en": {"value": "scholarly article"}},
                 "claims": {
-                    "P31": [
-                        {
-                            "mainsnak": {
-                                "datavalue": {"value": {"id": "Q13442814"}}
-                            }
-                        }
-                    ]
+                    "P31": [_wikidata_item_claim("Q13442814")]
                 },
             }
         }
@@ -890,6 +1060,16 @@ async def test_wikidata_article_is_retained_but_cannot_be_selected_as_organizati
     responses = [
         _FakeResponse(status=200, body=json.dumps(search).encode()),
         _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        "Q13442814": {"claims": {"P279": []}}
+                    }
+                }
+            ).encode(),
+        ),
     ]
 
     observation = await run_wikidata_affiliation_discovery(
@@ -906,7 +1086,609 @@ async def test_wikidata_article_is_retained_but_cannot_be_selected_as_organizati
         "not_verified_as_organization"
     )
     assert "type-verified Wikidata organization" in observation["reason"]
+    assert len([item for item in calls if item[0] == "get"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_wikidata_organization_subclass_is_type_verified_before_selection():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900001",
+                "label": "Example Hospital",
+                "description": "public hospital",
+                "match": {"text": "Example Hospital"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900001": {
+                "labels": {"en": {"value": "Example Hospital"}},
+                "descriptions": {"en": {"value": "public hospital"}},
+                "claims": {
+                    "P31": [_wikidata_item_claim("Q16917")]
+                },
+            }
+        }
+    }
+    class_hierarchy = {
+        "entities": {
+            "Q16917": {
+                "claims": {
+                    "P279": [_wikidata_item_claim("Q43229")]
+                }
+            }
+        }
+    }
+    relation_result = {"results": {"bindings": []}}
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(status=200, body=json.dumps(class_hierarchy).encode()),
+        _FakeResponse(status=200, body=json.dumps(relation_result).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Hospital",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "observed"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is True
+    assert candidate["organization_type_status"] == "verified_organization"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert requests[2]["params"]["ids"] == "Q16917"
+    assert requests[2]["params"]["props"] == "claims"
+    assert len(requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_wikidata_depth_limit_is_not_negative_type_evidence():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900100",
+                "label": "Example Research Center",
+                "description": "research center",
+                "match": {"text": "Example Research Center"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900100": {
+                "labels": {"en": {"value": "Example Research Center"}},
+                "descriptions": {"en": {"value": "research center"}},
+                "claims": {
+                    "P31": [_wikidata_item_claim("Q900101")]
+                },
+            }
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+    ]
+    for child_id, parent_id in zip(
+        ["Q900101", "Q900102", "Q900103", "Q900104"],
+        ["Q900102", "Q900103", "Q900104", "Q900105"],
+    ):
+        responses.append(
+            _FakeResponse(
+                status=200,
+                body=json.dumps(
+                    {
+                        "entities": {
+                            child_id: {
+                                "claims": {
+                                    "P279": [_wikidata_item_claim(parent_id)]
+                                }
+                            }
+                        }
+                    }
+                ).encode(),
+            )
+        )
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Research Center",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    assert "subclass verification was unavailable" in observation["reason"]
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert [request["params"].get("ids") for request in requests[2:]] == [
+        "Q900101",
+        "Q900102",
+        "Q900103",
+        "Q900104",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_wikidata_p31_claim_limit_is_not_negative_type_evidence():
+    calls = []
+
+    def class_claim(entity_id):
+        return _wikidata_item_claim(entity_id)
+
+    retained_classes = [f"Q94{index:04d}" for index in range(20)]
+    search = {
+        "search": [
+            {
+                "id": "Q900150",
+                "label": "Example Laboratory",
+                "description": "research laboratory",
+                "match": {"text": "Example Laboratory"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900150": {
+                "labels": {"en": {"value": "Example Laboratory"}},
+                "descriptions": {"en": {"value": "research laboratory"}},
+                "claims": {
+                    "P31": [
+                        *[
+                            class_claim(entity_id)
+                            for entity_id in retained_classes
+                        ],
+                        class_claim("Q43229"),
+                    ]
+                },
+            }
+        }
+    }
+    hierarchy = {
+        "entities": {
+            entity_id: {"claims": {"P279": []}}
+            for entity_id in retained_classes
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(status=200, body=json.dumps(hierarchy).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Laboratory",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert requests[2]["params"]["ids"].split("|") == retained_classes
+
+
+@pytest.mark.asyncio
+async def test_wikidata_p279_claim_limit_is_not_negative_type_evidence():
+    calls = []
+
+    def class_claim(entity_id):
+        return _wikidata_item_claim(entity_id)
+
+    retained_parents = [f"Q95{index:04d}" for index in range(20)]
+    search = {
+        "search": [
+            {
+                "id": "Q900250",
+                "label": "Example Observatory",
+                "description": "research observatory",
+                "match": {"text": "Example Observatory"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900250": {
+                "labels": {"en": {"value": "Example Observatory"}},
+                "descriptions": {"en": {"value": "research observatory"}},
+                "claims": {"P31": [class_claim("Q900251")]},
+            }
+        }
+    }
+    hierarchy = {
+        "entities": {
+            "Q900251": {
+                "claims": {
+                    "P279": [
+                        *[
+                            class_claim(entity_id)
+                            for entity_id in retained_parents
+                        ],
+                        class_claim("Q43229"),
+                    ]
+                }
+            }
+        }
+    }
+    terminal_parents = {
+        "entities": {
+            entity_id: {"claims": {"P279": []}}
+            for entity_id in retained_parents
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(status=200, body=json.dumps(hierarchy).encode()),
+        _FakeResponse(status=200, body=json.dumps(terminal_parents).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Observatory",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert requests[3]["params"]["ids"].split("|") == retained_parents
+
+
+@pytest.mark.asyncio
+async def test_wikidata_unknown_p31_value_is_not_negative_type_evidence():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900300",
+                "label": "Example Foundation",
+                "description": "research foundation",
+                "match": {"text": "Example Foundation"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900300": {
+                "labels": {"en": {"value": "Example Foundation"}},
+                "descriptions": {"en": {"value": "research foundation"}},
+                "claims": {
+                    "P31": [{"mainsnak": {"snaktype": "somevalue"}}]
+                },
+            }
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Foundation",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
     assert len([item for item in calls if item[0] == "get"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_wikidata_malformed_claims_container_is_incomplete():
+    session = _FakeSequenceSession([], [])
+
+    status, verified_classes = await _resolve_wikidata_organization_classes(
+        session,
+        {"entities": {"Q900325": {"claims": []}}},
+    )
+
+    assert status == "truncated"
+    assert verified_classes == set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("snak_type", [None, "unexpected"])
+async def test_wikidata_unrecognized_snak_type_is_incomplete(snak_type):
+    mainsnak = {
+        "datavalue": {"value": {"id": "Q43229"}},
+    }
+    if snak_type is not None:
+        mainsnak["snaktype"] = snak_type
+    session = _FakeSequenceSession([], [])
+    entity_payload = {
+        "entities": {
+            "Q900326": {
+                "labels": {"en": {"value": "Malformed type example"}},
+                "claims": {"P31": [{"mainsnak": mainsnak}]},
+            }
+        }
+    }
+
+    status, verified_classes = await _resolve_wikidata_organization_classes(
+        session,
+        entity_payload,
+    )
+
+    assert status == "truncated"
+    assert verified_classes == set()
+    assert normalize_wikidata_organization(
+        "Q900326", entity_payload
+    )["instance_of"] == []
+
+
+@pytest.mark.asyncio
+async def test_wikidata_missing_initial_candidate_is_not_negative_evidence():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900327",
+                "label": "Example Missing Organization",
+                "description": "organization",
+                "match": {"text": "Example Missing Organization"},
+            }
+        ]
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(
+            status=200,
+            body=json.dumps({"entities": {}}).encode(),
+        ),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Missing Organization",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "truncated"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is None
+    assert candidate["organization_type_status"] == "type_verification_unavailable"
+    assert len([item for item in calls if item[0] == "get"]) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "class_entity",
+    [
+        {"claims": {"P279": [{"mainsnak": {"snaktype": "somevalue"}}]}},
+        {"id": "Q900351", "missing": ""},
+    ],
+    ids=["unknown-parent", "missing-class"],
+)
+async def test_wikidata_incomplete_class_is_not_negative_type_evidence(
+    class_entity,
+):
+    calls = []
+    entity_payload = {
+        "entities": {
+            "Q900350": {
+                "claims": {
+                    "P31": [_wikidata_item_claim("Q900351")]
+                }
+            }
+        }
+    }
+    responses = [
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {"entities": {"Q900351": class_entity}}
+            ).encode(),
+        )
+    ]
+    session = _FakeSequenceSession(responses, calls)
+
+    status, verified_classes = await _resolve_wikidata_organization_classes(
+        session, entity_payload
+    )
+
+    assert status == "truncated"
+    assert verified_classes == set()
+    assert len([item for item in calls if item[0] == "get"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_wikidata_class_id_limit_marks_dropped_parents_as_truncated():
+    calls = []
+
+    def parent_claim(parent_id):
+        return _wikidata_item_claim(parent_id)
+
+    first_layer = [f"Q91{index:04d}" for index in range(20)]
+    second_layer = [f"Q92{index:04d}" for index in range(20)]
+    third_layer = [f"Q93{index:04d}" for index in range(20)]
+    responses = [
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        "Q900200": {
+                            "claims": {
+                                "P279": [
+                                    parent_claim(parent_id)
+                                    for parent_id in first_layer
+                                ]
+                            }
+                        }
+                    }
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        child_id: {
+                            "claims": {"P279": [parent_claim(parent_id)]}
+                        }
+                        for child_id, parent_id in zip(
+                            first_layer, second_layer
+                        )
+                    }
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        child_id: {
+                            "claims": {"P279": [parent_claim(parent_id)]}
+                        }
+                        for child_id, parent_id in zip(
+                            second_layer, third_layer
+                        )
+                    }
+                }
+            ).encode(),
+        ),
+        _FakeResponse(
+            status=200,
+            body=json.dumps(
+                {
+                    "entities": {
+                        entity_id: {"claims": {"P279": []}}
+                        for entity_id in third_layer[:9]
+                    }
+                }
+            ).encode(),
+        ),
+    ]
+    entity_payload = {
+        "entities": {
+            "Q900199": {
+                "claims": {"P31": [parent_claim("Q900200")]}
+            }
+        }
+    }
+    session = _FakeSequenceSession(responses, calls)
+
+    status, verified_classes = await _resolve_wikidata_organization_classes(
+        session, entity_payload
+    )
+
+    assert status == "truncated"
+    assert verified_classes == set()
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert len(requests[-1]["params"]["ids"].split("|")) == 9
+
+
+@pytest.mark.asyncio
+async def test_wikidata_keeps_verified_branch_when_later_class_fetch_fails():
+    calls = []
+    search = {
+        "search": [
+            {
+                "id": "Q900020",
+                "label": "Example Institute",
+                "description": "public institute",
+                "match": {"text": "Example Institute"},
+            }
+        ]
+    }
+    entity = {
+        "entities": {
+            "Q900020": {
+                "labels": {"en": {"value": "Example Institute"}},
+                "descriptions": {"en": {"value": "public institute"}},
+                "claims": {
+                    "P31": [
+                        _wikidata_item_claim("Q900021"),
+                        _wikidata_item_claim("Q900022"),
+                    ]
+                },
+            }
+        }
+    }
+    first_hierarchy = {
+        "entities": {
+            "Q900021": {
+                "claims": {
+                    "P279": [_wikidata_item_claim("Q43229")]
+                }
+            },
+            "Q900022": {
+                "claims": {
+                    "P279": [_wikidata_item_claim("Q900023")]
+                }
+            },
+        }
+    }
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(search).encode()),
+        _FakeResponse(status=200, body=json.dumps(entity).encode()),
+        _FakeResponse(status=200, body=json.dumps(first_hierarchy).encode()),
+        _FakeResponse(status=429, body=b"", headers={"Retry-After": "60"}),
+        _FakeResponse(
+            status=200,
+            body=json.dumps({"results": {"bindings": []}}).encode(),
+        ),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Institute",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "observed"
+    candidate = observation["organization_candidates"][0]
+    assert candidate["organization_eligible"] is True
+    assert candidate["organization_type_status"] == "verified_organization"
+    requests = [item[1] for item in calls if item[0] == "get"]
+    assert requests[2]["params"]["ids"] == "Q900021|Q900022"
+    assert requests[3]["params"]["ids"] == "Q900023"
+    assert len(requests) == 5
+
+
+@pytest.mark.asyncio
+async def test_wikidata_type_request_failure_is_not_negative_type_evidence():
+    calls = []
+    responses = [
+        _FakeResponse(status=200, body=json.dumps(_wikidata_search()).encode()),
+        _FakeResponse(status=429, body=b"", headers={"Retry-After": "60"}),
+    ]
+
+    observation = await run_wikidata_affiliation_discovery(
+        "Example Organization",
+        session_factory=lambda **options: _FakeSequenceSession(
+            responses, calls, **options
+        ),
+    )
+
+    assert observation["status"] == "rate_limited"
+    assert "type verification was unavailable" in observation["reason"]
+    assert observation["organization_candidates"][0].get(
+        "organization_eligible"
+    ) is None
 
 
 def _gleif_entities():
@@ -1421,6 +2203,840 @@ def test_unistellar_site_retains_people_email_and_link_without_inventing_address
     assert observation["linked_company_profiles"] == [
         "https://www.linkedin.com/company/unistellar"
     ]
+
+
+def test_cited_company_profiles_and_map_listings_remain_pending_observations():
+    linkedin_url = "https://www.linkedin.com/company/unistellar/"
+    maps_url = (
+        "https://www.google.com/maps/place/Unistellar/"
+        "@-6.2585928,106.8205345,980m/data=!3m1!1e3"
+    )
+    sources = [
+        {"title": "Unistellar | LinkedIn", "url": linkedin_url},
+        {"title": "Unistellar - Google Maps", "url": maps_url},
+    ]
+    proposals = [
+        {
+            "observation_type": "headquarters",
+            "value": "Jl Kemang Timur No. 28, Jakarta 12730, ID",
+            "source_url": linkedin_url,
+            "source_title": "Unistellar | LinkedIn",
+            "source_role": "other_public_source",
+            "identity_match_basis": "exact_name_and_official_website",
+            "reason": (
+                "The cited company profile uses the exact name and links to "
+                "unistellar.co while explicitly labelling Jakarta headquarters."
+            ),
+            "confidence": 84,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "business_address",
+            "value": "Jl Kemang Timur No. 28, Jakarta 12730, ID",
+            "source_url": maps_url,
+            "source_title": "Unistellar - Google Maps",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_and_location",
+            "reason": "The cited listing publishes this business address.",
+            "confidence": 80,
+            "latitude": -6.2585928,
+            "longitude": 106.8231094,
+        },
+    ]
+
+    findings = normalize_public_web_organization_findings(
+        "Unistellar",
+        proposals,
+        sources=sources,
+        official_website="https://www.unistellar.co/",
+    )
+
+    assert len(findings) == 2
+    assert {finding["source_role"] for finding in findings} == {
+        "professional_profile",
+        "map_listing",
+    }
+    assert all(
+        finding["source_engine"]
+        == PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE
+        for finding in findings
+    )
+    assert all(finding["review_status"] == "pending" for finding in findings)
+    assert all(
+        finding["automatic_approval_allowed"] is False for finding in findings
+    )
+    assert all(
+        finding["direct_platform_fetch_performed"] is False for finding in findings
+    )
+    assert all(finding["confidence"] == 75 for finding in findings)
+    assert findings[1]["latitude"] == -6.2585928
+    assert "not legal-registry" in findings[1]["limitation"]
+
+
+def test_public_web_headquarters_requires_an_explicit_source_label():
+    source_url = "https://directory.example/unistellar"
+    proposal = {
+        "observation_type": "headquarters",
+        "value": "Jakarta, Indonesia",
+        "source_url": source_url,
+        "source_title": "Unistellar listing",
+        "source_role": "public_directory",
+        "identity_match_basis": "exact_name_and_location",
+        "reason": "The listing publishes Jakarta as a business location.",
+        "confidence": 70,
+        "latitude": None,
+        "longitude": None,
+    }
+
+    assert normalize_public_web_organization_findings(
+        "Unistellar",
+        [proposal],
+        sources=[{"title": "Unistellar listing", "url": source_url}],
+    ) == []
+
+
+def test_public_web_findings_separate_contacts_from_organization_facts():
+    cited_url = "https://example.org/company"
+    proposals = [
+        {
+            "observation_type": "business_address",
+            "value": "Home address: 8 Private Road, Jakarta 12730",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "A directory returned a matching name.",
+            "confidence": 90,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "business_address",
+            "value": "8 Private Road, Jakarta 12730",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_and_location",
+            "reason": (
+                "The directory says this is the founder's private residence, "
+                "not a company office."
+            ),
+            "confidence": 70,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Unistellar",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "ambiguous",
+            "reason": "The name may refer to several organizations.",
+            "confidence": 40,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Alice Doe · +33.1.23.45.67.89",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing exposes a punctuated employee phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "+33\u202f1\u202f23\u202f45\u202f67\u202f89",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing exposes a Unicode-spaced phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "+33\u200b1\u200b23\u200b45\u200b67\u200b89",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing exposes a zero-width-spaced phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "+\u200b376\u200b123\u200b456",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing exposes a short international phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Call\u200b+\u200b376\u200b123\u200b456",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": (
+                "The listing separates a label and short international phone "
+                "number with zero-width characters."
+            ),
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Phone: 202\u200b555\u200b0123",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": (
+                "The listing separates a domestic phone number with zero-width "
+                "characters."
+            ),
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Call + 376 123 456",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing spaces an international phone after its plus.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Call + (376) 123 456",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": (
+                "The listing parenthesizes a spaced international country code."
+            ),
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "+33\u20111\u201123\u201145\u201167\u201189",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing uses Unicode dashes in an international phone.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Reception +376 123 456x123",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing appends an extension to an international phone.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Reception +376 123 456ext:123",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing uses a colon-delimited phone extension.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Phone: 2025550123",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing labels an unformatted domestic phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Tel. 2025550123",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing abbreviates a domestic phone label with a period.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Tel. 030/12345678",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing publishes a slash-separated phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Tel. +49 (0)30 / 123 45 67",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": (
+                "The listing publishes an international slash-separated phone "
+                "number."
+            ),
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Contact 01.13.2026 89.01",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The number has an impossible date and time shape.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "business_activity",
+            "value": "Think tank",
+            "source_url": "https://uncited.example/organization",
+            "source_title": "Uncited",
+            "source_role": "other_public_source",
+            "identity_match_basis": "exact_name_only",
+            "reason": "No exact citation was returned.",
+            "confidence": 50,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Employee email: alice@example.test",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The directory exposes an employee email address.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "business_activity",
+            "value": "Contact +62 812 3456 7890",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The listing includes a personal phone number.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "CEO: Alice Doe",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The page names Alice Doe as CEO.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "C-suite: Alice Doe",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "The page lists Alice Doe in the leadership team.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+        {
+            "observation_type": "company_profile",
+            "value": "Management-team: Alice Doe",
+            "source_url": cited_url,
+            "source_title": "Example",
+            "source_role": "public_directory",
+            "identity_match_basis": "exact_name_only",
+            "reason": "Alice Doe is a team-member and joined the board.",
+            "confidence": 60,
+            "latitude": None,
+            "longitude": None,
+        },
+    ]
+
+    findings = normalize_public_web_organization_findings(
+        "Unistellar",
+        proposals,
+        sources=[{"title": "Example", "url": cited_url}],
+    )
+
+    values = {finding["value"] for finding in findings}
+    assert "Tel. 030/12345678" in values
+    assert "Tel. +49 (0)30 / 123 45 67" in values
+    assert "Employee email: alice@example.test" in values
+    assert "Alice Doe · +33.1.23.45.67.89" in values
+    assert "Home address: 8 Private Road, Jakarta 12730" not in values
+    assert "8 Private Road, Jakarta 12730" not in values
+    assert "CEO: Alice Doe" not in values
+    assert "C-suite: Alice Doe" not in values
+    assert "Management-team: Alice Doe" not in values
+    assert all(
+        finding["observation_type"] == "public_contact" for finding in findings
+    )
+    assert all(finding["review_status"] == "pending" for finding in findings)
+    assert all(
+        finding["automatic_approval_allowed"] is False for finding in findings
+    )
+    assert all(
+        finding["contact_scope"] in {"organization", "named_person", "unclear"}
+        for finding in findings
+    )
+    assert all(
+        "lawful analyst review" in finding["limitation"] for finding in findings
+    )
+
+
+def test_public_web_financial_figures_and_timestamps_are_not_phone_contacts():
+    cited_url = "https://example.org/company-results"
+    findings = normalize_public_web_organization_findings(
+        "Unistellar",
+        [
+            {
+                "observation_type": "business_activity",
+                "value": "2026 revenue: $1,234,567,890 (€ 1.234.567.890)",
+                "source_url": cited_url,
+                "source_title": "Unistellar results",
+                "source_role": "news_or_institutional",
+                "identity_match_basis": "exact_name_only",
+                "reason": (
+                    "The cited company results report this financial figure at "
+                    "2026-09-01 12:30."
+                ),
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+            {
+                "observation_type": "business_activity",
+                "value": "Reporting cut-off: 01.09.2026 12.30",
+                "source_url": cited_url,
+                "source_title": "Unistellar results",
+                "source_role": "news_or_institutional",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited company results publish this timestamp.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+        ],
+        sources=[{"title": "Unistellar results", "url": cited_url}],
+    )
+
+    assert len(findings) == 2
+    assert findings[0]["value"] == (
+        "2026 revenue: $1,234,567,890 (€ 1.234.567.890)"
+    )
+    assert findings[1]["value"] == "Reporting cut-off: 01.09.2026 12.30"
+
+
+def test_public_web_citation_titles_neutralize_contact_data_without_losing_sources():
+    sources = normalize_public_web_organization_sources(
+        [
+            {
+                "title": "Unistellar company profile",
+                "url": "https://www.linkedin.com/company/unistellar/",
+            },
+            {
+                "title": "Employee email alice@example.test",
+                "url": "https://example.org/company",
+            },
+            {
+                "title": "Public profile source",
+                "url": (
+                    "https://example.org/profile/alice-doe"
+                    "?email=alice@example.test"
+                ),
+            },
+            {
+                "title": "Alice Doe – CEO at Acme",
+                "url": "https://example.org/leadership",
+            },
+            {
+                "title": "Alice Doe joins Acme's C-suite",
+                "url": "https://example.org/executives",
+            },
+            {
+                "title": "Alice Doe joins Acme's board",
+                "url": "https://example.org/board",
+            },
+            {
+                "title": "Management-team: Alice Doe",
+                "url": "https://example.org/management",
+            },
+            {
+                "title": "Management―team: Alice Doe",
+                "url": "https://example.org/management-horizontal-bar",
+            },
+            {
+                "title": "Alice Doe is a team－member",
+                "url": "https://example.org/team-fullwidth-hyphen",
+            },
+            {
+                "title": "Management--team: Alice Doe",
+                "url": "https://example.org/management-double-hyphen",
+            },
+            {
+                "title": "Alice Doe is a team/_member",
+                "url": "https://example.org/team-mixed-separators",
+            },
+            {
+                "title": "Management\u200bteam: Alice Doe",
+                "url": "https://example.org/management-zero-width",
+            },
+            {
+                "title": "Alice Doe is a team.member",
+                "url": "https://example.org/team-punctuation",
+            },
+            {
+                "title": "Alice Doe · +33.1.23.45.67.89",
+                "url": "https://example.org/phone-dots",
+            },
+            {
+                "title": "+33\u202f1\u202f23\u202f45\u202f67\u202f89",
+                "url": "https://example.org/phone-unicode-space",
+            },
+            {
+                "title": "+33\u200b1\u200b23\u200b45\u200b67\u200b89",
+                "url": "https://example.org/phone-zero-width-space",
+            },
+            {
+                "title": "+\u200b376\u200b123\u200b456",
+                "url": "https://example.org/phone-short-zero-width-space",
+            },
+            {
+                "title": "Call\u200b+\u200b376\u200b123\u200b456",
+                "url": (
+                    "https://example.org/phone-labelled-short-zero-width-space"
+                ),
+            },
+            {
+                "title": "Phone: 202\u200b555\u200b0123",
+                "url": "https://example.org/phone-domestic-zero-width-space",
+            },
+            {
+                "title": "Call + 376 123 456",
+                "url": "https://example.org/phone-spaced-international",
+            },
+            {
+                "title": "Call + (376) 123 456",
+                "url": "https://example.org/phone-parenthesized-international",
+            },
+            {
+                "title": "+33\u20111\u201123\u201145\u201167\u201189",
+                "url": "https://example.org/phone-unicode-dashes",
+            },
+            {
+                "title": "Reception +376 123 456x123",
+                "url": "https://example.org/phone-with-extension",
+            },
+            {
+                "title": "Reception +376 123 456ext:123",
+                "url": "https://example.org/phone-with-colon-extension",
+            },
+            {
+                "title": "Phone: 2025550123",
+                "url": "https://example.org/phone-labelled-continuous-domestic",
+            },
+            {
+                "title": "Tel. 2025550123",
+                "url": "https://example.org/phone-abbreviated-label-period",
+            },
+            {
+                "title": "Tel. 030/12345678",
+                "url": "https://example.org/phone-slash-domestic",
+            },
+            {
+                "title": "Tel. +49 (0)30 / 123 45 67",
+                "url": "https://example.org/phone-slash-international",
+            },
+            {
+                "title": "Contact 01.13.2026 89.01",
+                "url": "https://example.org/impossible-date-phone",
+            },
+            {
+                "title": "Unistellar update 01.09.2026 12.30",
+                "url": "https://example.org/company-update",
+            },
+            {
+                "title": "LinkedIn member",
+                "url": "https://www.linkedin.com/in/alice-doe/",
+            },
+            {
+                "title": "LinkedIn member",
+                "url": "https://www.linkedin.com/%69n/alice-doe/",
+            },
+            {
+                "title": "LinkedIn member",
+                "url": (
+                    "https://www.linkedin.com/company/../in/alice-doe/"
+                ),
+            },
+            {
+                "title": "LinkedIn member",
+                "url": (
+                    "https://www.linkedin.com/company/%2e%2e/in/alice-doe/"
+                ),
+            },
+        ]
+    )
+
+    sources_by_url = {source["url"]: source for source in sources}
+    assert len(sources_by_url) == len(sources)
+    assert sources_by_url[
+        "https://www.linkedin.com/company/unistellar/"
+    ]["title"] == "Unistellar company profile"
+    assert sources_by_url[
+        "https://www.linkedin.com/company/unistellar/"
+    ]["source_scope"] == "organization"
+    assert sources_by_url[
+        "https://example.org/company-update"
+    ]["title"] == "Unistellar update 01.09.2026 12.30"
+    assert sources_by_url[
+        "https://example.org/phone-slash-domestic"
+    ]["title"] == "Public web source · example.org"
+    assert sources_by_url[
+        "https://example.org/phone-slash-domestic"
+    ]["source_scope"] == "public_contact"
+    assert sources_by_url[
+        "https://example.org/phone-slash-international"
+    ]["title"] == "Public web source · example.org"
+    assert sources_by_url[
+        "https://www.linkedin.com/in/alice-doe/"
+    ]["title"] == "Public professional profile source"
+    assert sources_by_url[
+        "https://www.linkedin.com/in/alice-doe/"
+    ]["source_scope"] == "public_contact"
+    assert sources_by_url[
+        "https://example.org/profile/alice-doe?email=alice@example.test"
+    ]["source_scope"] == "public_contact"
+    assert all("alice@example.test" not in source["title"] for source in sources)
+    assert all("030/12345678" not in source["title"] for source in sources)
+
+
+def test_organization_language_is_not_mistaken_for_person_role_data():
+    partner_url = "https://example.org/hospital-partnership"
+    board_games_url = "https://example.org/products/board-games"
+    sources = normalize_public_web_organization_sources(
+        [
+            {"title": "Acme partners with hospitals", "url": partner_url},
+            {"title": "Board games manufacturer", "url": board_games_url},
+            {
+                "title": "Alice Doe joins Acme's board",
+                "url": "https://example.org/alice-board-appointment",
+            },
+        ]
+    )
+    sources_by_url = {source["url"]: source for source in sources}
+
+    assert sources_by_url[partner_url]["source_scope"] == "organization"
+    assert sources_by_url[board_games_url]["source_scope"] == "organization"
+    assert sources_by_url[
+        "https://example.org/alice-board-appointment"
+    ]["source_scope"] == "public_contact"
+
+    findings = normalize_public_web_organization_findings(
+        "Acme",
+        [
+            {
+                "observation_type": "business_activity",
+                "value": "Acme partners with hospitals.",
+                "source_url": partner_url,
+                "source_title": "Acme partners with hospitals",
+                "source_role": "news_or_institutional",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited source describes a hospital partnership.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+            {
+                "observation_type": "business_activity",
+                "value": "Acme manufactures board games.",
+                "source_url": board_games_url,
+                "source_title": "Board games manufacturer",
+                "source_role": "official_organization",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited source describes the product category.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+        ],
+        sources=sources,
+    )
+
+    assert [finding["value"] for finding in findings] == [
+        "Acme partners with hospitals.",
+        "Acme manufactures board games.",
+    ]
+
+
+def test_public_contact_source_scope_survives_repeated_normalization():
+    source_url = "https://example.org/company"
+    first_pass = normalize_public_web_organization_sources(
+        [{"title": "Employee email alice@example.test", "url": source_url}]
+    )
+
+    assert first_pass == [
+        {
+            "title": "Public web source · example.org",
+            "url": source_url,
+            "source_scope": "public_contact",
+        }
+    ]
+    assert normalize_public_web_organization_sources(first_pass) == first_pass
+    assert normalize_public_web_organization_findings(
+        "Example",
+        [
+            {
+                "observation_type": "company_profile",
+                "value": "Example manufactures optical equipment.",
+                "source_url": source_url,
+                "source_title": "Public web source · example.org",
+                "source_role": "public_directory",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited page describes the organization.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            }
+        ],
+        sources=first_pass,
+    ) == []
+
+
+def test_phone_bearing_url_is_public_contact_provenance_only():
+    source_url = "https://example.org/contact?phone=202-555-0123"
+    sources = normalize_public_web_organization_sources(
+        [{"title": "Example contact page", "url": source_url}]
+    )
+
+    assert sources == [
+        {
+            "title": "Example contact page",
+            "url": source_url,
+            "source_scope": "public_contact",
+        }
+    ]
+    assert normalize_public_web_organization_findings(
+        "Example",
+        [
+            {
+                "observation_type": "company_profile",
+                "value": "Example manufactures optical equipment.",
+                "source_url": source_url,
+                "source_title": "Example contact page",
+                "source_role": "public_directory",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The cited page describes the organization.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            }
+        ],
+        sources=sources,
+    ) == []
+
+
+def test_public_contact_provenance_cannot_support_an_organization_observation():
+    source_url = "https://www.linkedin.com/in/alice-doe/"
+    findings = normalize_public_web_organization_findings(
+        "Unistellar",
+        [
+            {
+                "observation_type": "company_profile",
+                "value": "Unistellar",
+                "source_url": source_url,
+                "source_title": "Alice Doe profile",
+                "source_role": "professional_profile",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The profile mentions the organization name.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+            {
+                "observation_type": "public_contact",
+                "value": "Tel. 030/12345678",
+                "source_url": source_url,
+                "source_title": "Alice Doe profile",
+                "source_role": "professional_profile",
+                "identity_match_basis": "exact_name_only",
+                "reason": "The named employee profile publishes this phone number.",
+                "confidence": 60,
+                "latitude": None,
+                "longitude": None,
+            },
+        ],
+        sources=[{"title": "Alice Doe profile", "url": source_url}],
+    )
+
+    assert len(findings) == 1
+    assert findings[0]["observation_type"] == "public_contact"
+    assert findings[0]["source_scope"] == "public_contact"
+    assert findings[0]["contact_scope"] == "named_person"
+    assert findings[0]["automatic_approval_allowed"] is False
 
 
 @pytest.mark.asyncio

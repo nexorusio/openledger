@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import ipaddress
 import inspect
@@ -63,6 +64,10 @@ WIKIDATA_TIMEOUT_SECONDS = 30
 WIKIDATA_MAX_RESPONSE_BYTES = 1_000_000
 MAX_WIKIDATA_ENTITY_CANDIDATES = 5
 MAX_WIKIDATA_AFFILIATED_PEOPLE = 50
+MAX_WIKIDATA_CLASS_DEPTH = 4
+MAX_WIKIDATA_CLASS_IDS = 50
+MAX_WIKIDATA_CLASS_CLAIMS = 20
+MAX_WIKIDATA_PROPERTY_STATEMENTS = 100
 
 WIKIPEDIA_ENGINE = "wikipedia_public_biography"
 WIKIPEDIA_API_URL = "https://en.wikipedia.org/w/api.php"
@@ -117,6 +122,54 @@ _WIKIDATA_ORGANIZATION_INSTANCE_IDS = frozenset(
     }
 )
 MAX_ORGANIZATION_RESOLUTION_CANDIDATES = 15
+PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE = "openai_public_web_research"
+MAX_PUBLIC_WEB_ORGANIZATION_FINDINGS = 20
+
+GOOGLE_PLACES_ENGINE = "google_places_business_search"
+GOOGLE_PLACES_SEARCH_URL = "https://places.googleapis.com/v1/places:searchText"
+GOOGLE_PLACES_DETAILS_URL = "https://places.googleapis.com/v1/places"
+GOOGLE_PLACES_TIMEOUT_SECONDS = 15
+GOOGLE_PLACES_MAX_RESPONSE_BYTES = 256_000
+MAX_GOOGLE_PLACES_CANDIDATES = 5
+_GOOGLE_PLACE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{10,512}$")
+_GOOGLE_BUSINESS_LOCATION_TYPES = frozenset(
+    {
+        "academic_department",
+        "accounting",
+        "association_or_organization",
+        "bank",
+        "business_center",
+        "community_center",
+        "consultant",
+        "corporate_office",
+        "coworking_space",
+        "educational_institution",
+        "employment_agency",
+        "engineering_consultant",
+        "farm",
+        "finance",
+        "general_contractor",
+        "government_office",
+        "insurance_agency",
+        "internet_service_provider",
+        "lawyer",
+        "local_government_office",
+        "manufacturer",
+        "marketing_consultant",
+        "non_profit_organization",
+        "ranch",
+        "real_estate_agency",
+        "research_institute",
+        "school",
+        "software_company",
+        "supplier",
+        "telecommunications_service_provider",
+        "television_studio",
+        "travel_agency",
+        "university",
+        "wholesaler",
+    }
+)
 
 GLEIF_ENGINE = "gleif_lei_registry"
 GLEIF_API_URL = "https://api.gleif.org/api/v1/lei-records"
@@ -598,12 +651,119 @@ _PRIVATE_ADDRESS_PATTERN = re.compile(
     r"adresse personnelle|domicilio particular|endere[cç]o residencial)\b",
     re.IGNORECASE,
 )
+_EMAIL_ADDRESS_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]{1,64}"
+    r"@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?"
+    r"\.[A-Za-z]{2,63}(?![A-Za-z0-9.-])"
+)
+_PHONE_NUMBER_CANDIDATE_PATTERN = re.compile(
+    r"(?<![\w$€£¥])"
+    r"(?P<number>(?:\+\s*\(?\s*)?\d[\d.\s()-]{5,40}\d)"
+    r"(?:\s*(?:ext(?:ension)?|x|#)\s*[:.,;=-]?\s*\d{1,8})?(?!\w)",
+    re.IGNORECASE,
+)
+_PHONE_LABEL_PATTERN = re.compile(
+    r"\b(?:mobile|phone|tel(?:ephone)?|whatsapp)"
+    r"\s*(?:number|no\.?)?\s*[:.,;=-]?\s*$",
+    re.IGNORECASE,
+)
+_LABELED_PHONE_NUMBER_PATTERN = re.compile(
+    r"\b(?:mobile|phone|tel(?:ephone)?|whatsapp)"
+    r"\s*(?:number|no\.?)?\s*[:.,;=-]?\s*"
+    r"(?P<number>(?:\+\s*\(?\s*)?\d[\d.\s()/\-]{5,40}\d)"
+    r"(?:\s*(?:ext(?:ension)?|x|#)\s*[:.,;=-]?\s*\d{1,8})?(?!\w)",
+    re.IGNORECASE,
+)
+_DATE_LIKE_NUMBER_PATTERN = re.compile(
+    r"^(?P<first>\d{1,4})(?P<date_separator>[-/.])"
+    r"(?P<second>\d{1,2})(?P=date_separator)(?P<third>\d{1,4})"
+    r"(?:[T\s]+(?P<hour>\d{1,2})"
+    r"(?:(?P<time_separator>[:.])(?P<minute>\d{2})"
+    r"(?:(?P=time_separator)(?P<time_second>\d{2}))?)?)?$"
+)
+_GROUPED_FINANCIAL_NUMBER_PATTERN = re.compile(
+    r"^\d{1,3}(?:[ .]\d{3}){2,}$"
+)
+_DECIMAL_NUMBER_PATTERN = re.compile(r"^\d{1,3}\.\d{4,}$")
+_PERSONAL_DATA_CONTEXT_PATTERN = re.compile(
+    r"(?:\b(?:employee|staff member)(?:'s|’s)?\b|"
+    r"\b(?:individual|personal|private)(?:'s|’s)?\s+"
+    r"(?:address|contact|data|details?|email|home|mobile|phone|residence|"
+    r"whatsapp)\b)",
+    re.IGNORECASE,
+)
+_PERSON_ROLE_LABEL_PATTERN = re.compile(
+    r"\b(?:advisers?|advisors?|board members?|board of directors|c suite|"
+    r"ceo|cfo|chair|chairman|chairperson|chairwoman|"
+    r"chief [a-z][a-z -]{1,40} officer|"
+    r"chief executive officer|chief financial officer|chief operating officer|"
+    r"chief technology officer|cio|cmo|coo|counsel|cto|directors?|employees?|"
+    r"executive team|executives?|founders?|heads? of|lawyers?|leadership|"
+    r"management team|managers?|officers?|owners?|personnel|"
+    r"presidents?|professors?|secretar(?:y|ies)|staff members?|team members?|"
+    r"treasurers?|vice[- ]presidents?|vp)\b",
+    re.IGNORECASE,
+)
+_PERSON_NAME_TOKEN = r"[A-ZÀ-ÖØ-Þ][A-Za-zÀ-ÖØ-öø-ÿ'’.\-]{0,60}"
+_NAMED_AMBIGUOUS_PERSON_ROLE_PATTERN = re.compile(
+    rf"(?:\b{_PERSON_NAME_TOKEN}(?:\s+{_PERSON_NAME_TOKEN}){{1,5}}\b"
+    rf"(?:(?:\s*[,·:—-]\s*|\s+)(?:is\s+|serves?\s+as\s+|named\s+)?"
+    rf"(?:a\s+|managing\s+)?partner\b|"
+    rf".{{0,80}}\b(?:joins?|joined|appointed|elected|serves?\s+on)\b"
+    rf".{{0,80}}\bboard\b)|"
+    rf"\bpartners?\s*[:·—-]\s*{_PERSON_NAME_TOKEN}"
+    rf"(?:\s+{_PERSON_NAME_TOKEN}){{1,5}}\b)"
+)
+_BUSINESS_LOCATION_CONTEXT_PATTERN = re.compile(
+    r"\b(?:business|company|commercial|corporate|organization|organisation|"
+    r"office|headquarters?|head office|registered office|branch|store|facility|"
+    r"operations?|workplace|kantor|lokasi bisnis|si[eè]ge|sede)\b",
+    re.IGNORECASE,
+)
+_HEADQUARTERS_LABEL_PATTERN = re.compile(
+    r"\b(?:headquarters?|head office|hq|kantor pusat|si[eè]ge(?: social)?|"
+    r"sede (?:central|principal)|hauptsitz)\b",
+    re.IGNORECASE,
+)
 _ADDRESS_CONTEXT_PATTERN = re.compile(
     r"(?:address|alamat|adresse|direcci[oó]n|endere[cç]o|indirizzo|anschrift|"
     r"contact|location|office|headquarter|registered[-_ ]office|si[eè]ge|sede|"
     r"kantor|lokasi|ubicaci[oó]n|localiza[cç][aã]o|所在地|地址|주소|адрес|العنوان)",
     re.IGNORECASE,
 )
+
+
+def _is_semantically_valid_date_like_number(value: str) -> bool:
+    match = _DATE_LIKE_NUMBER_PATTERN.fullmatch(value)
+    if match is None:
+        return False
+    first = match.group("first")
+    second = match.group("second")
+    third = match.group("third")
+    date_orders = []
+    if len(first) == 4 and len(third) <= 2:
+        date_orders.append((int(first), int(second), int(third)))
+    elif len(third) == 4 and len(first) <= 2:
+        # Accept both day-first and month-first public date conventions.
+        date_orders.extend(
+            (
+                (int(third), int(second), int(first)),
+                (int(third), int(first), int(second)),
+            )
+        )
+    else:
+        return False
+
+    hour = int(match.group("hour") or 0)
+    minute = int(match.group("minute") or 0)
+    time_second = int(match.group("time_second") or 0)
+    for year, month, day in date_orders:
+        try:
+            datetime(year, month, day, hour, minute, time_second)
+        except ValueError:
+            continue
+        return True
+    return False
 
 
 def _looks_like_public_address(value: Any) -> bool:
@@ -620,6 +780,439 @@ def _looks_like_public_address(value: Any) -> bool:
             )
         )
     )
+
+
+def _normalize_phone_scan_text(value: str) -> str:
+    """Remove invisible number separators without erasing token boundaries."""
+    normalized = unicodedata.normalize("NFKC", value)
+    output = []
+    for index, character in enumerate(normalized):
+        category = unicodedata.category(character)
+        if category == "Pd":
+            output.append("-")
+            continue
+        if category != "Cf":
+            output.append(character)
+            continue
+        previous_character = output[-1] if output else ""
+        next_character = next(
+            (
+                candidate
+                for candidate in normalized[index + 1 :]
+                if unicodedata.category(candidate) != "Cf"
+            ),
+            "",
+        )
+        if previous_character == "+" and next_character.isdigit():
+            continue
+        output.append(" ")
+    return "".join(output)
+
+
+def _contains_public_phone_number(value: Any) -> bool:
+    """Recognize bounded public phone representations without broad digit matching."""
+    text = _bounded_text(value, limit=3000)
+    if not text:
+        return False
+    phone_text = _normalize_phone_scan_text(text)
+    # Slash-separated area-code formats are common in public directories (for
+    # example ``Tel. 030/12345678``). Keep slash support confined to an
+    # explicit phone label so dates, ratios, and other slash-delimited numbers
+    # do not become contact-data false positives.
+    for match in _LABELED_PHONE_NUMBER_PATTERN.finditer(phone_text):
+        candidate = match.group("number").strip()
+        digit_count = sum(character.isdigit() for character in candidate)
+        if (
+            7 <= digit_count <= 15
+            and not _is_semantically_valid_date_like_number(candidate)
+            and not _GROUPED_FINANCIAL_NUMBER_PATTERN.fullmatch(candidate)
+        ):
+            return True
+    for match in _PHONE_NUMBER_CANDIDATE_PATTERN.finditer(phone_text):
+        candidate = match.group("number").strip()
+        digit_count = sum(character.isdigit() for character in candidate)
+        currency_prefix = phone_text[max(0, match.start() - 4) : match.start()]
+        if (
+            _is_semantically_valid_date_like_number(candidate)
+            or _GROUPED_FINANCIAL_NUMBER_PATTERN.fullmatch(candidate)
+            or _DECIMAL_NUMBER_PATTERN.fullmatch(candidate)
+            or re.search(r"[$€£¥]\s*$", currency_prefix)
+        ):
+            continue
+        if 7 <= digit_count <= 15 and candidate.startswith("+"):
+            return True
+        phone_label_prefix = phone_text[max(0, match.start() - 48) : match.start()]
+        if 7 <= digit_count <= 15 and _PHONE_LABEL_PATTERN.search(
+            phone_label_prefix
+        ):
+            return True
+        if 10 <= digit_count <= 15 and any(
+            separator in candidate for separator in (" ", ".", "(", ")", "-")
+        ):
+            return True
+    return False
+
+
+def _contains_public_contact_data(value: Any) -> bool:
+    text = _bounded_text(value, limit=3000)
+    return bool(
+        text
+        and (
+            _EMAIL_ADDRESS_PATTERN.search(text)
+            or _contains_public_phone_number(text)
+        )
+    )
+
+
+def _public_contact_scope(value: Any, reason: Any) -> str:
+    """Classify, but never infer, who a cited public contact appears to describe."""
+    text = _bounded_text(f"{value} {reason}", limit=4000)
+    role_text = " ".join(
+        "".join(
+            character if character.isalnum() else " "
+            for character in unicodedata.normalize("NFKC", text)
+        ).split()
+    )
+    if (
+        _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
+        or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
+        or _NAMED_AMBIGUOUS_PERSON_ROLE_PATTERN.search(text)
+    ):
+        return "named_person"
+    if _BUSINESS_LOCATION_CONTEXT_PATTERN.search(text):
+        return "organization"
+    return "unclear"
+
+
+def _contains_personal_organization_data(value: Any) -> bool:
+    """Keep person-level data out of organization-only observation types."""
+    text = _bounded_text(value, limit=3000)
+    role_text = " ".join(
+        "".join(
+            character if character.isalnum() else " "
+            for character in unicodedata.normalize("NFKC", text)
+        ).split()
+    )
+    if (
+        not text
+        or _PRIVATE_ADDRESS_PATTERN.search(text)
+        or _EMAIL_ADDRESS_PATTERN.search(text)
+        or _PERSONAL_DATA_CONTEXT_PATTERN.search(text)
+        # Organization context observations never carry officer/employee roles;
+        # named people belong in the provenance-linked Persona proposal workflow.
+        or _PERSON_ROLE_LABEL_PATTERN.search(role_text)
+        or _NAMED_AMBIGUOUS_PERSON_ROLE_PATTERN.search(text)
+    ):
+        return bool(text)
+    return _contains_public_phone_number(text)
+
+
+def normalize_public_web_organization_sources(sources: Any) -> List[Dict[str, str]]:
+    """Retain bounded public citations with privacy-safe display titles.
+
+    A title that repeats person-level data is replaced rather than causing the
+    entire citation to disappear. Authorized investigators therefore retain
+    the exact public provenance URL while unreviewed contact data cannot leak
+    into an organization finding or citation label.
+    """
+    output = []
+    seen = set()
+    for source in list(sources or [])[:100]:
+        if not isinstance(source, dict):
+            continue
+        source_url = _safe_public_url(source.get("url"))
+        if not source_url or source_url in seen:
+            continue
+        source_title = _bounded_text(source.get("title"), limit=300)
+        parsed_source = urlparse(source_url)
+        source_domain = (parsed_source.hostname or "").casefold().rstrip(".")
+        decoded_url = unicodedata.normalize("NFKC", unquote(source_url))
+        decoded_path = unicodedata.normalize("NFKC", unquote(parsed_source.path))
+        decoded_path_segments = decoded_path.replace("\\", "/").split("/")
+        personal_profile_url = bool(
+            (
+                source_domain == "linkedin.com"
+                or source_domain.endswith(".linkedin.com")
+            )
+            and (
+                decoded_path.casefold().startswith(("/in/", "/pub/"))
+                or "%" in decoded_path
+                or "\\" in decoded_path
+                or any(
+                    segment in {".", ".."}
+                    for segment in decoded_path_segments
+                )
+            )
+        )
+        title_has_person_data = bool(
+            source_title and _contains_personal_organization_data(source_title)
+        )
+        existing_public_contact_scope = (
+            str(source.get("source_scope") or "").strip().casefold()
+            == "public_contact"
+        )
+        source_scope = (
+            "public_contact"
+            if (
+                existing_public_contact_scope
+                or personal_profile_url
+                or _EMAIL_ADDRESS_PATTERN.search(decoded_url)
+                or _contains_public_phone_number(decoded_url)
+                or title_has_person_data
+            )
+            else "organization"
+        )
+        if personal_profile_url:
+            source_title = "Public professional profile source"
+        elif title_has_person_data:
+            source_title = (
+                f"Public web source · {source_domain}"
+                if source_domain
+                else "Public web source"
+            )
+        elif not source_title:
+            source_title = source_domain or "Public web source"
+        seen.add(source_url)
+        output.append(
+            {
+                "title": source_title,
+                "url": source_url,
+                "source_scope": source_scope,
+            }
+        )
+    return output
+
+
+def normalize_public_web_organization_findings(
+    organization_name: str,
+    proposals: Any,
+    *,
+    sources: Any,
+    official_website: Any = None,
+) -> List[Dict[str, Any]]:
+    """Bind AI-extracted organization observations to exact web citations."""
+    organization_name = normalize_affiliation_name(organization_name)
+    citation_sources: Dict[str, Dict[str, str]] = {}
+    for source in normalize_public_web_organization_sources(sources):
+        citation_sources[source["url"]] = source
+
+    if isinstance(official_website, dict):
+        official_website = official_website.get("url")
+    try:
+        normalized_official_website = normalize_official_website_url(
+            official_website
+        )
+    except ValueError:
+        normalized_official_website = None
+    official_domain = str(
+        (normalized_official_website or {}).get("domain") or ""
+    )
+
+    allowed_types = {
+        "organization_identity",
+        "company_profile",
+        "business_address",
+        "headquarters",
+        "business_activity",
+        "public_contact",
+    }
+    allowed_source_roles = {
+        "official_organization",
+        "legal_registry",
+        "professional_profile",
+        "map_listing",
+        "public_directory",
+        "news_or_institutional",
+        "other_public_source",
+    }
+    allowed_match_bases = {
+        "exact_name_and_official_website",
+        "exact_name_and_location",
+        "exact_name_only",
+    }
+    output = []
+    seen = set()
+    for raw in list(proposals or [])[:100]:
+        if not isinstance(raw, dict):
+            continue
+        observation_type = str(raw.get("observation_type") or "").strip()
+        source_url = _safe_public_url(raw.get("source_url"))
+        match_basis = str(raw.get("identity_match_basis") or "").strip()
+        if (
+            observation_type not in allowed_types
+            or not source_url
+            or source_url not in citation_sources
+            or match_basis not in allowed_match_bases
+        ):
+            continue
+        value = _bounded_text(raw.get("value"), limit=1500)
+        reason = _bounded_text(raw.get("reason"), limit=2000)
+        if not value or not reason:
+            continue
+        # A model may use an older organization observation type for an exact
+        # public phone or email. Preserve the cited lead, but reclassify it so it
+        # cannot masquerade as a company profile, activity, address, or fact.
+        if _contains_public_contact_data(value):
+            observation_type = "public_contact"
+        if observation_type == "public_contact":
+            if (
+                not _contains_public_contact_data(value)
+                or _PRIVATE_ADDRESS_PATTERN.search(value)
+                or _PRIVATE_ADDRESS_PATTERN.search(reason)
+            ):
+                continue
+            contact_scope = _public_contact_scope(value, reason)
+        else:
+            if _contains_personal_organization_data(
+                value
+            ) or _contains_personal_organization_data(reason):
+                continue
+            contact_scope = None
+        source_scope = citation_sources[source_url].get(
+            "source_scope", "organization"
+        )
+        if source_scope == "public_contact" and observation_type != "public_contact":
+            continue
+        if observation_type == "business_address" and (
+            not _looks_like_public_address(value)
+            or not _BUSINESS_LOCATION_CONTEXT_PATTERN.search(reason)
+        ):
+            continue
+        if observation_type == "headquarters" and (
+            len(value) < 2
+            or not _HEADQUARTERS_LABEL_PATTERN.search(reason)
+            or not _BUSINESS_LOCATION_CONTEXT_PATTERN.search(reason)
+        ):
+            continue
+
+        parsed_source = urlparse(source_url)
+        source_domain = (parsed_source.hostname or "").casefold().rstrip(".")
+        source_role = str(raw.get("source_role") or "").strip()
+        if source_role not in allowed_source_roles:
+            continue
+        if source_domain == "linkedin.com" or source_domain.endswith(
+            ".linkedin.com"
+        ):
+            source_role = "professional_profile"
+        elif (
+            source_domain in {"google.com", "www.google.com", "maps.google.com"}
+            and parsed_source.path.startswith("/maps")
+        ) or source_domain == "maps.app.goo.gl":
+            source_role = "map_listing"
+        elif official_domain and _domains_equivalent(
+            source_domain, official_domain
+        ):
+            source_role = "official_organization"
+        elif source_role in {"official_organization", "legal_registry"}:
+            # Arbitrary web citations cannot acquire first-party or governed-registry
+            # authority from a model label. Dedicated adapters retain those scopes.
+            source_role = "other_public_source"
+
+        try:
+            confidence = int(raw.get("confidence"))
+        except (TypeError, ValueError):
+            continue
+        confidence = max(0, min(confidence, 85))
+        if match_basis == "exact_name_only":
+            confidence = min(confidence, 60)
+        if source_role in {"professional_profile", "map_listing", "public_directory"}:
+            confidence = min(confidence, 75)
+
+        latitude = raw.get("latitude")
+        longitude = raw.get("longitude")
+        if observation_type not in {"business_address", "headquarters"}:
+            latitude = longitude = None
+        elif latitude is None or longitude is None:
+            latitude = longitude = None
+        else:
+            try:
+                latitude = float(latitude)
+                longitude = float(longitude)
+            except (TypeError, ValueError):
+                latitude = longitude = None
+            if (
+                latitude is not None
+                and not (-90 <= latitude <= 90 and -180 <= longitude <= 180)
+            ):
+                latitude = longitude = None
+
+        if observation_type == "public_contact":
+            limitation = (
+                "This exact phone or email is retained as a cited public investigative "
+                "lead. It may describe an organization, a named person, or an unclear "
+                "contact context; it is not an identity, affiliation, ownership, or "
+                "organization fact and requires lawful analyst review before use."
+            )
+        elif source_role == "professional_profile":
+            limitation = (
+                "This is a third-party professional company profile and may be "
+                "self-reported, incomplete, or stale. OpenLedger did not directly "
+                "fetch or scrape the platform page; confirm the observation before use."
+            )
+        elif source_role == "map_listing":
+            limitation = (
+                "This is a third-party map/business listing, not legal-registry or "
+                "first-party website evidence. OpenLedger did not directly fetch or "
+                "scrape the map page; confirm the observation before use."
+            )
+        elif source_role == "official_organization":
+            limitation = (
+                "This cited first-party statement may describe a contact, office, "
+                "mailing, historical, or other operating context. It does not prove "
+                "legal registration or the complete operating footprint."
+            )
+        elif source_role == "legal_registry":
+            limitation = (
+                "This cited registry statement applies only to the identified public "
+                "record and jurisdiction. It does not prove every operating location."
+            )
+        else:
+            limitation = (
+                "This third-party public-web observation may be incomplete or stale "
+                "and requires corroboration before it becomes case fact."
+            )
+        if observation_type == "headquarters":
+            limitation += (
+                " The headquarters label is retained only as the cited source's label, "
+                "not as an independently verified conclusion."
+            )
+
+        fingerprint_source = (
+            f"{organization_name.casefold()}\0{observation_type}\0"
+            f"{value.casefold()}\0{source_url}"
+        )
+        fingerprint = hashlib.sha256(
+            fingerprint_source.encode("utf-8")
+        ).hexdigest()
+        if fingerprint in seen:
+            continue
+        seen.add(fingerprint)
+        finding = {
+            "source_engine": PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+            "source_record_id": f"public-web-organization:{fingerprint[:32]}",
+            "organization_name": organization_name,
+            "observation_type": observation_type,
+            "value": value,
+            "source_url": source_url,
+            "source_title": citation_sources[source_url]["title"],
+            "source_scope": source_scope,
+            "source_role": source_role,
+            "identity_match_basis": match_basis,
+            "basis": reason,
+            "limitation": limitation,
+            "confidence": confidence,
+            "latitude": latitude,
+            "longitude": longitude,
+            "review_status": "pending",
+            "automatic_approval_allowed": False,
+            "direct_platform_fetch_performed": False,
+        }
+        if contact_scope:
+            finding["contact_scope"] = contact_scope
+        output.append(finding)
+        if len(output) >= MAX_PUBLIC_WEB_ORGANIZATION_FINDINGS:
+            break
+    return output
 
 
 def _address_context_attribute(node: Any) -> bool:
@@ -1156,7 +1749,9 @@ def normalize_wikidata_entity_candidates(
 def _wikidata_claim_values(entity: Dict[str, Any], property_id: str) -> List[Any]:
     claims = entity.get("claims") if isinstance(entity.get("claims"), dict) else {}
     output = []
-    for statement in list(claims.get(property_id) or [])[:100]:
+    statements = list(claims.get(property_id) or [])
+    statements = statements[:MAX_WIKIDATA_PROPERTY_STATEMENTS]
+    for statement in statements:
         if not isinstance(statement, dict) or statement.get("rank") == "deprecated":
             continue
         mainsnak = statement.get("mainsnak")
@@ -1194,26 +1789,35 @@ def normalize_wikidata_organization(entity_id: str, payload: Any) -> Dict[str, A
             websites.append(value)
         if len(websites) >= 5:
             break
-    instance_of = []
-    for raw in _wikidata_claim_values(entity, "P31"):
-        value = raw.get("id") if isinstance(raw, dict) else None
-        value = str(value or "").strip().upper()
-        if _WIKIDATA_ID_PATTERN.fullmatch(value) and value not in instance_of:
-            instance_of.append(value)
+    instance_of, _instance_of_incomplete = (
+        _bounded_wikidata_class_claim_ids(entity, "P31")
+    )
     return {
         "id": entity_id,
         "label": label,
         "description": _wikidata_language_value(entity, "descriptions", 1000),
         "url": _wikidata_item_url(entity_id),
         "official_websites": websites,
-        "instance_of": instance_of[:20],
+        "instance_of": instance_of,
     }
 
 
 def enrich_wikidata_organization_candidates(
-    candidates: Any, entity_payload: Any
+    candidates: Any,
+    entity_payload: Any,
+    *,
+    organization_class_ids: Any = None,
+    type_resolution_status: str = "ok",
 ) -> List[Dict[str, Any]]:
     """Attach bounded type evidence before a Wikidata item is selectable."""
+    verified_class_ids = set(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+    verified_class_ids.update(
+        str(value or "").strip().upper()
+        for value in list(organization_class_ids or [])[
+            :MAX_WIKIDATA_CLASS_IDS
+        ]
+        if _WIKIDATA_ID_PATTERN.fullmatch(str(value or "").strip().upper())
+    )
     output = []
     for raw_candidate in list(candidates or [])[:MAX_WIKIDATA_ENTITY_CANDIDATES]:
         if not isinstance(raw_candidate, dict):
@@ -1230,8 +1834,10 @@ def enrich_wikidata_organization_candidates(
             if isinstance(organization, dict)
             else []
         )
-        organization_eligible = bool(
-            set(instance_of).intersection(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+        organization_eligible = bool(set(instance_of).intersection(verified_class_ids))
+        type_unavailable = bool(
+            not organization_eligible
+            and type_resolution_status not in {"ok", "not_needed"}
         )
         candidate = dict(raw_candidate)
         candidate.update(
@@ -1242,24 +1848,233 @@ def enrich_wikidata_organization_candidates(
                     else []
                 ),
                 "instance_of": instance_of,
-                "organization_eligible": organization_eligible,
+                "organization_eligible": (
+                    None if type_unavailable else organization_eligible
+                ),
                 "organization_type_status": (
                     "verified_organization"
                     if organization_eligible
-                    else "not_verified_as_organization"
+                    else (
+                        "type_verification_unavailable"
+                        if type_unavailable
+                        else "not_verified_as_organization"
+                    )
                 ),
                 "type_note": (
                     "Wikidata type evidence identifies this item as an organization."
                     if organization_eligible
                     else (
-                        "Wikidata did not provide a supported organization type for "
-                        "this item. It cannot be selected as the case organization."
+                        "Wikidata type hierarchy verification was unavailable. "
+                        "Retry before treating this item as ineligible."
+                        if type_unavailable
+                        else (
+                            "Wikidata did not provide an organization type within "
+                            "the bounded subclass hierarchy. It cannot be selected "
+                            "as the case organization."
+                        )
                     )
                 ),
             }
         )
         output.append(candidate)
     return output
+
+
+def _bounded_wikidata_class_claim_ids(
+    entity: Dict[str, Any], property_id: str
+) -> tuple[List[str], bool]:
+    """Return bounded class IDs and whether any class evidence is unresolved."""
+    claims = entity.get("claims")
+    if not isinstance(claims, dict):
+        return [], True
+    raw_claims = claims.get(property_id)
+    if raw_claims is None:
+        return [], False
+    if not isinstance(raw_claims, list):
+        return [], True
+
+    incomplete = len(raw_claims) > MAX_WIKIDATA_PROPERTY_STATEMENTS
+    valid_ids = []
+    for statement in raw_claims[:MAX_WIKIDATA_PROPERTY_STATEMENTS]:
+        if not isinstance(statement, dict):
+            incomplete = True
+            continue
+        if statement.get("rank") == "deprecated":
+            continue
+        mainsnak = statement.get("mainsnak")
+        if not isinstance(mainsnak, dict):
+            incomplete = True
+            continue
+        snak_type = str(mainsnak.get("snaktype") or "").strip().lower()
+        if snak_type == "novalue":
+            continue
+        if snak_type == "somevalue":
+            incomplete = True
+            continue
+        if snak_type != "value":
+            incomplete = True
+            continue
+        datavalue = mainsnak.get("datavalue")
+        value = datavalue.get("value") if isinstance(datavalue, dict) else None
+        entity_id = value.get("id") if isinstance(value, dict) else None
+        entity_id = str(entity_id or "").strip().upper()
+        if _WIKIDATA_ID_PATTERN.fullmatch(entity_id):
+            valid_ids.append(entity_id)
+        else:
+            incomplete = True
+    return (
+        valid_ids[:MAX_WIKIDATA_CLASS_CLAIMS],
+        incomplete or len(valid_ids) > MAX_WIKIDATA_CLASS_CLAIMS,
+    )
+
+
+def _wikidata_instance_ids(
+    entity_payload: Any, expected_entity_ids: Any = None
+) -> tuple[List[str], bool]:
+    entities = (
+        entity_payload.get("entities")
+        if isinstance(entity_payload, dict)
+        else None
+    )
+    if not isinstance(entities, dict):
+        return [], True
+
+    output = []
+    truncated = False
+    if expected_entity_ids is None:
+        entity_items = list(entities.items())[:MAX_WIKIDATA_ENTITY_CANDIDATES]
+        truncated = len(entities) > len(entity_items)
+    else:
+        expected_ids = []
+        for raw_id in list(expected_entity_ids or []):
+            entity_id = str(raw_id or "").strip().upper()
+            if (
+                _WIKIDATA_ID_PATTERN.fullmatch(entity_id)
+                and entity_id not in expected_ids
+            ):
+                expected_ids.append(entity_id)
+        truncated = len(expected_ids) > MAX_WIKIDATA_ENTITY_CANDIDATES
+        expected_ids = expected_ids[:MAX_WIKIDATA_ENTITY_CANDIDATES]
+        entity_items = [
+            (entity_id, entities.get(entity_id))
+            for entity_id in expected_ids
+        ]
+
+    for _entity_id, entity in entity_items:
+        if (
+            not isinstance(entity, dict)
+            or "missing" in entity
+            or "invalid" in entity
+        ):
+            truncated = True
+            continue
+        instance_ids, entity_truncated = _bounded_wikidata_class_claim_ids(
+            entity, "P31"
+        )
+        truncated = truncated or entity_truncated
+        for entity_id in instance_ids:
+            if entity_id not in output:
+                output.append(entity_id)
+    return output, truncated
+
+
+async def _resolve_wikidata_organization_classes(
+    session: Any, entity_payload: Any, *, expected_entity_ids: Any = None
+) -> tuple[str, set[str]]:
+    """Resolve a bounded P279 hierarchy for candidate P31 values."""
+    initial_ids, truncated = _wikidata_instance_ids(
+        entity_payload, expected_entity_ids
+    )
+    all_unresolved = [
+        entity_id
+        for entity_id in initial_ids
+        if entity_id not in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
+    ]
+    unresolved = all_unresolved[:MAX_WIKIDATA_CLASS_IDS]
+    if not unresolved:
+        return ("truncated" if truncated else "not_needed"), set()
+
+    graph: Dict[str, set[str]] = {}
+
+    def resolved_classes() -> set[str]:
+        verified = set(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+        changed = True
+        while changed:
+            changed = False
+            for child_id, parent_ids in graph.items():
+                if child_id not in verified and parent_ids.intersection(verified):
+                    verified.add(child_id)
+                    changed = True
+        return verified.difference(_WIKIDATA_ORGANIZATION_INSTANCE_IDS)
+
+    visited = set()
+    frontier = unresolved
+    truncated = truncated or len(all_unresolved) > len(unresolved)
+    for _depth in range(MAX_WIKIDATA_CLASS_DEPTH):
+        frontier = [
+            entity_id
+            for entity_id in frontier
+            if entity_id not in visited
+        ][:MAX_WIKIDATA_CLASS_IDS]
+        if not frontier:
+            break
+        visited.update(frontier)
+        status, payload, _retry_after = await _bounded_wikidata_json(
+            session,
+            WIKIDATA_API_URL,
+            params={
+                "action": "wbgetentities",
+                "ids": "|".join(frontier),
+                "props": "claims",
+                "format": "json",
+                "formatversion": "2",
+            },
+        )
+        if status != "ok":
+            return status, resolved_classes()
+        entities = payload.get("entities") if isinstance(payload, dict) else None
+        if not isinstance(entities, dict):
+            return "invalid_response", resolved_classes()
+        next_frontier = []
+        next_frontier_ids = set()
+        for entity_id in frontier:
+            entity = entities.get(entity_id)
+            if (
+                not isinstance(entity, dict)
+                or "missing" in entity
+                or "invalid" in entity
+            ):
+                truncated = True
+                graph[entity_id] = set()
+                continue
+            parents = set()
+            parent_ids, entity_truncated = _bounded_wikidata_class_claim_ids(
+                entity, "P279"
+            )
+            truncated = truncated or entity_truncated
+            for parent_id in parent_ids:
+                parents.add(parent_id)
+                if (
+                    parent_id in _WIKIDATA_ORGANIZATION_INSTANCE_IDS
+                    or parent_id in visited
+                    or parent_id in next_frontier_ids
+                ):
+                    continue
+                if (
+                    len(visited) + len(next_frontier)
+                    >= MAX_WIKIDATA_CLASS_IDS
+                ):
+                    truncated = True
+                    continue
+                next_frontier.append(parent_id)
+                next_frontier_ids.add(parent_id)
+            graph[entity_id] = parents
+        frontier = next_frontier
+
+    return (
+        "truncated" if truncated or frontier else "ok",
+        resolved_classes(),
+    )
 
 
 def _wikidata_binding_id(value: Any, pattern: re.Pattern[str]) -> str:
@@ -1466,6 +2281,352 @@ async def _bounded_registry_json(
         raise RuntimeError(f"{source_name} returned invalid JSON") from error
 
 
+async def _bounded_google_places_json(
+    request: Any,
+    *,
+    maximum_bytes: int = GOOGLE_PLACES_MAX_RESPONSE_BYTES,
+):
+    """Read one fixed-origin Google Places response without following redirects."""
+    async with request as response:
+        retry_after = str(response.headers.get("Retry-After") or "")[:40]
+        if response.status == 429:
+            return "rate_limited", None, retry_after
+        if response.status == 404:
+            return "not_found", None, retry_after
+        if response.status in {401, 403}:
+            raise RuntimeError(
+                "Google Places rejected the server credential or API restrictions"
+            )
+        if response.status != 200:
+            raise RuntimeError(
+                f"Google Places returned HTTP {int(response.status)}"
+            )
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError) as error:
+                raise RuntimeError(
+                    "Google Places returned an invalid response length"
+                ) from error
+            if declared_length < 0 or declared_length > maximum_bytes:
+                raise RuntimeError("Google Places returned an oversized response")
+        body = await response.content.read(maximum_bytes + 1)
+        if len(body) > maximum_bytes:
+            raise RuntimeError("Google Places returned an oversized response")
+    try:
+        payload = json.loads(body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("Google Places returned invalid JSON") from error
+    if not isinstance(payload, dict):
+        raise RuntimeError("Google Places returned an invalid document")
+    return "ok", payload, retry_after
+
+
+def _google_places_source_url(place_id: str, organization_name: str) -> str:
+    return (
+        "https://www.google.com/maps/search/?api=1&query="
+        f"{quote(organization_name)}&query_place_id={quote(place_id)}"
+    )
+
+
+def normalize_google_places_search_candidates(
+    organization_name: str, payload: Any
+) -> List[Dict[str, Any]]:
+    """Retain only stable Place IDs; Google business content remains live-only."""
+    organization_name = normalize_affiliation_name(organization_name)
+    places = payload.get("places") if isinstance(payload, dict) else None
+    if places is None:
+        return []
+    if not isinstance(places, list):
+        raise ValueError("Google Places returned an invalid candidate list")
+    candidates = []
+    seen = set()
+    for place in places[:MAX_GOOGLE_PLACES_CANDIDATES]:
+        place_id = str(
+            place.get("id") if isinstance(place, dict) else ""
+        ).strip()
+        if not _GOOGLE_PLACE_ID_PATTERN.fullmatch(place_id) or place_id in seen:
+            continue
+        seen.add(place_id)
+        candidates.append(
+            {
+                "place_id": place_id,
+                "source_url": _google_places_source_url(
+                    place_id, organization_name
+                ),
+                "review_status": "pending",
+                "automatic_approval_allowed": False,
+                "durable_google_content_stored": False,
+            }
+        )
+    return candidates
+
+
+async def run_google_places_business_search(
+    organization_name: str,
+    api_key: str,
+    *,
+    legal_jurisdiction: Any = None,
+    timeout_seconds: int = GOOGLE_PLACES_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Run one bounded Places Text Search and persist only stable Place IDs."""
+    organization_name = normalize_affiliation_name(organization_name)
+    api_key = str(api_key or "").strip()
+    if not 8 <= len(api_key) <= 512 or any(
+        ord(character) < 33 for character in api_key
+    ):
+        raise ValueError("A valid Google Maps Platform API key is required")
+    if isinstance(legal_jurisdiction, dict):
+        legal_jurisdiction = normalize_legal_jurisdiction(
+            legal_jurisdiction.get("code")
+        )
+    else:
+        legal_jurisdiction = normalize_legal_jurisdiction(legal_jurisdiction)
+    query = organization_name
+    if legal_jurisdiction:
+        query += f", {legal_jurisdiction['label']}"
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": "places.id",
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+    body = {
+        "textQuery": query,
+        "pageSize": MAX_GOOGLE_PLACES_CANDIDATES,
+        "languageCode": "en",
+    }
+    if legal_jurisdiction:
+        body["regionCode"] = legal_jurisdiction["country_code"]
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        status, payload, _retry_after = await _bounded_google_places_json(
+            session.post(
+                GOOGLE_PLACES_SEARCH_URL,
+                json=body,
+                allow_redirects=False,
+            )
+        )
+    candidates = (
+        normalize_google_places_search_candidates(organization_name, payload)
+        if status == "ok"
+        else []
+    )
+    if status == "ok":
+        status = "observed" if candidates else "not_found"
+    return {
+        "source_engine": GOOGLE_PLACES_ENGINE,
+        "subject_type": "organization_business_listing",
+        "subject_value": organization_name,
+        "jurisdiction": legal_jurisdiction,
+        "status": status,
+        "reason": (
+            "Google Places returned bounded business-listing leads. Only stable "
+            "Place IDs were retained; live business content requires analyst review."
+            if candidates
+            else (
+                "Google Places returned no bounded business-listing lead. This is "
+                "an evidence gap, not proof that the organization has no location."
+                if status == "not_found"
+                else "Google Places business search was temporarily unavailable."
+            )
+        ),
+        "source_url": GOOGLE_PLACES_SEARCH_URL,
+        "source_record_id": (
+            "google-places-search:"
+            f"{claim_fingerprint('company', query)}"
+        ),
+        "query_context": {
+            "organization_name": organization_name,
+            "jurisdiction_code": (
+                legal_jurisdiction.get("code") if legal_jurisdiction else None
+            ),
+        },
+        "candidates": candidates,
+        "candidate_count": len(candidates),
+        "durable_google_content_stored": False,
+        "direct_consumer_page_scrape_performed": False,
+        "extra": {
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+            "stored_google_fields": ["place_id"],
+            "live_details_persisted": False,
+        },
+    }
+
+
+def _normalize_google_place_live_detail(
+    place_id: str, organization_name: str, payload: Any
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    returned_id = str(payload.get("id") or place_id).strip()
+    if returned_id != place_id:
+        return None
+    raw_display_name = payload.get("displayName")
+    display_name = _bounded_text(
+        raw_display_name.get("text")
+        if isinstance(raw_display_name, dict)
+        else raw_display_name,
+        limit=500,
+    )
+    formatted_address = _bounded_text(payload.get("formattedAddress"), limit=1000)
+    types = []
+    for raw_type in list(payload.get("types") or [])[:20]:
+        place_type = _bounded_text(raw_type, limit=100).casefold()
+        if re.fullmatch(r"[a-z][a-z0-9_]{1,99}", place_type) and place_type not in types:
+            types.append(place_type)
+    combined = f"{display_name} {formatted_address}"
+    business_types = [
+        place_type
+        for place_type in types
+        if place_type in _GOOGLE_BUSINESS_LOCATION_TYPES
+    ]
+    if (
+        not display_name
+        or not formatted_address
+        or not business_types
+        or _PRIVATE_ADDRESS_PATTERN.search(combined)
+    ):
+        return None
+    google_maps_uri = _safe_public_url(payload.get("googleMapsUri"))
+    if google_maps_uri:
+        parsed = urlparse(google_maps_uri)
+        hostname = (parsed.hostname or "").casefold().rstrip(".")
+        if hostname not in {"google.com", "www.google.com", "maps.google.com"}:
+            google_maps_uri = None
+    source_url = google_maps_uri or _google_places_source_url(
+        place_id, organization_name
+    )
+    identity = _affiliation_identity
+    name_match = (
+        "exact_name"
+        if identity(display_name) == identity(organization_name)
+        else "requires_analyst_confirmation"
+    )
+    return {
+        "place_id": place_id,
+        "display_name": display_name,
+        "formatted_address": formatted_address,
+        "business_status": _bounded_text(payload.get("businessStatus"), limit=80),
+        "types": types,
+        "source_url": source_url,
+        "identity_match": name_match,
+        "review_status": "pending",
+        "automatic_approval_allowed": False,
+        "live_google_content": True,
+        "durable_google_content_stored": False,
+        "limitation": (
+            "This live Google Maps business listing is a research lead, not a "
+            "legal-registry record, first-party statement, verified headquarters, "
+            "or complete operating footprint. It is not stored as case evidence."
+        ),
+    }
+
+
+async def run_google_places_live_details(
+    organization_name: str,
+    place_ids: Any,
+    api_key: str,
+    *,
+    timeout_seconds: int = GOOGLE_PLACES_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Fetch bounded Place Details for immediate display without persistence."""
+    organization_name = normalize_affiliation_name(organization_name)
+    api_key = str(api_key or "").strip()
+    if not 8 <= len(api_key) <= 512 or any(
+        ord(character) < 33 for character in api_key
+    ):
+        raise ValueError("A valid Google Maps Platform API key is required")
+    normalized_ids = []
+    for raw_id in list(place_ids or [])[:MAX_GOOGLE_PLACES_CANDIDATES]:
+        place_id = str(raw_id or "").strip()
+        if (
+            _GOOGLE_PLACE_ID_PATTERN.fullmatch(place_id)
+            and place_id not in normalized_ids
+        ):
+            normalized_ids.append(place_id)
+    if not normalized_ids:
+        return {
+            "status": "not_run",
+            "reason": "No stored Google Place ID was available for live display.",
+            "places": [],
+            "attribution": "Google Maps",
+            "durable_google_content_stored": False,
+        }
+    session_factory = session_factory or aiohttp.ClientSession
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "application/json",
+        "X-Goog-Api-Key": api_key,
+        "X-Goog-FieldMask": (
+            "id,displayName,formattedAddress,businessStatus,types,googleMapsUri"
+        ),
+        "User-Agent": (
+            "OpenLedger-OSINT-Enrichment/1.0 "
+            "(+https://github.com/nexorusio/openledger)"
+        ),
+    }
+
+    async def fetch_one(session: Any, place_id: str):
+        status, payload, _retry_after = await _bounded_google_places_json(
+            session.get(
+                f"{GOOGLE_PLACES_DETAILS_URL}/{place_id}",
+                allow_redirects=False,
+            )
+        )
+        if status != "ok":
+            return None
+        return _normalize_google_place_live_detail(
+            place_id, organization_name, payload
+        )
+
+    async with session_factory(timeout=timeout, headers=headers) as session:
+        results = await asyncio.gather(
+            *(fetch_one(session, place_id) for place_id in normalized_ids),
+            return_exceptions=True,
+        )
+    places = [result for result in results if isinstance(result, dict)]
+    failed = sum(1 for result in results if not isinstance(result, dict))
+    return {
+        "status": "partial" if failed and places else "observed" if places else "unavailable",
+        "reason": (
+            "Live Google Maps business details are displayed for analyst review "
+            "and are not persisted by OpenLedger."
+            if places
+            else "Live Google Maps business details were unavailable or did not pass the business-location safeguards."
+        ),
+        "places": places,
+        "attribution": "Google Maps",
+        "durable_google_content_stored": False,
+    }
+
+
+async def validate_google_places_connection(
+    api_key: str,
+    *,
+    session_factory: Optional[Callable[..., Any]] = None,
+) -> bool:
+    """Verify Places Text Search access before storing a submitted key."""
+    result = await run_google_places_business_search(
+        "Google Sydney",
+        api_key,
+        legal_jurisdiction="AU-NSW",
+        session_factory=session_factory,
+    )
+    if result["status"] not in {"observed", "not_found"}:
+        raise RuntimeError("Google Places connection verification was unavailable")
+    return True
+
+
 def _wikidata_diagnostic(name: str, status: str, reason: str, candidates=None):
     return {
         "source_engine": WIKIDATA_ENGINE,
@@ -1617,6 +2778,7 @@ async def run_wikidata_affiliation_discovery(
     }
     candidates = []
     candidate_entity_payload = None
+    candidate_type_status = "not_needed"
     async with session_factory(timeout=timeout, headers=headers) as session:
         if not selected_entity_id:
             status, payload, _retry_after = await _bounded_wikidata_json(
@@ -1659,9 +2821,29 @@ async def run_wikidata_affiliation_discovery(
                     )
                 )
                 if detail_status != "ok":
-                    candidate_entity_payload = {}
+                    return _wikidata_diagnostic(
+                        affiliation_name,
+                        detail_status,
+                        (
+                            "Wikidata candidate type verification was unavailable. "
+                            "Retry before selecting or rejecting an organization."
+                        ),
+                        candidates,
+                    )
+                candidate_type_status, organization_class_ids = (
+                    await _resolve_wikidata_organization_classes(
+                        session,
+                        candidate_entity_payload,
+                        expected_entity_ids=[
+                            candidate["id"] for candidate in candidates
+                        ],
+                    )
+                )
                 candidates = enrich_wikidata_organization_candidates(
-                    candidates, candidate_entity_payload
+                    candidates,
+                    candidate_entity_payload,
+                    organization_class_ids=organization_class_ids,
+                    type_resolution_status=candidate_type_status,
                 )
             exact = [
                 candidate
@@ -1670,6 +2852,17 @@ async def run_wikidata_affiliation_discovery(
                 and candidate.get("organization_eligible") is True
             ]
             if len(exact) != 1:
+                if candidate_type_status not in {"ok", "not_needed"}:
+                    return _wikidata_diagnostic(
+                        affiliation_name,
+                        candidate_type_status,
+                        (
+                            "Wikidata organization subclass verification was "
+                            "unavailable. Retry before selecting or rejecting a "
+                            "candidate."
+                        ),
+                        candidates,
+                    )
                 return _wikidata_diagnostic(
                     affiliation_name,
                     "needs_selection" if candidates else "not_found",
@@ -1714,6 +2907,13 @@ async def run_wikidata_affiliation_discovery(
             None,
         )
         if selected_candidate is None:
+            candidate_type_status, organization_class_ids = (
+                await _resolve_wikidata_organization_classes(
+                    session,
+                    payload,
+                    expected_entity_ids=[selected_entity_id],
+                )
+            )
             selected_candidate = enrich_wikidata_organization_candidates(
                 [
                     {
@@ -1729,15 +2929,27 @@ async def run_wikidata_affiliation_discovery(
                     }
                 ],
                 payload,
+                organization_class_ids=organization_class_ids,
+                type_resolution_status=candidate_type_status,
             )[0]
             candidates = [selected_candidate]
         if selected_candidate.get("organization_eligible") is not True:
+            diagnostic_status = (
+                candidate_type_status
+                if candidate_type_status not in {"ok", "not_needed"}
+                else "needs_selection"
+            )
             return _wikidata_diagnostic(
                 affiliation_name,
-                "needs_selection",
+                diagnostic_status,
                 (
-                    "The selected Wikidata item is not type-verified as an "
-                    "organization. No affiliation lookup was run."
+                    "Wikidata organization subclass verification was unavailable. "
+                    "Retry before selecting or rejecting this item."
+                    if diagnostic_status != "needs_selection"
+                    else (
+                        "The selected Wikidata item is not type-verified as an "
+                        "organization. No affiliation lookup was run."
+                    )
                 ),
                 candidates,
             )

@@ -847,6 +847,108 @@ def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store)
         assert connection.scalar(select(func.count()).select_from(claim_reviews)) == 1
 
 
+def test_configured_refresh_routes_variants_to_selected_persona_in_multi_person_case(
+    store,
+):
+    source_job_id = store.create_investigation(["alice", "bob"], {})
+    source_job = store.claim_next("worker:multi-person-source")
+    store.finish(
+        source_job_id,
+        {
+            "status": "completed",
+            "usernames": ["alice", "bob"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    case = store.get_case(source_job["case_id"])
+    persona_ids = {
+        persona["display_name"]: persona["id"] for persona in case["personas"]
+    }
+    alice_id = persona_ids["alice"]
+    refresh_id = store.repeat_persona_investigation(
+        alice_id,
+        ["alice.one"],
+        {
+            "all_sites": True,
+            "investigation_spec": {
+                "processing_mode": "same_subject",
+                "subject_label": "Alice Example",
+                "target_persona_id": alice_id,
+                "identifiers": [
+                    {"type": "full_name", "value": "Alice Example"}
+                ],
+            },
+        },
+    )
+    queued = store.get_job(refresh_id)
+    assert queued["options"]["investigation_spec"]["target_persona_id"] == alice_id
+    assert queued["options"]["investigation_spec"]["subject_label"] == "alice"
+    store.claim_next("worker:targeted-refresh")
+    result = {
+        "status": "completed",
+        "usernames": ["alice.one"],
+        "individual_reports": [
+            {
+                "username": "alice.one",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example",
+                        "url": "https://example.test/alice.one",
+                        "confidence": "strong",
+                        "evidence": {"email": "alice@example.test"},
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(refresh_id, result)
+    assert store.sync_persona_claims(refresh_id, result) >= 1
+    ai_sync = store.sync_ai_persona_claims(
+        refresh_id,
+        [
+            {
+                "username": "alice.one",
+                "field_name": "company",
+                "value": "Example Organization",
+                "confidence": 80,
+                "source_url": "https://example.test/alice.one",
+                "source_title": "Example profile",
+                "reason": "The cited profile explicitly names the organization.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            }
+        ],
+        sources=[
+            {
+                "title": "Example profile",
+                "url": "https://example.test/alice.one",
+            }
+        ],
+        usernames=["alice.one"],
+        model="gpt-5.6-terra",
+    )
+    assert ai_sync["count"] == 1
+
+    alice = store.get_persona(alice_id)
+    bob = store.get_persona(persona_ids["bob"])
+    assert any(
+        claim["field_name"] == "email"
+        and claim["display_value"] == "alice@example.test"
+        for claim in alice["claims"]
+    )
+    assert any(
+        claim["field_name"] == "company"
+        and claim["display_value"] == "Example Organization"
+        for claim in alice["claims"]
+    )
+    assert all(
+        claim["field_name"] not in {"email", "company"}
+        for claim in bob["claims"]
+    )
+
+
 def test_socid_metadata_refresh_preserves_account_claim_and_observation_history(store):
     job_id = store.create_investigation(["alice"], {})
     store.claim_next("worker:first")
@@ -1427,13 +1529,44 @@ def test_affiliation_discovery_is_pending_until_relationship_review(store):
 
 
 def test_affiliation_selection_accepts_only_a_stored_candidate(store):
-    job_id = store.create_affiliation_investigation("Example Organization")
+    job_id = store.create_affiliation_investigation(
+        "Example Organization",
+        source_claim_id="approved-role-claim",
+        source_claim_field="occupation",
+        target_basis="analyst_confirmed_role_organization",
+    )
     job = store.claim_next("worker:test")
     store.finish(job_id, {"status": "completed", "organization_candidates": [{"id": "Q95", "label": "Example Organization", "organization_eligible": True}]})
     with pytest.raises(ValueError, match="not a stored candidate"):
         store.queue_affiliation_entity(job["case_id"], "Q999")
     selected = store.get_job(store.queue_affiliation_entity(job["case_id"], "Q95"))
-    assert selected["options"]["investigation_spec"]["wikidata_entity_id"] == "Q95"
+    specification = selected["options"]["investigation_spec"]
+    assert specification["wikidata_entity_id"] == "Q95"
+    assert specification["source_claim_id"] == "approved-role-claim"
+    assert specification["source_claim_field"] == "occupation"
+    assert specification["target_basis"] == (
+        "analyst_confirmed_role_organization"
+    )
+
+
+def test_affiliation_reruns_preserve_optional_google_places_search(store):
+    job_id = store.create_affiliation_investigation(
+        "Example Organization", enable_google_places_search=True
+    )
+    queued = store.get_job(job_id)
+    assert queued["progress"]["total"] == 3
+    assert queued["options"]["investigation_spec"][
+        "enable_google_places_search"
+    ] is True
+    job = store.claim_next("worker:google-places-flag")
+    store.finish(job_id, {"status": "completed"})
+
+    rerun = store.get_job(store.queue_affiliation_context(job["case_id"]))
+
+    assert rerun["progress"]["total"] == 5
+    assert rerun["options"]["investigation_spec"][
+        "enable_google_places_search"
+    ] is True
 
 
 def test_source_neutral_organization_selection_is_persisted_and_audited(store):
@@ -1515,6 +1648,67 @@ def test_source_neutral_selection_rejects_non_organization_candidate(store):
     with pytest.raises(ValueError, match="not verified as an organization"):
         store.select_affiliation_organization(
             job["case_id"], "wikidata_affiliation:Q127199078", "analyst"
+        )
+
+
+def test_source_neutral_selection_rejects_candidate_from_older_result(store):
+    first_job_id = store.create_affiliation_investigation(
+        "Example Organization"
+    )
+    first_job = store.claim_next("worker:first-organization-result")
+    old_candidate = {
+        "candidate_key": "wikidata_affiliation:Q95",
+        "label": "Example Organization",
+        "source_engine": "wikidata_affiliation",
+        "source_name": "Wikidata",
+        "identity_scope": "public_knowledge_entity",
+        "selectable": True,
+    }
+    store.finish(
+        first_job_id,
+        {
+            "status": "completed",
+            "organization_resolution_candidates": [old_candidate],
+        },
+    )
+    rerun_id = store.queue_affiliation_context(first_job["case_id"])
+    store.claim_next("worker:current-organization-result")
+    store.finish(
+        rerun_id,
+        {"status": "completed", "organization_resolution_candidates": []},
+    )
+
+    with pytest.raises(ValueError, match="current completed affiliation"):
+        store.select_affiliation_organization(
+            first_job["case_id"], old_candidate["candidate_key"], "analyst"
+        )
+
+    assert store.get_job(first_job_id).get("selected_organization") is None
+
+
+def test_source_neutral_selection_waits_for_active_affiliation_job(store):
+    job_id = store.create_affiliation_investigation("Example Organization")
+    job = store.claim_next("worker:active-organization-result")
+    candidate = {
+        "candidate_key": "wikidata_affiliation:Q95",
+        "label": "Example Organization",
+        "source_engine": "wikidata_affiliation",
+        "source_name": "Wikidata",
+        "identity_scope": "public_knowledge_entity",
+        "selectable": True,
+    }
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "organization_resolution_candidates": [candidate],
+        },
+    )
+    store.queue_affiliation_context(job["case_id"])
+
+    with pytest.raises(ValueError, match="current affiliation investigation"):
+        store.select_affiliation_organization(
+            job["case_id"], candidate["candidate_key"], "analyst"
         )
 
 

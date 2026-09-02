@@ -658,8 +658,12 @@ class CaseStore:
         affiliation_name: str,
         *,
         source_claim_id: Optional[str] = None,
+        source_claim_field: Optional[str] = None,
+        target_basis: Optional[str] = None,
         jurisdiction: Any = None,
         enable_domain_context: bool = False,
+        enable_public_web_research: bool = False,
+        enable_google_places_search: bool = False,
         official_website: Any = None,
     ) -> str:
         from maigret.web.collector_adapters import (
@@ -675,6 +679,16 @@ class CaseStore:
         source_claim_id = str(source_claim_id or "").strip() or None
         if source_claim_id and len(source_claim_id) > 100:
             raise ValueError("Invalid source claim identifier")
+        source_claim_field = str(source_claim_field or "").strip() or None
+        if source_claim_field not in {None, "company", "occupation"}:
+            raise ValueError("Invalid source claim field")
+        target_basis = str(target_basis or "").strip() or None
+        if target_basis not in {
+            None,
+            "approved_affiliation_claim",
+            "analyst_confirmed_role_organization",
+        }:
+            raise ValueError("Invalid organization target basis")
         now = utcnow()
         case_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
         specification = {
@@ -682,8 +696,12 @@ class CaseStore:
             "investigation_type": "affiliation",
             "affiliation_name": affiliation_name,
             "source_claim_id": source_claim_id,
+            "source_claim_field": source_claim_field,
+            "target_basis": target_basis,
             "legal_jurisdiction": legal_jurisdiction,
             "enable_domain_context": enable_domain_context,
+            "enable_public_web_research": bool(enable_public_web_research),
+            "enable_google_places_search": bool(enable_google_places_search),
             "official_website": normalized_website,
         }
         case_title = f"Affiliation: {affiliation_name}"
@@ -714,7 +732,10 @@ class CaseStore:
                             if legal_jurisdiction
                             and legal_jurisdiction["code"] == "FR"
                             else 3 if legal_jurisdiction else 2
-                        ) + (2 if enable_domain_context else 0),
+                        )
+                        + (2 if enable_domain_context else 0)
+                        + (1 if enable_public_web_research else 0)
+                        + (1 if enable_google_places_search else 0),
                         "found": 0,
                     },
                     result=None,
@@ -731,8 +752,17 @@ class CaseStore:
                 "type": "queued",
                 "target_type": "affiliation",
                 "affiliation": affiliation_name,
+                "source_claim_id": source_claim_id,
+                "source_claim_field": source_claim_field,
+                "target_basis": target_basis,
                 "legal_jurisdiction": legal_jurisdiction,
                 "domain_context_requested": enable_domain_context,
+                "public_web_research_requested": bool(
+                    enable_public_web_research
+                ),
+                "google_places_search_requested": bool(
+                    enable_google_places_search
+                ),
             },
         )
         return job_id
@@ -884,7 +914,20 @@ class CaseStore:
                 case_statement = case_statement.with_for_update()
             if not connection.execute(case_statement).first():
                 raise KeyError(case_id)
-            prior_jobs = list(
+            if connection.scalar(
+                select(investigation_jobs.c.id)
+                .where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.kind == "affiliation",
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                )
+                .limit(1)
+            ):
+                raise ValueError(
+                    "Wait for the current affiliation investigation before "
+                    "confirming an organization"
+                )
+            selected_row = (
                 connection.execute(
                     select(
                         investigation_jobs.c.id,
@@ -897,13 +940,14 @@ class CaseStore:
                         investigation_jobs.c.status == "completed",
                     )
                     .order_by(investigation_jobs.c.created_at.desc())
-                    .limit(10)
-                ).mappings()
+                    .limit(1)
+                )
+                .mappings()
+                .first()
             )
             selected_candidate = None
-            selected_row = None
-            for prior in prior_jobs:
-                result = dict(prior["result"] or {})
+            if selected_row:
+                result = dict(selected_row["result"] or {})
                 for candidate in list(
                     result.get("organization_resolution_candidates") or []
                 )[:15]:
@@ -912,13 +956,11 @@ class CaseStore:
                         and candidate.get("candidate_key") == candidate_key
                     ):
                         selected_candidate = candidate
-                        selected_row = prior
                         break
-                if selected_candidate:
-                    break
             if not selected_candidate or not selected_row:
                 raise ValueError(
-                    "The selected organization is not a stored candidate for this case"
+                    "The selected organization is not a candidate from the current "
+                    "completed affiliation investigation"
                 )
             if selected_candidate.get("selectable") is not True:
                 raise ValueError(
@@ -1026,7 +1068,14 @@ class CaseStore:
             )
         return selection
 
-    def queue_affiliation_entity(self, case_id: str, entity_id: str) -> str:
+    def queue_affiliation_entity(
+        self,
+        case_id: str,
+        entity_id: str,
+        *,
+        enable_public_web_research: bool = False,
+        enable_google_places_search: bool = False,
+    ) -> str:
         entity_id = str(entity_id or "").strip().upper()
         if not re.fullmatch(r"Q[1-9][0-9]{0,19}", entity_id):
             raise ValueError("Select a valid Wikidata organization")
@@ -1057,19 +1106,33 @@ class CaseStore:
             candidate = None
             affiliation_name = ""
             source_claim_id = None
+            source_claim_field = None
+            target_basis = None
             legal_jurisdiction = None
             enable_domain_context = False
+            enable_public_web_research = bool(enable_public_web_research)
+            enable_google_places_search = bool(enable_google_places_search)
             official_website = None
             selected_organization = None
             for prior in prior_jobs:
                 spec = dict(prior["options"] or {}).get("investigation_spec") or {}
                 affiliation_name = affiliation_name or str(spec.get("affiliation_name") or "")
                 source_claim_id = source_claim_id or spec.get("source_claim_id")
+                source_claim_field = source_claim_field or spec.get(
+                    "source_claim_field"
+                )
+                target_basis = target_basis or spec.get("target_basis")
                 legal_jurisdiction = legal_jurisdiction or spec.get(
                     "legal_jurisdiction"
                 )
                 enable_domain_context = enable_domain_context or bool(
                     spec.get("enable_domain_context")
+                )
+                enable_public_web_research = enable_public_web_research or bool(
+                    spec.get("enable_public_web_research")
+                )
+                enable_google_places_search = enable_google_places_search or bool(
+                    spec.get("enable_google_places_search")
                 )
                 official_website = official_website or spec.get("official_website")
                 selected_organization = selected_organization or spec.get(
@@ -1093,8 +1156,12 @@ class CaseStore:
                 "investigation_type": "affiliation",
                 "affiliation_name": affiliation_name[:500],
                 "source_claim_id": source_claim_id,
+                "source_claim_field": source_claim_field,
+                "target_basis": target_basis,
                 "legal_jurisdiction": legal_jurisdiction,
                 "enable_domain_context": enable_domain_context,
+                "enable_public_web_research": enable_public_web_research,
+                "enable_google_places_search": enable_google_places_search,
                 "official_website": official_website,
                 "wikidata_entity_id": entity_id,
                 "selected_entity_label": selected_label,
@@ -1107,6 +1174,8 @@ class CaseStore:
                 else 3 if legal_jurisdiction else 2
             )
             total_sources += 2 if enable_domain_context else 0
+            total_sources += 1 if enable_public_web_research else 0
+            total_sources += 1 if enable_google_places_search else 0
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id, case_id=case_id, kind="affiliation", status="queued",
@@ -1130,7 +1199,12 @@ class CaseStore:
         return job_id
 
     def queue_affiliation_context(
-        self, case_id: str, *, official_website: Any = None
+        self,
+        case_id: str,
+        *,
+        official_website: Any = None,
+        enable_public_web_research: bool = False,
+        enable_google_places_search: bool = False,
     ) -> str:
         """Rerun an affiliation case with an explicit domain-context opt-in."""
         from maigret.web.collector_adapters import normalize_official_website_url
@@ -1180,6 +1254,14 @@ class CaseStore:
                 "investigation_type": "affiliation",
                 "affiliation_name": affiliation_name[:500],
                 "enable_domain_context": True,
+                "enable_public_web_research": bool(
+                    enable_public_web_research
+                    or prior_spec.get("enable_public_web_research")
+                ),
+                "enable_google_places_search": bool(
+                    enable_google_places_search
+                    or prior_spec.get("enable_google_places_search")
+                ),
                 "official_website": (
                     normalized_website or prior_spec.get("official_website")
                 ),
@@ -1189,7 +1271,9 @@ class CaseStore:
                 if isinstance(legal_jurisdiction, dict)
                 and legal_jurisdiction.get("code") == "FR"
                 else 3 if legal_jurisdiction else 2
-            ) + 2
+            ) + 2 + (
+                1 if specification["enable_public_web_research"] else 0
+            ) + (1 if specification["enable_google_places_search"] else 0)
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,
@@ -1220,7 +1304,12 @@ class CaseStore:
         )
         return job_id
 
-    def repeat_persona_investigation(self, persona_id: str) -> str:
+    def repeat_persona_investigation(
+        self,
+        persona_id: str,
+        usernames: Optional[Iterable[str]] = None,
+        options: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """Queue a fresh collection for one existing persona in the same case."""
         now = utcnow()
         job_id = str(uuid.uuid4())
@@ -1257,34 +1346,54 @@ class CaseStore:
                 .mappings()
                 .first()
             )
+            explicit_plan = usernames is not None or options is not None
+            if explicit_plan and (usernames is None or options is None):
+                raise ValueError(
+                    "Persona reruns require both search targets and options"
+                )
             latest_options: Dict[str, Any] = (
                 dict(latest_job["options"] or {}) if latest_job else {}
             )
-            latest_usernames = (
-                list(latest_job["usernames"] or []) if latest_job else []
-            )
-            investigation_spec = latest_options.get("investigation_spec")
+            latest_usernames = list(latest_job["usernames"] or []) if latest_job else []
+            queued_options = dict(options or {}) if explicit_plan else latest_options
+            investigation_spec = queued_options.get("investigation_spec")
             grouped = (
                 isinstance(investigation_spec, dict)
                 and investigation_spec.get("processing_mode") == "same_subject"
             )
-            username = str(persona_row["display_name"]).strip()
-            usernames = (
-                [str(value).strip() for value in latest_usernames]
-                if grouped
-                else [username]
+            display_name = str(persona_row["display_name"]).strip()
+            queued_usernames = (
+                [str(value).strip() for value in list(usernames or [])]
+                if explicit_plan
+                else (
+                    [str(value).strip() for value in latest_usernames]
+                    if grouped
+                    else [display_name]
+                )
             )
-            usernames = [value for value in usernames if value]
-            if not usernames:
+            queued_usernames = [value for value in queued_usernames if value]
+            if not queued_usernames:
                 raise ValueError("No searchable account identifiers are available")
+            if explicit_plan:
+                specification = (
+                    dict(investigation_spec)
+                    if isinstance(investigation_spec, dict)
+                    else {}
+                )
+                specification.update(
+                    processing_mode="same_subject",
+                    subject_label=display_name,
+                    target_persona_id=persona_id,
+                )
+                queued_options["investigation_spec"] = specification
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,
                     case_id=persona_row["case_id"],
                     kind="refresh",
                     status="queued",
-                    usernames=usernames,
-                    options=latest_options,
+                    usernames=queued_usernames,
+                    options=queued_options,
                     progress={"checked": 0, "total": None, "found": 0},
                     result=None,
                     error=None,
@@ -1301,7 +1410,12 @@ class CaseStore:
             )
         self.append_event(
             job_id,
-            {"type": "queued", "usernames": usernames, "reason": "persona_refresh"},
+            {
+                "type": "queued",
+                "usernames": queued_usernames,
+                "reason": "persona_refresh",
+                "target_persona_id": persona_id,
+            },
         )
         return job_id
 
@@ -3227,13 +3341,26 @@ class CaseStore:
             investigation_spec = dict(job_row["options"] or {}).get(
                 "investigation_spec"
             )
-            grouped_persona_id = (
-                persona_rows[0]["id"]
+            target_persona_id = (
+                str(investigation_spec.get("target_persona_id") or "")
                 if isinstance(investigation_spec, dict)
+                else ""
+            )
+            grouped_persona_id = next(
+                (
+                    row["id"]
+                    for row in persona_rows
+                    if target_persona_id and row["id"] == target_persona_id
+                ),
+                None,
+            )
+            if (
+                grouped_persona_id is None
+                and isinstance(investigation_spec, dict)
                 and investigation_spec.get("processing_mode") == "same_subject"
                 and len(persona_rows) == 1
-                else None
-            )
+            ):
+                grouped_persona_id = persona_rows[0]["id"]
             if grouped_persona_id:
                 synchronized += self._upsert_persona_candidates(
                     connection,
@@ -3375,13 +3502,26 @@ class CaseStore:
             investigation_spec = dict(job_row["options"] or {}).get(
                 "investigation_spec"
             )
-            grouped_persona_id = (
-                persona_rows[0]["id"]
+            target_persona_id = (
+                str(investigation_spec.get("target_persona_id") or "")
                 if isinstance(investigation_spec, dict)
+                else ""
+            )
+            grouped_persona_id = next(
+                (
+                    row["id"]
+                    for row in persona_rows
+                    if target_persona_id and row["id"] == target_persona_id
+                ),
+                None,
+            )
+            if (
+                grouped_persona_id is None
+                and isinstance(investigation_spec, dict)
                 and investigation_spec.get("processing_mode") == "same_subject"
                 and len(persona_rows) == 1
-                else None
-            )
+            ):
+                grouped_persona_id = persona_rows[0]["id"]
             for candidate in candidates:
                 persona_id = grouped_persona_id or personas_by_name.get(
                     candidate["username"].casefold()

@@ -46,6 +46,9 @@ def web_app(tmp_path):
     web_app_module.app.config['OPENAI_API_KEY_FILE'] = str(
         tmp_path / 'secrets' / 'openai_api_key'
     )
+    web_app_module.app.config['GOOGLE_MAPS_API_KEY_FILE'] = str(
+        tmp_path / 'secrets' / 'google_maps_api_key'
+    )
     web_app_module.app.config['AUTH_FILE'] = str(tmp_path / 'secrets' / 'auth.json')
     web_app_module.app.config['AUTH_REQUIRED'] = False
 
@@ -376,6 +379,41 @@ def test_investigation_builder_explains_identifier_capabilities(client):
     assert 'Query plan' in body
 
 
+def test_role_organization_suggestion_preserves_legal_suffix_and_fails_ambiguous(
+    web_app,
+):
+    assert web_app.suggested_role_organization(
+        "CEO, Acme Widgets, Inc."
+    ) == ""
+    assert web_app.suggested_role_organization(
+        "Director at Acme Widgets, Inc."
+    ) == "Acme Widgets, Inc."
+    assert web_app.suggested_role_organization(
+        "Professor at University at Buffalo"
+    ) == "University at Buffalo"
+    assert web_app.suggested_role_organization(
+        "Advocate for Center for Reproductive Rights"
+    ) == "Center for Reproductive Rights"
+    assert web_app.suggested_role_organization(
+        "Advocate for Lawyers at Work"
+    ) == "Lawyers at Work"
+    assert web_app.suggested_role_organization(
+        "Counsel for Smith, Jones & Co."
+    ) == "Smith, Jones & Co."
+    assert web_app.suggested_role_organization(
+        "CEO, Advisor at Acme Widgets"
+    ) == ""
+    assert web_app.suggested_role_organization(
+        "Co-founder, CEO, Acme Widgets"
+    ) == ""
+    assert web_app.suggested_role_organization(
+        "Co-founder, CEO, Acme Widgets, Inc."
+    ) == ""
+    assert web_app.suggested_role_organization(
+        "Co-founder, CEO, Inc."
+    ) == ""
+
+
 def test_application_login_replaces_browser_authentication(client, web_app):
     web_app.app.config['AUTH_REQUIRED'] = True
     web_app.save_auth_credentials('operator', 'correct-horse-battery-staple')
@@ -546,6 +584,14 @@ def test_admin_manages_analysts_and_analyst_cannot_access_settings(web_app):
     settings = analyst_client.get('/settings')
     assert settings.status_code == 403
     assert 'Administrator access required' in settings.get_data(as_text=True)
+    google_connection = analyst_client.post(
+        '/settings/google-places',
+        data={
+            'csrf_token': _csrf_token(analyst_client),
+            'google_maps_api_key': 'must-not-be-accepted',
+        },
+    )
+    assert google_connection.status_code == 403
     history = analyst_client.get('/history')
     assert history.status_code == 200
     assert '>Settings<' not in history.get_data(as_text=True)
@@ -1833,13 +1879,13 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
 
-    assert '2026-07-28 10:00:00' in body
+    assert '2026-07-28 10:00 UTC' in body
     assert 'soxoj, alice' in body
-    assert '>7<' in body
+    assert '7 profiles' in body
     assert 'completed' in body
     assert '/results/search_ts_completed' in body
 
-    assert '2026-07-28 09:00:00' in body
+    assert '2026-07-28 09:00 UTC' in body
     assert 'bob' in body
     assert 'Failed' in body
 
@@ -1954,7 +2000,7 @@ def test_completed_investigation_survives_process_restart(client, web_app):
 
     history = client.get('/history')
     assert history.status_code == 200
-    assert '2026-08-27 12:34:56' in history.get_data(as_text=True)
+    assert '2026-08-27 12:34 UTC' in history.get_data(as_text=True)
     assert '/results/search_persisted' in history.get_data(as_text=True)
 
     results = client.get('/results/search_persisted')
@@ -2564,6 +2610,7 @@ def test_failed_openai_verification_does_not_store_key(
     assert 'OpenAI verification failed.' in resp.get_data(as_text=True)
     assert not os.path.exists(web_app.app.config['OPENAI_API_KEY_FILE'])
 
+
 def test_browser_managed_openai_connection_can_be_removed(
     client, web_app, monkeypatch
 ):
@@ -2581,3 +2628,88 @@ def test_browser_managed_openai_connection_can_be_removed(
     assert resp.status_code == 200
     assert 'OpenAI connection removed.' in resp.get_data(as_text=True)
     assert not os.path.exists(web_app.app.config['OPENAI_API_KEY_FILE'])
+
+
+def test_google_places_connection_is_verified_and_saved_server_side(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('GOOGLE_MAPS_API_KEY', raising=False)
+    captured = {}
+
+    async def fake_validation(api_key):
+        captured['api_key'] = api_key
+        return True
+
+    monkeypatch.setattr(
+        web_app, 'validate_google_places_connection', fake_validation
+    )
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'google-connection-csrf'
+
+    api_key = 'restricted-google-server-key'
+    resp = client.post(
+        '/settings/google-places',
+        data={
+            'csrf_token': 'google-connection-csrf',
+            'action': 'connect',
+            'google_maps_api_key': api_key,
+        },
+        follow_redirects=True,
+    )
+
+    assert resp.status_code == 200
+    assert 'Google Places connected and verified.' in resp.get_data(as_text=True)
+    key_path = web_app.app.config['GOOGLE_MAPS_API_KEY_FILE']
+    with open(key_path, encoding='utf-8') as key_file:
+        assert key_file.read().strip() == api_key
+    assert os.stat(key_path).st_mode & 0o777 == 0o600
+    assert api_key not in resp.get_data(as_text=True)
+    assert captured['api_key'] == api_key
+
+
+def test_failed_google_places_verification_does_not_store_key(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('GOOGLE_MAPS_API_KEY', raising=False)
+
+    async def failed_validation(_api_key):
+        raise RuntimeError('invalid key with private diagnostic')
+
+    monkeypatch.setattr(
+        web_app, 'validate_google_places_connection', failed_validation
+    )
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'google-connection-csrf'
+
+    resp = client.post(
+        '/settings/google-places',
+        data={
+            'csrf_token': 'google-connection-csrf',
+            'action': 'connect',
+            'google_maps_api_key': 'invalid-google-key',
+        },
+        follow_redirects=True,
+    )
+
+    body = resp.get_data(as_text=True)
+    assert 'Google Places verification failed.' in body
+    assert 'private diagnostic' not in body
+    assert not os.path.exists(web_app.app.config['GOOGLE_MAPS_API_KEY_FILE'])
+
+
+def test_browser_managed_google_places_connection_can_be_removed(
+    client, web_app, monkeypatch
+):
+    monkeypatch.delenv('GOOGLE_MAPS_API_KEY', raising=False)
+    web_app.save_google_maps_api_key('restricted-google-server-key')
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'google-connection-csrf'
+
+    resp = client.post(
+        '/settings/google-places',
+        data={'csrf_token': 'google-connection-csrf', 'action': 'disconnect'},
+        follow_redirects=True,
+    )
+
+    assert 'Google Places connection removed.' in resp.get_data(as_text=True)
+    assert not os.path.exists(web_app.app.config['GOOGLE_MAPS_API_KEY_FILE'])

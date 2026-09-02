@@ -9,7 +9,7 @@
         <p class="eyebrow">Workspace configuration</p>
         <h1>Settings</h1>
         <p class="page-description">
-            Configure investigation defaults, optional site restrictions, network routing, and protected AI connections.
+            Configure investigation defaults, optional site restrictions, network routing, and protected provider connections.
         </p>
     </div>
     <span class="badge-soft success"><i data-lucide="shield-check"></i> Server protected</span>
@@ -19,7 +19,7 @@
     <nav class="panel-card settings-nav" aria-label="Settings sections">
         <a href="#investigation" class="active"><i data-lucide="sliders-horizontal"></i> Investigation</a>
         <a href="#filters"><i data-lucide="list-filter"></i> Sites & routing</a>
-        <a href="#connections"><i data-lucide="plug-zap"></i> AI connections</a>
+        <a href="#connections"><i data-lucide="plug-zap"></i> Provider connections</a>
     </nav>
 
     <div class="settings-stack">
@@ -108,12 +108,9 @@
         <section class="panel-card" id="connections">
             <header class="panel-header">
                 <div>
-                    <h2>AI connections</h2>
-                    <p>Connect OpenAI for server-side analysis of completed investigation reports.</p>
+                    <h2>Provider connections</h2>
+                    <p>Connect protected server-side providers for cited research and bounded business-listing leads.</p>
                 </div>
-                <span class="badge-soft {{ 'success' if openai_connected else 'warning' }}">
-                    {{ 'Connected' if openai_connected else 'Not configured' }}
-                </span>
             </header>
             <div class="panel-body">
                 <div class="connection-card">
@@ -192,6 +189,62 @@
                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                     <input type="hidden" name="action" value="disconnect">
                     <button type="submit" class="btn btn-outline-danger">Disconnect OpenAI</button>
+                </form>
+                {% endif %}
+
+                <div class="connection-card mt-4">
+                    <form method="POST" action="{{ url_for('google_places_settings_update') }}" class="connection-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <input type="hidden" name="action" value="connect">
+                        <div class="connection-brand">
+                            <span class="connection-logo"><i data-lucide="map-pinned"></i></span>
+                            <div>
+                                <h3>Google Places API (New)</h3>
+                                <p>
+                                    {% if google_maps_key_source %}
+                                    Active key source: {{ google_maps_key_source }}
+                                    {% else %}
+                                    No key has been stored on this server.
+                                    {% endif %}
+                                </p>
+                            </div>
+                            <span class="badge-soft {{ 'success' if google_places_connected else 'warning' }}">
+                                {{ 'Connected' if google_places_connected else 'Not configured' }}
+                            </span>
+                        </div>
+
+                        <div class="mb-3">
+                            <label for="google-maps-api-key" class="form-label">API key</label>
+                            <div class="secret-field">
+                                <input type="password" class="form-control" id="google-maps-api-key" name="google_maps_api_key"
+                                    autocomplete="new-password"
+                                    placeholder="{{ 'Leave blank to keep the current key' if google_places_connected else 'Paste a restricted Google Maps Platform API key' }}">
+                                <button type="button" class="secret-toggle" data-secret-target="google-maps-api-key" aria-label="Show API key">
+                                    <i data-lucide="eye"></i>
+                                </button>
+                            </div>
+                            <div class="form-text">Enable Places API (New), billing and quota. Restrict the key to this server and the Places API; never use a browser key here.</div>
+                        </div>
+
+                        <div class="security-callout connection-security">
+                            <i data-lucide="shield-check"></i>
+                            <span>Organization lookup uses Places Text Search—not Geocoding and not consumer-page scraping. Only Place IDs are retained; business details are fetched live for analyst review and are not persisted.</span>
+                        </div>
+
+                        <div class="connection-actions">
+                            <button type="submit" class="btn btn-primary px-4">
+                                {{ 'Verify and save' if google_places_connected else 'Connect and verify' }}
+                            </button>
+                            <a href="https://developers.google.com/maps/documentation/places/web-service/text-search" target="_blank" rel="noopener" class="btn btn-outline-secondary">Places Text Search docs</a>
+                        </div>
+                    </form>
+                </div>
+
+                {% if google_places_connected and google_maps_key_source != 'environment' %}
+                <form method="POST" action="{{ url_for('google_places_settings_update') }}" class="connection-actions">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <input type="hidden" name="action" value="disconnect">
+                    <button type="submit" class="btn btn-outline-danger">Disconnect Google Places</button>
                 </form>
                 {% endif %}
             </div>
@@ -273,12 +326,15 @@ document.addEventListener('DOMContentLoaded', function () {
     });
     renderSites();
 
-    const secretToggle = document.getElementById('secretToggle');
-    const secretInput = document.getElementById('openai-api-key');
-    secretToggle.addEventListener('click', function () {
-        const showing = secretInput.type === 'text';
-        secretInput.type = showing ? 'password' : 'text';
-        secretToggle.setAttribute('aria-label', showing ? 'Show API key' : 'Hide API key');
+    document.querySelectorAll('.secret-toggle').forEach(secretToggle => {
+        const targetId = secretToggle.dataset.secretTarget || 'openai-api-key';
+        const secretInput = document.getElementById(targetId);
+        if (!secretInput) return;
+        secretToggle.addEventListener('click', function () {
+            const showing = secretInput.type === 'text';
+            secretInput.type = showing ? 'password' : 'text';
+            secretToggle.setAttribute('aria-label', showing ? 'Show API key' : 'Hide API key');
+        });
     });
 
     const section = new URLSearchParams(window.location.search).get('section');

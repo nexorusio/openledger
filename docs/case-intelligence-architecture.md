@@ -314,8 +314,44 @@ organization/contact/location sections, or bounded multilingual address markers
 become pending organization-location observations with the exact page URL.
 Residential labels are blocked. These observations remain separate from legal
 records and technical infrastructure, and are never copied to a person's
-location. Broader operating-context research remains available through the
-persistent cited case chat.
+location.
+
+If the existing server-side OpenAI key and AI web-enrichment setting are
+available, the affiliation job also runs one cited public-web research turn for
+the exact organization. This reuses the persistent case-chat research boundary;
+it does not directly scrape LinkedIn, Google Maps, or another external profile.
+A strict second pass can propose bounded organization identity, profile,
+address, headquarters, activity, or public-contact observations only when each
+proposal uses an exact citation returned by that turn. Exact publicly cited
+phones and emails remain separate pending investigative leads; their apparent
+organization, named-person, or unclear scope is shown, and they are never
+silently treated as organization or Persona facts. Contact-bearing citation
+titles are neutralized without discarding their public provenance URLs. Server
+validation rejects ambiguous, uncited, private, residential, or malformed
+findings and marks every accepted finding pending. Third-party profile and map
+evidence is confidence-capped and cannot prove registration, ownership,
+completeness, or current accuracy. Organization observations never create a
+Persona or become canonical facts without analyst review. Failure remains
+isolated to this optional research source, and the same workflow remains
+available through persistent cited case chat for analyst-directed follow-up.
+
+If an administrator explicitly connects an operator-owned Google Maps Platform
+key, the affiliation job may also run one Places Text Search (New) request. This
+is an official API integration, not scraping of the consumer Google Maps page,
+and it is separate from address geocoding. The durable job result stores only at
+most five Place IDs and generated provenance links. The case workspace uses
+those IDs for transient Place Details display with Google Maps attribution;
+business names, addresses, coordinates, types, and statuses returned by Google
+are not written to PostgreSQL or report artifacts. Results remain third-party
+pending leads and cannot select the organization, create a Persona, populate a
+person location, or establish registration, headquarters, or a complete
+operating footprint.
+
+Investigation history derives a human-readable type, target, jurisdiction or
+domain context, and source-specific finding summary from each durable job. It
+does not assume every investigation is username-based; affiliation and
+confirmed-name enrichment jobs remain distinguishable without opening each
+case.
 
 ## Confirmed-name public-record enrichment
 

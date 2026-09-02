@@ -255,6 +255,93 @@
             <p class="form-text">No direct registered, website, or technical context finding was retained. This is an evidence gap, not a conclusion that the entity has no operations.</p>
             {% endif %}
 
+            {% if affiliation_job.google_places_search and affiliation_job.google_places_search.status != 'not_run' %}
+            {% set places_search = affiliation_job.google_places_search %}
+            {% set live_places = case.google_places_live %}
+            <article class="domain-context-card google-places-business-leads">
+                <header>
+                    <div>
+                        <strong>Google Places business leads</strong>
+                        <small>{{ places_search.reason }}</small>
+                    </div>
+                    <span class="badge-soft {{ 'success' if places_search.status == 'observed' else 'warning' }}">{{ places_search.status | replace('_', ' ') | title }}</span>
+                </header>
+                {% if live_places.places %}
+                <div class="business-context-list">
+                    {% for place in live_places.places %}
+                    <article class="business-context-finding">
+                        <header>
+                            <span class="badge-soft">Google Maps business listing</span>
+                            <span class="badge-soft warning">Pending verification</span>
+                            <a href="{{ place.source_url }}" target="_blank" rel="noopener noreferrer">Open in Google Maps</a>
+                        </header>
+                        <strong>{{ place.display_name }}</strong>
+                        <dl>
+                            <div><dt>Published address</dt><dd>{{ place.formatted_address }}</dd></div>
+                            <div><dt>Identity match</dt><dd>{{ place.identity_match | replace('_', ' ') | title }}</dd></div>
+                            {% if place.business_status %}<div><dt>Listing status</dt><dd>{{ place.business_status | replace('_', ' ') | title }}</dd></div>{% endif %}
+                            <div><dt>Limitation</dt><dd>{{ place.limitation }}</dd></div>
+                        </dl>
+                    </article>
+                    {% endfor %}
+                </div>
+                {% elif places_search.candidates %}
+                <p class="form-text">{{ live_places.reason }}</p>
+                <ul>
+                    {% for candidate in places_search.candidates %}
+                    <li><a href="{{ candidate.source_url }}" target="_blank" rel="noopener noreferrer">Open Google Maps candidate {{ loop.index }}</a> <span class="badge-soft warning">Pending verification</span></li>
+                    {% endfor %}
+                </ul>
+                {% if live_places.status == 'ready' %}
+                <form method="POST" action="{{ url_for('case_google_places_live', case_id=case.id) }}">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="map-pin"></i> Load live Google details</button>
+                    <small class="form-text">Explicit action required. This uses configured Google Places quota and is limited to once per case per minute.</small>
+                </form>
+                {% endif %}
+                {% endif %}
+                <p class="registry-coverage-note"><i data-lucide="map-pin"></i> Displayed live from <a href="https://maps.google.com/" target="_blank" rel="noopener noreferrer">Google Maps</a>. OpenLedger durably retains only Place IDs and provenance links—not the Google business name, address, coordinates, or status. A listing is not registry proof, a first-party statement, or a verified headquarters, and it never becomes a Persona address.</p>
+            </article>
+            {% endif %}
+
+            {% if affiliation_job.public_web_research %}
+            {% set public_research = affiliation_job.public_web_research %}
+            <article class="domain-context-card public-web-organization-research">
+                <header>
+                    <div><strong>Cited external company-profile research</strong><small>{{ public_research.reason }}</small></div>
+                    <span class="badge-soft {{ 'success' if public_research.status == 'observed' else 'warning' }}">{{ public_research.status | replace('_', ' ') | title }}</span>
+                </header>
+                {% if public_research.analysis %}<p class="public-web-research-analysis">{{ public_research.analysis }}</p>{% endif %}
+                {% if public_research.findings %}
+                <div class="business-context-list">
+                    {% for finding in public_research.findings %}
+                    <article class="business-context-finding">
+                        <header>
+                            <span class="badge-soft">{{ finding.observation_type | replace('_', ' ') | title }}</span>
+                            <span class="badge-soft warning">Pending verification</span>
+                            <a href="{{ finding.source_url }}" target="_blank" rel="noopener noreferrer">Open cited evidence</a>
+                        </header>
+                        <strong>{{ finding.value }}</strong>
+                        <dl>
+                            <div><dt>Source</dt><dd>{{ finding.source_title }} · {{ finding.source_role | replace('_', ' ') | title }}{% if finding.source_scope == 'public_contact' %} · Public contact provenance{% endif %}</dd></div>
+                            <div><dt>Identity match</dt><dd>{{ finding.identity_match_basis | replace('_', ' ') }}</dd></div>
+                            {% if finding.contact_scope %}<div><dt>Contact scope</dt><dd>{{ finding.contact_scope | replace('_', ' ') | title }}</dd></div>{% endif %}
+                            <div><dt>Basis</dt><dd>{{ finding.basis }}</dd></div>
+                            <div><dt>Limitation</dt><dd>{{ finding.limitation }}</dd></div>
+                        </dl>
+                    </article>
+                    {% endfor %}
+                </div>
+                {% elif public_research.status == 'observed' %}
+                <p class="form-text">The cited search completed but produced no organization observation that passed the identity, privacy, and provenance contract.</p>
+                {% endif %}
+                {% if public_research.sources %}
+                <div><strong>Citation catalogue</strong><ul>{% for source in public_research.sources %}<li><a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title or source.url }}</a>{% if source.source_scope == 'public_contact' %} <span class="badge-soft warning">Public contact provenance</span>{% endif %}</li>{% endfor %}</ul></div>
+                {% endif %}
+                <p class="registry-coverage-note"><i data-lucide="shield-check"></i> OpenLedger used the configured cited web-search capability and did not send direct scraping requests to LinkedIn, Google Maps, or another external profile page. These observations never become Persona locations or canonical organization facts automatically.</p>
+            </article>
+            {% endif %}
+
             {% if affiliation_job.website_observation %}
             {% set website_evidence = affiliation_job.website_observation %}
             <article class="domain-context-card">

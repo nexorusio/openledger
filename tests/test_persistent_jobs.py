@@ -15,12 +15,20 @@ def web_app(tmp_path):
     web_app_module.app.config["TESTING"] = True
     web_app_module.app.config["REPORTS_FOLDER"] = str(tmp_path / "reports")
     web_app_module.app.config["SETTINGS_FILE"] = str(tmp_path / "settings.json")
+    web_app_module.app.config["OPENAI_API_KEY_FILE"] = str(
+        tmp_path / "secrets" / "openai_api_key"
+    )
+    web_app_module.app.config["GOOGLE_MAPS_API_KEY_FILE"] = str(
+        tmp_path / "secrets" / "google_maps_api_key"
+    )
     web_app_module.app.config["AUTH_REQUIRED"] = False
     web_app_module.job_results.clear()
     web_app_module.live_jobs.clear()
+    web_app_module.google_places_live_requests.clear()
     yield web_app_module
     web_app_module.job_results.clear()
     web_app_module.live_jobs.clear()
+    web_app_module.google_places_live_requests.clear()
 
 
 @pytest.fixture
@@ -691,7 +699,7 @@ def test_approving_place_without_coordinates_generates_and_persists_centroid(
     assert 'id="personaLocationMap"' in page
 
 
-def test_persona_refresh_queues_new_collection_in_the_same_case(
+def test_legacy_persona_refresh_requires_configuration_before_queueing(
     client, persistent_store
 ):
     job_id = persistent_store.create_investigation(["alice"], {"top_sites": 250})
@@ -718,12 +726,186 @@ def test_persona_refresh_queues_new_collection_in_the_same_case(
     )
 
     assert response.status_code == 302
+    assert response.location.endswith(f"/personas/{persona_id}/investigate")
+    assert len(persistent_store.get_case(case["id"])["jobs"]) == 1
+
+
+def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
+    client, persistent_store
+):
+    subject = "Ferdinata Suryanto"
+    job_id = persistent_store.create_investigation(
+        ["ferdinatasuryanto"],
+        {
+            "investigation_spec": {
+                "processing_mode": "same_subject",
+                "subject_label": subject,
+            }
+        },
+    )
+    source_job = persistent_store.claim_next("worker:persona-builder-source")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": ["ferdinatasuryanto"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    persona_id = persistent_store.get_case(source_job["case_id"])["personas"][0][
+        "id"
+    ]
+
+    builder = client.get(f"/personas/{persona_id}/investigate")
+    body = builder.get_data(as_text=True)
+    assert builder.status_code == 200
+    assert "Configure this person investigation" in body
+    assert f'value="{subject}"' in body
+    assert "Cited public-web research" in body
+    assert "Case source filters" in body
+    assert "Full check" in body
+    assert "Pending or uncertain evidence is not silently reused" in body
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "configured-persona-csrf"
+    response = client.post(
+        f"/personas/{persona_id}/investigate",
+        data={
+            "csrf_token": "configured-persona-csrf",
+            "identifier_type": ["full_name", "social_handle", "email"],
+            "identifier_value": [subject, "@ferdinata", "f@example.test"],
+            "processing_mode": "same_subject",
+            "generate_name_variants": "on",
+            "allow_ai_context": "on",
+            "enable_github_profile_enrichment": "on",
+            "enable_archived_url_evidence": "on",
+            "tags": ["social"],
+            "mode": "full",
+        },
+    )
+
+    assert response.status_code == 302
     refresh_job_id = response.location.rsplit("/", 1)[-1]
     refresh_job = persistent_store.get_job(refresh_job_id)
-    assert refresh_job["case_id"] == case["id"]
-    assert refresh_job["status"] == "queued"
+    specification = refresh_job["options"]["investigation_spec"]
     assert refresh_job["kind"] == "refresh"
-    assert refresh_job["options"]["top_sites"] == 250
+    assert refresh_job["case_id"] == source_job["case_id"]
+    assert refresh_job["options"]["all_sites"] is True
+    assert refresh_job["options"]["tags"] == ["social"]
+    assert specification["target_persona_id"] == persona_id
+    assert specification["subject_label"] == subject
+    assert specification["processing_mode"] == "same_subject"
+    assert specification["allow_ai_context"] is True
+    assert specification["enable_github_profile_enrichment"] is True
+    assert specification["enable_archived_url_evidence"] is True
+    assert "ferdinata" in refresh_job["usernames"]
+    assert "f@example.test" not in refresh_job["usernames"]
+
+
+def test_persona_rerun_preserves_exact_username_origin(client, persistent_store):
+    username = "john.doe"
+    job_id = persistent_store.create_investigation(
+        [username],
+        {
+            "investigation_spec": {
+                "processing_mode": "independent",
+                "subject_label": username,
+                "identifiers": [{"type": "username", "value": username}],
+            }
+        },
+    )
+    source_job = persistent_store.claim_next("worker:username-rerun-source")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": [username],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    persona_id = persistent_store.get_case(source_job["case_id"])["personas"][0][
+        "id"
+    ]
+
+    page = client.get(f"/personas/{persona_id}/investigate").get_data(
+        as_text=True
+    )
+    assert '<option value="username" selected>Username</option>' in page
+    assert f'value="{username}"' in page
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "username-rerun-csrf"
+    response = client.post(
+        f"/personas/{persona_id}/investigate",
+        data={
+            "csrf_token": "username-rerun-csrf",
+            "identifier_type": "username",
+            "identifier_value": username,
+            "processing_mode": "same_subject",
+            "generate_name_variants": "on",
+            "mode": "fast",
+        },
+    )
+
+    refresh = persistent_store.get_job(response.location.rsplit("/", 1)[-1])
+    assert refresh["usernames"] == [username]
+    assert refresh["options"]["investigation_spec"]["identifiers"] == [
+        {"type": "username", "value": username}
+    ]
+
+
+def test_persona_prefill_ignores_another_personas_targeted_refresh(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(
+        ["alice", "bob"],
+        {
+            "investigation_spec": {
+                "processing_mode": "independent",
+                "subject_label": "alice",
+                "identifiers": [
+                    {"type": "username", "value": "alice"},
+                    {"type": "username", "value": "bob"},
+                ],
+            }
+        },
+    )
+    source_job = persistent_store.claim_next("worker:prefill-scope-source")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "usernames": ["alice", "bob"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    personas = {
+        persona["display_name"]: persona["id"]
+        for persona in persistent_store.get_case(source_job["case_id"])[
+            "personas"
+        ]
+    }
+    persistent_store.repeat_persona_investigation(
+        personas["alice"],
+        ["bob"],
+        {
+            "investigation_spec": {
+                "processing_mode": "same_subject",
+                "identifiers": [{"type": "full_name", "value": "bob"}],
+            }
+        },
+    )
+
+    bob_builder = client.get(
+        f"/personas/{personas['bob']}/investigate"
+    ).get_data(as_text=True)
+    assert '<option value="username" selected>Username</option>' in bob_builder
+    assert '<option value="full_name" selected>' not in bob_builder
 
 
 def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
@@ -1307,6 +1489,415 @@ def test_supplied_website_evidence_survives_wrong_wikidata_candidate(
     assert len(persistent_store.get_case(job["case_id"])["jobs"]) == 1
 
 
+def test_affiliation_job_retains_cited_linkedin_and_map_observations_without_scraping(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar",
+        enable_public_web_research=True,
+        official_website="https://www.unistellar.co/",
+    )
+    job = persistent_store.claim_next("worker:public-web-organization")
+    linkedin_url = "https://www.linkedin.com/company/unistellar/"
+    maps_url = (
+        "https://www.google.com/maps/place/Unistellar/"
+        "@-6.2585928,106.8205345,980m/data=!3m1!1e3"
+    )
+
+    async def no_wikidata_match(*_args, **_kwargs):
+        return {
+            "source_engine": "wikidata_affiliation",
+            "status": "not_found",
+            "reason": "No suitable knowledge entity.",
+            "organization_candidates": [],
+            "organization": None,
+            "people": [],
+        }
+
+    async def no_dns_records(*_args, **_kwargs):
+        return {
+            "source_engine": "cloudflare_dns_context",
+            "status": "observed",
+            "reason": "Current public DNS records.",
+            "domain": "unistellar.co",
+            "records": {},
+            "record_count": 0,
+        }
+
+    async def official_website_without_address(*_args, **_kwargs):
+        return _official_website_worker_observation(
+            linked_profiles=["https://www.linkedin.com/company/unistellar"]
+        )
+
+    async def cited_research(**kwargs):
+        assert kwargs["web_search_enabled"] is True
+        assert "LinkedIn" in kwargs["user_message"]
+        assert "Google Maps" in kwargs["user_message"]
+        return {
+            "analysis": (
+                "The cited LinkedIn company page publishes the Jakarta business "
+                "address, and the cited map listing points to the same organization. "
+                "Home address: 8 Private Road belongs to an employee."
+            ),
+            "sources": [
+                {"title": "Unistellar | LinkedIn", "url": linkedin_url},
+                {"title": "Unistellar - Google Maps", "url": maps_url},
+            ],
+            "web_search_completed": True,
+        }
+
+    async def organization_proposals(**kwargs):
+        assert kwargs["sources"][0]["url"] == linkedin_url
+        return [
+            {
+                "observation_type": "business_address",
+                "value": "Jl Kemang Timur No. 28, Jakarta 12730, ID",
+                "source_url": linkedin_url,
+                "source_title": "Unistellar | LinkedIn",
+                "source_role": "professional_profile",
+                "identity_match_basis": "exact_name_and_official_website",
+                "reason": (
+                    "The company page uses the exact name, links to unistellar.co, "
+                    "and publishes this primary business address."
+                ),
+                "confidence": 80,
+                "latitude": None,
+                "longitude": None,
+            },
+            {
+                "observation_type": "business_address",
+                "value": "Jl. Kemang Timur No.28, Jakarta 12730, Indonesia",
+                "source_url": maps_url,
+                "source_title": "Unistellar - Google Maps",
+                "source_role": "map_listing",
+                "identity_match_basis": "exact_name_and_location",
+                "reason": "The cited map listing publishes this business address.",
+                "confidence": 75,
+                "latitude": -6.2585928,
+                "longitude": 106.8231094,
+            },
+        ]
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(
+        web_app,
+        "load_settings",
+        lambda: {"openai_model": "gpt-5.6-terra", "ai_web_enrichment": True},
+    )
+    monkeypatch.setattr(
+        web_app, "run_wikidata_affiliation_discovery", no_wikidata_match
+    )
+    monkeypatch.setattr(web_app, "run_cloudflare_dns_context", no_dns_records)
+    monkeypatch.setattr(
+        web_app,
+        "run_official_website_public_content",
+        official_website_without_address,
+    )
+    monkeypatch.setattr(web_app, "get_case_chat_response", cited_research)
+    monkeypatch.setattr(
+        web_app, "get_organization_context_proposals", organization_proposals
+    )
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "completed"
+    assert completed["public_web_research"]["status"] == "observed"
+    assert completed["public_web_research"]["analysis"] == ""
+    assert "8 Private Road" not in json.dumps(completed)
+    assert completed["public_web_finding_count"] == 2
+    findings = completed["public_web_research"]["findings"]
+    assert {finding["source_role"] for finding in findings} == {
+        "professional_profile",
+        "map_listing",
+    }
+    assert all(finding["review_status"] == "pending" for finding in findings)
+    assert all(
+        finding["direct_platform_fetch_performed"] is False
+        for finding in findings
+    )
+    assert persistent_store.get_case(job["case_id"])["personas"] == []
+
+    page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "Cited external company-profile research" in page
+    assert "Jl Kemang Timur No. 28, Jakarta 12730, ID" in page
+    assert linkedin_url in page
+    assert maps_url.replace("&", "&amp;") in page
+    assert "did not send direct scraping requests" in page
+
+
+def test_cited_research_extraction_failure_is_partial_not_an_evidence_gap(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar", enable_public_web_research=True
+    )
+    job = persistent_store.claim_next("worker:public-web-extraction-failure")
+
+    async def no_wikidata_match(*_args, **_kwargs):
+        return {
+            "source_engine": "wikidata_affiliation",
+            "status": "not_found",
+            "reason": "No suitable knowledge entity.",
+            "organization_candidates": [],
+            "organization": None,
+            "people": [],
+        }
+
+    async def cited_research(**_kwargs):
+        return {
+            "analysis": (
+                "A cited source may describe a Jakarta business location. "
+                "Employee personal data: alice@example.test."
+            ),
+            "sources": [
+                {
+                    "title": "Unistellar company profile",
+                    "url": "https://example.org/unistellar",
+                }
+            ],
+            "web_search_completed": True,
+        }
+
+    async def failed_extraction(**_kwargs):
+        raise RuntimeError("private structured extraction diagnostic")
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(
+        web_app,
+        "load_settings",
+        lambda: {"openai_model": "gpt-5.6-terra", "ai_web_enrichment": True},
+    )
+    monkeypatch.setattr(
+        web_app, "run_wikidata_affiliation_discovery", no_wikidata_match
+    )
+    monkeypatch.setattr(web_app, "get_case_chat_response", cited_research)
+    monkeypatch.setattr(
+        web_app, "get_organization_context_proposals", failed_extraction
+    )
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    research = completed["public_web_research"]
+    assert research["status"] == "partial"
+    assert research["analysis"] == ""
+    assert research["findings"] == []
+    assert "without recording a zero-result conclusion" in research["reason"]
+    assert "unvalidated model narrative was discarded" in research["reason"]
+    assert "alice@example.test" not in json.dumps(completed)
+    assert "private structured extraction diagnostic" not in json.dumps(completed)
+    events = [item["event"] for item in persistent_store.get_events(job_id)]
+    assert any(
+        event.get("collector") == "cited-public-web-organization-research"
+        and event.get("type") == "collector_error"
+        for event in events
+    )
+
+
+def test_google_places_job_requires_explicit_rate_limited_live_details_action(
+    client, web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_affiliation_investigation(
+        "Unistellar", enable_google_places_search=True
+    )
+    job = persistent_store.claim_next("worker:google-places")
+    place_id = "ChIJCzjlUUSv4S4RCiu9uL4NlvE"
+
+    async def no_wikidata_match(*_args, **_kwargs):
+        return {
+            "source_engine": "wikidata_affiliation",
+            "status": "not_found",
+            "reason": "No suitable knowledge entity.",
+            "organization_candidates": [],
+            "organization": None,
+            "people": [],
+        }
+
+    async def google_search(*_args, **_kwargs):
+        return {
+            "source_engine": "google_places_business_search",
+            "status": "observed",
+            "reason": "One bounded Google Places lead.",
+            "subject_value": "Unistellar",
+            "candidates": [
+                {
+                    "place_id": place_id,
+                    "source_url": "https://www.google.com/maps/search/?api=1",
+                    "review_status": "pending",
+                    "automatic_approval_allowed": False,
+                    "durable_google_content_stored": False,
+                }
+            ],
+            "candidate_count": 1,
+            "durable_google_content_stored": False,
+        }
+
+    live_detail_calls = []
+
+    async def google_live_details(organization_name, place_ids, api_key):
+        assert organization_name == "Unistellar"
+        assert place_ids == [place_id]
+        assert api_key == "restricted-server-key"
+        live_detail_calls.append(place_ids)
+        return {
+            "status": "observed",
+            "reason": "Live Google Maps business details.",
+            "places": [
+                {
+                    "place_id": place_id,
+                    "display_name": "Unistellar",
+                    "formatted_address": (
+                        "Jl. Kemang Timur No. 28, Jakarta 12730, Indonesia"
+                    ),
+                    "business_status": "OPERATIONAL",
+                    "identity_match": "exact_name",
+                    "source_url": "https://maps.google.com/?cid=12345",
+                    "review_status": "pending",
+                    "limitation": "Live research lead only.",
+                }
+            ],
+            "attribution": "Google Maps",
+            "durable_google_content_stored": False,
+        }
+
+    monkeypatch.setattr(
+        web_app, "run_wikidata_affiliation_discovery", no_wikidata_match
+    )
+    monkeypatch.setattr(
+        web_app, "run_google_places_business_search", google_search
+    )
+    monkeypatch.setattr(
+        web_app, "run_google_places_live_details", google_live_details
+    )
+    monkeypatch.setattr(
+        web_app, "get_google_maps_api_key", lambda: "restricted-server-key"
+    )
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["google_places_candidate_count"] == 1
+    assert completed["google_places_search"]["candidates"][0]["place_id"] == place_id
+    assert "Jl. Kemang Timur" not in json.dumps(completed)
+    assert persistent_store.get_case(job["case_id"])["personas"] == []
+    events = [item["event"] for item in persistent_store.get_events(job_id)]
+    assert any(
+        event.get("collector") == "google-places-business-search"
+        and event.get("type") == "collector_completed"
+        for event in events
+    )
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "places-live-csrf"
+
+    page = client.get(f"/cases/{job['case_id']}").get_data(as_text=True)
+    assert "Google Places business leads" in page
+    assert "Jl. Kemang Timur No. 28" not in page
+    assert "Load live Google details" in page
+    assert live_detail_calls == []
+
+    loaded = client.post(
+        f"/cases/{job['case_id']}/google-places-live",
+        data={"csrf_token": "places-live-csrf"},
+    )
+    assert loaded.status_code == 200
+    loaded_page = loaded.get_data(as_text=True)
+    assert "Jl. Kemang Timur No. 28" in loaded_page
+    assert live_detail_calls == [[place_id]]
+
+    repeated = client.post(
+        f"/cases/{job['case_id']}/google-places-live",
+        data={"csrf_token": "places-live-csrf"},
+    )
+    assert repeated.status_code == 429
+    assert "Wait one minute" in repeated.get_data(as_text=True)
+    assert live_detail_calls == [[place_id]]
+    assert "durably retains only Place IDs" in page
+    assert "never becomes a Persona address" in page
+
+
+def test_google_places_live_display_does_not_reuse_older_job_candidates(
+    web_app, monkeypatch
+):
+    called = False
+
+    async def google_live_details(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return {"status": "observed", "places": [{"formatted_address": "stale"}]}
+
+    monkeypatch.setattr(
+        web_app, "run_google_places_live_details", google_live_details
+    )
+    monkeypatch.setattr(
+        web_app, "get_google_maps_api_key", lambda: "restricted-server-key"
+    )
+    case = {
+        "jobs": [
+            {
+                "id": "latest",
+                "kind": "affiliation",
+                "google_places_search": {
+                    "status": "not_found",
+                    "candidates": [],
+                },
+            },
+            {
+                "id": "older",
+                "kind": "affiliation",
+                "google_places_search": {
+                    "status": "observed",
+                    "subject_value": "Unistellar",
+                    "candidates": [{"place_id": "ChIJCzjlUUSv4S4RCiu9uL4NlvE"}],
+                },
+            },
+        ]
+    }
+
+    result = web_app.load_case_google_places_live(case)
+
+    assert result["status"] == "not_run"
+    assert result["places"] == []
+    assert called is False
+
+
+def test_history_describes_investigation_type_target_and_context(
+    client, persistent_store
+):
+    persistent_store.create_affiliation_investigation(
+        "Unistellar",
+        jurisdiction="ID",
+        official_website="https://www.unistellar.co/",
+    )
+
+    page = client.get("/history").get_data(as_text=True)
+
+    assert "<th>Investigation</th>" in page
+    assert "<th>Findings</th>" in page
+    assert "<th>Usernames</th>" not in page
+    assert "Organization affiliation" in page
+    assert "Unistellar" in page
+    assert "Indonesia · ID" in page
+    assert "unistellar.co" in page
+
+
+def test_history_counts_identity_enrichment_proposal_fields(web_app):
+    context = web_app.build_investigation_history_context(
+        {
+            "kind": "identity_enrichment",
+            "status": "completed",
+            "options": {
+                "investigation_spec": {"confirmed_name": "Alice Example"}
+            },
+            "wikipedia_claim_count": 2,
+            "offshore_alert_count": 1,
+        }
+    )
+
+    assert context["finding_summary"] == "3 claim proposals"
+
+
 def test_jurisdiction_registry_survives_wikidata_failure_and_proposes_people(
     client, web_app, persistent_store, monkeypatch
 ):
@@ -1473,6 +2064,96 @@ def test_approved_affiliation_opens_a_separate_case(client, persistent_store):
         "official_website"
     ]["domain"] == "example.org"
     assert persistent_store.get_case(affiliation_job["case_id"])["personas"] == []
+
+
+def test_approved_role_can_open_an_analyst_confirmed_organization_case(
+    client, persistent_store
+):
+    source_job_id = persistent_store.create_investigation(["imanul"], {})
+    source_job = persistent_store.claim_next("worker:role-source")
+    role = "Head of the Digital Economy Division, ILUNI FEB UI"
+    result = {
+        "status": "completed",
+        "usernames": ["imanul"],
+        "individual_reports": [
+            {
+                "username": "imanul",
+                "claimed_profiles": [
+                    {
+                        "site_name": "FEB UI",
+                        "url": "https://feb.ui.ac.id/example",
+                        "confidence": "strong",
+                        "evidence": {"occupation": role},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(source_job_id, result)
+    persistent_store.sync_persona_claims(source_job_id, result)
+    persona = persistent_store.get_persona(
+        persistent_store.get_case(source_job["case_id"])["personas"][0]["id"]
+    )
+    occupation = next(
+        claim for claim in persona["claims"] if claim["field_name"] == "occupation"
+    )
+    unreviewed_page = client.get(f"/personas/{persona['id']}").get_data(
+        as_text=True
+    )
+    assert "Investigate organization from role" not in unreviewed_page
+
+    persistent_store.review_claim(occupation["id"], "approved", "analyst")
+    reviewed_page = client.get(f"/personas/{persona['id']}").get_data(
+        as_text=True
+    )
+    assert "Investigate organization from role" in reviewed_page
+    assert 'value="ILUNI FEB UI"' in reviewed_page
+    assert "does not silently turn the role text into an approved affiliation fact" in (
+        reviewed_page
+    )
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "role-organization-csrf"
+    rejected = client.post(
+        f"/claims/{occupation['id']}/investigate-affiliation",
+        data={
+            "csrf_token": "role-organization-csrf",
+            "organization_name": "ILUNI",
+        },
+        follow_redirects=True,
+    )
+    assert "must match the bounded organization segment" in rejected.get_data(
+        as_text=True
+    )
+    assert len(persistent_store.list_jobs()) == 1
+
+    response = client.post(
+        f"/claims/{occupation['id']}/investigate-affiliation",
+        data={
+            "csrf_token": "role-organization-csrf",
+            "organization_name": "ILUNI FEB UI",
+            "jurisdiction": "ID",
+        },
+    )
+
+    assert response.status_code == 302
+    affiliation_job = persistent_store.get_job(response.location.rsplit("/", 1)[-1])
+    specification = affiliation_job["options"]["investigation_spec"]
+    assert specification["affiliation_name"] == "ILUNI FEB UI"
+    assert specification["source_claim_id"] == occupation["id"]
+    assert specification["source_claim_field"] == "occupation"
+    assert specification["target_basis"] == (
+        "analyst_confirmed_role_organization"
+    )
+    assert specification["legal_jurisdiction"]["code"] == "ID"
+    queued_event = persistent_store.get_events(affiliation_job["job_id"])[0][
+        "event"
+    ]
+    assert queued_event["source_claim_id"] == occupation["id"]
+    assert queued_event["source_claim_field"] == "occupation"
+    assert queued_event["target_basis"] == (
+        "analyst_confirmed_role_organization"
+    )
 
 
 def _persistent_approved_full_name(store, name="Alice Example"):

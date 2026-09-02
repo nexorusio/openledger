@@ -27,24 +27,23 @@
             <thead>
                 <tr>
                     <th>Started</th>
-                    <th>Usernames</th>
-                    <th>Profiles found</th>
+                    <th>Investigation</th>
+                    <th>Findings</th>
                     <th>Status</th>
                     <th><span class="visually-hidden">Actions</span></th>
                 </tr>
             </thead>
             <tbody>
                 {% for result in entries %}
+                {% set context = result.history_context %}
                 <tr>
-                    <td>{{ result.started_at or '—' }}</td>
-                    <td>{{ result.usernames | join(', ') if result.usernames else '—' }}</td>
-                    <td>{%- if result.status == 'completed' -%}
-                        {{- result.found_count -}}
-                        {%- elif result.status in ('queued', 'running', 'cancel_requested') -%}
-                        {{- result.progress.found | default(0) -}}
-                        {%- else -%}
-                        —
-                        {%- endif -%}</td>
+                    <td title="{{ context.started_raw }}">{{ context.started_display }}</td>
+                    <td>
+                        <span class="badge-soft">{{ context.type_label }}</span>
+                        <div><strong>{{ context.target }}</strong></div>
+                        {% if context.context %}<small>{{ context.context }}</small>{% endif %}
+                    </td>
+                    <td>{{ context.finding_summary if result.status in ('completed', 'queued', 'running', 'cancel_requested') else '—' }}</td>
                     <td>
                         {% if result.status == 'completed' and result.collection_status == 'cancelled' %}
                         <span class="badge-soft warning" title="{{ result.collection_message }}">Partial · stopped</span>

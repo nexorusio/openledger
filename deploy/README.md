@@ -11,7 +11,7 @@ It runs:
 - a branded OpenLedger login with protected password management;
 - persistent reports, PostgreSQL case state, investigation history, and web
   settings;
-- optional server-side OpenAI analysis configured from the protected Settings page.
+- optional server-side OpenAI analysis and Google Places business leads configured from the protected Settings page.
 
 ## Prerequisites
 
@@ -77,21 +77,30 @@ Apply normal updates after changes have been merged to main:
 
 The first update from the original Basic Authentication deployment prompts for
 an application username and password before removing the proxy login. Existing
-reports, settings, and the protected OpenAI key are preserved.
+reports, settings, and protected provider keys are preserved.
 
 Reset a forgotten application password from the Droplet console:
 
     cd /opt/openledger
     bash deploy/reset-password.sh
 
-## Connect or change OpenAI
+## Connect or change provider keys
 
-Sign in to OpenLedger, open **Settings**, and use **AI connections**. The
-server verifies the key and selected model without generating content, then
-stores the key in `runtime/secrets/openai_api_key` with mode 600. The key is
-never returned to the browser or written to the ordinary web settings file.
+Sign in to OpenLedger, open **Settings**, and use **Provider connections**. For
+OpenAI, the server verifies the key and selected model without generating
+content, then stores the key in `runtime/secrets/openai_api_key` with mode 600.
+The key is never returned to the browser or written to the ordinary web
+settings file.
 
 Never put the API key in GitHub, screenshots, or support messages.
+
+The optional Google Places connection stores its key separately in
+`runtime/secrets/google_maps_api_key` with mode 600. Enable Places API (New),
+billing and quota in the Google Cloud project, then restrict the key to the
+production server and the Places API before connecting it. OpenLedger uses
+Places Text Search for organization names; the Geocoding API is not a substitute
+for that search. The worker retains only Place IDs, while the case page fetches
+business details live without persisting Google content.
 
 The web deployment accepts only the fixed OpenAI HTTPS endpoint by default. To
 use another operator-controlled OpenAI-compatible endpoint, set

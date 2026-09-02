@@ -100,12 +100,15 @@ governed adapters through the existing worker and evidence model.
 | GLEIF Global LEI Index | Search legal entities by approved affiliation name and ISO jurisdiction. | Candidate evidence only; a missing LEI match does not prove that a business is unregistered. |
 | French National Enterprise Directory | Search France-registered entities and public leadership records. | Only one exact legal-name match may propose people; birth and nationality data are not retained. |
 | Cloudflare DNS-over-HTTPS | Collect current A, AAAA, MX and NS records for one opted-in official website domain. | Observation-only technical context; DNS, hosting and registrar geography never establish where a business operates. |
+| Google Places API (New) | Optionally find business-listing leads for the exact organization name and supplied jurisdiction. | Administrator-supplied restricted server key; Text Search retains only Place IDs, live details are not persisted, and every listing remains a pending lead. |
 | Wikipedia | Propose a biography summary, page identifier, and available lead image for an approved name. | Ambiguous pages require analyst selection. |
 | ICIJ Offshore Leaks | Alert on exact-name Officer candidates for an approved name. | Potential-match alert only; independent identity confirmation is mandatory. |
 
-The governed registry is [`config/osint-sources.json`](config/osint-sources.json).
+The credential-free governed registry is [`config/osint-sources.json`](config/osint-sources.json).
 Admission rules, review intervals, runtime limits, and contract checks are
 documented in [Governed OSINT source maintenance](docs/osint-source-maintenance.md).
+Google Places is a separately documented, administrator-enabled credentialed
+provider exception and is not represented as a free governed source.
 
 ## AI assistance
 
@@ -166,8 +169,10 @@ sudo bash deploy/install.sh
 The installer configures Docker when needed, generates protected application
 and database secrets, asks for the initial administrator, builds the services,
 runs database migrations, and waits for the health check. After signing in,
-connect the existing OpenAI account from **Settings → AI connections**. Never
-place an API key in Git, screenshots, logs, or support messages.
+connect the existing OpenAI account from **Settings → Provider connections**.
+Google Places can be connected there only when Places API (New), billing, quota,
+and server/API restrictions are configured. Never place an API key in Git,
+screenshots, logs, or support messages.
 
 For prerequisites, backup responsibilities, password recovery, custom AI
 endpoints, map endpoints, and security notes, read the

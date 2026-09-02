@@ -25,7 +25,7 @@ import secrets
 import shutil
 import time
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from threading import Lock, Thread
 from typing import Any, Dict, Optional
@@ -39,13 +39,14 @@ from maigret.ai import (
     get_case_chat_claim_proposals,
     get_case_chat_response,
     get_enriched_ai_analysis,
+    get_organization_context_proposals,
     validate_openai_connection,
 )
 from maigret.checking import build_cloudflare_bypass_config
 from maigret.result import MaigretCheckStatus
 from maigret.sites import MaigretDatabase
 from maigret.report import generate_report_context
-from maigret.utils import is_country_tag
+from maigret.utils import is_country_tag, is_plausible_username
 from maigret.web.case_store import (
     ActiveInvestigationError,
     TERMINAL_STATUSES,
@@ -56,7 +57,9 @@ from maigret.web.collector_adapters import (
     CLOUDFLARE_DNS_ENGINE,
     FR_BUSINESS_REGISTRY_ENGINE,
     GLEIF_ENGINE,
+    GOOGLE_PLACES_ENGINE,
     OFFICIAL_WEBSITE_ENGINE,
+    PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
     WIKIDATA_ENGINE,
     build_business_context_assessment,
     build_organization_resolution_candidates,
@@ -67,9 +70,13 @@ from maigret.web.collector_adapters import (
     github_profile_targets,
     normalize_legal_jurisdiction,
     normalize_official_website_url,
+    normalize_public_web_organization_findings,
+    normalize_public_web_organization_sources,
     run_cloudflare_dns_context,
     run_fr_business_registry_search,
     run_gleif_legal_entity_search,
+    run_google_places_business_search,
+    run_google_places_live_details,
     run_github_public_profile,
     run_icij_offshore_match,
     run_official_website_public_content,
@@ -80,6 +87,7 @@ from maigret.web.collector_adapters import (
     run_wikipedia_person_enrichment,
     user_scanner_available,
     user_scanner_email_targets,
+    validate_google_places_connection,
 )
 from maigret.web.geocoding import GeocodingError, geocode_place_center
 from maigret.web.investigation_input import (
@@ -132,6 +140,8 @@ metadata_lock = Lock()
 auth_lock = Lock()
 login_attempts_lock = Lock()
 login_attempts: Dict[str, Any] = {}
+google_places_live_requests_lock = Lock()
+google_places_live_requests: Dict[str, float] = {}
 
 # Live (streaming) scan jobs, keyed by job_id. Each entry:
 #   {'queue': Queue, 'cancelled': bool, 'loop': event loop, 'task': asyncio task}
@@ -241,6 +251,10 @@ app.config["OPENAI_API_KEY_FILE"] = os.getenv(
     "OPENAI_API_KEY_FILE",
     os.path.join("runtime", "secrets", "openai_api_key"),
 )
+app.config["GOOGLE_MAPS_API_KEY_FILE"] = os.getenv(
+    "GOOGLE_MAPS_API_KEY_FILE",
+    os.path.join("runtime", "secrets", "google_maps_api_key"),
+)
 app.config["GEOCODER_URL"] = os.getenv(
     "OPENLEDGER_GEOCODER_URL",
     "https://nominatim.openstreetmap.org/search",
@@ -346,6 +360,7 @@ ADMIN_ONLY_ENDPOINTS = frozenset(
     {
         'settings_update',
         'openai_settings_update',
+        'google_places_settings_update',
         'add_analyst',
         'remove_analyst',
     }
@@ -355,6 +370,7 @@ PASSWORD_HASH_ITERATIONS = 600_000
 PASSWORD_MIN_LENGTH = 12
 LOGIN_ATTEMPT_LIMIT = 8
 LOGIN_ATTEMPT_WINDOW_SECONDS = 15 * 60
+GOOGLE_PLACES_LIVE_RATE_LIMIT_SECONDS = 60
 LOG_CONTROL_CHARACTER_PATTERN = re.compile(r'[\x00-\x1f\x7f]+')
 
 
@@ -744,6 +760,14 @@ def get_openai_api_key():
     return os.getenv('OPENAI_API_KEY', '').strip()
 
 
+def affiliation_public_web_research_enabled() -> bool:
+    """Use the configured cited-web capability without introducing another key."""
+    return bool(
+        get_openai_api_key()
+        and load_settings().get('ai_web_enrichment', True)
+    )
+
+
 def get_openai_key_source():
     key_path = app.config.get("OPENAI_API_KEY_FILE")
     if key_path:
@@ -792,6 +816,83 @@ def save_openai_api_key(api_key):
 
 def remove_openai_api_key():
     key_path = app.config.get("OPENAI_API_KEY_FILE")
+    if not key_path:
+        return False
+    try:
+        os.remove(key_path)
+        return True
+    except FileNotFoundError:
+        return False
+
+
+def get_google_maps_api_key():
+    """Read the protected Google key without placing it in settings or jobs."""
+    key_path = app.config.get("GOOGLE_MAPS_API_KEY_FILE")
+    if key_path:
+        try:
+            with open(key_path, encoding='utf-8') as key_file:
+                key = key_file.read().strip()
+                if key:
+                    return key
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            record_internal_error('Failed to read the Google Maps key file', error)
+    return os.getenv('GOOGLE_MAPS_API_KEY', '').strip()
+
+
+def google_places_search_enabled() -> bool:
+    """Enable the bounded provider only after an administrator connects it."""
+    return bool(get_google_maps_api_key())
+
+
+def get_google_maps_key_source():
+    key_path = app.config.get("GOOGLE_MAPS_API_KEY_FILE")
+    if key_path:
+        try:
+            with open(key_path, encoding='utf-8') as key_file:
+                if key_file.read().strip():
+                    return 'protected file'
+        except (FileNotFoundError, OSError):
+            pass
+    if os.getenv('GOOGLE_MAPS_API_KEY', '').strip():
+        return 'environment'
+    return None
+
+
+def save_google_maps_api_key(api_key):
+    """Atomically store the Google key in its dedicated protected file."""
+    key_path = app.config.get("GOOGLE_MAPS_API_KEY_FILE")
+    if not key_path:
+        raise RuntimeError('Server-side Google API key storage is not configured.')
+    key_path = os.path.abspath(key_path)
+    key_directory = os.path.dirname(key_path)
+    os.makedirs(key_directory, mode=0o700, exist_ok=True)
+    os.chmod(key_directory, 0o700)
+    temporary_path = f"{key_path}.{uuid.uuid4().hex}.tmp"
+    descriptor = os.open(
+        temporary_path,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        with os.fdopen(descriptor, 'w', encoding='utf-8') as key_file:
+            key_file.write(api_key)
+            key_file.write('\n')
+            key_file.flush()
+            os.fsync(key_file.fileno())
+        os.replace(temporary_path, key_path)
+        os.chmod(key_path, 0o600)
+    except Exception:
+        try:
+            os.unlink(temporary_path)
+        except FileNotFoundError:
+            pass
+        raise
+
+
+def remove_google_maps_api_key():
+    key_path = app.config.get("GOOGLE_MAPS_API_KEY_FILE")
     if not key_path:
         return False
     try:
@@ -855,6 +956,7 @@ def inject_settings():
     return {
         'web_settings': load_settings(),
         'openai_connected': bool(get_openai_api_key()),
+        'google_places_connected': bool(get_google_maps_api_key()),
         'csrf_token': get_csrf_token(),
         'current_user': session.get('username'),
         'current_role': current_auth_role(),
@@ -2700,6 +2802,12 @@ def run_persistent_affiliation_job(
     else:
         legal_jurisdiction = normalize_legal_jurisdiction(legal_jurisdiction)
     domain_context_requested = bool(specification.get('enable_domain_context'))
+    public_web_research_requested = bool(
+        specification.get('enable_public_web_research')
+    )
+    google_places_search_requested = bool(
+        specification.get('enable_google_places_search')
+    )
     explicit_website = specification.get('official_website')
     if isinstance(explicit_website, dict):
         explicit_website = normalize_official_website_url(
@@ -2763,13 +2871,192 @@ def run_persistent_affiliation_job(
                 'targets': 1,
             }
         )
+    if public_web_research_requested:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': 'cited-public-web-organization-research',
+                'target_type': 'organization_name',
+                'targets': 1,
+            }
+        )
+    if google_places_search_requested:
+        sink.put(
+            {
+                'type': 'collector_started',
+                'collector': 'google-places-business-search',
+                'target_type': 'organization_name',
+                'targets': 1,
+            }
+        )
     runtime_job = {'cancelled': False}
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
     async def collect_sources():
-        base_results = await asyncio.gather(
-            *(coroutine for _source_name, coroutine in source_specs),
+        async def collect_google_places_search():
+            if not google_places_search_requested:
+                return {
+                    'source_engine': GOOGLE_PLACES_ENGINE,
+                    'status': 'not_run',
+                    'reason': 'Google Places business search was not enabled.',
+                    'candidates': [],
+                    'candidate_count': 0,
+                    'durable_google_content_stored': False,
+                }
+            api_key = get_google_maps_api_key()
+            if not api_key:
+                return {
+                    'source_engine': GOOGLE_PLACES_ENGINE,
+                    'status': 'unavailable',
+                    'reason': (
+                        'The protected Google Places connection is unavailable.'
+                    ),
+                    'candidates': [],
+                    'candidate_count': 0,
+                    'durable_google_content_stored': False,
+                }
+            return await run_google_places_business_search(
+                affiliation_name,
+                api_key,
+                legal_jurisdiction=legal_jurisdiction,
+            )
+
+        async def collect_public_web_research():
+            if not public_web_research_requested:
+                return {
+                    'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                    'status': 'not_run',
+                    'reason': 'Cited public-web organization research was not enabled.',
+                    'analysis': '',
+                    'sources': [],
+                    'findings': [],
+                    'direct_platform_fetch_performed': False,
+                }
+            api_key = get_openai_api_key()
+            if not api_key:
+                return {
+                    'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                    'status': 'unavailable',
+                    'reason': 'The configured AI research service is unavailable.',
+                    'analysis': '',
+                    'sources': [],
+                    'findings': [],
+                    'direct_platform_fetch_performed': False,
+                }
+            ai_settings = load_settings()
+            model = ai_settings.get(
+                'openai_model',
+                os.getenv('OPENAI_MODEL', DEFAULT_SETTINGS['openai_model']),
+            )
+            jurisdiction_context = (
+                legal_jurisdiction.get('code')
+                if isinstance(legal_jurisdiction, dict)
+                else None
+            )
+            research_prompt = (
+                f'Research the public business identity and operating context of the '
+                f'exact organization name {affiliation_name!r}. Look for its official '
+                'website, public professional company profiles such as LinkedIn, and '
+                'public map or business listings such as Google Maps, plus credible '
+                'registry or institutional sources. Report exact publicly stated '
+                'business addresses and any location explicitly labelled headquarters. '
+                'Separate first-party, registry, professional-profile, map-listing, and '
+                'other third-party statements. Do not treat a search result, map pin, '
+                'profile, or matching name as legal proof. Exclude private or '
+                'residential addresses and inferred locations. Preserve exact publicly '
+                'stated phones or emails as contact leads, explicitly distinguishing '
+                'organization contacts from contacts associated with a named person. '
+                'Use direct citations for every factual statement.'
+            )
+            if jurisdiction_context:
+                research_prompt += (
+                    f' The operator supplied jurisdiction {jurisdiction_context}; use it '
+                    'only to disambiguate and never as proof of identity or registration.'
+                )
+            if explicit_website:
+                research_prompt += (
+                    f' The operator supplied official website {explicit_website["url"]}; '
+                    'use an exact domain match as identity evidence.'
+                )
+            response = await get_case_chat_response(
+                api_key=api_key,
+                case_context={
+                    'investigation_type': 'affiliation',
+                    'organization_name': affiliation_name,
+                    'legal_jurisdiction': legal_jurisdiction,
+                    'operator_supplied_official_website': explicit_website,
+                },
+                conversation=[],
+                user_message=research_prompt,
+                model=model,
+                web_search_enabled=True,
+                **ai_endpoint_options(),
+            )
+            durable_sources = normalize_public_web_organization_sources(
+                response.get('sources', [])
+            )
+            proposal_error = ''
+            try:
+                raw_findings = await get_organization_context_proposals(
+                    api_key=api_key,
+                    organization_name=affiliation_name,
+                    legal_jurisdiction=legal_jurisdiction,
+                    official_website=explicit_website,
+                    research_answer=response['analysis'],
+                    sources=durable_sources,
+                    model=model,
+                    **ai_endpoint_options(),
+                )
+                findings = normalize_public_web_organization_findings(
+                    affiliation_name,
+                    raw_findings,
+                    sources=durable_sources,
+                    official_website=explicit_website,
+                )
+            except Exception as error:
+                proposal_error = record_internal_error(
+                    'Cited organization observation extraction failed',
+                    error,
+                    session=job_id,
+                )
+                findings = []
+            status = 'partial' if proposal_error else 'observed'
+            reason = (
+                'Cited public-web research completed, but structured '
+                'organization observations were unavailable. Citations were retained '
+                'without recording a zero-result conclusion; the unvalidated model '
+                'narrative was discarded.'
+                if proposal_error
+                else (
+                    'Cited public-web research completed. The unvalidated model '
+                    'narrative was discarded; every structured organization '
+                    'observation remains pending analyst verification.'
+                )
+            )
+            return {
+                'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+                'status': status,
+                'reason': reason,
+                # The raw model narrative is used transiently for structured
+                # extraction above. It may repeat private, unsupported, or untyped
+                # information despite the prompt, so only validated typed findings
+                # and citations cross the durable boundary.
+                'analysis': '',
+                'sources': durable_sources,
+                'findings': findings,
+                'proposal_error': proposal_error,
+                'direct_platform_fetch_performed': False,
+                'model': model,
+            }
+
+        base_results, public_web_result, google_places_result = await asyncio.gather(
+            asyncio.gather(
+                *(coroutine for _source_name, coroutine in source_specs),
+                return_exceptions=True,
+            ),
+            collect_public_web_research(),
+            collect_google_places_search(),
             return_exceptions=True,
         )
         website_context = explicit_website
@@ -2836,6 +3123,8 @@ def run_persistent_affiliation_job(
             website_result,
             website_context,
             website_context_source,
+            public_web_result,
+            google_places_result,
         )
 
     task = loop.create_task(collect_sources())
@@ -2847,6 +3136,8 @@ def run_persistent_affiliation_job(
     source_results = None
     dns_result = None
     website_result = None
+    public_web_result = None
+    google_places_result = None
     website_context = explicit_website
     website_context_source = 'operator_input' if explicit_website else ''
     try:
@@ -2856,6 +3147,8 @@ def run_persistent_affiliation_job(
             website_result,
             website_context,
             website_context_source,
+            public_web_result,
+            google_places_result,
         ) = loop.run_until_complete(task)
     except asyncio.CancelledError:
         pass
@@ -2969,6 +3262,78 @@ def run_persistent_affiliation_job(
                 {'collector': 'official-website-content', 'message': public_message}
             )
         source_observations['official-website-content'] = website_result
+
+    if public_web_research_requested and (
+        isinstance(public_web_result, BaseException)
+        or not isinstance(public_web_result, dict)
+    ):
+        public_message = record_internal_error(
+            'cited-public-web organization research failed',
+            public_web_result
+            if isinstance(public_web_result, BaseException)
+            else RuntimeError('The cited research source returned an invalid result'),
+            session=job_id,
+        )
+        public_web_result = {
+            'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+            'status': 'unavailable',
+            'reason': public_message,
+            'analysis': '',
+            'sources': [],
+            'findings': [],
+            'direct_platform_fetch_performed': False,
+        }
+        source_errors.append(
+            {
+                'collector': 'cited-public-web-organization-research',
+                'message': public_message,
+            }
+        )
+    elif not isinstance(public_web_result, dict):
+        public_web_result = {
+            'source_engine': PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
+            'status': 'not_run',
+            'reason': 'Cited public-web organization research was not enabled.',
+            'analysis': '',
+            'sources': [],
+            'findings': [],
+            'direct_platform_fetch_performed': False,
+        }
+
+    if google_places_search_requested and (
+        isinstance(google_places_result, BaseException)
+        or not isinstance(google_places_result, dict)
+    ):
+        public_message = record_internal_error(
+            'Google Places organization search failed',
+            google_places_result
+            if isinstance(google_places_result, BaseException)
+            else RuntimeError('Google Places returned an invalid result'),
+            session=job_id,
+        )
+        google_places_result = {
+            'source_engine': GOOGLE_PLACES_ENGINE,
+            'status': 'unavailable',
+            'reason': public_message,
+            'candidates': [],
+            'candidate_count': 0,
+            'durable_google_content_stored': False,
+        }
+        source_errors.append(
+            {
+                'collector': 'google-places-business-search',
+                'message': public_message,
+            }
+        )
+    elif not isinstance(google_places_result, dict):
+        google_places_result = {
+            'source_engine': GOOGLE_PLACES_ENGINE,
+            'status': 'not_run',
+            'reason': 'Google Places business search was not enabled.',
+            'candidates': [],
+            'candidate_count': 0,
+            'durable_google_content_stored': False,
+        }
 
     observation = source_observations['wikidata-affiliation']
     registry_observations = [
@@ -3149,6 +3514,16 @@ def run_persistent_affiliation_job(
                 dns_result if isinstance(dns_result, dict) else None
             ),
         ),
+        'public_web_research_requested': public_web_research_requested,
+        'public_web_research': public_web_result,
+        'public_web_finding_count': len(
+            list(public_web_result.get('findings') or [])
+        ),
+        'google_places_search_requested': google_places_search_requested,
+        'google_places_search': google_places_result,
+        'google_places_candidate_count': len(
+            list(google_places_result.get('candidates') or [])
+        ),
         'affiliated_person_count': len(unique_people),
         'persona_proposal_count': synchronized['personas'],
         'claim_proposal_count': synchronized['claims'],
@@ -3247,6 +3622,46 @@ def run_persistent_affiliation_job(
                     ),
                 }
             )
+    if public_web_research_requested:
+        research_status = str(
+            public_web_result.get('status') or 'unavailable'
+        )
+        sink.put(
+            {
+                'type': (
+                    'collector_error'
+                    if research_status in {'unavailable', 'rate_limited', 'partial'}
+                    else 'collector_completed'
+                ),
+                'collector': 'cited-public-web-organization-research',
+                'observations': len(
+                    list(public_web_result.get('findings') or [])
+                ),
+                'found': len(list(public_web_result.get('findings') or [])),
+                'message': str(public_web_result.get('reason') or '')[:1000],
+            }
+        )
+    if google_places_search_requested:
+        places_status = str(
+            google_places_result.get('status') or 'unavailable'
+        )
+        sink.put(
+            {
+                'type': (
+                    'collector_error'
+                    if places_status in {'unavailable', 'rate_limited', 'partial'}
+                    else 'collector_completed'
+                ),
+                'collector': 'google-places-business-search',
+                'observations': len(
+                    list(google_places_result.get('candidates') or [])
+                ),
+                'found': len(
+                    list(google_places_result.get('candidates') or [])
+                ),
+                'message': str(google_places_result.get('reason') or '')[:1000],
+            }
+        )
     sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
 
 
@@ -3624,8 +4039,62 @@ def scan_stop(job_id):
     return {'ok': True}
 
 
-@app.route('/')
-def index():
+def persona_display_identifier_type(persona):
+    """Classify a Persona label from its originating plan and reviewed evidence."""
+    display_name = " ".join(str(persona.get("display_name") or "").split())
+    normalized_display = display_name.casefold()
+    case = (
+        case_store.get_case(persona.get("case_id"))
+        if case_store is not None and persona.get("case_id")
+        else None
+    )
+    jobs = list((case or {}).get("jobs") or [])
+    for job in jobs:
+        options = job.get("options") if isinstance(job.get("options"), dict) else {}
+        specification = (
+            options.get("investigation_spec")
+            if isinstance(options.get("investigation_spec"), dict)
+            else {}
+        )
+        target_persona_id = str(
+            specification.get("target_persona_id") or ""
+        )
+        if target_persona_id and target_persona_id != persona.get("id"):
+            continue
+        for identifier in list(specification.get("identifiers") or [])[:24]:
+            if not isinstance(identifier, dict):
+                continue
+            identifier_type = str(identifier.get("type") or "")
+            identifier_value = " ".join(
+                str(identifier.get("value") or "").split()
+            )
+            if (
+                identifier_value.casefold() == normalized_display
+                and identifier_type in {"username", "social_handle", "full_name"}
+            ):
+                return identifier_type
+    affiliation_origin = any(job.get("kind") == "affiliation" for job in jobs)
+    for claim in persona.get("claims", []):
+        if (
+            claim.get("field_name") == "full_name"
+            and " ".join(str(claim.get("display_value") or "").split()).casefold()
+            == normalized_display
+            and (
+                claim.get("review_status") == "approved"
+                or (
+                    affiliation_origin
+                    and claim.get("review_status") not in {"rejected", "uncertain"}
+                )
+            )
+        ):
+            return "full_name"
+    if display_name and is_plausible_username(display_name):
+        return "username"
+    return "full_name"
+
+
+def investigation_builder_context(persona=None):
+    """Build the shared New investigation and Persona-rerun form context."""
     refresh_job_results_from_disk()
     entries = (
         case_store.list_jobs()
@@ -3646,17 +4115,61 @@ def index():
                 ai_assessments += 1
         except (KeyError, TypeError, ValueError):
             continue
-    return render_template(
-        'index.html',
-        available_tags=get_available_tags(),
-        dashboard_metrics={
+    initial_identifiers = [{"type": "username", "value": ""}]
+    if persona:
+        display_identifier_type = persona_display_identifier_type(persona)
+        initial_identifiers = [
+            {
+                "type": display_identifier_type,
+                "value": persona["display_name"],
+            }
+        ]
+        seen = {
+            (
+                display_identifier_type,
+                str(persona["display_name"]).strip().casefold(),
+            )
+        }
+        for claim in persona.get("claims", []):
+            if claim.get("review_status") != "approved":
+                continue
+            field_name = str(claim.get("field_name") or "")
+            identifier_type = (
+                field_name if field_name in {"full_name", "email", "phone"} else ""
+            )
+            value = claim.get("display_value")
+            if field_name == "social_account" and isinstance(claim.get("value"), dict):
+                identifier_type = "profile_url"
+                value = claim["value"].get("url")
+            elif field_name == "linked_profile_lead":
+                identifier_type = "profile_url"
+            normalized_value = " ".join(str(value or "").split())
+            key = (identifier_type, normalized_value.casefold())
+            if not identifier_type or not normalized_value or key in seen:
+                continue
+            seen.add(key)
+            initial_identifiers.append(
+                {"type": identifier_type, "value": normalized_value}
+            )
+            if len(initial_identifiers) >= 24:
+                break
+    return {
+        'available_tags': get_available_tags(),
+        'dashboard_metrics': {
             'investigations': len(entries),
             'completed': completed,
             'failed': failed,
             'profiles_found': profiles_found,
             'ai_assessments': ai_assessments,
         },
-    )
+        'investigation_persona': persona,
+        'initial_identifiers': initial_identifiers,
+    }
+
+
+@app.route('/')
+def index():
+    return render_template('index.html', **investigation_builder_context())
 
 
 @app.route('/healthz')
@@ -3690,6 +4203,7 @@ def settings_update():
         return render_template(
             'settings.html',
             openai_key_source=get_openai_key_source(),
+            google_maps_key_source=get_google_maps_key_source(),
         )
 
     if not is_valid_csrf(request.form.get('csrf_token')):
@@ -3759,6 +4273,60 @@ def openai_settings_update():
     return redirect(url_for('settings_update', section='connections'))
 
 
+@app.route('/settings/google-places', methods=['POST'])
+def google_places_settings_update():
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your settings session expired. Please try again.', 'danger')
+        return redirect(url_for('settings_update', section='connections'))
+
+    action = request.form.get('action', 'connect')
+    if action == 'disconnect':
+        if get_google_maps_key_source() == 'environment':
+            flash(
+                'This key is managed by the server environment and cannot be '
+                'removed from the browser.',
+                'warning',
+            )
+        elif remove_google_maps_api_key():
+            flash('Google Places connection removed.', 'success')
+        else:
+            flash(
+                'No browser-managed Google Places connection was configured.',
+                'info',
+            )
+        return redirect(url_for('settings_update', section='connections'))
+
+    submitted_key = request.form.get('google_maps_api_key', '').strip()
+    candidate_key = submitted_key or get_google_maps_api_key()
+    if not candidate_key:
+        flash('Enter a Google Maps Platform API key to connect.', 'danger')
+        return redirect(url_for('settings_update', section='connections'))
+    if (
+        not 8 <= len(candidate_key) <= 512
+        or any(ord(character) < 33 for character in candidate_key)
+    ):
+        flash('Enter a valid Google Maps Platform API key.', 'danger')
+        return redirect(url_for('settings_update', section='connections'))
+
+    try:
+        asyncio.run(validate_google_places_connection(candidate_key))
+    except Exception as error:
+        record_internal_error(
+            'Google Places connection verification failed', error
+        )
+        flash(
+            'Google Places verification failed. Confirm that Places API (New), '
+            'billing, server restrictions, and quota are enabled.',
+            'danger',
+        )
+        return redirect(url_for('settings_update', section='connections'))
+
+    if submitted_key:
+        save_google_maps_api_key(submitted_key)
+    flash('Google Places connected and verified.', 'success')
+    return redirect(url_for('settings_update', section='connections'))
+
+
 @app.route('/history')
 def history():
     refresh_job_results_from_disk()
@@ -3770,11 +4338,154 @@ def history():
         key = entry.get('session_folder') or f"legacy:{session_key}"
         entries_by_folder.setdefault(key, entry)
     entries = sorted(
-        entries_by_folder.values(),
+        (
+            {
+                **entry,
+                'history_context': build_investigation_history_context(entry),
+            }
+            for entry in entries_by_folder.values()
+        ),
         key=lambda r: r.get('started_at', ''),
         reverse=True,
     )
     return render_template('history.html', entries=entries)
+
+
+def _history_started_display(value: Any) -> str:
+    raw = str(value or '').strip()
+    if not raw:
+        return '—'
+    try:
+        parsed = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except ValueError:
+        return raw
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')
+
+
+def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]:
+    """Describe why a retained run exists, not just its username payload."""
+    options = entry.get('options') if isinstance(entry.get('options'), dict) else {}
+    specification = (
+        options.get('investigation_spec')
+        if isinstance(options.get('investigation_spec'), dict)
+        else {}
+    )
+    kind = str(
+        entry.get('kind') or specification.get('investigation_type') or 'live'
+    )
+    usernames = [
+        ' '.join(str(value).split())
+        for value in list(entry.get('usernames') or [])[:100]
+        if str(value).strip()
+    ]
+    context_parts = []
+
+    if kind == 'affiliation':
+        type_label = 'Organization affiliation'
+        target = ' '.join(
+            str(
+                specification.get('affiliation_name')
+                or entry.get('case_title')
+                or 'Organization'
+            ).split()
+        )
+        if target.startswith('Affiliation: '):
+            target = target[len('Affiliation: '):].split(' · ', 1)[0]
+        jurisdiction = specification.get('legal_jurisdiction')
+        if isinstance(jurisdiction, dict):
+            label = ' '.join(str(jurisdiction.get('label') or '').split())
+            code = ' '.join(str(jurisdiction.get('code') or '').split())
+            context_parts.append(
+                f"{label} · {code}" if label and code else label or code
+            )
+        website = specification.get('official_website')
+        if isinstance(website, dict) and website.get('domain'):
+            context_parts.append(str(website['domain']))
+        summary_parts = []
+        for count, singular, plural in (
+            (entry.get('registry_candidate_count'), 'registry lead', 'registry leads'),
+            (entry.get('google_places_candidate_count'), 'map lead', 'map leads'),
+            (entry.get('website_address_count'), 'website location', 'website locations'),
+            (entry.get('public_web_finding_count'), 'web observation', 'web observations'),
+            (entry.get('affiliated_person_count'), 'person proposal', 'person proposals'),
+        ):
+            try:
+                count = int(count or 0)
+            except (TypeError, ValueError):
+                count = 0
+            if count:
+                summary_parts.append(f"{count} {singular if count == 1 else plural}")
+        finding_summary = ' · '.join(summary_parts) or 'No retained leads'
+    elif kind == 'identity_enrichment':
+        type_label = 'Confirmed-name enrichment'
+        target = ' '.join(
+            str(
+                specification.get('confirmed_name')
+                or entry.get('case_title')
+                or 'Confirmed person'
+            ).split()
+        )
+        context_parts.append('Wikipedia and ICIJ public records')
+        proposal_count = 0
+        for field_name in ('wikipedia_claim_count', 'offshore_alert_count'):
+            try:
+                proposal_count += max(0, int(entry.get(field_name) or 0))
+            except (TypeError, ValueError):
+                continue
+        finding_summary = (
+            f"{proposal_count} claim proposal"
+            f"{'s' if proposal_count != 1 else ''}"
+        )
+    else:
+        grouped = specification.get('processing_mode') == 'same_subject'
+        type_label = 'Identity investigation' if grouped else 'Username investigation'
+        target = ' '.join(
+            str(specification.get('subject_label') or '').split()
+        )
+        if not target:
+            visible = usernames[:3]
+            target = ', '.join(visible) or 'Unlabelled target'
+            if len(usernames) > len(visible):
+                target += f" +{len(usernames) - len(visible)}"
+        identifier_count = len(
+            list(specification.get('identifiers') or [])
+        ) if grouped else len(usernames)
+        if identifier_count:
+            context_parts.append(
+                f"{identifier_count} identifier"
+                f"{'s' if identifier_count != 1 else ''} checked"
+            )
+        found = (
+            entry.get('found_count')
+            if entry.get('status') == 'completed'
+            else (entry.get('progress') or {}).get('found', 0)
+        )
+        try:
+            found = int(found or 0)
+        except (TypeError, ValueError):
+            found = 0
+        finding_summary = f"{found} profile{'s' if found != 1 else ''}"
+
+    status = str(entry.get('status') or '')
+    if status == 'queued':
+        finding_summary = 'Collection queued'
+    elif status in {'running', 'cancel_requested'}:
+        try:
+            progress_found = int((entry.get('progress') or {}).get('found') or 0)
+        except (TypeError, ValueError):
+            progress_found = 0
+        finding_summary = f"{progress_found} findings so far"
+
+    return {
+        'type_label': type_label,
+        'target': target[:500],
+        'context': ' · '.join(part for part in context_parts if part)[:1000],
+        'finding_summary': finding_summary[:500],
+        'started_display': _history_started_display(entry.get('started_at')),
+        'started_raw': str(entry.get('started_at') or ''),
+    }
 
 
 @app.route('/cases')
@@ -3783,6 +4494,105 @@ def cases_workspace():
         flash('The case workspace requires persistent storage.', 'warning')
         return redirect(url_for('history'))
     return render_template('cases.html', cases=case_store.list_cases())
+
+
+def reserve_google_places_live_request(case_id: str) -> bool:
+    """Allow at most one paid Place Details action per case each minute."""
+    now = time.monotonic()
+    cutoff = now - GOOGLE_PLACES_LIVE_RATE_LIMIT_SECONDS
+    with google_places_live_requests_lock:
+        for stored_case_id, requested_at in list(
+            google_places_live_requests.items()
+        ):
+            if requested_at < cutoff:
+                google_places_live_requests.pop(stored_case_id, None)
+        if case_id in google_places_live_requests:
+            return False
+        google_places_live_requests[case_id] = now
+    return True
+
+
+def load_case_google_places_live(
+    case: Dict[str, Any], *, fetch_live: bool = False
+) -> Dict[str, Any]:
+    """Prepare or explicitly fetch transient Place Details without persistence."""
+    jobs = list(case.get('jobs') or [])
+    job = jobs[0] if jobs else None
+    search = job.get('google_places_search') if isinstance(job, dict) else None
+    if not (
+        isinstance(job, dict)
+        and job.get('kind') == 'affiliation'
+        and isinstance(search, dict)
+    ):
+        return {
+            'status': 'not_run',
+            'reason': 'The latest case job has no Google Places search result.',
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+    candidates = [
+        candidate
+        for candidate in list(search.get('candidates') or [])[:5]
+        if isinstance(candidate, dict) and candidate.get('place_id')
+    ]
+    if not candidates:
+        return {
+            'status': 'not_run',
+            'reason': 'The latest Google Places search retained no Place ID.',
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+    specification = (job.get('options') or {}).get(
+        'investigation_spec'
+    ) or {}
+    organization_name = str(
+        specification.get('affiliation_name')
+        or search.get('subject_value')
+        or ''
+    ).strip()
+    api_key = get_google_maps_api_key()
+    if not api_key:
+        return {
+            'status': 'unavailable',
+            'reason': (
+                'Stored Google Place IDs remain available, but the protected '
+                'Google Places connection is not currently configured.'
+            ),
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+    if not fetch_live:
+        return {
+            'status': 'ready',
+            'reason': (
+                'Stored Place IDs are available. Select Load live Google details '
+                'to make an explicit, rate-limited Place Details request.'
+            ),
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+    try:
+        return asyncio.run(
+            run_google_places_live_details(
+                organization_name,
+                [candidate['place_id'] for candidate in candidates],
+                api_key,
+            )
+        )
+    except Exception as error:
+        return {
+            'status': 'unavailable',
+            'reason': record_internal_error(
+                'Live Google Places details were unavailable', error
+            ),
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
 
 
 @app.route('/cases/<case_id>')
@@ -3794,6 +4604,43 @@ def case_workspace(case_id):
     if not case:
         flash('That case does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
+    case['google_places_live'] = load_case_google_places_live(case)
+    return render_template('case.html', case=case)
+
+
+@app.route('/cases/<case_id>/google-places-live', methods=['POST'])
+def case_google_places_live(case_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('case_workspace', case_id=case_id))
+    if case_store is None:
+        flash('The case workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    case = case_store.get_case(case_id)
+    if not case:
+        flash('That case does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+
+    preview = load_case_google_places_live(case)
+    if preview['status'] != 'ready':
+        case['google_places_live'] = preview
+        return render_template('case.html', case=case)
+    if not reserve_google_places_live_request(case_id):
+        case['google_places_live'] = {
+            'status': 'rate_limited',
+            'reason': (
+                'Live Google details were requested recently for this case. '
+                'Wait one minute before requesting them again.'
+            ),
+            'places': [],
+            'attribution': 'Google Maps',
+            'durable_google_content_stored': False,
+        }
+        return render_template('case.html', case=case), 429
+
+    case['google_places_live'] = load_case_google_places_live(
+        case, fetch_live=True
+    )
     return render_template('case.html', case=case)
 
 
@@ -4086,6 +4933,36 @@ def case_timeline_workspace(case_id):
     )
 
 
+def suggested_role_organization(value):
+    """Offer a bounded, editable organization target from explicit role syntax."""
+    role = " ".join(str(value or "").split())[:500]
+    if not role:
+        return ""
+    candidate = ""
+    explicit_separators = list(
+        re.finditer(r"\s+(?:at|for|with)\s+", role, flags=re.IGNORECASE)
+    )
+    first_explicit = explicit_separators[0] if explicit_separators else None
+    first_comma = role.find(",")
+    if first_explicit and (
+        first_comma < 0 or first_explicit.start() < first_comma
+    ):
+        candidate = role[first_explicit.end() :].strip()
+    elif first_comma >= 0:
+        segments = [segment.strip() for segment in role.split(",")]
+        if len(segments) != 2 or first_explicit:
+            return ""
+        candidate = segments[1]
+    if (
+        not 2 <= len(candidate) <= 200
+        or not any(character.isalpha() for character in candidate)
+        or candidate.casefold()
+        in {"freelance", "independent", "self-employed", "self employed"}
+    ):
+        return ""
+    return candidate
+
+
 @app.route('/personas/<persona_id>')
 def persona_workspace(persona_id):
     if case_store is None:
@@ -4155,6 +5032,12 @@ def persona_workspace(persona_id):
         )
         for status in ('pending', 'approved', 'uncertain', 'rejected')
     }
+    for claim in persona['claims']:
+        claim['suggested_organization_target'] = (
+            suggested_role_organization(claim['display_value'])
+            if claim['field_name'] == 'occupation'
+            else ''
+        )
     return render_template(
         'persona.html',
         persona=persona,
@@ -4173,6 +5056,58 @@ def persona_workspace(persona_id):
             'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
         ),
     )
+
+
+@app.route('/personas/<persona_id>/investigate', methods=['GET', 'POST'])
+def configure_persona_investigation(persona_id):
+    if case_store is None:
+        flash('The persona workspace requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    persona = case_store.get_persona(persona_id)
+    if not persona:
+        flash('That persona does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    if request.method == 'GET':
+        return render_template(
+            'index.html',
+            **investigation_builder_context(persona),
+        )
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your investigation session expired. Please try again.', 'danger')
+        return redirect(
+            url_for('configure_persona_investigation', persona_id=persona_id)
+        )
+    try:
+        usernames, investigation_plan = parse_investigation_submission(
+            request.form
+        )
+        investigation_plan.update(
+            processing_mode='same_subject',
+            subject_label=persona['display_name'],
+            target_persona_id=persona_id,
+        )
+        options = parse_search_options(request.form, investigation_plan)
+        job_id = case_store.repeat_persona_investigation(
+            persona_id,
+            usernames,
+            sanitize_persistent_options(options),
+        )
+    except InvestigationInputError as error:
+        flash(str(error), 'danger')
+        return redirect(
+            url_for('configure_persona_investigation', persona_id=persona_id)
+        )
+    except ValueError as error:
+        flash(str(error), 'warning')
+        return redirect(
+            url_for('configure_persona_investigation', persona_id=persona_id)
+        )
+    flash(
+        'The configured investigation was queued for this Persona. Existing '
+        'review decisions will be preserved when new evidence arrives.',
+        'success',
+    )
+    return redirect(url_for('live_results', job_id=job_id))
 
 
 @app.route('/relationships')
@@ -4251,17 +5186,14 @@ def refresh_persona(persona_id):
     if not persona:
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
-    try:
-        job_id = case_store.repeat_persona_investigation(persona_id)
-    except ValueError:
-        flash('This case already has an active investigation.', 'warning')
-        return redirect(url_for('persona_workspace', persona_id=persona_id))
     flash(
-        'A fresh investigation was queued. Existing review decisions will be '
-        'preserved when new evidence arrives.',
-        'success',
+        'Review the identifiers and source options before rerunning this '
+        'Persona investigation.',
+        'info',
     )
-    return redirect(url_for('live_results', job_id=job_id))
+    return redirect(
+        url_for('configure_persona_investigation', persona_id=persona_id)
+    )
 
 
 @app.route('/claims/<claim_id>/enrich-public-records', methods=['POST'])
@@ -4331,17 +5263,63 @@ def investigate_affiliation_claim(claim_id):
     if not claim:
         flash('That affiliation record no longer exists.', 'danger')
         return redirect(url_for('cases_workspace'))
-    if claim['field_name'] != 'company' or claim['review_status'] != 'approved':
-        flash('Only an analyst-approved affiliation can open a new affiliation case.', 'warning')
+    if (
+        claim['field_name'] not in {'company', 'occupation'}
+        or claim['review_status'] != 'approved'
+    ):
+        flash(
+            'Only an analyst-approved affiliation or role can open an '
+            'organization case.',
+            'warning',
+        )
         return redirect(url_for('persona_workspace', persona_id=claim['persona_id']))
+    if claim['field_name'] == 'company':
+        organization_name = claim['display_value']
+        target_basis = 'approved_affiliation_claim'
+    else:
+        organization_name = request.form.get('organization_name', '')
+        target_basis = 'analyst_confirmed_role_organization'
+        if not str(organization_name).strip():
+            flash(
+                'Enter the exact organization named by the approved role.',
+                'warning',
+            )
+            return redirect(
+                url_for('persona_workspace', persona_id=claim['persona_id'])
+            )
+        normalized_organization = " ".join(str(organization_name).split())
+        expected_organization = suggested_role_organization(
+            claim['display_value']
+        )
+        if (
+            not expected_organization
+            or normalized_organization.casefold()
+            != expected_organization.casefold()
+        ):
+            flash(
+                'The organization target must match the bounded organization '
+                'segment in the approved role. Amend the role first if its '
+                'evidence is incomplete.',
+                'warning',
+            )
+            return redirect(
+                url_for('persona_workspace', persona_id=claim['persona_id'])
+            )
+        organization_name = expected_organization
     try:
         job_id = case_store.create_affiliation_investigation(
-            claim['display_value'],
+            organization_name,
             source_claim_id=claim_id,
+            source_claim_field=claim['field_name'],
+            target_basis=target_basis,
             jurisdiction=request.form.get('jurisdiction', ''),
             enable_domain_context=(
                 request.form.get('enable_domain_context') == '1'
             ),
+            enable_public_web_research=(
+                affiliation_public_web_research_enabled()
+            ),
+            enable_google_places_search=google_places_search_enabled(),
             official_website=request.form.get('official_website', ''),
         )
     except ValueError as error:
@@ -4376,11 +5354,21 @@ def select_affiliation_entity(case_id):
                 )
                 return redirect(url_for('case_workspace', case_id=case_id))
             job_id = case_store.queue_affiliation_entity(
-                case_id, selection.get('entity_id', '')
+                case_id,
+                selection.get('entity_id', ''),
+                enable_public_web_research=(
+                    affiliation_public_web_research_enabled()
+                ),
+                enable_google_places_search=google_places_search_enabled(),
             )
         else:
             job_id = case_store.queue_affiliation_entity(
-                case_id, request.form.get('entity_id', '')
+                case_id,
+                request.form.get('entity_id', ''),
+                enable_public_web_research=(
+                    affiliation_public_web_research_enabled()
+                ),
+                enable_google_places_search=google_places_search_enabled(),
             )
     except KeyError:
         flash('That affiliation case no longer exists.', 'danger')
@@ -4403,6 +5391,10 @@ def rerun_affiliation_domain_context(case_id):
         job_id = case_store.queue_affiliation_context(
             case_id,
             official_website=request.form.get('official_website', ''),
+            enable_public_web_research=(
+                affiliation_public_web_research_enabled()
+            ),
+            enable_google_places_search=google_places_search_enabled(),
         )
     except KeyError:
         flash('That affiliation case no longer exists.', 'danger')
