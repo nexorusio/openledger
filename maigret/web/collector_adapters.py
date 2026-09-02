@@ -771,10 +771,7 @@ def _normalize_phone_scan_text(value: str) -> str:
             ),
             "",
         )
-        if next_character.isdigit() and (
-            previous_character.isdigit()
-            or previous_character in "+.()-"
-        ):
+        if previous_character == "+" and next_character.isdigit():
             continue
         output.append(" ")
     return "".join(output)
