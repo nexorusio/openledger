@@ -1,5 +1,6 @@
 from maigret.web.persona_intelligence import (
     build_case_chat_url_claims,
+    extract_asserted_persona_urls,
     extract_ai_persona_claims,
     extract_case_chat_persona_claims,
     extract_explicit_public_urls,
@@ -19,6 +20,15 @@ def test_case_chat_extracts_exact_public_urls_without_private_targets():
     assert urls == ["https://www.tiktok.com/@alice?lang=id&ref=case"]
 
 
+def test_case_chat_requires_explicit_directive_before_attaching_persona_url():
+    url = "https://news.example/story"
+
+    assert extract_asserted_persona_urls(f"Add this {url}") == [url]
+    assert extract_asserted_persona_urls(
+        f"Does this article {url} support Alice's employment?"
+    ) == []
+
+
 def test_case_chat_builds_unverified_url_claim_with_exact_provenance():
     url = "https://www.tiktok.com/@skandaloknumpejabat"
     claims = build_case_chat_url_claims(
@@ -34,7 +44,7 @@ def test_case_chat_builds_unverified_url_claim_with_exact_provenance():
     assert claim["field_name"] == "social_account"
     assert claim["value"]["url"] == url
     assert claim["confidence"] == 50
-    assert claim["source_engine"] == "case_chat_user_supplied_url"
+    assert claim["source_engine"] == "case_chat_user_statement"
     assert claim["provenance_message_id"] == "user-message"
     assert claim["evidence"][0]["source_url"] == url
     assert claim["evidence"][0]["details"]["analyst_supplied_url"] is True

@@ -344,6 +344,10 @@ def _public_url(value: Any) -> str:
 
 
 _EXPLICIT_PUBLIC_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_PERSONA_URL_DIRECTIVE = re.compile(
+    r"^\s*(?:please\s+)?(?:add|attach|save|record|associate|link)\b",
+    re.IGNORECASE,
+)
 _SOCIAL_ACCOUNT_HOSTS = {
     "bsky.app",
     "facebook.com",
@@ -390,6 +394,14 @@ def extract_explicit_public_urls(value: Any, *, limit: int = 10) -> List[str]:
         if len(urls) >= max(0, min(int(limit), 10)):
             break
     return urls
+
+
+def extract_asserted_persona_urls(value: Any) -> List[str]:
+    """Return URLs only when the analyst explicitly directs Persona attachment."""
+    text = str(value or "")[:12_000]
+    if not _PERSONA_URL_DIRECTIVE.search(text):
+        return []
+    return extract_explicit_public_urls(text)
 
 
 def build_case_chat_url_claims(
@@ -453,7 +465,7 @@ def build_case_chat_url_claims(
                 "normalized_value": _normalized_value(stored_value),
                 "confidence": 50,
                 "fingerprint": fingerprint,
-                "source_engine": "case_chat_user_supplied_url",
+                "source_engine": "case_chat_user_statement",
                 "evidence_basis": "user_statement",
                 "provenance_message_id": user_message_id,
                 "latitude": None,

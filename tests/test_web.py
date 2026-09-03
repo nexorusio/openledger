@@ -1149,7 +1149,7 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
         )
         assert claim['review_status'] == 'pending'
         assert claim['confidence'] == 50
-        assert claim['source_engine'] == 'case_chat_user_supplied_url'
+        assert claim['source_engine'] == 'case_chat_user_statement'
         assert claim['display_value'] == url
         assert claim['evidence'][0]['source_url'] == url
         details = claim['evidence'][0]['details']
@@ -1179,6 +1179,32 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
         )
         assert approved_claim['review_status'] == 'approved'
         assert approved_claim['evidence'][0]['source_url'] == url
+
+        question_url = 'https://news.example/story'
+        question = client.post(
+            f"/api/cases/{case['id']}/chat",
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+            json={
+                'message': (
+                    f'Does this article {question_url} support the Persona?'
+                ),
+                'persona_id': persona_id,
+                'research_enabled': True,
+                'propose_to_persona': True,
+            },
+        )
+        assert question.status_code == 200
+        question_payload = question.get_json()
+        assert question_payload['proposal_summary']['status'] == (
+            'no_supported_facts'
+        )
+        assert question_payload['proposal_summary']['count'] == 0
+        persona_urls = {
+            item['display_value']
+            for item in store.get_persona(persona_id)['claims']
+            if item['field_name'] in {'social_account', 'website'}
+        }
+        assert question_url not in persona_urls
     finally:
         store.dispose()
 

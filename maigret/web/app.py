@@ -110,6 +110,7 @@ from maigret.web.investigation_input import (
 )
 from maigret.web.persona_intelligence import (
     build_case_chat_url_claims,
+    extract_asserted_persona_urls,
     extract_explicit_public_urls,
     extract_case_chat_persona_claims,
     field_display_label,
@@ -5514,7 +5515,7 @@ def case_chat_message(case_id):
                         diagnostics=diagnostics,
                     )
                 url_candidates = build_case_chat_url_claims(
-                    explicit_public_urls,
+                    extract_asserted_persona_urls(message),
                     target_persona=target_persona,
                     user_message_id=user_record['id'],
                     assistant_message_id=assistant_record['id'],
@@ -5536,7 +5537,11 @@ def case_chat_message(case_id):
                     candidates,
                 )
                 proposal_summary = {
-                    "status": "pending_review",
+                    "status": (
+                        "pending_review"
+                        if synchronized["count"]
+                        else "no_supported_facts"
+                    ),
                     "count": synchronized["count"],
                     "kind": "persona",
                     "persona_id": persona_id,

@@ -73,6 +73,10 @@
                 <div class="case-chat-proposal-note warning">
                     <i data-lucide="shield-alert"></i> No new relationship met the approved-evidence requirements; the answer remains in chat for analysis.
                 </div>
+                {% elif message.proposals.status == 'no_supported_facts' %}
+                <div class="case-chat-proposal-note warning">
+                    <i data-lucide="shield-alert"></i> No explicit, supported Persona fact was proposed; the answer remains in chat for analysis.
+                </div>
                 {% elif message.proposals.status == 'stale_snapshot' %}
                 <div class="case-chat-proposal-note warning">
                     <i data-lucide="refresh-cw"></i> The answer was saved, but new relationship proposals require a refreshed snapshot.
