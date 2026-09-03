@@ -70,6 +70,128 @@
     </article>
 </section>
 
+<section class="panel-card combined-insight-panel">
+    <header class="panel-card-header combined-insight-header">
+        <div>
+            <p class="eyebrow">AI investigation assessment</p>
+            <h2>Why these cases may be connected</h2>
+        </div>
+        {% if latest_analysis_run %}
+        <div class="combined-insight-run-meta">
+            <span class="badge-soft {{ 'success' if latest_analysis_run.status == 'completed' else 'warning' }}">{{ latest_analysis_run.status | replace('_', ' ') | title }}</span>
+            {% if latest_analysis_run.model %}<span>{{ latest_analysis_run.model }}</span>{% endif %}
+            <span>{{ 'Cited public-web research' if latest_analysis_run.web_search_enabled else 'Stored evidence only' }}</span>
+            {% if latest_analysis_run.completed_at %}<span>{{ latest_analysis_run.completed_at }}</span>{% endif %}
+        </div>
+        {% endif %}
+    </header>
+    {% if not latest_analysis_run %}
+    <div class="combined-insight-empty">
+        <i data-lucide="sparkles"></i>
+        <div><strong>Analysis has not run yet.</strong><p>AI synthesis starts automatically after the approved-evidence snapshot completes.</p></div>
+    </div>
+    {% elif latest_analysis_run.status in ('unavailable', 'failed') %}
+    <div class="combined-insight-empty warning">
+        <i data-lucide="triangle-alert"></i>
+        <div>
+            <strong>{{ 'OpenAI is not connected.' if latest_analysis_run.status == 'unavailable' else 'AI analysis could not be completed.' }}</strong>
+            <p>{{ latest_analysis_run.error }}</p>
+            {% if latest_analysis_run.status == 'unavailable' %}<a href="{{ url_for('settings_update') }}" class="btn btn-sm btn-outline-secondary">Open AI settings</a>{% endif %}
+        </div>
+    </div>
+    {% elif latest_analysis_run.status == 'processing' %}
+    <div class="combined-insight-empty"><i data-lucide="loader-circle"></i><div><strong>Analysis is in progress.</strong><p>The snapshot remains available while OpenLedger develops cited hypotheses.</p></div></div>
+    {% else %}
+    <div class="combined-executive-summary">
+        <span class="insight-section-label">Assessment</span>
+        <p>{{ latest_analysis_run.executive_summary or 'No defensible relationship conclusion was produced from the approved evidence.' }}</p>
+        <small>Generated for snapshot <span class="snapshot-hash-short" title="{{ latest_analysis_run.snapshot_sha256 }}">{{ latest_analysis_run.snapshot_sha256[:12] }}…</span>. This assessment is analytical output, not a reviewed case fact.</small>
+    </div>
+
+    {% if latest_analysis_run.key_findings %}
+    <div class="combined-insight-list-block">
+        <h3>Key observations</h3>
+        <ul>{% for finding in latest_analysis_run.key_findings %}<li>{{ finding.summary }} <span class="insight-evidence-count">{{ finding.evidence | length }} evidence anchor{{ '' if finding.evidence | length == 1 else 's' }}</span><div class="proposal-source-links">{% for evidence in finding.evidence %}{% if evidence.reference_type == 'public_web' %}<a href="{{ evidence.url }}" target="_blank" rel="noopener noreferrer">{{ evidence.title }}</a>{% elif evidence.reference_type == 'approved_organization' and evidence.source_url %}<a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">{{ evidence.source_name or evidence.label }}</a>{% elif evidence.reference_type == 'approved_claim' %}{% for source in evidence.sources %}{% if source.url %}<a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.name }}</a>{% endif %}{% endfor %}{% endif %}{% endfor %}</div></li>{% endfor %}</ul>
+    </div>
+    {% endif %}
+
+    <div class="relationship-proposal-heading">
+        <div><span class="insight-section-label">Human review required</span><h3>Relationship hypotheses</h3></div>
+        <span class="badge-soft">{{ latest_analysis_run.proposals | length }} proposal{{ '' if latest_analysis_run.proposals | length == 1 else 's' }}</span>
+    </div>
+    {% if latest_analysis_run.proposals %}
+    <div class="relationship-proposal-list">
+        {% for proposal in latest_analysis_run.proposals %}
+        <article class="relationship-proposal review-{{ proposal.review_status }}">
+            <header>
+                <div>
+                    <span class="relationship-type">{{ proposal.relationship_type | replace('_', ' ') }}</span>
+                    <h4>{{ proposal.title }}</h4>
+                </div>
+                <div class="proposal-confidence"><strong>{{ proposal.confidence }}%</strong><span>AI confidence</span></div>
+            </header>
+            <div class="proposal-path" aria-label="Proposed relationship">
+                <div><strong>{{ proposal.subject_entity.label }}</strong><span>{{ proposal.subject_entity.case_title }}</span></div>
+                <i data-lucide="arrow-right"></i>
+                <div><strong>{{ proposal.object_entity.label }}</strong><span>{{ proposal.object_entity.case_title }}</span></div>
+            </div>
+            <p class="proposal-explanation">{{ proposal.explanation }}</p>
+            <details class="proposal-evidence" open>
+                <summary>Evidence anchors ({{ proposal.evidence | length }})</summary>
+                <ul>
+                    {% for evidence in proposal.evidence %}
+                    <li>
+                        {% if evidence.reference_type == 'public_web' %}
+                        <span class="badge-soft">Public web</span> <a href="{{ evidence.url }}" target="_blank" rel="noopener noreferrer">{{ evidence.title }}</a>
+                        {% elif evidence.reference_type == 'approved_organization' %}
+                        <span class="badge-soft success">Approved organization</span> <strong>{{ evidence.label }}</strong> · {{ evidence.case_title }}
+                        {% if evidence.source_url %}<div><a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">{{ evidence.source_name or evidence.source_url }}</a></div>{% endif %}
+                        {% else %}
+                        <span class="badge-soft success">Approved claim</span> <strong>{{ evidence.persona_name }}</strong> · {{ evidence.field_name | replace('_', ' ') }}: {{ evidence.display_value }}
+                        <div class="proposal-evidence-context">{{ evidence.case_title }} · claim {{ evidence.claim_id }}</div>
+                        {% if evidence.sources %}<div class="proposal-source-links">{% for source in evidence.sources %}{% if source.url %}<a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.name }}</a>{% else %}<span>{{ source.name }}</span>{% endif %}{% endfor %}</div>{% endif %}
+                        {% endif %}
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% if proposal.contradictory_evidence %}
+            <details class="proposal-evidence contradictory">
+                <summary>Contradicting evidence ({{ proposal.contradictory_evidence | length }})</summary>
+                <ul>{% for evidence in proposal.contradictory_evidence %}<li>{{ evidence.title or evidence.display_value or evidence.label }}{% if evidence.url %} · <a href="{{ evidence.url }}" target="_blank" rel="noopener noreferrer">source</a>{% endif %}</li>{% endfor %}</ul>
+            </details>
+            {% endif %}
+            {% if proposal.limitations %}<div class="proposal-limitations"><strong>Limitations</strong><ul>{% for limitation in proposal.limitations %}<li>{{ limitation }}</li>{% endfor %}</ul></div>{% endif %}
+            <form method="POST" action="{{ url_for('review_combined_relationship', case_id=case.id, proposal_id=proposal.id) }}" class="proposal-review-form">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <label for="proposal-note-{{ proposal.id }}">Analyst note</label>
+                <input id="proposal-note-{{ proposal.id }}" name="note" type="text" maxlength="2000" placeholder="State the review basis (optional)">
+                <div class="proposal-review-actions">
+                    <span class="review-badge {{ proposal.review_status }}">{{ proposal.review_status | title }}</span>
+                    <button class="btn btn-sm btn-outline-secondary" type="submit" name="decision" value="uncertain">Mark uncertain</button>
+                    <button class="btn btn-sm btn-outline-danger" type="submit" name="decision" value="rejected">Reject</button>
+                    <button class="btn btn-sm btn-primary" type="submit" name="decision" value="approved">Approve link</button>
+                </div>
+                {% if proposal.reviewed_by %}<small>Last reviewed by {{ proposal.reviewed_by }} at {{ proposal.reviewed_at }}. {{ proposal.reviews | length }} decision{{ '' if proposal.reviews | length == 1 else 's' }} retained.</small>{% endif %}
+            </form>
+        </article>
+        {% endfor %}
+    </div>
+    {% else %}
+    <div class="combined-insight-empty compact"><i data-lucide="circle-check"></i><div><strong>No defensible cross-case relationship was proposed.</strong><p>Review the information gaps below before collecting more evidence.</p></div></div>
+    {% endif %}
+
+    <div class="combined-analysis-columns">
+        <section><h3>Contradictions</h3>{% if latest_analysis_run.contradictions %}<ul>{% for item in latest_analysis_run.contradictions %}<li>{{ item.summary }}<div class="proposal-source-links">{% for evidence in item.evidence %}{% if evidence.reference_type == 'public_web' %}<a href="{{ evidence.url }}" target="_blank" rel="noopener noreferrer">{{ evidence.title }}</a>{% elif evidence.reference_type == 'approved_organization' and evidence.source_url %}<a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">{{ evidence.source_name or evidence.label }}</a>{% elif evidence.reference_type == 'approved_claim' %}{% for source in evidence.sources %}{% if source.url %}<a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.name }}</a>{% endif %}{% endfor %}{% endif %}{% endfor %}</div></li>{% endfor %}</ul>{% else %}<p>No explicit contradiction was identified.</p>{% endif %}</section>
+        <section><h3>Information gaps</h3>{% if latest_analysis_run.information_gaps %}<ul>{% for item in latest_analysis_run.information_gaps %}<li>{{ item }}</li>{% endfor %}</ul>{% else %}<p>No additional gap was returned.</p>{% endif %}</section>
+        <section><h3>Next investigative actions</h3>{% if latest_analysis_run.next_steps %}<ol>{% for item in latest_analysis_run.next_steps %}<li>{{ item }}</li>{% endfor %}</ol>{% else %}<p>No next action was returned.</p>{% endif %}</section>
+    </div>
+    {% if latest_analysis_run.sources %}
+    <div class="combined-web-sources"><h3>Cited public-web sources</h3><ul>{% for source in latest_analysis_run.sources %}<li><a href="{{ source.url }}" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span>{{ source.url }}</span></li>{% endfor %}</ul></div>
+    {% endif %}
+    {% endif %}
+</section>
+
 <section class="panel-card combined-case-overview">
     <header class="panel-card-header">
         <div>

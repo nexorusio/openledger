@@ -40,6 +40,7 @@ from maigret.ai import (
     get_ai_evidence_proposals,
     get_case_chat_claim_proposals,
     get_case_chat_response,
+    get_combined_investigation_insights,
     get_enriched_ai_analysis,
     get_organization_context_proposals,
     validate_openai_connection,
@@ -92,6 +93,11 @@ from maigret.web.collector_adapters import (
     user_scanner_available,
     user_scanner_email_targets,
     validate_google_places_connection,
+)
+from maigret.web.combined_intelligence import (
+    bounded_combined_context,
+    normalize_combined_insights,
+    overlay_relationship_proposals,
 )
 from maigret.web.geocoding import GeocodingError, geocode_place_center
 from maigret.web.investigation_input import (
@@ -3818,6 +3824,113 @@ def run_persistent_identity_enrichment_job(
     )
 
 
+def run_combined_case_ai_analysis(
+    store: CaseStore,
+    job: Dict[str, Any],
+    snapshot_result: Dict[str, Any],
+    analysis_context: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Generate cited, reviewable insights without changing source evidence."""
+    settings = load_settings()
+    model = settings.get(
+        "openai_model",
+        os.getenv("OPENAI_MODEL", DEFAULT_SETTINGS["openai_model"]),
+    )
+    web_search_enabled = bool(settings.get("ai_web_enrichment", True))
+    snapshot_sha = str((snapshot_result.get("snapshot") or {}).get("sha256") or "")
+    run_id = store.start_combined_analysis_run(
+        job["job_id"],
+        snapshot_sha,
+        model=model,
+        web_search_enabled=web_search_enabled,
+    )
+    api_key = get_openai_api_key()
+    if not api_key:
+        reason = "The protected OpenAI connection is not configured on this server."
+        store.stop_combined_analysis_run(run_id, status="unavailable", error=reason)
+        return {
+            "run_id": run_id,
+            "status": "unavailable",
+            "model": model,
+            "web_search_enabled": web_search_enabled,
+            "proposal_count": 0,
+        }
+
+    bounded_context = bounded_combined_context(analysis_context)
+    store.append_event(
+        job["job_id"],
+        {
+            "type": "progress",
+            "activity": "AI relationship analysis",
+            "site": "Cited cross-case synthesis",
+        },
+    )
+    try:
+        research = asyncio.run(
+            get_case_chat_response(
+                api_key=api_key,
+                case_context=bounded_context,
+                conversation=[],
+                user_message=(
+                    "Analyze why the selected source cases may be connected. "
+                    "Compare the approved evidence across cases, identify defensible "
+                    "relationship hypotheses and contradictions, and state missing "
+                    "evidence and concrete next investigative steps. When public-web "
+                    "research is enabled, search for corroborating or contradicting "
+                    "public sources and cite every web-derived statement. Do not use "
+                    "private or residential details as search terms. Do not promote "
+                    "personal/contact evidence into organization facts."
+                ),
+                model=model,
+                web_search_enabled=web_search_enabled,
+                **ai_endpoint_options(),
+            )
+        )
+        raw_insights = asyncio.run(
+            get_combined_investigation_insights(
+                api_key=api_key,
+                case_context=bounded_context,
+                research_answer=research["analysis"],
+                sources=research.get("sources", []),
+                model=model,
+                **ai_endpoint_options(),
+            )
+        )
+        insights = normalize_combined_insights(
+            raw_insights,
+            context=bounded_context,
+            web_sources=research.get("sources", []),
+        )
+        proposal_count = store.complete_combined_analysis_run(run_id, insights)
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "model": model,
+            "web_search_enabled": web_search_enabled,
+            "web_search_completed": bool(research.get("web_search_completed")),
+            "proposal_count": proposal_count,
+            "truncated_claim_count": int(
+                bounded_context.get("truncated_claim_count") or 0
+            ),
+        }
+    except Exception as error:
+        public_error = record_internal_error(
+            "Combined AI relationship analysis failed",
+            error,
+            case_id=job.get("case_id"),
+        )
+        store.stop_combined_analysis_run(
+            run_id, status="failed", error=public_error
+        )
+        return {
+            "run_id": run_id,
+            "status": "failed",
+            "model": model,
+            "web_search_enabled": web_search_enabled,
+            "proposal_count": 0,
+        }
+
+
 def run_persistent_case_fusion_job(
     store: CaseStore, job: Dict[str, Any], shutdown_check=None
 ):
@@ -3853,6 +3966,7 @@ def run_persistent_case_fusion_job(
             }
         else:
             snapshot_result = store.build_case_fusion_snapshot(job_id)
+            analysis_context = dict(snapshot_result.pop("analysis_context", {}) or {})
             if store.is_cancel_requested(job_id) or bool(
                 shutdown_check and shutdown_check()
             ):
@@ -3879,10 +3993,14 @@ def run_persistent_case_fusion_job(
                         "site": "Approved evidence snapshot",
                     },
                 )
+                ai_analysis = run_combined_case_ai_analysis(
+                    store, job, snapshot_result, analysis_context
+                )
                 result = {
                     "status": "completed",
                     "kind": "case_fusion",
                     **snapshot_result,
+                    "ai_analysis": ai_analysis,
                 }
     except Exception as error:
         public_error = record_internal_error(
@@ -4801,11 +4919,21 @@ def case_workspace(case_id):
             ),
             None,
         )
+        latest_analysis_run = next(
+            (
+                run
+                for run in case.get("analysis_runs", [])
+                if latest_completed_fusion_job
+                and run.get("job_id") == latest_completed_fusion_job.get("job_id")
+            ),
+            None,
+        )
         return render_template(
             "combined_case.html",
             case=case,
             latest_fusion_job=latest_fusion_job,
             latest_completed_fusion_job=latest_completed_fusion_job,
+            latest_analysis_run=latest_analysis_run,
         )
     case["google_places_live"] = load_case_google_places_live(case)
     return render_template("case.html", case=case)
@@ -4835,6 +4963,38 @@ def refresh_combined_case(case_id):
         return redirect(url_for("case_workspace", case_id=case_id))
     flash("A refreshed approved-evidence snapshot was queued.", "success")
     return redirect(url_for("live_results", job_id=job_id))
+
+
+@app.route(
+    "/cases/<case_id>/relationships/<proposal_id>/review", methods=["POST"]
+)
+def review_combined_relationship(case_id, proposal_id):
+    if not is_valid_csrf(request.form.get("csrf_token")):
+        flash("Your review session expired. Please try again.", "danger")
+        return redirect(url_for("case_workspace", case_id=case_id))
+    if case_store is None:
+        flash("Combined investigations require persistent storage.", "warning")
+        return redirect(url_for("history"))
+    decision = str(request.form.get("decision") or "").strip().casefold()
+    reviewer = session.get("username") or "local-operator"
+    try:
+        case_store.review_combined_relationship_proposal(
+            case_id,
+            proposal_id,
+            decision,
+            reviewer,
+            note=request.form.get("note", ""),
+        )
+    except KeyError:
+        flash("That relationship proposal does not belong to this investigation.", "danger")
+    except ValueError as error:
+        flash(str(error), "danger")
+    else:
+        flash(
+            "Relationship hypothesis review recorded. Source cases were not changed.",
+            "success",
+        )
+    return redirect(url_for("case_workspace", case_id=case_id))
 
 
 @app.route('/cases/<case_id>/google-places-live', methods=['POST'])
@@ -5453,6 +5613,20 @@ def relationships_workspace():
                 "field_counts": {},
             },
         }
+        matching_analysis = next(
+            (
+                run
+                for run in (combined_case or {}).get("analysis_runs", [])
+                if completed_fusion
+                and run.get("job_id") == completed_fusion.get("job_id")
+                and run.get("status") == "completed"
+            ),
+            None,
+        )
+        if matching_analysis:
+            graph = overlay_relationship_proposals(
+                graph, matching_analysis.get("proposals", [])
+            )
     else:
         graph = case_store.build_relationship_graph(selected_case_id or None)
     for edge in graph.get("edges", []):

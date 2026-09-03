@@ -1486,6 +1486,110 @@ def test_combined_investigation_snapshots_only_approved_cross_case_links(store):
     )
 
 
+def test_combined_ai_proposals_are_snapshot_bound_and_reviewed_separately(store):
+    alice_case_id, _ = _create_case_with_company_claim(store, "alice", "Nexorus")
+    bob_case_id, _ = _create_case_with_company_claim(store, "bob", "Nexorus")
+    fusion_job_id = store.create_combined_investigation(
+        [alice_case_id, bob_case_id],
+        title="AI relationship review",
+        purpose="Test governed cross-case hypotheses.",
+        created_by="analyst",
+    )
+    fusion_job = store.claim_next("worker:fusion-ai")
+    snapshot = store.build_case_fusion_snapshot(fusion_job_id)
+    context = snapshot["analysis_context"]
+    entities = {
+        entity["case_id"]: entity
+        for entity in context["entities"]
+        if entity["entity_type"] == "persona"
+    }
+    evidence = [
+        {
+            "reference_id": claim["reference_id"],
+            "reference_type": "approved_claim",
+            "claim_id": claim["claim_id"],
+            "case_id": claim["case_id"],
+            "case_title": claim["case_title"],
+            "persona_id": claim["persona_id"],
+            "persona_name": claim["persona_name"],
+            "field_name": claim["field_name"],
+            "display_value": claim["display_value"],
+            "confidence": claim["confidence"],
+            "sources": claim["sources"],
+        }
+        for claim in context["approved_claims"]
+    ]
+    run_id = store.start_combined_analysis_run(
+        fusion_job_id,
+        snapshot["snapshot"]["sha256"],
+        model="gpt-5.6-terra",
+        web_search_enabled=True,
+    )
+    assert store.complete_combined_analysis_run(
+        run_id,
+        {
+            "executive_summary": "The approved affiliations match exactly.",
+            "key_findings": [
+                {
+                    "summary": "Both approved records name Nexorus.",
+                    "evidence": evidence,
+                }
+            ],
+            "contradictions": [],
+            "information_gaps": ["The relationship type is not independently known."],
+            "next_steps": ["Review official organization records."],
+            "sources": [],
+            "proposals": [
+                {
+                    "title": "Shared Nexorus affiliation",
+                    "relationship_type": "affiliation",
+                    "subject_ref": entities[alice_case_id]["reference_id"],
+                    "subject_entity": entities[alice_case_id],
+                    "object_ref": entities[bob_case_id]["reference_id"],
+                    "object_entity": entities[bob_case_id],
+                    "explanation": "Both approved claims name the same organization.",
+                    "confidence": 75,
+                    "evidence": evidence,
+                    "contradictory_evidence": [],
+                    "limitations": ["A shared affiliation does not prove coordination."],
+                }
+            ],
+        },
+    ) == 1
+    snapshot.pop("analysis_context")
+    store.finish(
+        fusion_job_id,
+        {"status": "completed", "kind": "case_fusion", **snapshot},
+    )
+
+    combined = store.get_case(fusion_job["case_id"])
+    analysis = combined["analysis_runs"][0]
+    assert analysis["snapshot_sha256"] == snapshot["snapshot"]["sha256"]
+    proposal = analysis["proposals"][0]
+    assert proposal["review_status"] == "pending"
+    source_versions = {
+        case_id: store.get_case(case_id)["updated_at"]
+        for case_id in (alice_case_id, bob_case_id)
+    }
+
+    store.review_combined_relationship_proposal(
+        combined["id"],
+        proposal["id"],
+        "approved",
+        "reviewer.one",
+        "Verified against the cited approved records.",
+    )
+
+    reviewed = store.get_case(combined["id"])["analysis_runs"][0]["proposals"][0]
+    assert reviewed["review_status"] == "approved"
+    assert reviewed["reviewed_by"] == "reviewer.one"
+    assert reviewed["reviews"][0]["note"].startswith("Verified")
+    assert {
+        case_id: store.get_case(case_id)["updated_at"]
+        for case_id in (alice_case_id, bob_case_id)
+    } == source_versions
+
+
 def test_combined_case_references_protect_sources_and_delete_independently(store):
     first_case_id, _ = _create_case_with_company_claim(store, "alice", "Nexorus")
     second_case_id, _ = _create_case_with_company_claim(store, "bob", "Nexorus")

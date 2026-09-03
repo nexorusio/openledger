@@ -30,7 +30,7 @@
         <span>Approved, pending, and uncertain records can be traced to their sources. Rejected records are excluded from the graph but retained in the audit trail.</span>
         {% elif combined_scope %}
         <strong>Versioned combined-case snapshot</strong>
-        <span>Only exact approved evidence captured by the latest completed snapshot is shown. Source cases remain unchanged and every evidence path retains its original claim and provenance.</span>
+        <span>Exact approved paths come from the latest snapshot. Dashed paths are AI hypotheses awaiting or carrying an uncertain analyst review; approved hypotheses become solid, and rejected hypotheses stay in audit history but leave the graph. Source cases remain unchanged.</span>
         {% else %}
         <strong>Exact approved evidence only</strong>
         <span>A shared attribute is an investigative lead—not proof of contact. Pending, uncertain, and rejected records are excluded; no relationship is created from AI prose or fuzzy similarity.</span>
@@ -135,6 +135,10 @@
                     <li><span class="legend-node legend-attribute"></span><span>Shared attribute</span><strong>{{ graph.stats.shared_attribute_count }}</strong></li>
                     {% if graph.stats.organization_count %}<li><span class="legend-node legend-organization"></span><span>Confirmed organization</span><strong>{{ graph.stats.organization_count }}</strong></li>{% endif %}
                     <li><span class="legend-edge"></span><span>Exact approved path</span><strong>{{ graph.stats.connection_count }}</strong></li>
+                    {% if graph.stats.ai_proposal_count %}
+                    <li><span class="legend-edge legend-ai-pending"></span><span>Pending/uncertain AI hypothesis</span><strong>{{ graph.stats.ai_proposal_counts.pending + graph.stats.ai_proposal_counts.uncertain }}</strong></li>
+                    <li><span class="legend-edge legend-ai-approved"></span><span>Analyst-approved AI link</span><strong>{{ graph.stats.ai_proposal_counts.approved }}</strong></li>
+                    {% endif %}
                     {% endif %}
                 </ul>
                 {% if mode == 'shared' %}<p class="relationship-control-help">Shared attributes are exact normalized matches across personas.</p>{% endif %}
