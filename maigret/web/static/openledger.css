@@ -4444,6 +4444,9 @@ textarea.form-control.compact-textarea {
     align-items: end;
     margin-top: 12px;
 }
+.case-chat-shell[data-combined="true"] .case-chat-options {
+    grid-template-columns: minmax(180px, 1fr) auto auto;
+}
 .case-chat-target label {
     display: block;
     margin-bottom: 5px;
@@ -4641,6 +4644,27 @@ textarea.form-control.compact-textarea {
 .proposal-review-form label { color: var(--ol-muted); font-size: .66rem; font-weight: 700; text-transform: uppercase; }
 .proposal-review-actions { display: flex; justify-content: flex-end; align-items: center; flex-wrap: wrap; gap: 8px; }
 .proposal-review-form small { color: var(--ol-muted); text-align: right; }
+.proposal-review-result {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    margin-top: 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--ol-border);
+    border-radius: 8px;
+    background: var(--ol-surface);
+    color: var(--ol-muted);
+    font-size: .72rem;
+}
+.proposal-review-result svg { width: 17px; flex: 0 0 auto; }
+.proposal-review-result span { flex: 1; }
+.proposal-review-result strong { color: var(--ol-text); }
+.proposal-review-result.approved { border-color: rgba(32, 189, 131, .35); }
+.proposal-review-result.approved svg { color: var(--ol-success); }
+.proposal-review-result.rejected { border-color: rgba(220, 53, 69, .3); }
+.proposal-review-result.rejected svg { color: var(--ol-danger); }
+.proposal-review-result.uncertain { border-color: rgba(213, 168, 70, .35); }
+.proposal-review-result.uncertain svg { color: var(--ol-warning); }
 .combined-analysis-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border-top: 1px solid var(--ol-border); }
 .combined-analysis-columns section { padding: 20px 22px; border-right: 1px solid var(--ol-border); }
 .combined-analysis-columns section:last-child { border-right: 0; }
@@ -4654,6 +4678,7 @@ textarea.form-control.compact-textarea {
     .analyst-create-grid { grid-template-columns: 1fr 1fr; }
     .case-chat-governance { grid-template-columns: 1fr; }
     .case-chat-options { grid-template-columns: 1fr 1fr; align-items: center; }
+    .case-chat-shell[data-combined="true"] .case-chat-options { grid-template-columns: 1fr 1fr; }
     .case-chat-options .form-check { margin: 0; }
     .combine-case-layout { grid-template-columns: 1fr; }
     .combine-case-details { position: static; }
@@ -4665,6 +4690,7 @@ textarea.form-control.compact-textarea {
 @media (max-width: 767px) {
     .analyst-create-grid,
     .case-chat-options { grid-template-columns: 1fr; }
+    .case-chat-shell[data-combined="true"] .case-chat-options { grid-template-columns: 1fr; }
     .affiliation-candidate,
     .affiliation-entity-summary,
     .organization-resolution-candidate > header,

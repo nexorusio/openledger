@@ -1607,6 +1607,98 @@ def test_combined_ai_proposals_are_snapshot_bound_and_reviewed_separately(store)
     } == source_versions
 
 
+def test_combined_chat_relationship_proposals_retain_message_lineage(store):
+    alice_case_id, _ = _create_case_with_company_claim(store, "alice", "Nexorus")
+    bob_case_id, _ = _create_case_with_company_claim(store, "bob", "Nexorus")
+    job_id = store.create_combined_investigation(
+        [alice_case_id, bob_case_id],
+        title="Chat relationship lineage",
+        purpose="Question and extend a governed assessment.",
+        created_by="analyst",
+    )
+    job = store.claim_next("worker:combined-chat-lineage")
+    snapshot = store.build_case_fusion_snapshot(job_id)
+    context = snapshot.pop("analysis_context")
+    personas = {
+        item["case_id"]: item
+        for item in context["entities"]
+        if item["entity_type"] == "persona"
+    }
+    evidence = [
+        {
+            "reference_id": item["reference_id"],
+            "reference_type": "approved_claim",
+            "claim_id": item["claim_id"],
+            "case_id": item["case_id"],
+            "case_title": item["case_title"],
+            "persona_id": item["persona_id"],
+            "persona_name": item["persona_name"],
+            "field_name": item["field_name"],
+            "display_value": item["display_value"],
+            "confidence": item["confidence"],
+            "sources": item["sources"],
+        }
+        for item in context["approved_claims"]
+    ]
+    run_id = store.start_combined_analysis_run(
+        job_id,
+        snapshot["snapshot"]["sha256"],
+        model="gpt-5.6-sol",
+        web_search_enabled=True,
+    )
+    store.complete_combined_analysis_run(
+        run_id,
+        {
+            "executive_summary": "Initial assessment.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": [],
+            "next_steps": [],
+            "sources": [],
+            "proposals": [],
+        },
+    )
+    store.finish(job_id, {"status": "completed", "kind": "case_fusion", **snapshot})
+    message = store.append_case_chat_message(
+        job["case_id"],
+        role="assistant",
+        author="OpenLedger AI",
+        content="The cited evidence supports a reviewable affiliation hypothesis.",
+        research_enabled=True,
+        sources=[{"title": "Public source", "url": "https://example.test/source"}],
+        proposals={"status": "processing", "kind": "relationship", "count": 0},
+        model="gpt-5.6-sol",
+    )
+    proposal = {
+        "title": "Chat-derived affiliation",
+        "relationship_type": "affiliation",
+        "subject_ref": personas[alice_case_id]["reference_id"],
+        "subject_entity": personas[alice_case_id],
+        "object_ref": personas[bob_case_id]["reference_id"],
+        "object_entity": personas[bob_case_id],
+        "explanation": "The approved affiliations name the same organization.",
+        "confidence": 70,
+        "evidence": evidence,
+        "contradictory_evidence": [],
+        "limitations": ["Shared affiliation does not prove direct contact."],
+    }
+
+    inserted = store.append_combined_relationship_proposals(
+        job["case_id"], run_id, message["id"], [proposal]
+    )
+    assert len(inserted) == 1
+    assert (
+        store.append_combined_relationship_proposals(
+            job["case_id"], run_id, message["id"], [proposal]
+        )
+        == []
+    )
+    retained = store.get_case(job["case_id"])["analysis_runs"][0]["proposals"]
+    assert retained[0]["id"] == inserted[0]
+    assert retained[0]["chat_message_id"] == message["id"]
+    assert retained[0]["review_status"] == "pending"
+
+
 def test_combined_case_references_protect_sources_and_delete_independently(store):
     first_case_id, _ = _create_case_with_company_claim(store, "alice", "Nexorus")
     second_case_id, _ = _create_case_with_company_claim(store, "bob", "Nexorus")

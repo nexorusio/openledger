@@ -304,6 +304,12 @@ combined_relationship_proposals = Table(
         ForeignKey("combined_analysis_runs.id", ondelete="CASCADE"),
         nullable=False,
     ),
+    Column(
+        "chat_message_id",
+        String(36),
+        ForeignKey("case_chat_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
     Column("title", String(500), nullable=False),
     Column("relationship_type", String(64), nullable=False),
     Column("subject_ref", String(100), nullable=False),
@@ -332,6 +338,10 @@ Index(
     "ix_combined_relationship_proposals_run_status",
     combined_relationship_proposals.c.analysis_run_id,
     combined_relationship_proposals.c.review_status,
+)
+Index(
+    "ix_combined_relationship_proposals_chat_message",
+    combined_relationship_proposals.c.chat_message_id,
 )
 
 combined_relationship_reviews = Table(
@@ -4884,6 +4894,9 @@ class CaseStore:
         return {
             "id": str(row["id"]),
             "analysis_run_id": str(row["analysis_run_id"]),
+            "chat_message_id": (
+                str(row["chat_message_id"]) if row["chat_message_id"] else None
+            ),
             "title": str(row["title"]),
             "relationship_type": str(row["relationship_type"]),
             "subject_ref": str(row["subject_ref"]),
@@ -5069,6 +5082,7 @@ class CaseStore:
                     insert(combined_relationship_proposals).values(
                         id=str(uuid.uuid4()),
                         analysis_run_id=run_id,
+                        chat_message_id=None,
                         title=str(proposal["title"]),
                         relationship_type=str(proposal["relationship_type"]),
                         subject_ref=str(proposal["subject_ref"]),
@@ -5104,6 +5118,132 @@ class CaseStore:
                 )
             )
         return len(proposals)
+
+    def append_combined_relationship_proposals(
+        self,
+        combined_case_id: str,
+        analysis_run_id: str,
+        chat_message_id: str,
+        proposals: Iterable[Dict[str, Any]],
+    ) -> list[str]:
+        """Append validated chat-derived hypotheses to one completed AI run."""
+        candidates = list(proposals or [])[:MAX_COMBINED_AI_PROPOSALS]
+        if not candidates:
+            return []
+        now = utcnow()
+        inserted_ids: list[str] = []
+        with self.engine.begin() as connection:
+            run_row = (
+                connection.execute(
+                    select(
+                        combined_analysis_runs.c.combined_case_id,
+                        combined_analysis_runs.c.status,
+                    ).where(combined_analysis_runs.c.id == analysis_run_id)
+                )
+                .mappings()
+                .first()
+            )
+            if not run_row:
+                raise KeyError(analysis_run_id)
+            if (
+                str(run_row["combined_case_id"]) != combined_case_id
+                or str(run_row["status"]) != "completed"
+            ):
+                raise ValueError(
+                    "Relationship proposals require the completed analysis for this investigation"
+                )
+            message_row = (
+                connection.execute(
+                    select(
+                        case_chat_messages.c.case_id,
+                        case_chat_messages.c.role,
+                    ).where(case_chat_messages.c.id == chat_message_id)
+                )
+                .mappings()
+                .first()
+            )
+            if not message_row:
+                raise KeyError(chat_message_id)
+            if (
+                str(message_row["case_id"]) != combined_case_id
+                or str(message_row["role"]) != "assistant"
+            ):
+                raise ValueError(
+                    "Relationship proposals require an assistant message from this investigation"
+                )
+            existing_rows = list(
+                connection.execute(
+                    select(
+                        combined_relationship_proposals.c.relationship_type,
+                        combined_relationship_proposals.c.subject_ref,
+                        combined_relationship_proposals.c.object_ref,
+                        combined_relationship_proposals.c.title,
+                    ).where(
+                        combined_relationship_proposals.c.analysis_run_id
+                        == analysis_run_id
+                    )
+                ).mappings()
+            )
+            remaining = max(0, MAX_COMBINED_AI_PROPOSALS - len(existing_rows))
+            fingerprints = {
+                (
+                    str(row["relationship_type"]),
+                    tuple(sorted((str(row["subject_ref"]), str(row["object_ref"])))),
+                    str(row["title"]).strip().casefold(),
+                )
+                for row in existing_rows
+            }
+            for proposal in candidates:
+                if len(inserted_ids) >= remaining:
+                    break
+                fingerprint = (
+                    str(proposal["relationship_type"]),
+                    tuple(
+                        sorted(
+                            (
+                                str(proposal["subject_ref"]),
+                                str(proposal["object_ref"]),
+                            )
+                        )
+                    ),
+                    str(proposal["title"]).strip().casefold(),
+                )
+                if fingerprint in fingerprints:
+                    continue
+                fingerprints.add(fingerprint)
+                proposal_id = str(uuid.uuid4())
+                connection.execute(
+                    insert(combined_relationship_proposals).values(
+                        id=proposal_id,
+                        analysis_run_id=analysis_run_id,
+                        chat_message_id=chat_message_id,
+                        title=str(proposal["title"]),
+                        relationship_type=str(proposal["relationship_type"]),
+                        subject_ref=str(proposal["subject_ref"]),
+                        subject_entity=dict(proposal["subject_entity"]),
+                        object_ref=str(proposal["object_ref"]),
+                        object_entity=dict(proposal["object_entity"]),
+                        explanation=str(proposal["explanation"]),
+                        confidence=int(proposal["confidence"]),
+                        evidence=list(proposal.get("evidence") or []),
+                        contradictory_evidence=list(
+                            proposal.get("contradictory_evidence") or []
+                        ),
+                        limitations=list(proposal.get("limitations") or []),
+                        review_status="pending",
+                        created_at=now,
+                        reviewed_at=None,
+                        reviewed_by=None,
+                    )
+                )
+                inserted_ids.append(proposal_id)
+            if inserted_ids:
+                connection.execute(
+                    update(cases)
+                    .where(cases.c.id == combined_case_id)
+                    .values(updated_at=now)
+                )
+        return inserted_ids
 
     def stop_combined_analysis_run(
         self, run_id: str, *, status: str, error: str

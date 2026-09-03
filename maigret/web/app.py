@@ -40,6 +40,7 @@ from maigret.ai import (
     get_ai_evidence_proposals,
     get_case_chat_claim_proposals,
     get_case_chat_response,
+    get_combined_case_chat_response,
     get_combined_investigation_insights,
     get_enriched_ai_analysis,
     get_organization_context_proposals,
@@ -4068,6 +4069,86 @@ def run_persistent_case_fusion_job(
     )
 
 
+def combined_case_chat_context(case: Dict[str, Any]):
+    """Build bounded chat context for the latest immutable combined snapshot."""
+    latest_fusion = next(
+        (
+            job
+            for job in case.get("jobs", [])
+            if job.get("kind") == "case_fusion" and job.get("status") == "completed"
+        ),
+        None,
+    )
+    latest_analysis = next(
+        (
+            run
+            for run in case.get("analysis_runs", [])
+            if latest_fusion and run.get("job_id") == latest_fusion.get("job_id")
+        ),
+        None,
+    )
+    expected_sha = str(
+        ((latest_fusion or {}).get("snapshot") or {}).get("sha256") or ""
+    )
+    evidence_context: Dict[str, Any] = {}
+    snapshot_current = False
+    if (
+        latest_fusion
+        and expected_sha
+        and case_store is not None
+        and not case.get("source_changed_count")
+    ):
+        try:
+            rebuilt = case_store.build_case_fusion_snapshot(latest_fusion["job_id"])
+        except (KeyError, RuntimeError, ValueError):
+            rebuilt = {}
+        rebuilt_sha = str((rebuilt.get("snapshot") or {}).get("sha256") or "")
+        snapshot_current = bool(rebuilt_sha) and hmac.compare_digest(
+            expected_sha, rebuilt_sha
+        )
+        if snapshot_current:
+            evidence_context = bounded_combined_context(
+                dict(rebuilt.get("analysis_context") or {})
+            )
+    assessment = None
+    if latest_analysis:
+        assessment = {
+            "id": latest_analysis.get("id"),
+            "snapshot_sha256": latest_analysis.get("snapshot_sha256"),
+            "status": latest_analysis.get("status"),
+            "model": latest_analysis.get("model"),
+            "executive_summary": latest_analysis.get("executive_summary"),
+            "key_findings": list(latest_analysis.get("key_findings") or [])[:20],
+            "contradictions": list(latest_analysis.get("contradictions") or [])[:20],
+            "information_gaps": list(latest_analysis.get("information_gaps") or [])[
+                :20
+            ],
+            "next_steps": list(latest_analysis.get("next_steps") or [])[:20],
+            "sources": list(latest_analysis.get("sources") or [])[:100],
+            "proposals": list(latest_analysis.get("proposals") or [])[:100],
+            "created_at": latest_analysis.get("created_at"),
+            "completed_at": latest_analysis.get("completed_at"),
+        }
+    return (
+        {
+            "scope": "combined_investigation",
+            "combined_case": {
+                "id": case.get("id"),
+                "title": case.get("title"),
+                "purpose": case.get("purpose"),
+            },
+            "snapshot_sha256": expected_sha or None,
+            "snapshot_current": snapshot_current,
+            "source_changed_count": int(case.get("source_changed_count") or 0),
+            "source_cases": list(case.get("source_cases") or [])[:10],
+            "approved_snapshot_evidence": evidence_context,
+            "latest_ai_assessment": assessment,
+        },
+        evidence_context,
+        latest_analysis,
+    )
+
+
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
     """Execute a claimed database job independently from any browser request."""
     if job.get("kind") == "affiliation":
@@ -5034,11 +5115,27 @@ def review_combined_relationship(case_id, proposal_id):
     except ValueError as error:
         flash(str(error), "danger")
     else:
+        if decision == "approved":
+            flash(
+                "Relationship approved and added to the combined graph. "
+                "Source cases were not changed.",
+                "success",
+            )
+            return redirect(
+                url_for(
+                    "relationships_workspace",
+                    mode="shared",
+                    case_id=case_id,
+                    proposal_id=proposal_id,
+                )
+            )
         flash(
-            "Relationship hypothesis review recorded. Source cases were not changed.",
+            f"Relationship marked {decision}. Source cases were not changed.",
             "success",
         )
-    return redirect(url_for("case_workspace", case_id=case_id))
+    return redirect(
+        url_for("case_workspace", case_id=case_id, _anchor=f"proposal-{proposal_id}")
+    )
 
 
 @app.route('/cases/<case_id>/google-places-live', methods=['POST'])
@@ -5128,96 +5225,115 @@ def delete_case_workspace(case_id):
     return redirect(url_for("cases_workspace"))
 
 
-@app.route('/cases/<case_id>/chat')
+@app.route("/cases/<case_id>/chat")
 def case_chat_workspace(case_id):
     if case_store is None:
-        flash('Case chat requires persistent storage.', 'warning')
-        return redirect(url_for('history'))
+        flash("Case chat requires persistent storage.", "warning")
+        return redirect(url_for("history"))
     case = case_store.get_case(case_id)
     if not case:
-        flash('That case does not exist.', 'danger')
-        return redirect(url_for('cases_workspace'))
-    initial_prompt = ''
+        flash("That case does not exist.", "danger")
+        return redirect(url_for("cases_workspace"))
+    is_combined = case.get("case_type") == "combined"
+    initial_prompt = ""
     initial_research_enabled = False
-    if request.args.get('mode') == 'business_context':
+    if request.args.get("mode") == "business_context":
         affiliation_job = next(
-            (job for job in case.get('jobs', []) if job.get('kind') == 'affiliation'),
+            (job for job in case.get("jobs", []) if job.get("kind") == "affiliation"),
             None,
         )
         specification = (
-            (affiliation_job.get('options') or {}).get('investigation_spec') or {}
+            (affiliation_job.get("options") or {}).get("investigation_spec") or {}
             if affiliation_job
             else {}
         )
-        affiliation_name = ' '.join(
-            str(specification.get('affiliation_name') or '').split()
+        affiliation_name = " ".join(
+            str(specification.get("affiliation_name") or "").split()
         )[:500]
         if affiliation_name:
             initial_prompt = (
-                f'Research the public operating context of {affiliation_name}. '
-                'Find its official website and exact publicly stated business or '
-                'institutional addresses, legal registration, headquarters, business '
-                'activities, and jurisdictions using direct citations. Separate legal '
-                'registry facts, statements published by the organization, and technical '
-                'domain infrastructure. Explain the basis and limitations of every '
-                'conclusion. Do not infer where the business operates from DNS, hosting, '
-                'nameserver, mail-provider, registrar, or domain-registration geography.'
+                f"Research the public operating context of {affiliation_name}. "
+                "Find its official website and exact publicly stated business or "
+                "institutional addresses, legal registration, headquarters, business "
+                "activities, and jurisdictions using direct citations. Separate legal "
+                "registry facts, statements published by the organization, and technical "
+                "domain infrastructure. Explain the basis and limitations of every "
+                "conclusion. Do not infer where the business operates from DNS, hosting, "
+                "nameserver, mail-provider, registrar, or domain-registration geography."
             )
             initial_research_enabled = True
     return render_template(
-        'case_chat.html',
+        "case_chat.html",
         case=case,
         messages=case_store.list_case_chat_messages(case_id, limit=500),
         ai_enabled=bool(get_openai_api_key()),
+        is_combined=is_combined,
         initial_prompt=initial_prompt,
         initial_research_enabled=initial_research_enabled,
     )
 
 
-@app.route('/api/cases/<case_id>/chat', methods=['POST'])
+@app.route("/api/cases/<case_id>/chat", methods=["POST"])
 def case_chat_message(case_id):
-    if not is_valid_csrf(request.headers.get('X-OpenLedger-CSRF', '')):
-        return {'error': 'Invalid request token. Refresh the case chat.'}, 403
+    if not is_valid_csrf(request.headers.get("X-OpenLedger-CSRF", "")):
+        return {"error": "Invalid request token. Refresh the case chat."}, 403
     if case_store is None:
-        return {'error': 'Case chat requires persistent storage.'}, 503
+        return {"error": "Case chat requires persistent storage."}, 503
     api_key = get_openai_api_key()
     if not api_key:
-        return {'error': 'AI analysis is not configured on the server.'}, 503
+        return {"error": "AI analysis is not configured on the server."}, 503
     payload = request.get_json(silent=True)
     if not isinstance(payload, dict):
-        return {'error': 'A JSON chat request is required.'}, 400
-    message = str(payload.get('message') or '').strip()
+        return {"error": "A JSON chat request is required."}, 400
+    message = str(payload.get("message") or "").strip()
     if not message:
-        return {'error': 'Write a message before sending.'}, 400
+        return {"error": "Write a message before sending."}, 400
     if len(message) > 12_000:
-        return {'error': 'Chat messages are limited to 12,000 characters.'}, 400
-    research_enabled = payload.get('research_enabled') is True
-    propose_to_persona = payload.get('propose_to_persona') is True
-    persona_id = str(payload.get('persona_id') or '').strip() or None
+        return {"error": "Chat messages are limited to 12,000 characters."}, 400
+    research_enabled = payload.get("research_enabled") is True
+    propose_to_persona = payload.get("propose_to_persona") is True
+    propose_relationships = payload.get("propose_relationships") is True
+    persona_id = str(payload.get("persona_id") or "").strip() or None
     case = case_store.get_case(case_id)
     if not case:
-        return {'error': 'That case does not exist.'}, 404
-    personas_by_id = {persona['id']: persona for persona in case['personas']}
+        return {"error": "That case does not exist."}, 404
+    is_combined = case.get("case_type") == "combined"
+    if is_combined and (persona_id or propose_to_persona):
+        return {
+            "error": "Combined investigations create relationship proposals, not Persona facts."
+        }, 400
+    if not is_combined and propose_relationships:
+        return {
+            "error": "Relationship proposals are available only in combined investigations."
+        }, 400
+    personas_by_id = {persona["id"]: persona for persona in case["personas"]}
     if persona_id and persona_id not in personas_by_id:
-        return {'error': 'That Persona does not belong to this case.'}, 400
+        return {"error": "That Persona does not belong to this case."}, 400
     if propose_to_persona and not persona_id:
         return {
-            'error': 'Choose a target Persona before proposing new information.'
+            "error": "Choose a target Persona before proposing new information."
         }, 400
 
     lock = case_chat_locks.setdefault(case_id, Lock())
     if not lock.acquire(blocking=False):
-        return {'error': 'A case-chat response is already being generated.'}, 409
+        return {"error": "A case-chat response is already being generated."}, 409
 
-    actor = session.get('username') or 'local-operator'
+    actor = session.get("username") or "local-operator"
     try:
         conversation = case_store.list_case_chat_messages(case_id, limit=30)
-        case_context = case_store.get_case_chat_context(case_id)
-        if not case_context:
-            return {'error': 'That case does not exist.'}, 404
+        relationship_context: Dict[str, Any] = {}
+        latest_analysis = None
+        if is_combined:
+            case_context, relationship_context, latest_analysis = (
+                combined_case_chat_context(case)
+            )
+        else:
+            case_context = case_store.get_case_chat_context(case_id)
+            if not case_context:
+                return {"error": "That case does not exist."}, 404
         user_record = case_store.append_case_chat_message(
             case_id,
-            role='user',
+            role="user",
             author=actor,
             content=message,
             persona_id=persona_id,
@@ -5225,11 +5341,14 @@ def case_chat_message(case_id):
         )
         ai_settings = load_settings()
         model = ai_settings.get(
-            'openai_model',
-            os.getenv('OPENAI_MODEL', DEFAULT_SETTINGS['openai_model']),
+            "openai_model",
+            os.getenv("OPENAI_MODEL", DEFAULT_SETTINGS["openai_model"]),
+        )
+        response_function = (
+            get_combined_case_chat_response if is_combined else get_case_chat_response
         )
         response = asyncio.run(
-            get_case_chat_response(
+            response_function(
                 api_key=api_key,
                 case_context=case_context,
                 conversation=conversation,
@@ -5239,17 +5358,20 @@ def case_chat_message(case_id):
                 **ai_endpoint_options(),
             )
         )
-        answer = response['analysis']
-        sources = response.get('sources', [])
-        initial_proposal_status = (
-            {'status': 'processing', 'count': 0}
-            if propose_to_persona
-            else {'status': 'not_requested', 'count': 0}
+        answer = response["analysis"]
+        sources = response.get("sources", [])
+        proposal_requested = (
+            propose_relationships if is_combined else propose_to_persona
         )
+        initial_proposal_status = {
+            "status": "processing" if proposal_requested else "not_requested",
+            "count": 0,
+            "kind": "relationship" if is_combined else "persona",
+        }
         assistant_record = case_store.append_case_chat_message(
             case_id,
-            role='assistant',
-            author='OpenLedger AI',
+            role="assistant",
+            author="OpenLedger AI",
             content=answer,
             persona_id=persona_id,
             research_enabled=research_enabled,
@@ -5258,7 +5380,69 @@ def case_chat_message(case_id):
             model=model,
         )
         proposal_summary = initial_proposal_status
-        if propose_to_persona:
+        if is_combined and propose_relationships:
+            if not relationship_context:
+                proposal_summary = {
+                    "status": "stale_snapshot",
+                    "count": 0,
+                    "kind": "relationship",
+                }
+            elif not latest_analysis or latest_analysis.get("status") != "completed":
+                proposal_summary = {
+                    "status": "unavailable",
+                    "count": 0,
+                    "kind": "relationship",
+                }
+            else:
+                try:
+                    raw_insights = asyncio.run(
+                        get_combined_investigation_insights(
+                            api_key=api_key,
+                            case_context=relationship_context,
+                            research_answer=answer,
+                            sources=sources,
+                            model=model,
+                            **ai_endpoint_options(),
+                        )
+                    )
+                    normalized = normalize_combined_insights(
+                        raw_insights,
+                        context=relationship_context,
+                        web_sources=sources,
+                    )
+                    proposal_ids = case_store.append_combined_relationship_proposals(
+                        case_id,
+                        latest_analysis["id"],
+                        assistant_record["id"],
+                        normalized.get("proposals") or [],
+                    )
+                    proposal_summary = {
+                        "status": (
+                            "pending_review"
+                            if proposal_ids
+                            else "no_supported_relationships"
+                        ),
+                        "count": len(proposal_ids),
+                        "kind": "relationship",
+                        "analysis_run_id": latest_analysis["id"],
+                        "proposal_ids": proposal_ids,
+                    }
+                except Exception as error:
+                    record_internal_error(
+                        "Combined case-chat relationship extraction failed",
+                        error,
+                        case_id=case_id,
+                    )
+                    proposal_summary = {
+                        "status": "unavailable",
+                        "count": 0,
+                        "kind": "relationship",
+                    }
+            case_store.update_case_chat_message_proposals(
+                assistant_record["id"], proposal_summary
+            )
+            assistant_record["proposals"] = proposal_summary
+        elif propose_to_persona:
             try:
                 raw_proposals = asyncio.run(
                     get_case_chat_claim_proposals(
@@ -5289,27 +5473,29 @@ def case_chat_message(case_id):
                     candidates,
                 )
                 proposal_summary = {
-                    'status': 'pending_review',
-                    'count': synchronized['count'],
-                    'persona_id': persona_id,
-                    'diagnostics': diagnostics,
-                    'proposals': synchronized['proposals'],
+                    "status": "pending_review",
+                    "count": synchronized["count"],
+                    "kind": "persona",
+                    "persona_id": persona_id,
+                    "diagnostics": diagnostics,
+                    "proposals": synchronized["proposals"],
                 }
             except Exception as error:
                 record_internal_error(
-                    'Case chat Persona proposal extraction failed',
+                    "Case chat Persona proposal extraction failed",
                     error,
                     case_id=case_id,
                 )
                 proposal_summary = {
-                    'status': 'unavailable',
-                    'count': 0,
-                    'persona_id': persona_id,
+                    "status": "unavailable",
+                    "count": 0,
+                    "kind": "persona",
+                    "persona_id": persona_id,
                 }
             case_store.update_case_chat_message_proposals(
-                assistant_record['id'], proposal_summary
+                assistant_record["id"], proposal_summary
             )
-            assistant_record['proposals'] = proposal_summary
+            assistant_record["proposals"] = proposal_summary
         return jsonify(
             user_message=user_record,
             assistant_message=assistant_record,
