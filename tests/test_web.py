@@ -869,6 +869,90 @@ def test_ai_analysis_is_generated_once_and_cached(
     assert 'requires verification' in saved.read_text(encoding='utf-8')
 
 
+def test_ai_analysis_falls_back_to_case_evidence_when_research_has_no_citations(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'case-evidence-fallback.db'}", create_schema=True
+    )
+    monkeypatch.setattr(web_app, 'case_store', store)
+    calls = []
+
+    async def fake_analysis(**kwargs):
+        calls.append(kwargs['web_search_enabled'])
+        if kwargs['web_search_enabled']:
+            raise AIEnrichmentContractError('no cited public sources')
+        return {
+            'analysis': (
+                '# Assessment\n\nThe stored account evidence remains available '
+                'for analyst review.'
+            ),
+            'sources': [],
+        }
+
+    async def proposals_must_not_run(**_kwargs):
+        raise AssertionError('uncited research reached AI proposal extraction')
+
+    monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
+    monkeypatch.setattr(
+        web_app, 'get_ai_evidence_proposals', proposals_must_not_run
+    )
+    try:
+        job_id = store.create_investigation(['alice'], {})
+        store.claim_next('worker:test')
+        result = {
+            'status': 'completed',
+            'session_folder': f'search_{job_id}',
+            'graph_file': f'search_{job_id}/combined_graph.html',
+            'usernames': ['alice'],
+            'individual_reports': [],
+        }
+        store.finish(job_id, result)
+        web_app.job_results[job_id] = result
+        with client.session_transaction() as browser_session:
+            browser_session['csrf_token'] = 'test-csrf'
+
+        first = client.post(
+            f'/api/analysis/search_{job_id}',
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+        )
+        second = client.post(
+            f'/api/analysis/search_{job_id}',
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+        )
+
+        assert first.status_code == 200
+        assert first.get_json()['cached'] is False
+        assert first.get_json()['sources'] == []
+        assert first.get_json()['research_status'] == 'no_cited_web_findings'
+        assert first.get_json()['proposal_status'] == 'case_evidence_only'
+        assert second.status_code == 200
+        assert second.get_json()['cached'] is True
+        assert second.get_json()['research_status'] == 'no_cited_web_findings'
+        assert second.get_json()['proposal_status'] == 'case_evidence_only'
+        assert calls == [True, False]
+
+        metadata = json.loads(
+            (tmp_path / f'search_{job_id}' / 'ai_analysis.json').read_text(
+                encoding='utf-8'
+            )
+        )
+        assert metadata['research_status'] == 'no_cited_web_findings'
+        assert metadata['proposal_status'] == 'case_evidence_only'
+        assert metadata['evidence_proposals'] == []
+
+        case = store.get_case(store.get_job(job_id)['case_id'])
+        assert [persona['display_name'] for persona in case['personas']] == ['alice']
+        page = client.get(f'/results/search_{job_id}').get_data(as_text=True)
+        assert 'No new sources' in page
+        assert 'Persona retained' in page
+        assert 'existing structured Persona remains available' in page
+        assert 'Open evidence profile' in page
+    finally:
+        store.dispose()
+
+
 def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
     client, web_app, monkeypatch, tmp_path
 ):

@@ -11,17 +11,30 @@
         <span class="ai-pipeline-step">2</span>
         <div>
             <small>Cited research</small>
+            {% if ai_analysis_status.research_status == 'no_cited_web_findings' %}
+            <strong>No new sources</strong>
+            <p>Web research returned no usable citations; the saved assessment uses stored case evidence only.</p>
+            {% elif ai_analysis_status.research_status == 'case_evidence_only' %}
+            <strong>Not requested</strong>
+            <p>The saved assessment uses stored case evidence only.</p>
+            {% else %}
             <strong>{{ ai_analysis_status.source_count }} source{{ '' if ai_analysis_status.source_count == 1 else 's' }}</strong>
             <p>Only URLs returned by the same research run may support Persona proposals.</p>
+            {% endif %}
         </div>
     </article>
     <article>
         <span class="ai-pipeline-step">3</span>
         <div>
             <small>Persona extraction</small>
+            {% if ai_analysis_status.proposal_status == 'case_evidence_only' %}
+            <strong>Persona retained</strong>
+            {% else %}
             <strong>{{ ai_analysis_status.proposal_count }} accepted proposal{{ '' if ai_analysis_status.proposal_count == 1 else 's' }}</strong>
+            {% endif %}
             <p>
                 {% if ai_analysis_status.proposal_status == 'pending_review' %}Validated and synchronized; current analyst decisions appear in the profile.
+                {% elif ai_analysis_status.proposal_status == 'case_evidence_only' %}The existing structured Persona remains available; no uncited web fact was added.
                 {% elif ai_analysis_status.proposal_status == 'no_valid_proposals' %}No cited finding passed validation.
                 {% elif ai_analysis_status.proposal_status == 'unavailable' %}Structured extraction failed; the assessment was retained.
                 {% elif ai_analysis_status.proposal_status == 'metadata_unavailable' %}Assessment metadata is unavailable.

@@ -1965,6 +1965,7 @@ def get_ai_analysis_status(result_data: Dict[str, Any]) -> Dict[str, Any]:
     status: Dict[str, Any] = {
         'has_assessment': False,
         'proposal_status': 'not_requested',
+        'research_status': 'not_run',
         'proposal_count': 0,
         'source_count': 0,
         'model': None,
@@ -1987,8 +1988,12 @@ def get_ai_analysis_status(result_data: Dict[str, Any]) -> Dict[str, Any]:
     sources = metadata.get('sources')
     proposals = metadata.get('evidence_proposals')
     diagnostics = metadata.get('proposal_diagnostics')
+    research_status = metadata.get('research_status')
+    if not isinstance(research_status, str) or not research_status.strip():
+        research_status = 'cited_web' if sources else 'legacy'
     status.update(
         proposal_status=str(metadata.get('proposal_status') or 'unknown'),
+        research_status=research_status,
         proposal_count=len(proposals) if isinstance(proposals, list) else 0,
         source_count=len(sources) if isinstance(sources, list) else 0,
         model=(
@@ -2029,6 +2034,7 @@ def get_case_ai_analysis_status(case_id: str) -> Dict[str, Any]:
     empty_status = {
         'has_assessment': False,
         'proposal_status': 'not_requested',
+        'research_status': 'not_run',
         'proposal_count': 0,
         'source_count': 0,
         'model': None,
@@ -6553,6 +6559,10 @@ def analyze_session(session_id):
                     and isinstance(metadata.get('model'), str)
                     and metadata.get('proposal_status') != 'unavailable'
                 ):
+                    research_status = str(
+                        metadata.get('research_status')
+                        or ('cited_web' if metadata['sources'] else 'legacy')
+                    )
                     proposal_sync = synchronize_ai_evidence_proposals(
                         session_id,
                         result_data,
@@ -6560,12 +6570,15 @@ def analyze_session(session_id):
                         sources=metadata['sources'],
                         model=metadata['model'],
                     )
+                    if metadata.get('proposal_status') == 'case_evidence_only':
+                        proposal_sync['status'] = 'case_evidence_only'
                     with open(analysis_path, encoding='utf-8') as analysis_file:
                         return {
                             'analysis': analysis_file.read(),
                             'sources': metadata['sources'],
                             'proposal_count': proposal_sync['count'],
                             'proposal_status': proposal_sync['status'],
+                            'research_status': research_status,
                             'proposal_diagnostics': proposal_sync['diagnostics'],
                             'cached': True,
                         }
@@ -6584,22 +6597,51 @@ def analyze_session(session_id):
             os.getenv('OPENAI_MODEL', DEFAULT_SETTINGS['openai_model']),
         )
         endpoint_options = ai_endpoint_options()
-        enriched = asyncio.run(
-            get_enriched_ai_analysis(
-                api_key=api_key,
-                investigation_evidence=markdown_report,
-                model=model,
-                web_search_enabled=bool(
-                    ai_settings.get('ai_web_enrichment', True)
-                ),
-                **endpoint_options,
-            )
+        web_search_enabled = bool(ai_settings.get('ai_web_enrichment', True))
+        research_status = (
+            'cited_web' if web_search_enabled else 'case_evidence_only'
         )
+        try:
+            enriched = asyncio.run(
+                get_enriched_ai_analysis(
+                    api_key=api_key,
+                    investigation_evidence=markdown_report,
+                    model=model,
+                    web_search_enabled=web_search_enabled,
+                    **endpoint_options,
+                )
+            )
+            if web_search_enabled and not enriched.get('sources'):
+                raise AIEnrichmentContractError(
+                    'OpenAI API returned no cited public sources'
+                )
+        except AIEnrichmentContractError:
+            if not web_search_enabled:
+                raise
+            logging.info(
+                'No cited public-web findings for AI assessment session %s; '
+                'running a separate case-evidence-only assessment',
+                safe_log_value(session_id),
+            )
+            enriched = asyncio.run(
+                get_enriched_ai_analysis(
+                    api_key=api_key,
+                    investigation_evidence=markdown_report,
+                    model=model,
+                    web_search_enabled=False,
+                    **endpoint_options,
+                )
+            )
+            research_status = 'no_cited_web_findings'
         analysis = enriched['analysis']
-        sources = enriched.get('sources', [])
+        sources = (
+            enriched.get('sources', [])
+            if research_status == 'cited_web'
+            else []
+        )
         raw_proposals = []
         proposal_error = False
-        if sources:
+        if research_status == 'cited_web' and sources:
             try:
                 raw_proposals = asyncio.run(
                     get_ai_evidence_proposals(
@@ -6627,6 +6669,11 @@ def analyze_session(session_id):
         )
         if proposal_error:
             proposal_sync['status'] = 'unavailable'
+        elif research_status in {
+            'case_evidence_only',
+            'no_cited_web_findings',
+        }:
+            proposal_sync['status'] = 'case_evidence_only'
 
         os.makedirs(os.path.dirname(analysis_path), exist_ok=True)
         temporary_path = f"{analysis_path}.{uuid.uuid4().hex}.tmp"
@@ -6641,6 +6688,7 @@ def analyze_session(session_id):
                 {
                     'schema_version': AI_ANALYSIS_SCHEMA_VERSION,
                     'model': model,
+                    'research_status': research_status,
                     'sources': sources,
                     'evidence_proposals': proposal_sync['proposals'],
                     'proposal_status': proposal_sync['status'],
@@ -6656,6 +6704,7 @@ def analyze_session(session_id):
             'sources': sources,
             'proposal_count': proposal_sync['count'],
             'proposal_status': proposal_sync['status'],
+            'research_status': research_status,
             'proposal_diagnostics': proposal_sync['diagnostics'],
             'cached': False,
         }

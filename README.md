@@ -128,9 +128,11 @@ AI can:
   follow-up research, and create additional snapshot-bound relationship proposals.
 
 AI cannot approve or reject claims, silently merge identities, convert an
-inference into a fact, or bypass the evidence and review model. A cited research
-run with no usable citations is rejected instead of being saved as a successful
-assessment. Cross-case hypotheses are stored separately from source evidence and
+inference into a fact, or bypass the evidence and review model. When public-web
+research returns no usable citations, OpenLedger discards the uncited output and
+runs a separate assessment from stored case evidence only. The existing Persona
+remains available, but no web-derived Persona proposal is created. Cross-case
+hypotheses are stored separately from source evidence and
 remain pending until an analyst reviews them.
 
 ## Architecture
