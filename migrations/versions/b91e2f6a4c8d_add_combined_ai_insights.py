@@ -46,7 +46,8 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.CheckConstraint(
-            "status IN ('processing', 'completed', 'unavailable', 'failed')",
+            "status IN ('processing', 'completed', 'unavailable', 'failed', "
+            "'cancelled')",
             name="ck_combined_analysis_runs_status",
         ),
         sa.ForeignKeyConstraint(["combined_case_id"], ["cases.id"], ondelete="CASCADE"),

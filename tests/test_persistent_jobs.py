@@ -1276,6 +1276,67 @@ def test_case_fusion_worker_runs_cited_ai_analysis_with_existing_connection(
     assert "https://example.test/public" in workspace
 
 
+def test_case_fusion_worker_honors_cancellation_during_ai_analysis(
+    web_app, persistent_store, monkeypatch
+):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        persistent_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = persistent_store.create_combined_investigation(
+        source_case_ids,
+        title="Cancelled AI worker test",
+        purpose="Do not publish output after cancellation.",
+        created_by="analyst",
+    )
+    fusion_job = persistent_store.claim_next("worker:fusion-cancel")
+
+    async def fake_research(**_kwargs):
+        assert persistent_store.request_cancel(fusion_job_id) is True
+        return {
+            "analysis": "This output must be discarded.",
+            "sources": [
+                {
+                    "title": "Public source",
+                    "url": "https://example.test/public",
+                }
+            ],
+            "web_search_completed": True,
+        }
+
+    async def forbidden_insights(**_kwargs):
+        raise AssertionError("the structured stage must not start after cancellation")
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(
+        web_app,
+        "load_settings",
+        lambda: {"openai_model": "gpt-5.6-terra", "ai_web_enrichment": True},
+    )
+    monkeypatch.setattr(web_app, "get_case_chat_response", fake_research)
+    monkeypatch.setattr(
+        web_app, "get_combined_investigation_insights", forbidden_insights
+    )
+
+    web_app.run_persistent_job(persistent_store, fusion_job)
+
+    completed = persistent_store.get_job(fusion_job_id)
+    assert completed["status"] == "cancelled"
+    assert "snapshot" not in completed
+    analysis = persistent_store.get_case(fusion_job["case_id"])["analysis_runs"][0]
+    assert analysis["status"] == "cancelled"
+    assert analysis["proposals"] == []
+
+
 def test_combined_case_selection_and_workspace_flow(client, web_app, persistent_store):
     source_case_ids = []
     for username in ("alice", "bob"):

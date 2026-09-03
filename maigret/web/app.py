@@ -3829,6 +3829,7 @@ def run_combined_case_ai_analysis(
     job: Dict[str, Any],
     snapshot_result: Dict[str, Any],
     analysis_context: Dict[str, Any],
+    shutdown_check=None,
 ) -> Dict[str, Any]:
     """Generate cited, reviewable insights without changing source evidence."""
     settings = load_settings()
@@ -3844,6 +3845,27 @@ def run_combined_case_ai_analysis(
         model=model,
         web_search_enabled=web_search_enabled,
     )
+
+    def cancelled_result():
+        interrupted = bool(shutdown_check and shutdown_check())
+        cancelled = store.is_cancel_requested(job["job_id"])
+        if not interrupted and not cancelled:
+            return None
+        reason = "AI relationship analysis stopped before its output was published."
+        store.stop_combined_analysis_run(
+            run_id, status="cancelled", error=reason
+        )
+        return {
+            "run_id": run_id,
+            "status": "cancelled",
+            "model": model,
+            "web_search_enabled": web_search_enabled,
+            "proposal_count": 0,
+        }
+
+    stopped = cancelled_result()
+    if stopped:
+        return stopped
     api_key = get_openai_api_key()
     if not api_key:
         reason = "The protected OpenAI connection is not configured on this server."
@@ -3886,6 +3908,9 @@ def run_combined_case_ai_analysis(
                 **ai_endpoint_options(),
             )
         )
+        stopped = cancelled_result()
+        if stopped:
+            return stopped
         raw_insights = asyncio.run(
             get_combined_investigation_insights(
                 api_key=api_key,
@@ -3896,6 +3921,9 @@ def run_combined_case_ai_analysis(
                 **ai_endpoint_options(),
             )
         )
+        stopped = cancelled_result()
+        if stopped:
+            return stopped
         insights = normalize_combined_insights(
             raw_insights,
             context=bounded_context,
@@ -3994,14 +4022,30 @@ def run_persistent_case_fusion_job(
                     },
                 )
                 ai_analysis = run_combined_case_ai_analysis(
-                    store, job, snapshot_result, analysis_context
+                    store,
+                    job,
+                    snapshot_result,
+                    analysis_context,
+                    shutdown_check=shutdown_check,
                 )
-                result = {
-                    "status": "completed",
-                    "kind": "case_fusion",
-                    **snapshot_result,
-                    "ai_analysis": ai_analysis,
-                }
+                interrupted = bool(shutdown_check and shutdown_check())
+                cancelled = store.is_cancel_requested(job_id)
+                if interrupted or cancelled:
+                    result = {
+                        "status": "interrupted" if interrupted else "cancelled",
+                        "kind": "case_fusion",
+                        "error": (
+                            "The combined investigation stopped before AI output "
+                            "could be published."
+                        ),
+                    }
+                else:
+                    result = {
+                        "status": "completed",
+                        "kind": "case_fusion",
+                        **snapshot_result,
+                        "ai_analysis": ai_analysis,
+                    }
     except Exception as error:
         public_error = record_internal_error(
             "Combined investigation failed", error, case_id=job.get("case_id")

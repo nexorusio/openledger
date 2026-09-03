@@ -9,6 +9,7 @@ from sqlalchemy import func, select, update
 from maigret.web.case_store import (
     CaseStore,
     ReferencedCaseError,
+    _bounded_round_robin_case_records,
     cases,
     claim_evidence,
     claim_reviews,
@@ -1484,6 +1485,22 @@ def test_combined_investigation_snapshots_only_approved_cross_case_links(store):
         edge["sources"][0]["url"].startswith("https://example.test/")
         for edge in graph["edges"]
     )
+
+
+def test_combined_ai_claim_cap_is_balanced_before_truncation():
+    records = [
+        {"case_id": "case-a", "id": f"a-{index}"} for index in range(600)
+    ] + [{"case_id": "case-b", "id": f"b-{index}"} for index in range(10)]
+
+    bounded = _bounded_round_robin_case_records(
+        records, ["case-a", "case-b"], 500
+    )
+
+    assert len(bounded) == 500
+    assert [item["case_id"] for item in bounded[:20]] == [
+        value for _ in range(10) for value in ("case-a", "case-b")
+    ]
+    assert sum(item["case_id"] == "case-b" for item in bounded) == 10
 
 
 def test_combined_ai_proposals_are_snapshot_bound_and_reviewed_separately(store):

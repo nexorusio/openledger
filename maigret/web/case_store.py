@@ -284,7 +284,7 @@ combined_analysis_runs = Table(
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("completed_at", DateTime(timezone=True), nullable=True),
     CheckConstraint(
-        "status IN ('processing', 'completed', 'unavailable', 'failed')",
+        "status IN ('processing', 'completed', 'unavailable', 'failed', 'cancelled')",
         name="ck_combined_analysis_runs_status",
     ),
 )
@@ -623,6 +623,35 @@ RELATIONSHIP_FIELDS = {
     "company_ownership",
     "vehicle_ownership",
 }
+
+
+def _bounded_round_robin_case_records(
+    records: Iterable[Dict[str, Any]], case_ids: Iterable[str], limit: int
+) -> list[Dict[str, Any]]:
+    """Select a deterministic, balanced record projection across source cases."""
+    ordered_case_ids = [str(case_id) for case_id in case_ids]
+    buckets = {case_id: [] for case_id in ordered_case_ids}
+    for record in records:
+        case_id = str(record.get("case_id") or "")
+        if case_id in buckets:
+            buckets[case_id].append(record)
+    selected = []
+    position = 0
+    bounded_limit = max(0, int(limit))
+    while len(selected) < bounded_limit:
+        appended = False
+        for case_id in ordered_case_ids:
+            bucket = buckets[case_id]
+            if position >= len(bucket):
+                continue
+            selected.append(bucket[position])
+            appended = True
+            if len(selected) >= bounded_limit:
+                break
+        if not appended:
+            break
+        position += 1
+    return selected
 
 
 class ActiveInvestigationError(ValueError):
@@ -4732,13 +4761,14 @@ class CaseStore:
         analysis_claims.sort(
             key=lambda item: (
                 item["field_name"] not in RELATIONSHIP_FIELDS,
-                item["case_id"],
                 item["persona_id"],
                 item["field_name"],
                 item["claim_id"],
             )
         )
-        bounded_analysis_claims = analysis_claims[:MAX_COMBINED_AI_CLAIMS]
+        bounded_analysis_claims = _bounded_round_robin_case_records(
+            analysis_claims, source_case_ids, MAX_COMBINED_AI_CLAIMS
+        )
         entities = [
             {
                 "reference_id": f"case:{item['id']}",
@@ -5079,7 +5109,7 @@ class CaseStore:
         self, run_id: str, *, status: str, error: str
     ) -> None:
         """Finish an unavailable or failed AI run without failing its snapshot."""
-        if status not in {"unavailable", "failed"}:
+        if status not in {"unavailable", "failed", "cancelled"}:
             raise ValueError("Invalid combined analysis terminal status")
         now = utcnow()
         with self.engine.begin() as connection:

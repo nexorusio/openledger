@@ -90,11 +90,11 @@
         <i data-lucide="sparkles"></i>
         <div><strong>Analysis has not run yet.</strong><p>AI synthesis starts automatically after the approved-evidence snapshot completes.</p></div>
     </div>
-    {% elif latest_analysis_run.status in ('unavailable', 'failed') %}
+    {% elif latest_analysis_run.status in ('unavailable', 'failed', 'cancelled') %}
     <div class="combined-insight-empty warning">
         <i data-lucide="triangle-alert"></i>
         <div>
-            <strong>{{ 'OpenAI is not connected.' if latest_analysis_run.status == 'unavailable' else 'AI analysis could not be completed.' }}</strong>
+            <strong>{% if latest_analysis_run.status == 'unavailable' %}OpenAI is not connected.{% elif latest_analysis_run.status == 'cancelled' %}AI analysis was cancelled.{% else %}AI analysis could not be completed.{% endif %}</strong>
             <p>{{ latest_analysis_run.error }}</p>
             {% if latest_analysis_run.status == 'unavailable' %}<a href="{{ url_for('settings_update') }}" class="btn btn-sm btn-outline-secondary">Open AI settings</a>{% endif %}
         </div>
