@@ -1,11 +1,44 @@
 from maigret.web.persona_intelligence import (
+    build_case_chat_url_claims,
     extract_ai_persona_claims,
     extract_case_chat_persona_claims,
+    extract_explicit_public_urls,
     extract_investigation_identifier_claims,
     extract_persona_claims,
     field_display_label,
     group_claims,
 )
+
+
+def test_case_chat_extracts_exact_public_urls_without_private_targets():
+    urls = extract_explicit_public_urls(
+        "Add https://www.tiktok.com/@alice?lang=id&ref=case, "
+        "ignore http://127.0.0.1/admin and http://localhost/private."
+    )
+
+    assert urls == ["https://www.tiktok.com/@alice?lang=id&ref=case"]
+
+
+def test_case_chat_builds_unverified_url_claim_with_exact_provenance():
+    url = "https://www.tiktok.com/@skandaloknumpejabat"
+    claims = build_case_chat_url_claims(
+        [url],
+        target_persona="skandaloknumpejabat",
+        user_message_id="user-message",
+        assistant_message_id="assistant-message",
+        provided_by="field.analyst",
+    )
+
+    assert len(claims) == 1
+    claim = claims[0]
+    assert claim["field_name"] == "social_account"
+    assert claim["value"]["url"] == url
+    assert claim["confidence"] == 50
+    assert claim["source_engine"] == "case_chat_user_supplied_url"
+    assert claim["provenance_message_id"] == "user-message"
+    assert claim["evidence"][0]["source_url"] == url
+    assert claim["evidence"][0]["details"]["analyst_supplied_url"] is True
+    assert claim["evidence"][0]["details"]["independently_corroborated"] is False
 
 
 def test_extraction_ignores_unsupported_sensitive_inferences_and_unsafe_urls():
@@ -538,3 +571,31 @@ def test_case_chat_rejects_model_values_not_explicitly_in_user_message():
 
     assert claims == []
     assert diagnostics["rejected"]["not_explicitly_user_provided"] == 1
+
+
+def test_case_chat_user_statement_url_keeps_exact_public_provenance():
+    url = "https://example.test/alice?source=case-chat"
+    claims = extract_case_chat_persona_claims(
+        [
+            {
+                "field_name": "website",
+                "value": url,
+                "confidence": 75,
+                "evidence_basis": "user_statement",
+                "reason": "The analyst explicitly supplied this URL.",
+            }
+        ],
+        sources=[],
+        target_persona="alice",
+        model="test-model",
+        user_message=f"Add {url}",
+        user_message_id="user-message",
+        assistant_message_id="assistant-message",
+        provided_by="field.analyst",
+    )
+
+    assert len(claims) == 1
+    assert claims[0]["confidence"] == 50
+    assert claims[0]["evidence"][0]["source_url"] == url
+    details = claims[0]["evidence"][0]["details"]
+    assert details["independently_corroborated"] is False

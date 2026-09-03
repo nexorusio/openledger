@@ -343,6 +343,127 @@ def _public_url(value: Any) -> str:
     return candidate
 
 
+_EXPLICIT_PUBLIC_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
+_SOCIAL_ACCOUNT_HOSTS = {
+    "bsky.app",
+    "facebook.com",
+    "instagram.com",
+    "linkedin.com",
+    "mastodon.social",
+    "medium.com",
+    "pinterest.com",
+    "reddit.com",
+    "snapchat.com",
+    "t.me",
+    "threads.net",
+    "tiktok.com",
+    "tumblr.com",
+    "twitter.com",
+    "vk.com",
+    "weibo.com",
+    "x.com",
+    "youtube.com",
+}
+
+
+def extract_explicit_public_urls(value: Any, *, limit: int = 10) -> List[str]:
+    """Extract bounded URLs explicitly supplied in analyst text.
+
+    This validates URL syntax only. It does not fetch or corroborate the URL.
+    """
+    text = str(value or "")[:12_000]
+    urls: List[str] = []
+    seen = set()
+    for match in _EXPLICIT_PUBLIC_URL.finditer(text):
+        candidate = match.group(0).rstrip(".,;!?")
+        for closing, opening in ((")", "("), ("]", "["), ("}", "{")):
+            while (
+                candidate.endswith(closing)
+                and candidate.count(closing) > candidate.count(opening)
+            ):
+                candidate = candidate[:-1]
+        public_url = _public_url(candidate)
+        if not public_url or public_url in seen:
+            continue
+        seen.add(public_url)
+        urls.append(public_url)
+        if len(urls) >= max(0, min(int(limit), 10)):
+            break
+    return urls
+
+
+def build_case_chat_url_claims(
+    urls: Iterable[str],
+    *,
+    target_persona: str,
+    user_message_id: str,
+    assistant_message_id: str,
+    provided_by: str,
+) -> List[Dict[str, Any]]:
+    """Build pending-only claims for exact analyst-supplied public URLs."""
+    candidates: List[Dict[str, Any]] = []
+    seen = set()
+    for raw_url in list(urls)[:10]:
+        public_url = _public_url(raw_url)
+        if not public_url or public_url in seen:
+            continue
+        seen.add(public_url)
+        hostname = (urlparse(public_url).hostname or "").casefold().rstrip(".")
+        normalized_host = hostname.removeprefix("www.")
+        is_social_account = any(
+            normalized_host == known_host
+            or normalized_host.endswith(f".{known_host}")
+            for known_host in _SOCIAL_ACCOUNT_HOSTS
+        )
+        field_name = "social_account" if is_social_account else "website"
+        stored_value: Any = public_url
+        if is_social_account:
+            stored_value = {
+                "platform": normalized_host[:300],
+                "url": public_url,
+                "username": str(target_persona).strip()[:500],
+            }
+        fingerprint = claim_fingerprint(field_name, stored_value)
+        evidence: Dict[str, Any] = {
+            "evidence_type": "analyst_provided_context",
+            "source_name": f"Analyst-supplied public URL · {normalized_host}"[:300],
+            "source_url": public_url,
+            "details": {
+                "target_persona": str(target_persona).strip()[:500],
+                "proposal_reason": (
+                    "The analyst explicitly supplied this public URL for the "
+                    "selected Persona. Its ownership and content are not "
+                    "independently corroborated."
+                ),
+                "provided_by": str(provided_by).strip()[:200],
+                "case_chat_user_message_id": user_message_id,
+                "case_chat_assistant_message_id": assistant_message_id,
+                "human_review_required": True,
+                "analyst_supplied_url": True,
+                "independently_corroborated": False,
+                "unverified_user_statement": True,
+            },
+        }
+        evidence["fingerprint"] = evidence_fingerprint(evidence)
+        candidates.append(
+            {
+                "field_name": field_name,
+                "value": stored_value,
+                "display_value": _display_value(stored_value),
+                "normalized_value": _normalized_value(stored_value),
+                "confidence": 50,
+                "fingerprint": fingerprint,
+                "source_engine": "case_chat_user_supplied_url",
+                "evidence_basis": "user_statement",
+                "provenance_message_id": user_message_id,
+                "latitude": None,
+                "longitude": None,
+                "evidence": [evidence],
+            }
+        )
+    return candidates
+
+
 def _display_value(value: Any) -> str:
     if isinstance(value, dict):
         return str(
@@ -987,10 +1108,16 @@ def extract_case_chat_persona_claims(
                 "username": target_persona[:500],
             }
         fingerprint = claim_fingerprint(field_name, stored_value)
+        is_url_field = field_name in {"social_account", "website", "photograph"}
+        hostname = (urlparse(value).hostname or "").removeprefix("www.")
         evidence: Dict[str, Any] = {
             "evidence_type": "analyst_provided_context",
-            "source_name": f"Case chat · {provided_by}"[:300],
-            "source_url": "",
+            "source_name": (
+                f"Analyst-supplied public URL · {hostname}"
+                if is_url_field
+                else f"Case chat · {provided_by}"
+            )[:300],
+            "source_url": value if is_url_field else "",
             "details": {
                 "target_persona": target_persona[:500],
                 "proposal_reason": reason,
@@ -1002,6 +1129,11 @@ def extract_case_chat_persona_claims(
                 "unverified_user_statement": True,
             },
         }
+        if is_url_field:
+            evidence["details"].update(
+                analyst_supplied_url=True,
+                independently_corroborated=False,
+            )
         evidence["fingerprint"] = evidence_fingerprint(evidence)
         deduplication_key = (fingerprint, evidence["fingerprint"])
         if deduplication_key in seen:
