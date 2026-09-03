@@ -12,6 +12,7 @@ from maigret.ai import (
     get_ai_evidence_proposals,
     get_case_chat_claim_proposals,
     get_case_chat_response,
+    get_combined_investigation_insights,
     get_enriched_ai_analysis,
     get_organization_context_proposals,
     validate_ai_api_base_url,
@@ -115,6 +116,11 @@ def test_responses_analysis_preserves_deduplicated_safe_citations():
                                 "type": "url_citation",
                                 "url": "javascript:alert(1)",
                                 "title": "Unsafe",
+                            },
+                            {
+                                "type": "url_citation",
+                                "url": "https://user:secret@example.com/private",
+                                "title": "Credential-bearing URL",
                             },
                         ],
                     }
@@ -554,3 +560,98 @@ def test_organization_context_proposals_use_citation_bound_strict_schema(monkeyp
     assert structured_input["citation_catalogue"][0]["source_scope"] == (
         "organization"
     )
+
+
+def test_combined_insight_extraction_is_strict_and_cannot_browse(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps(
+                                    {
+                                        "executive_summary": "No link established.",
+                                        "key_findings": [],
+                                        "contradictions": [],
+                                        "information_gaps": ["Need ownership records."],
+                                        "next_steps": ["Check the public registry."],
+                                        "proposals": [],
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def post(self, url, *, json, headers):
+            captured.update(url=url, payload=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai.aiohttp, "ClientSession", FakeSession)
+    output = asyncio.run(
+        get_combined_investigation_insights(
+            api_key="test-key",
+            case_context={
+                "purpose": "Find a publication connection.",
+                "snapshot_sha256": "a" * 64,
+                "source_cases": [],
+                "entities": [],
+                "approved_claims": [],
+                "approved_organizations": [],
+            },
+            research_answer="No cited relationship was established.",
+            sources=[
+                {
+                    "title": "Public registry",
+                    "url": "https://registry.example/entity",
+                }
+            ],
+            model="gpt-5.6-terra",
+        )
+    )
+
+    assert output["executive_summary"] == "No link established."
+    assert captured["url"] == "https://api.openai.com/v1/responses"
+    assert "tools" not in captured["payload"]
+    response_format = captured["payload"]["text"]["format"]
+    assert response_format["strict"] is True
+    assert response_format["name"] == "openledger_combined_investigation_insights"
+    structured_input = json.loads(captured["payload"]["input"])
+    assert structured_input["web_citation_catalogue"] == [
+        {
+            "reference_id": "web:1",
+            "title": "Public registry",
+            "url": "https://registry.example/entity",
+        }
+    ]
+    normalized_instructions = " ".join(
+        captured["payload"]["instructions"].split()
+    )
+    assert "two different source cases" in normalized_instructions
+    assert "pending analyst hypotheses" in normalized_instructions
+    assert "never transform them into organization facts" in normalized_instructions

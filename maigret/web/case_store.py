@@ -253,6 +253,112 @@ Index(
 )
 Index("ix_investigation_jobs_case_id", investigation_jobs.c.case_id)
 
+combined_analysis_runs = Table(
+    "combined_analysis_runs",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "combined_case_id",
+        String(36),
+        ForeignKey("cases.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "job_id",
+        String(36),
+        ForeignKey("investigation_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    ),
+    Column("snapshot_sha256", String(64), nullable=False),
+    Column("status", String(16), nullable=False),
+    Column("model", String(100), nullable=True),
+    Column("web_search_enabled", Boolean, nullable=False, server_default="false"),
+    Column("executive_summary", Text, nullable=True),
+    Column("key_findings", json_document, nullable=False),
+    Column("contradictions", json_document, nullable=False),
+    Column("information_gaps", json_document, nullable=False),
+    Column("next_steps", json_document, nullable=False),
+    Column("sources", json_document, nullable=False),
+    Column("error", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("completed_at", DateTime(timezone=True), nullable=True),
+    CheckConstraint(
+        "status IN ('processing', 'completed', 'unavailable', 'failed', 'cancelled')",
+        name="ck_combined_analysis_runs_status",
+    ),
+)
+Index(
+    "ix_combined_analysis_runs_case_created",
+    combined_analysis_runs.c.combined_case_id,
+    combined_analysis_runs.c.created_at,
+)
+
+combined_relationship_proposals = Table(
+    "combined_relationship_proposals",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "analysis_run_id",
+        String(36),
+        ForeignKey("combined_analysis_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("title", String(500), nullable=False),
+    Column("relationship_type", String(64), nullable=False),
+    Column("subject_ref", String(100), nullable=False),
+    Column("subject_entity", json_document, nullable=False),
+    Column("object_ref", String(100), nullable=False),
+    Column("object_entity", json_document, nullable=False),
+    Column("explanation", Text, nullable=False),
+    Column("confidence", Integer, nullable=False),
+    Column("evidence", json_document, nullable=False),
+    Column("contradictory_evidence", json_document, nullable=False),
+    Column("limitations", json_document, nullable=False),
+    Column("review_status", String(16), nullable=False, server_default="pending"),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    Column("reviewed_at", DateTime(timezone=True), nullable=True),
+    Column("reviewed_by", String(200), nullable=True),
+    CheckConstraint(
+        "confidence >= 0 AND confidence <= 85",
+        name="ck_combined_relationship_proposals_confidence",
+    ),
+    CheckConstraint(
+        "review_status IN ('pending', 'approved', 'rejected', 'uncertain')",
+        name="ck_combined_relationship_proposals_review_status",
+    ),
+)
+Index(
+    "ix_combined_relationship_proposals_run_status",
+    combined_relationship_proposals.c.analysis_run_id,
+    combined_relationship_proposals.c.review_status,
+)
+
+combined_relationship_reviews = Table(
+    "combined_relationship_reviews",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "proposal_id",
+        String(36),
+        ForeignKey("combined_relationship_proposals.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("decision", String(16), nullable=False),
+    Column("reviewer", String(200), nullable=False),
+    Column("note", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "decision IN ('approved', 'rejected', 'uncertain')",
+        name="ck_combined_relationship_reviews_decision",
+    ),
+)
+Index(
+    "ix_combined_relationship_reviews_proposal",
+    combined_relationship_reviews.c.proposal_id,
+    combined_relationship_reviews.c.created_at,
+)
+
 investigation_events = Table(
     "investigation_events",
     metadata,
@@ -503,6 +609,8 @@ MAX_COMBINED_SOURCE_CASES = 10
 MAX_COMBINED_APPROVED_CLAIMS = 10_000
 MAX_COMBINED_EVIDENCE_REFERENCES = 50_000
 MAX_COMBINED_RELATIONSHIP_EDGES = 20_000
+MAX_COMBINED_AI_CLAIMS = 500
+MAX_COMBINED_AI_PROPOSALS = 100
 RELATIONSHIP_FIELDS = {
     "email",
     "phone",
@@ -515,6 +623,35 @@ RELATIONSHIP_FIELDS = {
     "company_ownership",
     "vehicle_ownership",
 }
+
+
+def _bounded_round_robin_case_records(
+    records: Iterable[Dict[str, Any]], case_ids: Iterable[str], limit: int
+) -> list[Dict[str, Any]]:
+    """Select a deterministic, balanced record projection across source cases."""
+    ordered_case_ids = [str(case_id) for case_id in case_ids]
+    buckets = {case_id: [] for case_id in ordered_case_ids}
+    for record in records:
+        case_id = str(record.get("case_id") or "")
+        if case_id in buckets:
+            buckets[case_id].append(record)
+    selected = []
+    position = 0
+    bounded_limit = max(0, int(limit))
+    while len(selected) < bounded_limit:
+        appended = False
+        for case_id in ordered_case_ids:
+            bucket = buckets[case_id]
+            if position >= len(bucket):
+                continue
+            selected.append(bucket[position])
+            appended = True
+            if len(selected) >= bounded_limit:
+                break
+        if not appended:
+            break
+        position += 1
+    return selected
 
 
 class ActiveInvestigationError(ValueError):
@@ -2117,6 +2254,13 @@ class CaseStore:
                 if case_row["case_type"] == "combined"
                 else []
             )
+            analysis_runs = (
+                self._combined_analysis_runs_with_connection(
+                    connection, str(case_row["id"])
+                )
+                if case_row["case_type"] == "combined"
+                else []
+            )
         return {
             "id": case_row["id"],
             "title": case_row["title"],
@@ -2135,6 +2279,7 @@ class CaseStore:
             ],
             "jobs": [self._serialize_job(row) for row in job_rows],
             "source_cases": members,
+            "analysis_runs": analysis_runs,
             "source_changed_count": sum(
                 bool(item["changed_since_snapshot"]) for item in members
             ),
@@ -4226,6 +4371,7 @@ class CaseStore:
                     investigation_jobs.c.case_id,
                     investigation_jobs.c.kind,
                     cases.c.case_type,
+                    cases.c.purpose,
                 )
                 .join(cases, cases.c.id == investigation_jobs.c.case_id)
                 .where(investigation_jobs.c.id == job_id)
@@ -4387,6 +4533,7 @@ class CaseStore:
 
         graph_rows = []
         manifest_claims = []
+        analysis_claims = []
         for claim in claim_rows:
             claim_id = str(claim["id"])
             persona = persona_by_id[str(claim["persona_id"])]
@@ -4402,6 +4549,22 @@ class CaseStore:
                     "fingerprint": str(claim["fingerprint"]),
                     "review_id": int(review["id"]) if review else None,
                     "evidence_ids": [str(item["id"]) for item in evidence_rows],
+                }
+            )
+            analysis_claims.append(
+                {
+                    "reference_id": f"claim:{claim_id}",
+                    "claim_id": claim_id,
+                    "case_id": case_id,
+                    "case_title": source_titles[case_id],
+                    "entity_ref": f"persona:{persona['id']}",
+                    "persona_id": str(persona["id"]),
+                    "persona_name": str(persona["display_name"]),
+                    "field_name": str(claim["field_name"]),
+                    "display_value": str(claim["display_value"])[:4000],
+                    "confidence": int(claim["confidence"]),
+                    "last_seen_at": _as_iso(claim["last_seen_at"]),
+                    "sources": self._relationship_sources(evidence_rows)[:10],
                 }
             )
             if claim["field_name"] in RELATIONSHIP_FIELDS:
@@ -4595,6 +4758,50 @@ class CaseStore:
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        analysis_claims.sort(
+            key=lambda item: (
+                item["field_name"] not in RELATIONSHIP_FIELDS,
+                item["persona_id"],
+                item["field_name"],
+                item["claim_id"],
+            )
+        )
+        bounded_analysis_claims = _bounded_round_robin_case_records(
+            analysis_claims, source_case_ids, MAX_COMBINED_AI_CLAIMS
+        )
+        entities = [
+            {
+                "reference_id": f"case:{item['id']}",
+                "entity_type": "case",
+                "entity_id": item["id"],
+                "label": item["title"],
+                "case_id": item["id"],
+                "case_title": item["title"],
+            }
+            for item in source_cases
+        ]
+        entities.extend(
+            {
+                "reference_id": f"persona:{row['id']}",
+                "entity_type": "persona",
+                "entity_id": str(row["id"]),
+                "label": str(row["display_name"]),
+                "case_id": str(row["case_id"]),
+                "case_title": source_titles[str(row["case_id"])],
+            }
+            for row in persona_rows
+        )
+        entities.extend(
+            {
+                "reference_id": f"organization:{item['case_id']}",
+                "entity_type": "organization",
+                "entity_id": f"organization:{item['case_id']}",
+                "label": item["label"],
+                "case_id": item["case_id"],
+                "case_title": item["case_title"],
+            }
+            for item in organizations
+        )
         return {
             "snapshot": {
                 **manifest,
@@ -4602,6 +4809,32 @@ class CaseStore:
                 "sha256": snapshot_sha256,
             },
             "relationship_graph": graph,
+            "analysis_context": {
+                "purpose": str(job_row["purpose"] or "")[:4000],
+                "snapshot_sha256": snapshot_sha256,
+                "source_cases": source_cases,
+                "entities": entities,
+                "approved_claims": bounded_analysis_claims,
+                "approved_organizations": [
+                    {
+                        "reference_id": (
+                            f"organization-evidence:{item['case_id']}"
+                        ),
+                        "case_id": item["case_id"],
+                        "case_title": item["case_title"],
+                        "entity_ref": f"organization:{item['case_id']}",
+                        "label": item["label"],
+                        "source_name": item["source_name"],
+                        "source_url": item["source_url"],
+                        "reviewed_by": item["reviewed_by"],
+                        "reviewed_at": item["reviewed_at"],
+                    }
+                    for item in organizations
+                ],
+                "truncated_claim_count": max(
+                    0, len(analysis_claims) - len(bounded_analysis_claims)
+                ),
+            },
             "source_case_count": len(source_cases),
             "approved_claim_count": len(manifest_claims),
             "approved_organization_count": len(organizations),
@@ -4645,6 +4878,308 @@ class CaseStore:
                 connection.rollback()
                 raise
         return snapshot
+
+    @staticmethod
+    def _serialize_combined_proposal(row, reviews=()) -> Dict[str, Any]:
+        return {
+            "id": str(row["id"]),
+            "analysis_run_id": str(row["analysis_run_id"]),
+            "title": str(row["title"]),
+            "relationship_type": str(row["relationship_type"]),
+            "subject_ref": str(row["subject_ref"]),
+            "subject_entity": dict(row["subject_entity"] or {}),
+            "object_ref": str(row["object_ref"]),
+            "object_entity": dict(row["object_entity"] or {}),
+            "explanation": str(row["explanation"]),
+            "confidence": int(row["confidence"]),
+            "evidence": list(row["evidence"] or []),
+            "contradictory_evidence": list(row["contradictory_evidence"] or []),
+            "limitations": list(row["limitations"] or []),
+            "review_status": str(row["review_status"]),
+            "created_at": _as_iso(row["created_at"]),
+            "reviewed_at": _as_iso(row["reviewed_at"]),
+            "reviewed_by": str(row["reviewed_by"]) if row["reviewed_by"] else None,
+            "reviews": [
+                {
+                    "decision": str(review["decision"]),
+                    "reviewer": str(review["reviewer"]),
+                    "note": str(review["note"]) if review["note"] else None,
+                    "created_at": _as_iso(review["created_at"]),
+                }
+                for review in reviews
+            ],
+        }
+
+    def _combined_analysis_runs_with_connection(
+        self, connection: Connection, combined_case_id: str
+    ) -> list[Dict[str, Any]]:
+        run_rows = list(
+            connection.execute(
+                select(combined_analysis_runs)
+                .where(combined_analysis_runs.c.combined_case_id == combined_case_id)
+                .order_by(
+                    combined_analysis_runs.c.created_at.desc(),
+                    combined_analysis_runs.c.id.desc(),
+                )
+            ).mappings()
+        )
+        if not run_rows:
+            return []
+        run_ids = [str(row["id"]) for row in run_rows]
+        proposal_rows = list(
+            connection.execute(
+                select(combined_relationship_proposals)
+                .where(combined_relationship_proposals.c.analysis_run_id.in_(run_ids))
+                .order_by(
+                    combined_relationship_proposals.c.created_at,
+                    combined_relationship_proposals.c.id,
+                )
+            ).mappings()
+        )
+        proposal_ids = [str(row["id"]) for row in proposal_rows]
+        reviews_by_proposal: Dict[str, list] = {}
+        if proposal_ids:
+            for review in connection.execute(
+                select(combined_relationship_reviews)
+                .where(
+                    combined_relationship_reviews.c.proposal_id.in_(proposal_ids)
+                )
+                .order_by(
+                    combined_relationship_reviews.c.created_at,
+                    combined_relationship_reviews.c.id,
+                )
+            ).mappings():
+                reviews_by_proposal.setdefault(str(review["proposal_id"]), []).append(
+                    review
+                )
+        proposals_by_run: Dict[str, list] = {}
+        for proposal in proposal_rows:
+            proposal_id = str(proposal["id"])
+            proposals_by_run.setdefault(str(proposal["analysis_run_id"]), []).append(
+                self._serialize_combined_proposal(
+                    proposal, reviews_by_proposal.get(proposal_id, [])
+                )
+            )
+        return [
+            {
+                "id": str(row["id"]),
+                "combined_case_id": str(row["combined_case_id"]),
+                "job_id": str(row["job_id"]),
+                "snapshot_sha256": str(row["snapshot_sha256"]),
+                "status": str(row["status"]),
+                "model": str(row["model"]) if row["model"] else None,
+                "web_search_enabled": bool(row["web_search_enabled"]),
+                "executive_summary": str(row["executive_summary"] or ""),
+                "key_findings": list(row["key_findings"] or []),
+                "contradictions": list(row["contradictions"] or []),
+                "information_gaps": list(row["information_gaps"] or []),
+                "next_steps": list(row["next_steps"] or []),
+                "sources": list(row["sources"] or []),
+                "error": str(row["error"]) if row["error"] else None,
+                "created_at": _as_iso(row["created_at"]),
+                "completed_at": _as_iso(row["completed_at"]),
+                "proposals": proposals_by_run.get(str(row["id"]), []),
+            }
+            for row in run_rows
+        ]
+
+    def start_combined_analysis_run(
+        self,
+        job_id: str,
+        snapshot_sha256: str,
+        *,
+        model: Optional[str],
+        web_search_enabled: bool,
+    ) -> str:
+        """Create the durable AI run bound to one immutable fusion snapshot."""
+        snapshot_sha = str(snapshot_sha256 or "").strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha):
+            raise ValueError("A valid combined snapshot SHA-256 is required")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            existing = connection.scalar(
+                select(combined_analysis_runs.c.id).where(
+                    combined_analysis_runs.c.job_id == job_id
+                )
+            )
+            if existing:
+                return str(existing)
+            job_row = (
+                connection.execute(
+                    select(
+                        investigation_jobs.c.case_id,
+                        investigation_jobs.c.kind,
+                        cases.c.case_type,
+                    )
+                    .join(cases, cases.c.id == investigation_jobs.c.case_id)
+                    .where(investigation_jobs.c.id == job_id)
+                )
+                .mappings()
+                .first()
+            )
+            if not job_row:
+                raise KeyError(job_id)
+            if job_row["kind"] != "case_fusion" or job_row["case_type"] != "combined":
+                raise ValueError("This job is not a combined-case investigation")
+            run_id = str(uuid.uuid4())
+            connection.execute(
+                insert(combined_analysis_runs).values(
+                    id=run_id,
+                    combined_case_id=str(job_row["case_id"]),
+                    job_id=job_id,
+                    snapshot_sha256=snapshot_sha,
+                    status="processing",
+                    model=str(model)[:100] if model else None,
+                    web_search_enabled=bool(web_search_enabled),
+                    executive_summary=None,
+                    key_findings=[],
+                    contradictions=[],
+                    information_gaps=[],
+                    next_steps=[],
+                    sources=[],
+                    error=None,
+                    created_at=now,
+                    completed_at=None,
+                )
+            )
+        return run_id
+
+    def complete_combined_analysis_run(
+        self, run_id: str, insights: Dict[str, Any]
+    ) -> int:
+        """Persist validated insight output and pending relationship proposals."""
+        now = utcnow()
+        proposals = list(insights.get("proposals") or [])[:MAX_COMBINED_AI_PROPOSALS]
+        with self.engine.begin() as connection:
+            run_row = (
+                connection.execute(
+                    select(combined_analysis_runs.c.status).where(
+                        combined_analysis_runs.c.id == run_id
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if not run_row:
+                raise KeyError(run_id)
+            if run_row["status"] != "processing":
+                raise ValueError("This combined analysis run is already complete")
+            for proposal in proposals:
+                connection.execute(
+                    insert(combined_relationship_proposals).values(
+                        id=str(uuid.uuid4()),
+                        analysis_run_id=run_id,
+                        title=str(proposal["title"]),
+                        relationship_type=str(proposal["relationship_type"]),
+                        subject_ref=str(proposal["subject_ref"]),
+                        subject_entity=dict(proposal["subject_entity"]),
+                        object_ref=str(proposal["object_ref"]),
+                        object_entity=dict(proposal["object_entity"]),
+                        explanation=str(proposal["explanation"]),
+                        confidence=int(proposal["confidence"]),
+                        evidence=list(proposal.get("evidence") or []),
+                        contradictory_evidence=list(
+                            proposal.get("contradictory_evidence") or []
+                        ),
+                        limitations=list(proposal.get("limitations") or []),
+                        review_status="pending",
+                        created_at=now,
+                        reviewed_at=None,
+                        reviewed_by=None,
+                    )
+                )
+            connection.execute(
+                update(combined_analysis_runs)
+                .where(combined_analysis_runs.c.id == run_id)
+                .values(
+                    status="completed",
+                    executive_summary=str(insights.get("executive_summary") or ""),
+                    key_findings=list(insights.get("key_findings") or []),
+                    contradictions=list(insights.get("contradictions") or []),
+                    information_gaps=list(insights.get("information_gaps") or []),
+                    next_steps=list(insights.get("next_steps") or []),
+                    sources=list(insights.get("sources") or []),
+                    error=None,
+                    completed_at=now,
+                )
+            )
+        return len(proposals)
+
+    def stop_combined_analysis_run(
+        self, run_id: str, *, status: str, error: str
+    ) -> None:
+        """Finish an unavailable or failed AI run without failing its snapshot."""
+        if status not in {"unavailable", "failed", "cancelled"}:
+            raise ValueError("Invalid combined analysis terminal status")
+        now = utcnow()
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(combined_analysis_runs)
+                .where(
+                    combined_analysis_runs.c.id == run_id,
+                    combined_analysis_runs.c.status == "processing",
+                )
+                .values(status=status, error=str(error)[:2000], completed_at=now)
+            )
+            if result.rowcount != 1:
+                raise KeyError(run_id)
+
+    def review_combined_relationship_proposal(
+        self,
+        combined_case_id: str,
+        proposal_id: str,
+        decision: str,
+        reviewer: str,
+        note: str = "",
+    ) -> None:
+        """Record an analyst decision without changing any source-case evidence."""
+        if decision not in {"approved", "rejected", "uncertain"}:
+            raise ValueError("Choose approved, rejected, or uncertain")
+        normalized_reviewer = " ".join(str(reviewer or "").split())[:200]
+        if not normalized_reviewer:
+            raise ValueError("A reviewer is required")
+        normalized_note = str(note or "").strip()[:2000] or None
+        now = utcnow()
+        with self.engine.begin() as connection:
+            statement = (
+                select(combined_relationship_proposals.c.id)
+                .join(
+                    combined_analysis_runs,
+                    combined_analysis_runs.c.id
+                    == combined_relationship_proposals.c.analysis_run_id,
+                )
+                .where(
+                    combined_relationship_proposals.c.id == proposal_id,
+                    combined_analysis_runs.c.combined_case_id == combined_case_id,
+                )
+            )
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            if connection.scalar(statement) is None:
+                raise KeyError(proposal_id)
+            connection.execute(
+                update(combined_relationship_proposals)
+                .where(combined_relationship_proposals.c.id == proposal_id)
+                .values(
+                    review_status=decision,
+                    reviewed_at=now,
+                    reviewed_by=normalized_reviewer,
+                )
+            )
+            connection.execute(
+                insert(combined_relationship_reviews).values(
+                    proposal_id=proposal_id,
+                    decision=decision,
+                    reviewer=normalized_reviewer,
+                    note=normalized_note,
+                    created_at=now,
+                )
+            )
+            connection.execute(
+                update(cases)
+                .where(cases.c.id == combined_case_id)
+                .values(updated_at=now)
+            )
 
     def build_relationship_graph(self, case_id: Optional[str] = None) -> Dict[str, Any]:
         """Project approved, exact shared attributes across two or more personas."""

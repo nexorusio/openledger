@@ -33,6 +33,9 @@
     };
     const readable = (value) => fieldLabels[value] || String(value || '').replaceAll('_', ' ');
     const baseEdgeColor = (opacity = 0.78) => ({color: '#536b83', highlight: '#30c7ca', hover: '#73a5d1', opacity});
+    const proposalEdgeColor = (status) => status === 'approved'
+        ? {color: '#20bd83', highlight: '#b8ffe2', hover: '#57d9aa', opacity: 1}
+        : {color: '#d5a846', highlight: '#ffe6aa', hover: '#edc76c', opacity: 0.82};
 
     const originalNodes = graph.nodes.map((node) => ({
         ...node,
@@ -47,7 +50,10 @@
     }));
     const originalEdges = graph.edges.map((edge) => ({
         ...edge,
-        color: baseEdgeColor(), width: 1.35, selectionWidth: 2.5, hoverWidth: 1.5,
+        color: edge.proposal_id ? proposalEdgeColor(edge.review_status) : baseEdgeColor(),
+        width: edge.proposal_id ? 2 : 1.35,
+        dashes: Boolean(edge.proposal_id && edge.review_status !== 'approved'),
+        selectionWidth: 2.5, hoverWidth: 1.5,
         smooth: {type: 'dynamic'},
         arrows: {to: {enabled: graph.mode === 'persona', scaleFactor: 0.45}},
         font: {color: '#8191a6', face: 'Alliance No. 2, Arial', size: 9, strokeWidth: 0},
@@ -88,7 +94,7 @@
     let visibleEdgeIds = new Set(originalEdges.map((edge) => edge.id));
     let focusedNodeIds = null;
 
-    const candidateEdges = () => originalEdges.filter((edge) => activeFields.has(edge.field_name) && !manuallyHiddenNodes.has(edge.from) && !manuallyHiddenNodes.has(edge.to));
+    const candidateEdges = () => originalEdges.filter((edge) => (edge.proposal_id || activeFields.has(edge.field_name)) && !manuallyHiddenNodes.has(edge.from) && !manuallyHiddenNodes.has(edge.to));
     const neighborhood = (rootId, depth, candidates) => {
         const adjacency = new Map();
         candidates.forEach((edge) => {
@@ -215,6 +221,11 @@
             addLine('Relationship rule', 'Exact approved affiliation and analyst-confirmed organization name');
             const list = addList('Confirmation source');
             appendSource(list, {name: node.source_name || 'Confirmed organization record', url: node.source_url, type: 'analyst confirmed organization'});
+        } else if (node.kind === 'ai_entity') {
+            addLine('Source case', node.case_title);
+            addLine('Entity type', readable(node.entity_type));
+            addLine('Hypothesis review', readable(node.review_status));
+            addLine('Relationship rule', 'AI-proposed cross-case relationship; analyst review controls graph status');
         } else {
             addLine('Shared field', readable(node.field_name));
             addLine('Connected Personas', node.persona_count);
@@ -237,6 +248,14 @@
         addHeading(`${from?.label || 'Record'} → ${to?.label || 'Record'}`, 'evidence path');
         addLine('Relationship', readable(edge.label));
         addLine('Field', readable(edge.field_name));
+        if (edge.proposal_id) {
+            addLine('Review status', readable(edge.review_status));
+            addLine('AI confidence', `${edge.confidence}%`);
+            addLine('Evidence rule', edge.relationship_rule);
+            const list = addList(`Evidence anchors (${(edge.sources || []).length})`);
+            ((edge.sources || []).length ? edge.sources : [{name: 'No public URL attached'}]).forEach((source) => appendSource(list, source));
+            return;
+        }
         if (graph.mode === 'shared') {
             addLine('Evidence rule', edge.relationship_rule || 'Exact normalized value · approved claim');
             addLine('Evidence confidence', `${edge.confidence}%`);

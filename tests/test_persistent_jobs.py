@@ -1184,11 +1184,157 @@ def test_case_fusion_worker_publishes_versioned_snapshot(web_app, persistent_sto
     assert completed["source_case_count"] == 2
     assert len(completed["snapshot"]["sha256"]) == 64
     assert completed["relationship_graph"]["scope"] == ("combined_case_snapshot")
+    assert "analysis_context" not in completed
     assert persistent_store.get_events(fusion_job_id)[-1]["event"] == {
         "type": "done",
         "status": "completed",
         "redirect": f"/cases/{fusion_job['case_id']}",
     }
+    combined = persistent_store.get_case(fusion_job["case_id"])
+    assert combined["analysis_runs"][0]["status"] == "unavailable"
+
+
+def test_case_fusion_worker_runs_cited_ai_analysis_with_existing_connection(
+    client, web_app, persistent_store, monkeypatch
+):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        persistent_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = persistent_store.create_combined_investigation(
+        source_case_ids,
+        title="Cited AI worker test",
+        purpose="Find a public relationship if the evidence supports one.",
+        created_by="analyst",
+    )
+    fusion_job = persistent_store.claim_next("worker:fusion-ai")
+    captured = {}
+
+    async def fake_research(**kwargs):
+        captured["research"] = kwargs
+        return {
+            "analysis": "No defensible connection is established.",
+            "sources": [
+                {
+                    "title": "Public source",
+                    "url": "https://example.test/public",
+                }
+            ],
+            "web_search_completed": True,
+        }
+
+    async def fake_insights(**kwargs):
+        captured["insights"] = kwargs
+        return {
+            "executive_summary": "No defensible connection is established.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": ["The source cases have no approved claims."],
+            "next_steps": ["Approve relevant evidence before retrying."],
+            "proposals": [],
+        }
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(
+        web_app,
+        "load_settings",
+        lambda: {"openai_model": "gpt-5.6-terra", "ai_web_enrichment": True},
+    )
+    monkeypatch.setattr(web_app, "get_case_chat_response", fake_research)
+    monkeypatch.setattr(
+        web_app, "get_combined_investigation_insights", fake_insights
+    )
+
+    web_app.run_persistent_job(persistent_store, fusion_job)
+
+    completed = persistent_store.get_job(fusion_job_id)
+    assert completed["status"] == "completed"
+    assert completed["ai_analysis"]["status"] == "completed"
+    assert completed["ai_analysis"]["web_search_completed"] is True
+    assert captured["research"]["web_search_enabled"] is True
+    assert captured["insights"]["model"] == "gpt-5.6-terra"
+    combined = persistent_store.get_case(fusion_job["case_id"])
+    analysis = combined["analysis_runs"][0]
+    assert analysis["status"] == "completed"
+    assert analysis["sources"][0]["url"] == "https://example.test/public"
+    assert analysis["information_gaps"] == [
+        "The source cases have no approved claims."
+    ]
+    workspace = client.get(f"/cases/{fusion_job['case_id']}").get_data(as_text=True)
+    assert "Why these cases may be connected" in workspace
+    assert "No defensible connection is established." in workspace
+    assert "Cited public-web research" in workspace
+    assert "https://example.test/public" in workspace
+
+
+def test_case_fusion_worker_honors_cancellation_during_ai_analysis(
+    web_app, persistent_store, monkeypatch
+):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        persistent_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = persistent_store.create_combined_investigation(
+        source_case_ids,
+        title="Cancelled AI worker test",
+        purpose="Do not publish output after cancellation.",
+        created_by="analyst",
+    )
+    fusion_job = persistent_store.claim_next("worker:fusion-cancel")
+
+    async def fake_research(**_kwargs):
+        assert persistent_store.request_cancel(fusion_job_id) is True
+        return {
+            "analysis": "This output must be discarded.",
+            "sources": [
+                {
+                    "title": "Public source",
+                    "url": "https://example.test/public",
+                }
+            ],
+            "web_search_completed": True,
+        }
+
+    async def forbidden_insights(**_kwargs):
+        raise AssertionError("the structured stage must not start after cancellation")
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(
+        web_app,
+        "load_settings",
+        lambda: {"openai_model": "gpt-5.6-terra", "ai_web_enrichment": True},
+    )
+    monkeypatch.setattr(web_app, "get_case_chat_response", fake_research)
+    monkeypatch.setattr(
+        web_app, "get_combined_investigation_insights", forbidden_insights
+    )
+
+    web_app.run_persistent_job(persistent_store, fusion_job)
+
+    completed = persistent_store.get_job(fusion_job_id)
+    assert completed["status"] == "cancelled"
+    assert "snapshot" not in completed
+    analysis = persistent_store.get_case(fusion_job["case_id"])["analysis_runs"][0]
+    assert analysis["status"] == "cancelled"
+    assert analysis["proposals"] == []
 
 
 def test_combined_case_selection_and_workspace_flow(client, web_app, persistent_store):
@@ -1260,6 +1406,172 @@ def test_combined_case_selection_and_workspace_flow(client, web_app, persistent_
         as_text=True
     )
     assert persistent_store.get_case(source_case_ids[0]) is not None
+
+
+def test_combined_relationship_review_controls_workspace_and_graph(
+    client, persistent_store
+):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        result = {
+            "status": "completed",
+            "usernames": [username],
+            "individual_reports": [
+                {
+                    "username": username,
+                    "claimed_profiles": [
+                        {
+                            "site_name": "Example",
+                            "url": f"https://example.test/{username}",
+                            "confidence": "strong",
+                            "evidence": {"company": "Nexorus"},
+                        }
+                    ],
+                }
+            ],
+        }
+        persistent_store.finish(source_job_id, result)
+        persistent_store.sync_persona_claims(source_job_id, result)
+        source_case = persistent_store.get_case(source_job["case_id"])
+        persona = persistent_store.get_persona(source_case["personas"][0]["id"])
+        company_claim = next(
+            claim for claim in persona["claims"] if claim["field_name"] == "company"
+        )
+        persistent_store.review_claim(company_claim["id"], "approved", "analyst")
+        source_case_ids.append(source_job["case_id"])
+
+    fusion_job_id = persistent_store.create_combined_investigation(
+        source_case_ids,
+        title="Governed AI graph",
+        purpose="Review an AI-proposed shared affiliation.",
+        created_by="analyst",
+    )
+    fusion_job = persistent_store.claim_next("worker:fusion-review")
+    snapshot = persistent_store.build_case_fusion_snapshot(fusion_job_id)
+    context = snapshot.pop("analysis_context")
+    persona_entities = {
+        entity["case_id"]: entity
+        for entity in context["entities"]
+        if entity["entity_type"] == "persona"
+    }
+    proposal_evidence = [
+        {
+            "reference_id": claim["reference_id"],
+            "reference_type": "approved_claim",
+            "claim_id": claim["claim_id"],
+            "case_id": claim["case_id"],
+            "case_title": claim["case_title"],
+            "persona_id": claim["persona_id"],
+            "persona_name": claim["persona_name"],
+            "field_name": claim["field_name"],
+            "display_value": claim["display_value"],
+            "confidence": claim["confidence"],
+            "sources": claim["sources"],
+        }
+        for claim in context["approved_claims"]
+    ]
+    run_id = persistent_store.start_combined_analysis_run(
+        fusion_job_id,
+        snapshot["snapshot"]["sha256"],
+        model="gpt-5.6-terra",
+        web_search_enabled=True,
+    )
+    persistent_store.complete_combined_analysis_run(
+        run_id,
+        {
+            "executive_summary": "The two approved affiliations may be connected.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": ["Coordination is not established."],
+            "next_steps": ["Review the official staff directory."],
+            "sources": [
+                {
+                    "reference_id": "web:1",
+                    "reference_type": "public_web",
+                    "title": "Nexorus staff",
+                    "url": "https://example.test/staff",
+                }
+            ],
+            "proposals": [
+                {
+                    "title": "Shared affiliation",
+                    "relationship_type": "affiliation",
+                    "subject_ref": persona_entities[source_case_ids[0]][
+                        "reference_id"
+                    ],
+                    "subject_entity": persona_entities[source_case_ids[0]],
+                    "object_ref": persona_entities[source_case_ids[1]][
+                        "reference_id"
+                    ],
+                    "object_entity": persona_entities[source_case_ids[1]],
+                    "explanation": "Both reviewed claims name Nexorus.",
+                    "confidence": 70,
+                    "evidence": proposal_evidence,
+                    "contradictory_evidence": [],
+                    "limitations": ["Shared affiliation is not proof of contact."],
+                }
+            ],
+        },
+    )
+    persistent_store.finish(
+        fusion_job_id,
+        {"status": "completed", "kind": "case_fusion", **snapshot},
+    )
+    combined_case_id = fusion_job["case_id"]
+    proposal_id = persistent_store.get_case(combined_case_id)["analysis_runs"][0][
+        "proposals"
+    ][0]["id"]
+
+    workspace = client.get(f"/cases/{combined_case_id}").get_data(as_text=True)
+    assert "Shared affiliation" in workspace
+    assert "Both reviewed claims name Nexorus." in workspace
+    assert "Approve link" in workspace
+    assert "https://example.test/alice" in workspace
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "relationship-review-csrf"
+        browser_session["username"] = "relationship.reviewer"
+    response = client.post(
+        f"/cases/{combined_case_id}/relationships/{proposal_id}/review",
+        data={
+            "csrf_token": "relationship-review-csrf",
+            "decision": "approved",
+            "note": "The approved evidence anchors both source cases.",
+        },
+        follow_redirects=True,
+    )
+    body = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Relationship hypothesis review recorded" in body
+    assert "relationship.reviewer" in body
+    assert "Approved" in body
+
+    graph = client.get(
+        f"/relationships?mode=shared&case_id={combined_case_id}"
+    ).get_data(as_text=True)
+    assert "Analyst-approved AI link" in graph
+    assert f"ai-proposal:{proposal_id}" in graph
+    assert '"review_status": "approved"' in graph
+
+    client.post(
+        f"/cases/{combined_case_id}/relationships/{proposal_id}/review",
+        data={
+            "csrf_token": "relationship-review-csrf",
+            "decision": "rejected",
+            "note": "Alternative explanation is more likely.",
+        },
+    )
+    rejected_graph = client.get(
+        f"/relationships?mode=shared&case_id={combined_case_id}"
+    ).get_data(as_text=True)
+    assert f"ai-proposal:{proposal_id}" not in rejected_graph
+    retained = persistent_store.get_case(combined_case_id)["analysis_runs"][0][
+        "proposals"
+    ][0]
+    assert retained["review_status"] == "rejected"
+    assert len(retained["reviews"]) == 2
 
 
 def _affiliation_worker_observation():

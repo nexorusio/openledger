@@ -428,12 +428,31 @@ organization selection. Pending, uncertain, rejected, fuzzy, and name-only
 records are excluded. Organization cases without a confirmed selection remain
 visible in the combined scope but do not create graph edges.
 
+After the local snapshot, OpenLedger can run a separate two-stage AI relationship
+assessment with the existing server-side OpenAI connection. The first stage sees
+a deterministic, size-bounded, round-robin projection of approved snapshot
+evidence and may require cited public-web search. The second stage cannot browse;
+it structures the assessment into an executive summary, observations,
+contradictions, information gaps, next actions, and relationship hypotheses.
+The server rejects a hypothesis unless its two entities belong to different
+source cases and approved evidence from both cases anchors it. Exact web URLs are
+accepted only from the first stage's citation catalogue. Organization hypotheses
+also require an approved affiliation/ownership claim and a separately approved
+organization record, so a personal or contact URL cannot silently become an
+organization fact.
+
+AI hypotheses have their own durable analysis, proposal, and append-only review
+records bound to the snapshot SHA-256. They begin pending. Pending and uncertain
+hypotheses appear as dashed graph paths, approved hypotheses as solid paths, and
+rejected hypotheses remain in review history but leave the graph. This layer does
+not modify source Personas, claims, evidence, or their review decisions. If the
+OpenAI connection is unavailable or analysis fails, the approved-evidence
+snapshot still completes and reports that insight status separately.
+
 Deleting a combined investigation deletes only its membership rows, snapshot
-jobs, and presentation record. Deleting a referenced source case is refused
-until the retaining combined investigation is deleted, preventing provenance
-from becoming dangling or silently disappearing. A future AI relationship
-stage must create separate pending, cited, reviewable relationship proposals;
-it must not write model prose into this approved-only graph projection.
+jobs, AI analysis/proposal records, and presentation record. Deleting a
+referenced source case is refused until the retaining combined investigation is
+deleted, preventing provenance from becoming dangling or silently disappearing.
 
 ## Case timeline projection
 

@@ -99,6 +99,54 @@ def test_postgres_combined_case_uses_repeatable_read_snapshot(postgres_store):
     assert snapshot["snapshot"]["generated_at"].endswith("+00:00")
 
 
+def test_postgres_persists_snapshot_bound_combined_ai_run(postgres_store):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = postgres_store.create_investigation([username], {})
+        source_job = postgres_store.claim_next(f"worker:{username}")
+        postgres_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = postgres_store.create_combined_investigation(
+        source_case_ids,
+        title="PostgreSQL combined AI run",
+        purpose="Exercise durable AI analysis storage.",
+        created_by="analyst",
+    )
+    fusion_job = postgres_store.claim_next("worker:fusion-ai")
+    snapshot = postgres_store.build_case_fusion_snapshot(fusion_job_id)
+    run_id = postgres_store.start_combined_analysis_run(
+        fusion_job_id,
+        snapshot["snapshot"]["sha256"],
+        model="gpt-5.6-terra",
+        web_search_enabled=True,
+    )
+
+    postgres_store.complete_combined_analysis_run(
+        run_id,
+        {
+            "executive_summary": "No approved relationship evidence yet.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": ["Approve relevant source evidence."],
+            "next_steps": ["Review pending Persona claims."],
+            "sources": [],
+            "proposals": [],
+        },
+    )
+
+    analysis = postgres_store.get_case(fusion_job["case_id"])["analysis_runs"][0]
+    assert analysis["status"] == "completed"
+    assert analysis["snapshot_sha256"] == snapshot["snapshot"]["sha256"]
+    assert analysis["information_gaps"] == ["Approve relevant source evidence."]
+
+
 def test_postgres_allows_only_one_investigation_worker_lock(postgres_store):
     competing_store = CaseStore(POSTGRES_URL)
     first_lock = postgres_store.try_acquire_worker_lock()
