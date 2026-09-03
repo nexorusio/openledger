@@ -13,7 +13,7 @@
   <a href="https://github.com/nexorusio/openledger/actions/workflows/openledger-persistence.yml"><img alt="PostgreSQL persistence safety" src="https://github.com/nexorusio/openledger/actions/workflows/openledger-persistence.yml/badge.svg"></a>
   <a href="https://github.com/nexorusio/openledger/actions/workflows/codeql-analysis.yml"><img alt="CodeQL" src="https://github.com/nexorusio/openledger/actions/workflows/codeql-analysis.yml/badge.svg"></a>
   <a href="https://github.com/nexorusio/openledger/actions/workflows/osint-source-audit.yml"><img alt="Governed OSINT source audit" src="https://github.com/nexorusio/openledger/actions/workflows/osint-source-audit.yml/badge.svg"></a>
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
+  <a href="LICENSE"><img alt="Mixed licensing" src="https://img.shields.io/badge/license-mixed-blue.svg"></a>
 </p>
 
 OpenLedger turns public-source findings into durable cases, reviewable Personas,
@@ -302,6 +302,10 @@ Docker Compose application described above.
 
 ## Contributing
 
+Read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
+External code contributions require written contributor terms; a public pull
+request alone is not authorization to merge proprietary work.
+
 1. Branch from the latest `main`.
 2. Keep changes backward-compatible with existing PostgreSQL data and runtime
    secrets whenever practical.
@@ -313,6 +317,23 @@ Docker Compose application described above.
 
 ## License and attribution
 
-This repository is distributed under the [MIT License](LICENSE) originating
-with Maigret, copyright © 2020–2026 Soxoj. OpenLedger is a Nexorus downstream
-distribution and is not the upstream Maigret project.
+OpenLedger is a mixed-license work. The Maigret fork base is commit
+`af3de564c706e677221ab9f82f90166bb8b346ea`; original OpenLedger modifications
+begin with commit `8bc569097af94d992ac2f32a7293eeb6b140bfd4`. PT Daya Prana Inovasi asserts
+copyright in company-authored or assigned OpenLedger work from that point.
+
+Repository revisions through commit
+`60b187135c94621d729a42b0d09294c59a3d8cb7` were published with an MIT license,
+and permissions already granted for those copies remain effective. Beginning
+with the licensing-transition revision, PT Daya Prana Inovasi offers its
+current and future original OpenLedger material under proprietary terms unless
+an explicit file-level notice says otherwise. This is a change in licensing for
+current and future distribution, not a withdrawal of earlier MIT grants.
+
+Retained and modified Maigret portions remain under Maigret's MIT License,
+copyright © 2020–2026 Soxoj. See the repository [licensing notice](LICENSE),
+[Nexorus proprietary terms](LICENSES/LicenseRef-Nexorus-Proprietary.txt),
+[Maigret's preserved MIT terms](LICENSES/MAIGRET-MIT.txt), and
+[third-party notices](THIRD_PARTY_NOTICES.md) for the controlling boundaries.
+OpenLedger is a Nexorus downstream product and is not the upstream Maigret
+project.

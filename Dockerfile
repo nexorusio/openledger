@@ -1,5 +1,8 @@
 FROM python:3.11-slim AS base
-LABEL maintainer="Soxoj <soxoj@protonmail.com>"
+LABEL org.opencontainers.image.title="OpenLedger" \
+      org.opencontainers.image.vendor="PT Daya Prana Inovasi" \
+      org.opencontainers.image.licenses="LicenseRef-Nexorus-Proprietary AND MIT" \
+      org.opencontainers.image.source="https://github.com/nexorusio/openledger"
 WORKDIR /app
 RUN pip install --no-cache-dir --upgrade pip
 RUN apt-get update && \

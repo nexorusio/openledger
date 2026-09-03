@@ -19,4 +19,5 @@ static/
 tests/
 *.txt
 !/requirements.txt
+!LICENSES/*.txt
 venv/

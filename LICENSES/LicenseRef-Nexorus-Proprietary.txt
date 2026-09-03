@@ -1,0 +1,20 @@
+OPENLEDGER PROPRIETARY SOURCE LICENSE
+
+Copyright (c) 2026 PT Daya Prana Inovasi. All rights reserved.
+
+This license applies only to material expressly identified by the
+SPDX-License-Identifier `LicenseRef-Nexorus-Proprietary` or by another notice
+that incorporates these terms. It does not apply to Maigret or other
+third-party material.
+
+No permission is granted to use, reproduce, modify, distribute, sublicense,
+sell, or create derivative works from the covered material except under a
+written agreement with PT Daya Prana Inovasi or as required for
+repository-hosting functionality.
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE COVERED MATERIAL IS
+PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING
+BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, TITLE, AND NON-INFRINGEMENT. IN NO EVENT SHALL PT DAYA PRANA INOVASI
+BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM OR RELATED TO
+THE COVERED MATERIAL OR ITS USE.
