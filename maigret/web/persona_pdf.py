@@ -24,7 +24,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont, TTFError
+from reportlab.pdfbase.ttfonts import TTFont, TTFError, shapeFragWord
 from reportlab.platypus import (
     Paragraph,
     SimpleDocTemplate,
@@ -32,6 +32,7 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from reportlab.platypus.paragraph import _getFragWords
 
 from maigret.web.persona_intelligence import FIELD_GROUPS
 
@@ -450,6 +451,23 @@ def _wrap_rtl_lines(
     return rendered_lines
 
 
+def _shape_visual_ltr_words(
+    fragments: Sequence[Any], available_width: float
+) -> list[Any]:
+    """Shape non-RTL words after bidi conversion without reshaping RTL glyphs."""
+    shaped_words = []
+    for word in _getFragWords(fragments, available_width):
+        text = "".join(
+            str(fragment_text)
+            for fragment, fragment_text in word[1:]
+            if not hasattr(fragment, "cbDefn")
+        )
+        shaped_words.append(
+            word if not text or _contains_rtl(text) else shapeFragWord(word)
+        )
+    return shaped_words
+
+
 class _RTLParagraph(Paragraph):
     """Delay RTL shaping until the table or page provides the real line width."""
 
@@ -492,6 +510,7 @@ class _RTLParagraph(Paragraph):
         )
         markup = "<br/>".join(_font_markup(line, rtl_style) for line in lines) or "-"
         Paragraph.__init__(self, markup, rtl_style)
+        self.frags = _shape_visual_ltr_words(self.frags, available_width)
         self._openledger_prepared_width = available_width
 
     def wrap(

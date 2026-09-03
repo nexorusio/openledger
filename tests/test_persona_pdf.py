@@ -256,7 +256,7 @@ def test_font_markup_uses_actual_fallback_glyph_coverage():
     assert '<font name="ThaiFallback">ไท</font>' in markup
 
 
-def test_persona_styles_enable_complex_script_shaping_without_double_shaping_rtl(
+def test_mixed_rtl_paragraph_shapes_only_non_rtl_visual_words(
     monkeypatch,
 ):
     class IdentityReshaper:
@@ -272,11 +272,31 @@ def test_persona_styles_enable_complex_script_shaping_without_double_shaping_rtl
         bold_font,
         fallback_fonts,
     )
+    shaped_words = []
+
+    def record_shaped_word(word):
+        shaped_words.append(
+            "".join(
+                str(fragment_text)
+                for fragment, fragment_text in word[1:]
+                if not hasattr(fragment, "cbDefn")
+            )
+        )
+        return word
+
+    monkeypatch.setattr(persona_pdf_module, "shapeFragWord", record_shaped_word)
 
     assert all(style.shaping == 1 for style in styles.values())
-    paragraph = persona_pdf_module._paragraph("مرحبا بالعالم", styles["body"])
+    paragraph = persona_pdf_module._paragraph(
+        "सार्वजनिक তথ্য สาธารณะ — مرحبا بالعالم",
+        styles["body"],
+    )
     paragraph.wrap(200, 400)
     assert paragraph.style.shaping == 0
+    assert any("सार्वजनिक" in word for word in shaped_words)
+    assert any("তথ্য" in word for word in shaped_words)
+    assert any("สาธารณะ" in word for word in shaped_words)
+    assert all(not persona_pdf_module._contains_rtl(word) for word in shaped_words)
 
 
 def test_rtl_display_shapes_arabic_before_bidi_reordering(monkeypatch):
