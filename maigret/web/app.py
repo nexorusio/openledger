@@ -109,6 +109,9 @@ from maigret.web.investigation_input import (
     search_usernames,
 )
 from maigret.web.persona_intelligence import (
+    build_case_chat_url_claims,
+    extract_asserted_persona_urls,
+    extract_explicit_public_urls,
     extract_case_chat_persona_claims,
     field_display_label,
     group_claims,
@@ -5348,19 +5351,49 @@ def case_chat_message(case_id):
         response_function = (
             get_combined_case_chat_response if is_combined else get_case_chat_response
         )
-        response = asyncio.run(
-            response_function(
-                api_key=api_key,
-                case_context=case_context,
-                conversation=conversation,
-                user_message=message,
-                model=model,
-                web_search_enabled=research_enabled,
-                **ai_endpoint_options(),
-            )
+        explicit_public_urls = (
+            [] if is_combined else extract_explicit_public_urls(message)
         )
-        answer = response["analysis"]
-        sources = response.get("sources", [])
+        uncited_url_fallback = False
+        try:
+            response = asyncio.run(
+                response_function(
+                    api_key=api_key,
+                    case_context=case_context,
+                    conversation=conversation,
+                    user_message=message,
+                    model=model,
+                    web_search_enabled=research_enabled,
+                    **ai_endpoint_options(),
+                )
+            )
+            answer = response["analysis"]
+            sources = response.get("sources", [])
+        except AIEnrichmentContractError:
+            if not (research_enabled and explicit_public_urls and not is_combined):
+                raise
+            logging.warning(
+                "Cited case-chat research could not corroborate an "
+                "analyst-supplied URL"
+            )
+            uncited_url_fallback = True
+            answer = (
+                "OpenLedger could not independently corroborate the supplied public "
+                "URL through cited web research. The exact URL has been retained as "
+                "analyst-supplied, unverified context. OpenLedger has not fetched or "
+                "verified its content, ownership, or relationship to the selected "
+                "Persona. If proposed, it remains pending until an analyst reviews it."
+            )
+            sources = [
+                {
+                    "title": (
+                        "Analyst-supplied URL (unverified) · "
+                        f"{urlsplit(url).hostname}"
+                    ),
+                    "url": url,
+                }
+                for url in explicit_public_urls
+            ]
         proposal_requested = (
             propose_relationships if is_combined else propose_to_persona
         )
@@ -5369,6 +5402,10 @@ def case_chat_message(case_id):
             "count": 0,
             "kind": "relationship" if is_combined else "persona",
         }
+        if uncited_url_fallback:
+            initial_proposal_status["research_status"] = (
+                "no_independent_citations"
+            )
         assistant_record = case_store.append_case_chat_message(
             case_id,
             role="assistant",
@@ -5451,42 +5488,70 @@ def case_chat_message(case_id):
             assistant_record["proposals"] = proposal_summary
         elif propose_to_persona:
             try:
-                raw_proposals = asyncio.run(
-                    get_case_chat_claim_proposals(
-                        api_key=api_key,
-                        target_persona=personas_by_id[persona_id]['display_name'],
-                        user_message=message,
-                        assistant_answer=answer,
-                        sources=sources,
-                        model=model,
-                        **ai_endpoint_options(),
-                    )
-                )
+                target_persona = personas_by_id[persona_id]['display_name']
                 diagnostics: Dict[str, Any] = {}
-                candidates = extract_case_chat_persona_claims(
-                    raw_proposals,
-                    sources=sources,
-                    target_persona=personas_by_id[persona_id]['display_name'],
-                    model=model,
-                    user_message=message,
+                candidates = []
+                if not uncited_url_fallback:
+                    raw_proposals = asyncio.run(
+                        get_case_chat_claim_proposals(
+                            api_key=api_key,
+                            target_persona=target_persona,
+                            user_message=message,
+                            assistant_answer=answer,
+                            sources=sources,
+                            model=model,
+                            **ai_endpoint_options(),
+                        )
+                    )
+                    candidates = extract_case_chat_persona_claims(
+                        raw_proposals,
+                        sources=sources,
+                        target_persona=target_persona,
+                        model=model,
+                        user_message=message,
+                        user_message_id=user_record['id'],
+                        assistant_message_id=assistant_record['id'],
+                        provided_by=actor,
+                        diagnostics=diagnostics,
+                    )
+                url_candidates = build_case_chat_url_claims(
+                    extract_asserted_persona_urls(message),
+                    target_persona=target_persona,
                     user_message_id=user_record['id'],
                     assistant_message_id=assistant_record['id'],
                     provided_by=actor,
-                    diagnostics=diagnostics,
                 )
+                known_fingerprints = {
+                    candidate["fingerprint"] for candidate in candidates
+                }
+                candidates.extend(
+                    candidate
+                    for candidate in url_candidates
+                    if candidate["fingerprint"] not in known_fingerprints
+                )
+                diagnostics["analyst_supplied_urls"] = len(url_candidates)
+                diagnostics["accepted"] = len(candidates)
                 synchronized = case_store.sync_case_chat_persona_claims(
                     case_id,
                     persona_id,
                     candidates,
                 )
                 proposal_summary = {
-                    "status": "pending_review",
+                    "status": (
+                        "pending_review"
+                        if synchronized["count"]
+                        else "no_supported_facts"
+                    ),
                     "count": synchronized["count"],
                     "kind": "persona",
                     "persona_id": persona_id,
                     "diagnostics": diagnostics,
                     "proposals": synchronized["proposals"],
                 }
+                if uncited_url_fallback:
+                    proposal_summary["research_status"] = (
+                        "no_independent_citations"
+                    )
             except Exception as error:
                 record_internal_error(
                     "Case chat Persona proposal extraction failed",

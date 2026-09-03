@@ -78,6 +78,15 @@
         }
 
         const proposalSummary = message.proposals || {};
+        if (proposalSummary.research_status === 'no_independent_citations') {
+            const note = document.createElement('div');
+            note.className = 'case-chat-proposal-note warning';
+            note.appendChild(icon('shield-alert'));
+            note.appendChild(document.createTextNode(
+                ' Public-web research could not independently corroborate the supplied URL. It remains analyst-supplied, unverified context.'
+            ));
+            article.appendChild(note);
+        }
         if (proposalSummary.status === 'pending_review') {
             const note = document.createElement('div');
             note.className = 'case-chat-proposal-note';
@@ -96,6 +105,14 @@
             note.appendChild(icon('shield-alert'));
             note.appendChild(document.createTextNode(
                 ' No new relationship met the approved-evidence requirements; the answer remains in chat for analysis.'
+            ));
+            article.appendChild(note);
+        } else if (proposalSummary.status === 'no_supported_facts') {
+            const note = document.createElement('div');
+            note.className = 'case-chat-proposal-note warning';
+            note.appendChild(icon('shield-alert'));
+            note.appendChild(document.createTextNode(
+                ' No explicit, supported Persona fact was proposed; the answer remains in chat for analysis.'
             ));
             article.appendChild(note);
         } else if (proposalSummary.status === 'stale_snapshot') {

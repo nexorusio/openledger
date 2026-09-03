@@ -17,6 +17,7 @@ import pytest
 import maigret
 import maigret.report
 import maigret.settings
+from maigret.ai import AIEnrichmentContractError
 from maigret.result import MaigretCheckResult, MaigretCheckStatus
 from maigret.web import app as web_app_module
 from maigret.web.case_store import CaseStore
@@ -1084,6 +1085,126 @@ def test_case_chat_does_not_expose_internal_validation_errors(
             'error': 'Case chat request could not be processed.'
         }
         assert 'private upstream' not in response.get_data(as_text=True)
+    finally:
+        store.dispose()
+
+
+def test_case_chat_retains_explicit_url_when_research_has_no_citations(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'case-chat-direct-url.db'}", create_schema=True
+    )
+    monkeypatch.setattr(web_app, 'case_store', store)
+    try:
+        job_id = store.create_investigation(['skandaloknumpejabat'], {})
+        case = store.get_case(store.get_job(job_id)['case_id'])
+        persona_id = case['personas'][0]['id']
+        url = 'https://www.tiktok.com/@skandaloknumpejabat'
+
+        async def uncited_research(**_kwargs):
+            raise AIEnrichmentContractError('no cited public sources')
+
+        async def proposals_must_not_run(**_kwargs):
+            raise AssertionError('uncited research reached AI proposal extraction')
+
+        monkeypatch.setattr(web_app, 'get_case_chat_response', uncited_research)
+        monkeypatch.setattr(
+            web_app, 'get_case_chat_claim_proposals', proposals_must_not_run
+        )
+        with client.session_transaction() as browser_session:
+            browser_session['csrf_token'] = 'test-csrf'
+            browser_session['username'] = 'field.analyst'
+
+        response = client.post(
+            f"/api/cases/{case['id']}/chat",
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+            json={
+                'message': f'add this {url}',
+                'persona_id': persona_id,
+                'research_enabled': True,
+                'propose_to_persona': True,
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.get_json()
+        assert payload['assistant_message']['sources'] == [
+            {
+                'title': 'Analyst-supplied URL (unverified) · www.tiktok.com',
+                'url': url,
+            }
+        ]
+        assert payload['proposal_summary']['status'] == 'pending_review'
+        assert payload['proposal_summary']['count'] == 1
+        assert payload['proposal_summary']['research_status'] == (
+            'no_independent_citations'
+        )
+        persona = store.get_persona(persona_id)
+        claim = next(
+            item
+            for item in persona['claims']
+            if item['field_name'] == 'social_account'
+        )
+        assert claim['review_status'] == 'pending'
+        assert claim['confidence'] == 50
+        assert claim['source_engine'] == 'case_chat_user_statement'
+        assert claim['display_value'] == url
+        assert claim['evidence'][0]['source_url'] == url
+        details = claim['evidence'][0]['details']
+        assert details['unverified_user_statement'] is True
+        assert details['independently_corroborated'] is False
+
+        page = client.get(f"/cases/{case['id']}/chat")
+        body = page.get_data(as_text=True)
+        assert 'Public-web research could not independently corroborate' in body
+        assert f'href="{url}"' in body
+        assert '1 Persona proposal' in body
+
+        approval = client.post(
+            f"/claims/{claim['id']}/review",
+            data={
+                'csrf_token': 'test-csrf',
+                'persona_id': persona_id,
+                'decision': 'approved',
+                'note': 'Verified by analyst.',
+            },
+        )
+        assert approval.status_code == 302
+        approved_claim = next(
+            item
+            for item in store.get_persona(persona_id)['claims']
+            if item['id'] == claim['id']
+        )
+        assert approved_claim['review_status'] == 'approved'
+        assert approved_claim['evidence'][0]['source_url'] == url
+
+        question_url = 'https://news.example/story'
+        question = client.post(
+            f"/api/cases/{case['id']}/chat",
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+            json={
+                'message': (
+                    f'Does this article {question_url} support the Persona?'
+                ),
+                'persona_id': persona_id,
+                'research_enabled': True,
+                'propose_to_persona': True,
+            },
+        )
+        assert question.status_code == 200
+        question_payload = question.get_json()
+        assert question_payload['proposal_summary']['status'] == (
+            'no_supported_facts'
+        )
+        assert question_payload['proposal_summary']['count'] == 0
+        persona_urls = {
+            item['display_value']
+            for item in store.get_persona(persona_id)['claims']
+            if item['field_name'] in {'social_account', 'website'}
+        }
+        assert question_url not in persona_urls
     finally:
         store.dispose()
 

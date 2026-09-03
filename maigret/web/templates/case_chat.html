@@ -59,6 +59,11 @@
                     </ol>
                 </div>
                 {% endif %}
+                {% if message.proposals.research_status == 'no_independent_citations' %}
+                <div class="case-chat-proposal-note warning">
+                    <i data-lucide="shield-alert"></i> Public-web research could not independently corroborate the supplied URL. It remains analyst-supplied, unverified context.
+                </div>
+                {% endif %}
                 {% if message.proposals.status == 'pending_review' %}
                 <div class="case-chat-proposal-note">
                     <i data-lucide="clipboard-check"></i>
@@ -67,6 +72,10 @@
                 {% elif message.proposals.status == 'no_supported_relationships' %}
                 <div class="case-chat-proposal-note warning">
                     <i data-lucide="shield-alert"></i> No new relationship met the approved-evidence requirements; the answer remains in chat for analysis.
+                </div>
+                {% elif message.proposals.status == 'no_supported_facts' %}
+                <div class="case-chat-proposal-note warning">
+                    <i data-lucide="shield-alert"></i> No explicit, supported Persona fact was proposed; the answer remains in chat for analysis.
                 </div>
                 {% elif message.proposals.status == 'stale_snapshot' %}
                 <div class="case-chat-proposal-note warning">
