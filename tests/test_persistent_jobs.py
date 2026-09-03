@@ -1155,6 +1155,98 @@ def test_relationship_workspace_renders_shared_approved_attributes(
     assert "/static/relationships.js" in persona_page
 
 
+def test_case_fusion_worker_publishes_versioned_snapshot(web_app, persistent_store):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        persistent_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = persistent_store.create_combined_investigation(
+        source_case_ids,
+        title="Combined worker test",
+        purpose="Verify the persistent worker snapshot path.",
+        created_by="analyst",
+    )
+    fusion_job = persistent_store.claim_next("worker:fusion")
+
+    web_app.run_persistent_job(persistent_store, fusion_job)
+
+    completed = persistent_store.get_job(fusion_job_id)
+    assert completed["status"] == "completed"
+    assert completed["source_case_count"] == 2
+    assert len(completed["snapshot"]["sha256"]) == 64
+    assert completed["relationship_graph"]["scope"] == ("combined_case_snapshot")
+    assert persistent_store.get_events(fusion_job_id)[-1]["event"] == {
+        "type": "done",
+        "status": "completed",
+        "redirect": f"/cases/{fusion_job['case_id']}",
+    }
+
+
+def test_combined_case_selection_and_workspace_flow(client, web_app, persistent_store):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        persistent_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+
+    cases_page = client.get("/cases").get_data(as_text=True)
+    assert 'href="/cases/combine"' in cases_page
+    selection_page = client.get("/cases/combine").get_data(as_text=True)
+    assert "Create one auditable investigation view" in selection_page
+    assert "Select source cases" in selection_page
+    assert "/static/combine-cases.js" in selection_page
+
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "combine-csrf"
+        browser_session["username"] = "field.analyst"
+    response = client.post(
+        "/cases/combine",
+        data={
+            "csrf_token": "combine-csrf",
+            "case_id": source_case_ids,
+            "title": "Two-case picture",
+            "purpose": "Identify exact reviewed evidence shared by these cases.",
+        },
+    )
+    assert response.status_code == 302
+    fusion_job_id = response.location.rsplit("/", 1)[-1]
+    fusion_job = persistent_store.claim_next("worker:fusion")
+    assert fusion_job["job_id"] == fusion_job_id
+    live_page = client.get(f"/live/{fusion_job_id}").get_data(as_text=True)
+    assert "Combined investigation" in live_page
+    assert "Evidence scope" in live_page
+    assert "Approved only" in live_page
+    web_app.run_persistent_job(persistent_store, fusion_job)
+
+    combined_case = persistent_store.get_case(fusion_job["case_id"])
+    workspace = client.get(f"/cases/{combined_case['id']}").get_data(as_text=True)
+    assert "Two-case picture" in workspace
+    assert "Source evidence remains canonical" in workspace
+    assert "Snapshot SHA-256" in workspace
+    assert "Open source case" in workspace
+    relationships = client.get(
+        f"/relationships?mode=shared&case_id={combined_case['id']}"
+    ).get_data(as_text=True)
+    assert "Versioned combined-case snapshot" in relationships
+
+
 def _affiliation_worker_observation():
     return {
         "source_engine": "wikidata_affiliation",

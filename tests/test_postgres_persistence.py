@@ -70,6 +70,35 @@ def test_postgres_persona_export_uses_a_timestamped_consistent_snapshot(
     assert generated_at.tzinfo is not None
 
 
+def test_postgres_combined_case_uses_repeatable_read_snapshot(postgres_store):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = postgres_store.create_investigation([username], {})
+        source_job = postgres_store.claim_next(f"worker:{username}")
+        postgres_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = postgres_store.create_combined_investigation(
+        source_case_ids,
+        title="PostgreSQL combined snapshot",
+        purpose="Exercise the production transaction path.",
+        created_by="analyst",
+    )
+    postgres_store.claim_next("worker:fusion")
+
+    snapshot = postgres_store.build_case_fusion_snapshot(fusion_job_id)
+
+    assert snapshot["source_case_count"] == 2
+    assert len(snapshot["snapshot"]["sha256"]) == 64
+    assert snapshot["snapshot"]["generated_at"].endswith("+00:00")
+
+
 def test_postgres_allows_only_one_investigation_worker_lock(postgres_store):
     competing_store = CaseStore(POSTGRES_URL)
     first_lock = postgres_store.try_acquire_worker_lock()

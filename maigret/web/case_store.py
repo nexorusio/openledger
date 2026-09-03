@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
@@ -60,12 +61,47 @@ cases = Table(
     Column("id", String(36), primary_key=True),
     Column("title", String(500), nullable=False),
     Column("status", String(32), nullable=False, server_default="open"),
+    Column("case_type", String(32), nullable=False, server_default="standalone"),
+    Column("purpose", Text, nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint(
         "status IN ('open', 'closed', 'archived')",
         name="ck_cases_status",
     ),
+    CheckConstraint(
+        "case_type IN ('standalone', 'combined')",
+        name="ck_cases_case_type",
+    ),
+)
+
+combined_case_members = Table(
+    "combined_case_members",
+    metadata,
+    Column(
+        "combined_case_id",
+        String(36),
+        ForeignKey("cases.id", ondelete="CASCADE"),
+        primary_key=True,
+    ),
+    Column(
+        "source_case_id",
+        String(36),
+        ForeignKey("cases.id", ondelete="RESTRICT"),
+        primary_key=True,
+    ),
+    Column("position", Integer, nullable=False),
+    Column("added_by", String(200), nullable=False),
+    Column("added_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "combined_case_id <> source_case_id",
+        name="ck_combined_case_members_distinct",
+    ),
+    CheckConstraint("position >= 0", name="ck_combined_case_members_position"),
+)
+Index(
+    "ix_combined_case_members_source",
+    combined_case_members.c.source_case_id,
 )
 
 personas = Table(
@@ -323,8 +359,16 @@ query_receipts = Table(
         name="ck_query_receipts_result_count",
     ),
 )
-Index("ix_query_receipts_case_created", query_receipts.c.case_id, query_receipts.c.created_at)
-Index("ix_query_receipts_source_status", query_receipts.c.source_id, query_receipts.c.status)
+Index(
+    "ix_query_receipts_case_created",
+    query_receipts.c.case_id,
+    query_receipts.c.created_at,
+)
+Index(
+    "ix_query_receipts_source_status",
+    query_receipts.c.source_id,
+    query_receipts.c.status,
+)
 
 external_evidence_records = Table(
     "external_evidence_records",
@@ -361,7 +405,11 @@ external_evidence_records = Table(
         name="uq_external_evidence_source_version",
     ),
 )
-Index("ix_external_evidence_case_source", external_evidence_records.c.case_id, external_evidence_records.c.source_id)
+Index(
+    "ix_external_evidence_case_source",
+    external_evidence_records.c.case_id,
+    external_evidence_records.c.source_id,
+)
 Index("ix_external_evidence_content_hash", external_evidence_records.c.content_hash)
 
 external_evidence_receipts = Table(
@@ -435,18 +483,50 @@ claim_observations = Table(
     ),
     UniqueConstraint("claim_id", "fingerprint", name="uq_claim_observation_fingerprint"),
 )
-Index("ix_claim_observations_claim_observed", claim_observations.c.claim_id, claim_observations.c.observed_at)
-Index("ix_claim_observations_provenance", claim_observations.c.provenance_type, claim_observations.c.provenance_id)
+Index(
+    "ix_claim_observations_claim_observed",
+    claim_observations.c.claim_id,
+    claim_observations.c.observed_at,
+)
+Index(
+    "ix_claim_observations_provenance",
+    claim_observations.c.provenance_type,
+    claim_observations.c.provenance_id,
+)
 Index("ix_claim_observations_chat_message", claim_observations.c.chat_message_id)
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
 ACTIVE_STATUSES = {"queued", "running", "cancel_requested"}
 WORKER_LOCK_KEY = 5714024849188199506
+MAX_COMBINED_SOURCE_CASES = 10
+MAX_COMBINED_APPROVED_CLAIMS = 10_000
+MAX_COMBINED_EVIDENCE_REFERENCES = 50_000
+MAX_COMBINED_RELATIONSHIP_EDGES = 20_000
+RELATIONSHIP_FIELDS = {
+    "email",
+    "phone",
+    "address",
+    "current_location",
+    "social_account",
+    "website",
+    "occupation",
+    "company",
+    "company_ownership",
+    "vehicle_ownership",
+}
 
 
 class ActiveInvestigationError(ValueError):
     """Raised when destructive case changes race an active investigation."""
+
+
+class ReferencedCaseError(ValueError):
+    """Raised when a source case is still retained by a combined case."""
+
+    def __init__(self, references: Iterable[Dict[str, str]]):
+        self.references = [dict(item) for item in references]
+        super().__init__("Source case is referenced by a combined investigation")
 
 
 def utcnow() -> datetime:
@@ -651,6 +731,207 @@ class CaseStore:
                 )
             )
         self.append_event(job_id, {"type": "queued", "usernames": normalized})
+        return job_id
+
+    @staticmethod
+    def _normalize_combined_source_case_ids(
+        source_case_ids: Iterable[str],
+    ) -> list[str]:
+        normalized: list[str] = []
+        seen = set()
+        for value in source_case_ids:
+            case_id = str(value or "").strip()
+            if not case_id or case_id in seen:
+                continue
+            if len(case_id) > 36:
+                raise ValueError("Invalid source case identifier")
+            seen.add(case_id)
+            normalized.append(case_id)
+        if len(normalized) < 2:
+            raise ValueError("Select at least two source cases")
+        if len(normalized) > MAX_COMBINED_SOURCE_CASES:
+            raise ValueError(
+                f"Select no more than {MAX_COMBINED_SOURCE_CASES} source cases"
+            )
+        return normalized
+
+    @staticmethod
+    def _case_fusion_job_values(
+        *,
+        job_id: str,
+        case_id: str,
+        source_case_ids: list[str],
+        purpose: str,
+        requested_by: str,
+        now: datetime,
+    ) -> Dict[str, Any]:
+        return {
+            "id": job_id,
+            "case_id": case_id,
+            "kind": "case_fusion",
+            "status": "queued",
+            "usernames": [],
+            "options": {
+                "investigation_spec": {
+                    "schema_version": 1,
+                    "investigation_type": "case_fusion",
+                    "source_case_ids": source_case_ids,
+                    "purpose": purpose,
+                    "requested_by": requested_by,
+                    "evidence_scope": "approved_only",
+                }
+            },
+            "progress": {
+                "checked": 0,
+                "total": len(source_case_ids),
+                "found": 0,
+            },
+            "result": None,
+            "error": None,
+            "cancel_requested": False,
+            "attempts": 0,
+            "created_at": now,
+            "updated_at": now,
+        }
+
+    def create_combined_investigation(
+        self,
+        source_case_ids: Iterable[str],
+        *,
+        title: str,
+        purpose: str,
+        created_by: str,
+    ) -> str:
+        """Create a durable combined case without copying source evidence."""
+        normalized_ids = self._normalize_combined_source_case_ids(source_case_ids)
+        normalized_title = bounded_text(title, "combined case title", max_chars=500)
+        normalized_purpose = bounded_text(
+            purpose, "investigation purpose", max_chars=2000
+        )
+        actor = bounded_text(created_by, "creator", max_chars=200)
+        now = utcnow()
+        case_id, job_id = str(uuid.uuid4()), str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            source_rows = list(
+                connection.execute(
+                    select(cases.c.id, cases.c.case_type).where(
+                        cases.c.id.in_(normalized_ids)
+                    )
+                ).mappings()
+            )
+            found = {str(row["id"]): row for row in source_rows}
+            missing = [case_id for case_id in normalized_ids if case_id not in found]
+            if missing:
+                raise KeyError(missing[0])
+            if any(
+                found[case_id]["case_type"] != "standalone"
+                for case_id in normalized_ids
+            ):
+                raise ValueError(
+                    "Combined investigations cannot be nested inside another combined investigation"
+                )
+            connection.execute(
+                insert(cases).values(
+                    id=case_id,
+                    title=normalized_title,
+                    status="open",
+                    case_type="combined",
+                    purpose=normalized_purpose,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            connection.execute(
+                insert(combined_case_members),
+                [
+                    {
+                        "combined_case_id": case_id,
+                        "source_case_id": source_case_id,
+                        "position": position,
+                        "added_by": actor,
+                        "added_at": now,
+                    }
+                    for position, source_case_id in enumerate(normalized_ids)
+                ],
+            )
+            connection.execute(
+                insert(investigation_jobs).values(
+                    **self._case_fusion_job_values(
+                        job_id=job_id,
+                        case_id=case_id,
+                        source_case_ids=normalized_ids,
+                        purpose=normalized_purpose,
+                        requested_by=actor,
+                        now=now,
+                    )
+                )
+            )
+        self.append_event(
+            job_id,
+            {"type": "queued", "source_case_count": len(normalized_ids)},
+        )
+        return job_id
+
+    def queue_combined_investigation_refresh(
+        self, case_id: str, *, requested_by: str
+    ) -> str:
+        """Queue a new immutable snapshot for an existing combined case."""
+        actor = bounded_text(requested_by, "requester", max_chars=200)
+        now = utcnow()
+        job_id = str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            case_statement = select(
+                cases.c.id, cases.c.case_type, cases.c.purpose
+            ).where(cases.c.id == case_id)
+            if self.engine.dialect.name == "postgresql":
+                case_statement = case_statement.with_for_update()
+            case_row = connection.execute(case_statement).mappings().first()
+            if not case_row:
+                raise KeyError(case_id)
+            if case_row["case_type"] != "combined":
+                raise ValueError("Only combined investigations can be refreshed")
+            if connection.scalar(
+                select(investigation_jobs.c.id)
+                .where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                )
+                .limit(1)
+            ):
+                raise ActiveInvestigationError(
+                    "Wait for the active combined investigation before refreshing"
+                )
+            source_case_ids = list(
+                connection.scalars(
+                    select(combined_case_members.c.source_case_id)
+                    .where(combined_case_members.c.combined_case_id == case_id)
+                    .order_by(combined_case_members.c.position)
+                )
+            )
+            source_case_ids = self._normalize_combined_source_case_ids(source_case_ids)
+            connection.execute(
+                insert(investigation_jobs).values(
+                    **self._case_fusion_job_values(
+                        job_id=job_id,
+                        case_id=case_id,
+                        source_case_ids=source_case_ids,
+                        purpose=str(case_row["purpose"] or ""),
+                        requested_by=actor,
+                        now=now,
+                    )
+                )
+            )
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(updated_at=now)
+            )
+        self.append_event(
+            job_id,
+            {
+                "type": "queued",
+                "source_case_count": len(source_case_ids),
+                "refresh": True,
+            },
+        )
         return job_id
 
     def create_affiliation_investigation(
@@ -1605,6 +1886,96 @@ class CaseStore:
             ).mappings()
             return [self._serialize_job(row) for row in rows]
 
+    @staticmethod
+    def _snapshot_source_versions(job_rows) -> Dict[str, str]:
+        for job_row in job_rows:
+            if (
+                str(job_row["kind"]) != "case_fusion"
+                or str(job_row["status"]) != "completed"
+            ):
+                continue
+            result = dict(job_row["result"] or {})
+            snapshot = result.get("snapshot")
+            if not isinstance(snapshot, dict):
+                return {}
+            return {
+                str(item.get("id")): str(item.get("updated_at") or "")
+                for item in list(snapshot.get("source_cases") or [])
+                if isinstance(item, dict) and item.get("id")
+            }
+        return {}
+
+    def _combined_members_with_connection(
+        self,
+        connection: Connection,
+        combined_case_id: str,
+        *,
+        snapshot_versions: Optional[Dict[str, str]] = None,
+    ) -> list[Dict[str, Any]]:
+        rows = list(
+            connection.execute(
+                select(
+                    combined_case_members.c.source_case_id,
+                    combined_case_members.c.position,
+                    combined_case_members.c.added_by,
+                    combined_case_members.c.added_at,
+                    cases.c.title,
+                    cases.c.status,
+                    cases.c.case_type,
+                    cases.c.updated_at,
+                )
+                .join(cases, cases.c.id == combined_case_members.c.source_case_id)
+                .where(combined_case_members.c.combined_case_id == combined_case_id)
+                .order_by(combined_case_members.c.position)
+            ).mappings()
+        )
+        versions = snapshot_versions or {}
+        members = []
+        for row in rows:
+            source_case_id = str(row["source_case_id"])
+            current_updated_at = _as_iso(row["updated_at"])
+            snapshot_updated_at = versions.get(source_case_id)
+            persona_count = int(
+                connection.scalar(
+                    select(func.count())
+                    .select_from(personas)
+                    .where(personas.c.case_id == source_case_id)
+                )
+                or 0
+            )
+            latest_job_row = (
+                connection.execute(
+                    select(investigation_jobs)
+                    .where(investigation_jobs.c.case_id == source_case_id)
+                    .order_by(investigation_jobs.c.created_at.desc())
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            members.append(
+                {
+                    "id": source_case_id,
+                    "title": str(row["title"]),
+                    "status": str(row["status"]),
+                    "case_type": str(row["case_type"]),
+                    "updated_at": current_updated_at,
+                    "snapshot_updated_at": snapshot_updated_at,
+                    "changed_since_snapshot": bool(
+                        snapshot_updated_at
+                        and snapshot_updated_at != current_updated_at
+                    ),
+                    "persona_count": persona_count,
+                    "latest_job": (
+                        self._serialize_job(latest_job_row) if latest_job_row else None
+                    ),
+                    "position": int(row["position"]),
+                    "added_by": str(row["added_by"]),
+                    "added_at": _as_iso(row["added_at"]),
+                }
+            )
+        return members
+
     def list_cases(self, limit: int = 500):
         """List case summaries with their personas and latest job state."""
         with self.engine.connect() as connection:
@@ -1639,11 +2010,48 @@ class CaseStore:
                         "id": case_row["id"],
                         "title": case_row["title"],
                         "status": case_row["status"],
+                        "case_type": case_row["case_type"],
+                        "purpose": case_row["purpose"],
                         "created_at": _as_iso(case_row["created_at"]),
                         "updated_at": _as_iso(case_row["updated_at"]),
                         "personas": [dict(row) for row in persona_rows],
                         "latest_job": (
                             self._serialize_job(latest_job) if latest_job else None
+                        ),
+                        "source_case_count": (
+                            int(
+                                connection.scalar(
+                                    select(func.count())
+                                    .select_from(combined_case_members)
+                                    .where(
+                                        combined_case_members.c.combined_case_id
+                                        == case_row["id"]
+                                    )
+                                )
+                                or 0
+                            )
+                            if case_row["case_type"] == "combined"
+                            else 0
+                        ),
+                        "member_persona_count": (
+                            int(
+                                connection.scalar(
+                                    select(func.count())
+                                    .select_from(personas)
+                                    .join(
+                                        combined_case_members,
+                                        combined_case_members.c.source_case_id
+                                        == personas.c.case_id,
+                                    )
+                                    .where(
+                                        combined_case_members.c.combined_case_id
+                                        == case_row["id"]
+                                    )
+                                )
+                                or 0
+                            )
+                            if case_row["case_type"] == "combined"
+                            else len(persona_rows)
                         ),
                     }
                 )
@@ -1699,10 +2107,22 @@ class CaseStore:
                     .order_by(investigation_jobs.c.created_at.desc())
                 ).mappings()
             )
+            snapshot_versions = self._snapshot_source_versions(job_rows)
+            members = (
+                self._combined_members_with_connection(
+                    connection,
+                    str(case_row["id"]),
+                    snapshot_versions=snapshot_versions,
+                )
+                if case_row["case_type"] == "combined"
+                else []
+            )
         return {
             "id": case_row["id"],
             "title": case_row["title"],
             "status": case_row["status"],
+            "case_type": case_row["case_type"],
+            "purpose": case_row["purpose"],
             "created_at": _as_iso(case_row["created_at"]),
             "updated_at": _as_iso(case_row["updated_at"]),
             "personas": [
@@ -1714,6 +2134,10 @@ class CaseStore:
                 for row in persona_rows
             ],
             "jobs": [self._serialize_job(row) for row in job_rows],
+            "source_cases": members,
+            "source_changed_count": sum(
+                bool(item["changed_since_snapshot"]) for item in members
+            ),
         }
 
     def append_case_chat_message(
@@ -3698,7 +4122,15 @@ class CaseStore:
                     select(
                         persona_claims.c.persona_id,
                         persona_claims.c.field_name,
-                    ).where(persona_claims.c.id == claim_id)
+                        personas.c.case_id,
+                    )
+                    .select_from(
+                        persona_claims.join(
+                            personas,
+                            personas.c.id == persona_claims.c.persona_id,
+                        )
+                    )
+                    .where(persona_claims.c.id == claim_id)
                 )
                 .mappings()
                 .first()
@@ -3737,6 +4169,11 @@ class CaseStore:
                     created_at=now,
                 )
             )
+            connection.execute(
+                update(cases)
+                .where(cases.c.id == claim["case_id"])
+                .values(updated_at=now)
+            )
         return str(claim["persona_id"])
 
     @staticmethod
@@ -3763,20 +4200,454 @@ class CaseStore:
             raise ValueError("Longitude must be between -180 and 180")
         return parsed_latitude, parsed_longitude
 
+    @staticmethod
+    def _relationship_sources(evidence_rows) -> list[Dict[str, Any]]:
+        return [
+            {
+                "id": str(row["id"]),
+                "name": str(row["source_name"]),
+                "url": row["source_url"],
+                "type": str(row["evidence_type"]),
+                "observed_at": _as_iso(row["observed_at"]),
+            }
+            for row in evidence_rows
+        ]
+
+    def _build_case_fusion_snapshot_with_connection(
+        self,
+        connection: Connection,
+        job_id: str,
+        generated_at: datetime,
+    ) -> Dict[str, Any]:
+        job_row = (
+            connection.execute(
+                select(
+                    investigation_jobs.c.id,
+                    investigation_jobs.c.case_id,
+                    investigation_jobs.c.kind,
+                    cases.c.case_type,
+                )
+                .join(cases, cases.c.id == investigation_jobs.c.case_id)
+                .where(investigation_jobs.c.id == job_id)
+            )
+            .mappings()
+            .first()
+        )
+        if not job_row:
+            raise KeyError(job_id)
+        if job_row["kind"] != "case_fusion" or job_row["case_type"] != "combined":
+            raise ValueError("This job is not a combined-case investigation")
+
+        member_rows = list(
+            connection.execute(
+                select(
+                    combined_case_members.c.source_case_id,
+                    combined_case_members.c.position,
+                    cases.c.title,
+                    cases.c.status,
+                    cases.c.updated_at,
+                )
+                .join(cases, cases.c.id == combined_case_members.c.source_case_id)
+                .where(combined_case_members.c.combined_case_id == job_row["case_id"])
+                .order_by(combined_case_members.c.position)
+            ).mappings()
+        )
+        source_case_ids = [str(row["source_case_id"]) for row in member_rows]
+        self._normalize_combined_source_case_ids(source_case_ids)
+        source_cases = [
+            {
+                "id": str(row["source_case_id"]),
+                "title": str(row["title"]),
+                "status": str(row["status"]),
+                "updated_at": _as_iso(row["updated_at"]),
+            }
+            for row in member_rows
+        ]
+        source_titles = {item["id"]: item["title"] for item in source_cases}
+
+        persona_rows = list(
+            connection.execute(
+                select(personas)
+                .where(personas.c.case_id.in_(source_case_ids))
+                .order_by(personas.c.case_id, personas.c.created_at, personas.c.id)
+            ).mappings()
+        )
+        persona_ids = [str(row["id"]) for row in persona_rows]
+        persona_by_id = {str(row["id"]): row for row in persona_rows}
+        claim_rows = (
+            list(
+                connection.execute(
+                    select(persona_claims)
+                    .where(
+                        persona_claims.c.persona_id.in_(persona_ids),
+                        persona_claims.c.review_status == "approved",
+                    )
+                    .order_by(
+                        persona_claims.c.persona_id,
+                        persona_claims.c.field_name,
+                        persona_claims.c.normalized_value,
+                        persona_claims.c.id,
+                    )
+                    .limit(MAX_COMBINED_APPROVED_CLAIMS + 1)
+                ).mappings()
+            )
+            if persona_ids
+            else []
+        )
+        if len(claim_rows) > MAX_COMBINED_APPROVED_CLAIMS:
+            raise ValueError(
+                "The selected cases contain too many approved records for one "
+                "combined investigation; select a smaller case group"
+            )
+        claim_ids = [str(row["id"]) for row in claim_rows]
+        evidence_by_claim: Dict[str, list] = {}
+        latest_review_by_claim: Dict[str, Any] = {}
+        if claim_ids:
+            evidence_rows = list(
+                connection.execute(
+                    select(claim_evidence)
+                    .where(claim_evidence.c.claim_id.in_(claim_ids))
+                    .order_by(
+                        claim_evidence.c.claim_id,
+                        claim_evidence.c.observed_at,
+                        claim_evidence.c.id,
+                    )
+                    .limit(MAX_COMBINED_EVIDENCE_REFERENCES + 1)
+                ).mappings()
+            )
+            if len(evidence_rows) > MAX_COMBINED_EVIDENCE_REFERENCES:
+                raise ValueError(
+                    "The selected cases contain too many evidence references for "
+                    "one combined investigation; select a smaller case group"
+                )
+            for evidence in evidence_rows:
+                evidence_by_claim.setdefault(str(evidence["claim_id"]), []).append(
+                    evidence
+                )
+            for review in connection.execute(
+                select(claim_reviews)
+                .where(claim_reviews.c.claim_id.in_(claim_ids))
+                .order_by(
+                    claim_reviews.c.claim_id,
+                    claim_reviews.c.created_at.desc(),
+                    claim_reviews.c.id.desc(),
+                )
+            ).mappings():
+                latest_review_by_claim.setdefault(str(review["claim_id"]), review)
+
+        latest_affiliation_jobs: Dict[str, Any] = {}
+        for affiliation_job in connection.execute(
+            select(investigation_jobs)
+            .where(
+                investigation_jobs.c.case_id.in_(source_case_ids),
+                investigation_jobs.c.kind == "affiliation",
+                investigation_jobs.c.status == "completed",
+            )
+            .order_by(
+                investigation_jobs.c.case_id,
+                investigation_jobs.c.created_at.desc(),
+                investigation_jobs.c.id.desc(),
+            )
+        ).mappings():
+            latest_affiliation_jobs.setdefault(
+                str(affiliation_job["case_id"]), affiliation_job
+            )
+
+        organizations = []
+        organizations_by_name: Dict[str, list] = {}
+        for source_case_id in source_case_ids:
+            affiliation_job = latest_affiliation_jobs.get(source_case_id)
+            if not affiliation_job:
+                continue
+            result = dict(affiliation_job["result"] or {})
+            selected = result.get("selected_organization")
+            if not (
+                isinstance(selected, dict)
+                and selected.get("review_status") == "approved"
+                and str(selected.get("label") or "").strip()
+            ):
+                continue
+            label = " ".join(str(selected["label"]).split())[:500]
+            normalized_label = label.casefold()
+            organization = {
+                "case_id": source_case_id,
+                "case_title": source_titles[source_case_id],
+                "label": label,
+                "normalized_label": normalized_label,
+                "candidate_key": str(selected.get("candidate_key") or "")[:500],
+                "source_engine": str(selected.get("source_engine") or "")[:100],
+                "source_name": str(selected.get("source_name") or "")[:300],
+                "source_url": selected.get("source_url"),
+                "identity_scope": str(selected.get("identity_scope") or "")[:100],
+                "reviewed_by": str(selected.get("reviewed_by") or "")[:200],
+                "reviewed_at": str(selected.get("reviewed_at") or ""),
+            }
+            organizations.append(organization)
+            organizations_by_name.setdefault(normalized_label, []).append(organization)
+
+        graph_rows = []
+        manifest_claims = []
+        for claim in claim_rows:
+            claim_id = str(claim["id"])
+            persona = persona_by_id[str(claim["persona_id"])]
+            case_id = str(persona["case_id"])
+            evidence_rows = evidence_by_claim.get(claim_id, [])
+            review = latest_review_by_claim.get(claim_id)
+            manifest_claims.append(
+                {
+                    "id": claim_id,
+                    "case_id": case_id,
+                    "persona_id": str(persona["id"]),
+                    "field_name": str(claim["field_name"]),
+                    "fingerprint": str(claim["fingerprint"]),
+                    "review_id": int(review["id"]) if review else None,
+                    "evidence_ids": [str(item["id"]) for item in evidence_rows],
+                }
+            )
+            if claim["field_name"] in RELATIONSHIP_FIELDS:
+                graph_rows.append(
+                    {
+                        "claim_id": claim_id,
+                        "field_name": str(claim["field_name"]),
+                        "display_value": str(claim["display_value"]),
+                        "normalized_value": str(claim["normalized_value"]),
+                        "confidence": int(claim["confidence"]),
+                        "persona_id": str(persona["id"]),
+                        "persona_name": str(persona["display_name"]),
+                        "case_id": case_id,
+                        "case_title": source_titles[case_id],
+                        "sources": self._relationship_sources(evidence_rows)[:10],
+                    }
+                )
+
+        shared: Dict[tuple[str, str], list] = {}
+        for row in graph_rows:
+            key = (row["field_name"], row["normalized_value"])
+            shared.setdefault(key, []).append(row)
+
+        nodes: list[Dict[str, Any]] = []
+        edges: list[Dict[str, Any]] = []
+        persona_nodes: Dict[str, Dict[str, Any]] = {}
+        organization_nodes: Dict[str, Dict[str, Any]] = {}
+        field_counts: Dict[str, int] = {}
+
+        def append_edge(edge: Dict[str, Any]) -> None:
+            if len(edges) >= MAX_COMBINED_RELATIONSHIP_EDGES:
+                raise ValueError(
+                    "The selected cases produce too many exact relationship paths "
+                    "for one combined investigation; select a smaller case group"
+                )
+            edges.append(edge)
+
+        for (field_name, normalized_value), candidates in shared.items():
+            distinct_case_ids = {row["case_id"] for row in candidates}
+            matched_organizations = (
+                organizations_by_name.get(normalized_value, [])
+                if field_name == "company"
+                else []
+            )
+            external_organizations = [
+                organization
+                for organization in matched_organizations
+                if any(row["case_id"] != organization["case_id"] for row in candidates)
+            ]
+            if external_organizations:
+                field_counts[field_name] = field_counts.get(field_name, 0) + 1
+                for organization in external_organizations:
+                    organization_id = f"organization:{organization['case_id']}"
+                    organization_nodes.setdefault(
+                        organization_id,
+                        {
+                            "id": organization_id,
+                            "label": organization["label"],
+                            "kind": "organization",
+                            "case_id": organization["case_id"],
+                            "case_title": organization["case_title"],
+                            "source_name": organization["source_name"],
+                            "source_url": organization["source_url"],
+                            "identity_scope": organization["identity_scope"],
+                        },
+                    )
+                    for row in candidates:
+                        if row["case_id"] == organization["case_id"]:
+                            continue
+                        persona_id = row["persona_id"]
+                        persona_nodes.setdefault(
+                            persona_id,
+                            {
+                                "id": f"persona:{persona_id}",
+                                "label": row["persona_name"],
+                                "kind": "persona",
+                                "persona_id": persona_id,
+                                "case_id": row["case_id"],
+                                "case_title": row["case_title"],
+                            },
+                        )
+                        sources = list(row["sources"])
+                        if organization["source_name"] or organization["source_url"]:
+                            sources.append(
+                                {
+                                    "name": organization["source_name"]
+                                    or "Confirmed organization record",
+                                    "url": organization["source_url"],
+                                    "type": "analyst_confirmed_organization",
+                                }
+                            )
+                        append_edge(
+                            {
+                                "id": (
+                                    f"edge:{row['claim_id']}:"
+                                    f"organization:{organization['case_id']}"
+                                ),
+                                "from": f"persona:{persona_id}",
+                                "to": organization_id,
+                                "label": "approved affiliation matches confirmed organization",
+                                "field_name": field_name,
+                                "confidence": row["confidence"],
+                                "claim_id": row["claim_id"],
+                                "sources": sources[:11],
+                                "relationship_rule": (
+                                    "Exact approved affiliation and analyst-confirmed "
+                                    "organization name"
+                                ),
+                            }
+                        )
+                continue
+            if len(distinct_case_ids) < 2:
+                continue
+            attribute_id = (
+                f"attribute:{field_name}:"
+                + hashlib.sha256(normalized_value.encode("utf-8")).hexdigest()[:20]
+            )
+            distinct_personas = {row["persona_id"] for row in candidates}
+            field_counts[field_name] = field_counts.get(field_name, 0) + 1
+            nodes.append(
+                {
+                    "id": attribute_id,
+                    "label": candidates[0]["display_value"],
+                    "kind": "attribute",
+                    "field_name": field_name,
+                    "persona_count": len(distinct_personas),
+                    "case_count": len(distinct_case_ids),
+                }
+            )
+            seen_personas = set()
+            for row in candidates:
+                persona_id = row["persona_id"]
+                if persona_id in seen_personas:
+                    continue
+                seen_personas.add(persona_id)
+                persona_nodes.setdefault(
+                    persona_id,
+                    {
+                        "id": f"persona:{persona_id}",
+                        "label": row["persona_name"],
+                        "kind": "persona",
+                        "persona_id": persona_id,
+                        "case_id": row["case_id"],
+                        "case_title": row["case_title"],
+                    },
+                )
+                append_edge(
+                    {
+                        "id": f"edge:{row['claim_id']}",
+                        "from": f"persona:{persona_id}",
+                        "to": attribute_id,
+                        "label": field_name.replace("_", " "),
+                        "field_name": field_name,
+                        "confidence": row["confidence"],
+                        "claim_id": row["claim_id"],
+                        "sources": row["sources"],
+                        "relationship_rule": (
+                            "Exact normalized value across approved claims in "
+                            "different source cases"
+                        ),
+                    }
+                )
+
+        nodes = list(persona_nodes.values()) + list(organization_nodes.values()) + nodes
+        graph = {
+            "mode": "shared",
+            "scope": "combined_case_snapshot",
+            "nodes": nodes,
+            "edges": edges,
+            "stats": {
+                "persona_count": len(persona_nodes),
+                "organization_count": len(organization_nodes),
+                "shared_attribute_count": len(
+                    [node for node in nodes if node.get("kind") == "attribute"]
+                ),
+                "connection_count": len(edges),
+                "field_counts": field_counts,
+            },
+        }
+        manifest = {
+            "schema_version": 1,
+            "source_cases": source_cases,
+            "approved_claims": manifest_claims,
+            "approved_organizations": organizations,
+        }
+        snapshot_sha256 = hashlib.sha256(
+            json.dumps(
+                manifest,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        return {
+            "snapshot": {
+                **manifest,
+                "generated_at": _as_iso(generated_at),
+                "sha256": snapshot_sha256,
+            },
+            "relationship_graph": graph,
+            "source_case_count": len(source_cases),
+            "approved_claim_count": len(manifest_claims),
+            "approved_organization_count": len(organizations),
+            "shared_attribute_count": graph["stats"]["shared_attribute_count"],
+            "connection_count": graph["stats"]["connection_count"],
+        }
+
+    def build_case_fusion_snapshot(self, job_id: str) -> Dict[str, Any]:
+        """Capture approved source evidence and exact links in one DB snapshot."""
+        dialect = self.engine.dialect.name
+        connection = self.engine.connect()
+        if dialect == "postgresql":
+            connection = connection.execution_options(isolation_level="REPEATABLE READ")
+        elif dialect != "sqlite":
+            connection = connection.execution_options(isolation_level="SERIALIZABLE")
+        with connection:
+            if dialect == "sqlite":
+                connection.exec_driver_sql("BEGIN IMMEDIATE")
+                generated_at = utcnow()
+            else:
+                connection.begin()
+                if dialect == "postgresql":
+                    connection.exec_driver_sql("SET TRANSACTION READ ONLY")
+                    generated_at = connection.scalar(select(func.statement_timestamp()))
+                else:
+                    generated_at = utcnow()
+            try:
+                if not isinstance(generated_at, datetime):
+                    raise RuntimeError(
+                        "Database did not provide a combined snapshot timestamp"
+                    )
+                if generated_at.tzinfo is None:
+                    generated_at = generated_at.replace(tzinfo=timezone.utc)
+                else:
+                    generated_at = generated_at.astimezone(timezone.utc)
+                snapshot = self._build_case_fusion_snapshot_with_connection(
+                    connection, job_id, generated_at
+                )
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+        return snapshot
+
     def build_relationship_graph(self, case_id: Optional[str] = None) -> Dict[str, Any]:
         """Project approved, exact shared attributes across two or more personas."""
-        relationship_fields = {
-            "email",
-            "phone",
-            "address",
-            "current_location",
-            "social_account",
-            "website",
-            "occupation",
-            "company",
-            "company_ownership",
-            "vehicle_ownership",
-        }
         statement = (
             select(
                 persona_claims.c.id.label("claim_id"),
@@ -3793,7 +4664,7 @@ class CaseStore:
             .join(cases, cases.c.id == personas.c.case_id)
             .where(
                 persona_claims.c.review_status == "approved",
-                persona_claims.c.field_name.in_(relationship_fields),
+                persona_claims.c.field_name.in_(RELATIONSHIP_FIELDS),
             )
         )
         if case_id:
@@ -3808,9 +4679,7 @@ class CaseStore:
                         claim_evidence.c.claim_id.in_(claim_ids)
                     )
                 ).mappings():
-                    evidence_by_claim.setdefault(
-                        str(evidence["claim_id"]), []
-                    ).append(
+                    evidence_by_claim.setdefault(str(evidence["claim_id"]), []).append(
                         {
                             "name": str(evidence["source_name"]),
                             "url": evidence["source_url"],
@@ -3872,9 +4741,7 @@ class CaseStore:
                         "field_name": field_name,
                         "confidence": int(row["confidence"]),
                         "claim_id": str(row["claim_id"]),
-                        "sources": evidence_by_claim.get(
-                            str(row["claim_id"]), []
-                        )[:10],
+                        "sources": evidence_by_claim.get(str(row["claim_id"]), [])[:10],
                     }
                 )
         nodes = list(persona_nodes.values()) + nodes
@@ -4183,7 +5050,9 @@ class CaseStore:
     ) -> bool:
         """Delete a case atomically once none of its investigations are active."""
         with self.engine.begin() as connection:
-            statement = select(cases.c.id, cases.c.title).where(cases.c.id == case_id)
+            statement = select(cases.c.id, cases.c.title, cases.c.case_type).where(
+                cases.c.id == case_id
+            )
             if self.engine.dialect.name == "postgresql":
                 statement = statement.with_for_update()
             stored_case = connection.execute(statement).mappings().first()
@@ -4206,6 +5075,32 @@ class CaseStore:
                 raise ActiveInvestigationError(
                     "Cases with active investigations cannot be deleted"
                 )
+            if stored_case["case_type"] == "standalone":
+                parent_cases = cases.alias("parent_cases")
+                references = list(
+                    connection.execute(
+                        select(
+                            parent_cases.c.id,
+                            parent_cases.c.title,
+                        )
+                        .select_from(
+                            combined_case_members.join(
+                                parent_cases,
+                                parent_cases.c.id
+                                == combined_case_members.c.combined_case_id,
+                            )
+                        )
+                        .where(combined_case_members.c.source_case_id == case_id)
+                        .order_by(parent_cases.c.created_at, parent_cases.c.id)
+                    ).mappings()
+                )
+                if references:
+                    raise ReferencedCaseError(
+                        [
+                            {"id": str(row["id"]), "title": str(row["title"])}
+                            for row in references
+                        ]
+                    )
             connection.execute(delete(cases).where(cases.c.id == case_id))
         return True
 

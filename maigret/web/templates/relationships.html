@@ -28,6 +28,9 @@
         {% if mode == 'persona' %}
         <strong>Review status remains visible</strong>
         <span>Approved, pending, and uncertain records can be traced to their sources. Rejected records are excluded from the graph but retained in the audit trail.</span>
+        {% elif combined_scope %}
+        <strong>Versioned combined-case snapshot</strong>
+        <span>Only exact approved evidence captured by the latest completed snapshot is shown. Source cases remain unchanged and every evidence path retains its original claim and provenance.</span>
         {% else %}
         <strong>Exact approved evidence only</strong>
         <span>A shared attribute is an investigative lead—not proof of contact. Pending, uncertain, and rejected records are excluded; no relationship is created from AI prose or fuzzy similarity.</span>
@@ -42,7 +45,7 @@
         <select id="relationshipCase" name="case_id" onchange="this.form.submit()">
             <option value="">All cases</option>
             {% for case in cases %}
-            <option value="{{ case.id }}" {{ 'selected' if selected_case_id == case.id else '' }}>{{ case.title }}</option>
+            <option value="{{ case.id }}" {{ 'selected' if selected_case_id == case.id else '' }}>{{ case.title }}{{ ' · Combined' if case.case_type == 'combined' else '' }}</option>
             {% endfor %}
         </select>
     </div>
@@ -130,6 +133,7 @@
                     <li><span class="legend-node legend-source"></span><span>Source</span><strong>{{ graph.stats.source_count }}</strong></li>
                     {% else %}
                     <li><span class="legend-node legend-attribute"></span><span>Shared attribute</span><strong>{{ graph.stats.shared_attribute_count }}</strong></li>
+                    {% if graph.stats.organization_count %}<li><span class="legend-node legend-organization"></span><span>Confirmed organization</span><strong>{{ graph.stats.organization_count }}</strong></li>{% endif %}
                     <li><span class="legend-edge"></span><span>Exact approved path</span><strong>{{ graph.stats.connection_count }}</strong></li>
                     {% endif %}
                 </ul>
@@ -172,7 +176,7 @@
             <p>Complete an investigation or run a cited AI assessment. New findings will enter as pending records with their sources attached.</p>
             {% else %}
             <h3>No shared approved attributes yet</h3>
-            <p>Select All cases or approve an exact matching location, affiliation, contact, account, occupation, website, vehicle, or ownership record on at least two Persona profiles.</p>
+            <p>{% if combined_scope %}The selected source cases have no exact approved cross-case links in their latest snapshot. Review source findings or refresh after approvals change.{% else %}Select All cases or approve an exact matching location, affiliation, contact, account, occupation, website, vehicle, or ownership record on at least two Persona profiles.{% endif %}</p>
             {% endif %}
         </div>
         {% endif %}

@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+
+{% block title %}{{ case.title }} | OpenLedger{% endblock %}
+{% block breadcrumb %}Combined investigation{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Cross-case intelligence</p>
+        <h1>{{ case.title }}</h1>
+        <p class="page-description">A versioned view of approved evidence from {{ case.source_cases | length }} independently retained source cases.</p>
+    </div>
+    <div class="page-heading-actions">
+        {% if latest_completed_fusion_job %}<a href="{{ url_for('relationships_workspace', mode='shared', case_id=case.id) }}" class="btn btn-primary"><i data-lucide="share-2"></i> Explore graph</a>{% endif %}
+        {% if latest_fusion_job and latest_fusion_job.status not in ('completed', 'failed', 'cancelled', 'interrupted') %}
+        <a href="{{ url_for('live_results', job_id=latest_fusion_job.job_id) }}" class="btn btn-outline-secondary">View progress</a>
+        {% else %}
+        <form method="POST" action="{{ url_for('refresh_combined_case', case_id=case.id) }}" class="d-inline">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="btn btn-outline-secondary"><i data-lucide="refresh-cw"></i> Refresh snapshot</button>
+        </form>
+        {% endif %}
+        <a href="{{ url_for('cases_workspace') }}" class="btn btn-outline-secondary">All cases</a>
+        <form method="POST"
+              action="{{ url_for('delete_case_workspace', case_id=case.id) }}"
+              class="d-inline case-delete-form"
+              data-case-title="{{ case.title }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <input type="hidden" name="confirmation_name" value="">
+            <button type="submit" class="btn btn-outline-danger"><i data-lucide="trash-2"></i> Delete</button>
+        </form>
+    </div>
+</section>
+
+<section class="relationship-policy" aria-label="Combined investigation status">
+    <i data-lucide="shield-check"></i>
+    <div>
+        <strong>Source evidence remains canonical in its original case</strong>
+        <span>This workspace never moves, copies, approves, or changes source findings. Exact links are rebuilt only when an analyst explicitly refreshes the snapshot.</span>
+    </div>
+</section>
+
+{% if case.source_changed_count %}
+<div class="security-callout warning-callout">
+    <i data-lucide="triangle-alert"></i>
+    <span>{{ case.source_changed_count }} source case{{ '' if case.source_changed_count == 1 else 's' }} changed after the latest completed snapshot. Refresh to analyze the current approved records; the prior snapshot will remain in the investigation history.</span>
+</div>
+{% endif %}
+
+<section class="metric-grid case-metric-grid">
+    <article class="metric-card">
+        <span class="metric-label">Source cases</span>
+        <strong class="metric-value">{{ case.source_cases | length }}</strong>
+        <span class="metric-footnote">Referenced, not copied</span>
+    </article>
+    <article class="metric-card">
+        <span class="metric-label">Approved records</span>
+        <strong class="metric-value">{{ latest_completed_fusion_job.approved_claim_count | default(0) if latest_completed_fusion_job else 0 }}</strong>
+        <span class="metric-footnote">At snapshot time</span>
+    </article>
+    <article class="metric-card">
+        <span class="metric-label">Shared attributes</span>
+        <strong class="metric-value">{{ latest_completed_fusion_job.shared_attribute_count | default(0) if latest_completed_fusion_job else 0 }}</strong>
+        <span class="metric-footnote">Exact approved matches</span>
+    </article>
+    <article class="metric-card">
+        <span class="metric-label">Evidence paths</span>
+        <strong class="metric-value">{{ latest_completed_fusion_job.connection_count | default(0) if latest_completed_fusion_job else 0 }}</strong>
+        <span class="metric-footnote">Across different cases</span>
+    </article>
+</section>
+
+<section class="panel-card combined-case-overview">
+    <header class="panel-card-header">
+        <div>
+            <p class="eyebrow">Investigation basis</p>
+            <h2>Purpose and snapshot</h2>
+        </div>
+    </header>
+    <dl class="combined-case-metadata">
+        <div><dt>Purpose</dt><dd>{{ case.purpose }}</dd></div>
+        <div><dt>Combined case ID</dt><dd>{{ case.id }}</dd></div>
+        {% if latest_completed_fusion_job %}
+        <div><dt>Snapshot time</dt><dd>{{ latest_completed_fusion_job.snapshot.generated_at }}</dd></div>
+        <div><dt>Snapshot SHA-256</dt><dd class="snapshot-hash">{{ latest_completed_fusion_job.snapshot.sha256 }}</dd></div>
+        {% else %}
+        <div><dt>Snapshot</dt><dd>Not completed yet.</dd></div>
+        {% endif %}
+    </dl>
+</section>
+
+<section class="panel-card data-table-card">
+    <header class="panel-card-header combined-source-header">
+        <div>
+            <p class="eyebrow">Scope</p>
+            <h2>Source cases</h2>
+        </div>
+        <span class="badge-soft">Standalone records preserved</span>
+    </header>
+    <div class="table-responsive">
+        <table class="table align-middle">
+            <thead><tr><th>Case</th><th>Personas</th><th>Latest investigation</th><th>Snapshot state</th><th><span class="visually-hidden">Action</span></th></tr></thead>
+            <tbody>
+                {% for source in case.source_cases %}
+                <tr>
+                    <td><strong>{{ source.title }}</strong><div class="form-text">{{ source.id }}</div></td>
+                    <td>{{ source.persona_count }}</td>
+                    <td>{% if source.latest_job %}{{ source.latest_job.kind | replace('_', ' ') | title }} · {{ source.latest_job.status | replace('_', ' ') | title }}{% else %}—{% endif %}</td>
+                    <td>
+                        {% if source.changed_since_snapshot %}<span class="badge-soft warning">Changed since snapshot</span>
+                        {% elif source.snapshot_updated_at %}<span class="badge-soft success">Matches snapshot</span>
+                        {% else %}<span class="badge-soft">Awaiting snapshot</span>{% endif %}
+                    </td>
+                    <td class="text-end"><a href="{{ url_for('case_workspace', case_id=source.id) }}" class="btn btn-sm btn-outline-secondary">Open source case</a></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+
+<section class="panel-card data-table-card">
+    <header class="panel-card-header">
+        <div><p class="eyebrow">Audit</p><h2>Snapshot activity</h2></div>
+    </header>
+    <div class="table-responsive">
+        <table class="table align-middle">
+            <thead><tr><th>Started</th><th>Status</th><th>Approved records</th><th>Evidence paths</th><th>Snapshot</th></tr></thead>
+            <tbody>
+                {% for job in case.jobs if job.kind == 'case_fusion' %}
+                <tr>
+                    <td>{{ job.started_at }}</td>
+                    <td><span class="badge-soft {{ 'success' if job.status == 'completed' else 'warning' if job.status in ('failed', 'cancelled', 'interrupted') else '' }}">{{ job.status | replace('_', ' ') | title }}</span></td>
+                    <td>{{ job.approved_claim_count | default('—') }}</td>
+                    <td>{{ job.connection_count | default('—') }}</td>
+                    <td>{% if job.snapshot %}<span class="snapshot-hash-short" title="{{ job.snapshot.sha256 }}">{{ job.snapshot.sha256[:12] }}…</span>{% else %}—{% endif %}</td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+</section>
+{% endblock %}
