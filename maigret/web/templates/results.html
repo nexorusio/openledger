@@ -70,7 +70,7 @@
         <header class="panel-header">
             <div>
                 <h2 id="ai-analysis-heading">AI investigation assessment</h2>
-                <p>Research the identity hypothesis and propose cited evidence for analyst review.</p>
+                <p>Analyze stored case evidence, research the identity hypothesis, and propose cited evidence for analyst review.</p>
             </div>
             <span class="badge-soft {{ 'success' if ai_enabled else 'warning' }}">
                 {{ 'Connected' if ai_enabled else 'Connection required' }}
@@ -81,7 +81,8 @@
                 <i data-lucide="shield-alert"></i>
                 <p>
                     AI output is investigative assistance, not verified identity evidence. OpenLedger
-                    submits the normalized report only when you request analysis. Supported public-web
+                    submits the normalized report only when you request analysis. Assessment can continue
+                    from stored case evidence when research finds no new sources. Only supported public-web
                     findings become pending Persona proposals; AI cannot approve them.
                 </p>
             </div>
@@ -268,6 +269,7 @@ if (aiButton) {
                     pending_review: `${count} cited evidence proposal${count === 1 ? '' : 's'} added to the human review queue. Nothing was approved automatically.`,
                     no_valid_proposals: 'No cited AI finding met the evidence validation rules. The narrative assessment remains available above.',
                     unavailable: 'The narrative assessment was saved, but structured evidence proposals were unavailable for this run.',
+                    case_evidence_only: 'The assessment used existing case evidence. The structured Persona remains available, and no uncited web fact was added.',
                     storage_unavailable: 'Persistent Persona storage is unavailable, so no evidence proposal was retained.',
                     investigation_unavailable: 'The investigation record could not be linked to a Persona review queue.'
                 };
@@ -281,11 +283,32 @@ if (aiButton) {
                     || 'No evidence proposal was added.') + validationDetail;
                 proposalNotice.classList.remove('d-none');
                 const reviewLink = document.getElementById('aiProposalReviewLink');
-                if (reviewLink) reviewLink.hidden = payload.proposal_status !== 'pending_review';
+                if (reviewLink) {
+                    reviewLink.hidden = !['pending_review', 'case_evidence_only'].includes(payload.proposal_status);
+                    reviewLink.textContent = payload.proposal_status === 'case_evidence_only'
+                        ? 'Open existing Persona'
+                        : 'Review Persona evidence';
+                }
             }
-            status.textContent = payload.cached
-                ? 'Loaded the saved assessment and synchronized its proposals.'
-                : 'Assessment completed; proposals are ready for human review.';
+            if (payload.research_status === 'no_cited_web_findings') {
+                status.textContent = payload.cached
+                    ? 'Loaded the saved case-evidence assessment.'
+                    : 'No new public sources were found. Assessment completed from stored case evidence.';
+                if (payload.proposal_status === 'case_evidence_only') {
+                    status.textContent += ' The existing Persona remains available.';
+                }
+            } else if (payload.research_status === 'case_evidence_only') {
+                status.textContent = payload.cached
+                    ? 'Loaded the saved case-evidence assessment.'
+                    : 'Assessment completed from stored case evidence.';
+                if (payload.proposal_status === 'case_evidence_only') {
+                    status.textContent += ' The existing Persona remains available.';
+                }
+            } else {
+                status.textContent = payload.cached
+                    ? 'Loaded the saved assessment and synchronized its proposals.'
+                    : 'Assessment completed; proposals are ready for human review.';
+            }
         } catch (error) {
             status.textContent = error.message;
         } finally {

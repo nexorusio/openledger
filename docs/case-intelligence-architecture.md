@@ -199,11 +199,13 @@ second source.
 
 AI analysis uses two server-side Responses API stages. The first stage analyzes
 the normalized investigation evidence and, when enrichment is enabled, requires
-hosted public web search plus URL citations. An uncited model-only response is
-rejected and is not saved as a successful assessment. The
-second stage receives the assessment and its citation catalogue without browsing
-again, then returns a strict JSON Schema payload. OpenLedger treats that payload
-as untrusted and validates it again before storage.
+hosted public web search plus URL citations. If that research returns no usable
+citations, its output is discarded and a separate non-browsing pass assesses the
+stored case evidence. The existing structured Persona remains available, while
+no web-derived Persona proposal is created. The second stage runs only for a
+cited assessment, receives that assessment and its citation catalogue without
+browsing again, then returns a strict JSON Schema payload. OpenLedger treats that
+payload as untrusted and validates it again before storage.
 
 The allowlist is intentionally limited to public-biographical and explicit public
 contact fields: summary, full name, coarse current location, occupation,
