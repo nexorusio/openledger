@@ -1029,6 +1029,71 @@ def test_ai_analysis_fallback_preserves_unavailable_persona_status(
             store.dispose()
 
 
+def test_cached_ai_fallback_restores_persona_status_after_storage_recovers(
+    client, web_app, monkeypatch, tmp_path
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'recovered-fallback.db'}", create_schema=True
+    )
+    calls = []
+
+    async def fake_analysis(**kwargs):
+        calls.append(kwargs['web_search_enabled'])
+        if kwargs['web_search_enabled']:
+            raise AIEnrichmentContractError('no cited public sources')
+        return {
+            'analysis': '# Assessment\n\nStored evidence remains reviewable.',
+            'sources': [],
+        }
+
+    monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
+    try:
+        job_id = store.create_investigation(['alice'], {})
+        store.claim_next('worker:test')
+        result = {
+            'status': 'completed',
+            'session_folder': f'search_{job_id}',
+            'graph_file': f'search_{job_id}/combined_graph.html',
+            'usernames': ['alice'],
+            'individual_reports': [],
+        }
+        store.finish(job_id, result)
+        web_app.job_results[job_id] = result
+        monkeypatch.setattr(web_app, 'case_store', None)
+        with client.session_transaction() as browser_session:
+            browser_session['csrf_token'] = 'test-csrf'
+
+        first = client.post(
+            f'/api/analysis/search_{job_id}',
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+        )
+        assert first.status_code == 200
+        assert first.get_json()['proposal_status'] == 'storage_unavailable'
+
+        monkeypatch.setattr(web_app, 'case_store', store)
+        second = client.post(
+            f'/api/analysis/search_{job_id}',
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+        )
+
+        assert second.status_code == 200
+        assert second.get_json()['cached'] is True
+        assert second.get_json()['proposal_status'] == 'case_evidence_only'
+        assert calls == [True, False]
+
+        metadata = json.loads(
+            (tmp_path / f'search_{job_id}' / 'ai_analysis.json').read_text(
+                encoding='utf-8'
+            )
+        )
+        assert metadata['proposal_status'] == 'case_evidence_only'
+        page = client.get(f'/results/search_{job_id}').get_data(as_text=True)
+        assert '<strong>Persona retained</strong>' in page
+    finally:
+        store.dispose()
+
+
 def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
     client, web_app, monkeypatch, tmp_path
 ):

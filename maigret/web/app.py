@@ -6571,11 +6571,26 @@ def analyze_session(session_id):
                         model=metadata['model'],
                     )
                     if (
-                        metadata.get('proposal_status') == 'case_evidence_only'
+                        research_status
+                        in {'case_evidence_only', 'no_cited_web_findings'}
                         and proposal_sync['status']
                         in {'pending_review', 'no_valid_proposals'}
                     ):
                         proposal_sync['status'] = 'case_evidence_only'
+                        if metadata.get('proposal_status') != 'case_evidence_only':
+                            metadata['proposal_status'] = 'case_evidence_only'
+                            metadata['proposal_diagnostics'] = proposal_sync[
+                                'diagnostics'
+                            ]
+                            temporary_path = (
+                                f"{metadata_path}.{uuid.uuid4().hex}.tmp"
+                            )
+                            with open(
+                                temporary_path, 'w', encoding='utf-8'
+                            ) as metadata_file:
+                                json.dump(metadata, metadata_file, indent=2)
+                                metadata_file.write('\n')
+                            os.replace(temporary_path, metadata_path)
                     with open(analysis_path, encoding='utf-8') as analysis_file:
                         return {
                             'analysis': analysis_file.read(),
