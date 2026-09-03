@@ -256,6 +256,25 @@ def test_font_markup_uses_actual_fallback_glyph_coverage():
     assert '<font name="ThaiFallback">ไท</font>' in markup
 
 
+def test_font_markup_keeps_join_controls_inside_the_script_fallback_run():
+    style = persona_pdf_module.ParagraphStyle(
+        "JoinControlTest", fontName="Helvetica", fontSize=10
+    )
+    style.openledger_primary_coverage = frozenset(
+        {*range(32, 127), ord("\u200c"), ord("\u200d")}
+    )
+    style.openledger_fallback_fonts = (
+        (
+            "DevanagariFallback",
+            frozenset({ord("क"), ord("्"), ord("ष")}),
+        ),
+    )
+
+    markup = persona_pdf_module._escaped_paragraph_text("क्\u200dष", style)
+
+    assert markup == '<font name="DevanagariFallback">क्\u200dष</font>'
+
+
 def test_mixed_rtl_paragraph_shapes_only_non_rtl_visual_words(
     monkeypatch,
 ):

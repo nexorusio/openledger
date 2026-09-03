@@ -350,14 +350,30 @@ def _font_for_character(character: str, style: ParagraphStyle) -> Optional[str]:
     return None
 
 
+def _font_sequence(text: str, style: ParagraphStyle) -> list[Optional[str]]:
+    """Choose fonts while keeping join controls inside their script cluster."""
+    fonts = [_font_for_character(character, style) for character in text]
+    for index, character in enumerate(text):
+        if character not in {"\u200c", "\u200d"}:
+            continue
+        previous_font = fonts[index - 1] if index else None
+        next_font = fonts[index + 1] if index + 1 < len(fonts) else None
+        fonts[index] = (
+            previous_font
+            if previous_font == next_font or previous_font is not None
+            else next_font
+        )
+    return fonts
+
+
 def _font_markup(cleaned: str, style: ParagraphStyle) -> str:
     if not cleaned:
         return ""
+    fonts = _font_sequence(cleaned, style)
     fragments = []
     start = 0
-    current_font = _font_for_character(cleaned[0], style)
-    for index, character in enumerate(cleaned[1:], start=1):
-        font_name = _font_for_character(character, style)
+    current_font = fonts[0]
+    for index, font_name in enumerate(fonts[1:], start=1):
         if font_name == current_font:
             continue
         fragment = escape(cleaned[start:index], entities={"'": "&apos;", '"': "&quot;"})
@@ -383,9 +399,9 @@ def _escaped_paragraph_text(value: Any, style: ParagraphStyle) -> str:
 def _rendered_width(text: str, style: ParagraphStyle) -> float:
     width = 0.0
     start = 0
-    current_font = _font_for_character(text[0], style) if text else None
-    for index, character in enumerate(text[1:], start=1):
-        font_name = _font_for_character(character, style)
+    fonts = _font_sequence(text, style)
+    current_font = fonts[0] if fonts else None
+    for index, font_name in enumerate(fonts[1:], start=1):
         if font_name == current_font:
             continue
         width += pdfmetrics.stringWidth(
