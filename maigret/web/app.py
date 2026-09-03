@@ -51,6 +51,8 @@ from maigret.report import generate_report_context
 from maigret.utils import is_country_tag, is_plausible_username
 from maigret.web.case_store import (
     ActiveInvestigationError,
+    MAX_COMBINED_SOURCE_CASES,
+    ReferencedCaseError,
     TERMINAL_STATUSES,
     CaseStore,
     database_url_from_environment,
@@ -107,11 +109,11 @@ from maigret.web.persona_pdf import generate_persona_pdf, persona_pdf_filename
 
 app = Flask(__name__)
 try:
-    trusted_proxy_hops = int(os.getenv('OPENLEDGER_PROXY_HOPS', '0'))
+    trusted_proxy_hops = int(os.getenv("OPENLEDGER_PROXY_HOPS", "0"))
 except ValueError as error:
-    raise RuntimeError('OPENLEDGER_PROXY_HOPS must be an integer') from error
+    raise RuntimeError("OPENLEDGER_PROXY_HOPS must be an integer") from error
 if trusted_proxy_hops not in {0, 1, 2}:
-    raise RuntimeError('OPENLEDGER_PROXY_HOPS must be 0, 1, or 2')
+    raise RuntimeError("OPENLEDGER_PROXY_HOPS must be 0, 1, or 2")
 if trusted_proxy_hops:
     app.wsgi_app = ProxyFix(
         app.wsgi_app,
@@ -123,11 +125,11 @@ if trusted_proxy_hops:
 configured_secret_key = os.getenv('FLASK_SECRET_KEY', '').strip()
 app.secret_key = configured_secret_key or os.urandom(24).hex()
 app.config.update(
-    SESSION_COOKIE_NAME='openledger_session',
+    SESSION_COOKIE_NAME="openledger_session",
     SESSION_COOKIE_HTTPONLY=True,
-    SESSION_COOKIE_SAMESITE='Strict',
-    SESSION_COOKIE_SECURE=os.getenv('SESSION_COOKIE_SECURE', 'false').lower()
-    in ('true', '1', 'yes'),
+    SESSION_COOKIE_SAMESITE="Strict",
+    SESSION_COOKIE_SECURE=os.getenv("SESSION_COOKIE_SECURE", "false").lower()
+    in ("true", "1", "yes"),
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
     MAX_CONTENT_LENGTH=2 * 1024 * 1024,
     MAX_FORM_MEMORY_SIZE=256 * 1024,
@@ -3816,28 +3818,118 @@ def run_persistent_identity_enrichment_job(
     )
 
 
+def run_persistent_case_fusion_job(
+    store: CaseStore, job: Dict[str, Any], shutdown_check=None
+):
+    """Build one immutable approved-evidence snapshot for selected cases."""
+    job_id = job["job_id"]
+    source_case_ids = list(
+        ((job.get("options") or {}).get("investigation_spec") or {}).get(
+            "source_case_ids"
+        )
+        or []
+    )
+    store.append_event(
+        job_id,
+        {
+            "type": "start",
+            "total": len(source_case_ids),
+            "activity": "Capturing approved source evidence",
+        },
+    )
+    try:
+        if store.is_cancel_requested(job_id) or bool(
+            shutdown_check and shutdown_check()
+        ):
+            status = (
+                "interrupted"
+                if bool(shutdown_check and shutdown_check())
+                else "cancelled"
+            )
+            result = {
+                "status": status,
+                "kind": "case_fusion",
+                "error": "The combined investigation stopped before snapshot completion.",
+            }
+        else:
+            snapshot_result = store.build_case_fusion_snapshot(job_id)
+            if store.is_cancel_requested(job_id) or bool(
+                shutdown_check and shutdown_check()
+            ):
+                status = (
+                    "interrupted"
+                    if bool(shutdown_check and shutdown_check())
+                    else "cancelled"
+                )
+                result = {
+                    "status": status,
+                    "kind": "case_fusion",
+                    "error": (
+                        "The combined investigation stopped before the snapshot "
+                        "could be published."
+                    ),
+                }
+            else:
+                store.append_event(
+                    job_id,
+                    {
+                        "type": "progress",
+                        "checked": len(source_case_ids),
+                        "total": len(source_case_ids),
+                        "site": "Approved evidence snapshot",
+                    },
+                )
+                result = {
+                    "status": "completed",
+                    "kind": "case_fusion",
+                    **snapshot_result,
+                }
+    except Exception as error:
+        public_error = record_internal_error(
+            "Combined investigation failed", error, case_id=job.get("case_id")
+        )
+        result = {
+            "status": "failed",
+            "kind": "case_fusion",
+            "error": public_error,
+        }
+    store.finish(job_id, result)
+    store.append_event(
+        job_id,
+        {
+            "type": "done",
+            "status": result["status"],
+            "redirect": (
+                f"/cases/{job['case_id']}" if result["status"] == "completed" else None
+            ),
+        },
+    )
+
+
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
     """Execute a claimed database job independently from any browser request."""
-    if job.get('kind') == 'affiliation':
+    if job.get("kind") == "affiliation":
         return run_persistent_affiliation_job(store, job, shutdown_check=shutdown_check)
-    if job.get('kind') == 'identity_enrichment':
+    if job.get("kind") == "identity_enrichment":
         return run_persistent_identity_enrichment_job(
             store, job, shutdown_check=shutdown_check
         )
-    job_id = job['job_id']
-    usernames = job['usernames']
-    options = hydrate_persistent_options(job['options'])
-    started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if job.get("kind") == "case_fusion":
+        return run_persistent_case_fusion_job(store, job, shutdown_check=shutdown_check)
+    job_id = job["job_id"]
+    usernames = job["usernames"]
+    options = hydrate_persistent_options(job["options"])
+    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     sink = PersistentEventSink(store, job_id)
     runtime_job = {
-        'queue': sink,
-        'cancelled': False,
-        'loop': None,
-        'task': None,
+        "queue": sink,
+        "cancelled": False,
+        "loop": None,
+        "task": None,
     }
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    runtime_job['loop'] = loop
+    runtime_job["loop"] = loop
     general_results = []
     stream_task = None
     stop_watcher = None
@@ -3864,12 +3956,12 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         )
         general_results = loop.run_until_complete(stream_task)
     except asyncio.CancelledError:
-        general_results = list(runtime_job.get('general_results') or [])
+        general_results = list(runtime_job.get("general_results") or [])
     except Exception as error:
         public_error = record_internal_error(
-            'Persistent investigation failed', error, session=job_id
+            "Persistent investigation failed", error, session=job_id
         )
-        sink.put({'type': 'error', 'message': public_error})
+        sink.put({"type": "error", "message": public_error})
     finally:
         if stop_watcher is not None and not stop_watcher.done():
             stop_watcher.cancel()
@@ -3885,7 +3977,7 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         general_results,
         started_at,
         sink,
-        collector_observations=runtime_job.get('collector_observations'),
+        collector_observations=runtime_job.get("collector_observations"),
         cancelled=store.is_cancel_requested(job_id) and not shutdown_requested,
         interrupted=shutdown_requested,
     )
@@ -3927,7 +4019,7 @@ def scan_start():
     return {'job_id': job_id}
 
 
-@app.route('/api/scan/<job_id>/stream')
+@app.route("/api/scan/<job_id>/stream")
 def scan_stream(job_id):
     if case_store is not None:
         stored_job = case_store.get_job(job_id)
@@ -3935,8 +4027,7 @@ def scan_stream(job_id):
             return "Unknown job", 404
         try:
             last_event_id = int(
-                request.headers.get('Last-Event-ID')
-                or request.args.get('after', '0')
+                request.headers.get("Last-Event-ID") or request.args.get("after", "0")
             )
         except ValueError:
             last_event_id = 0
@@ -3948,8 +4039,8 @@ def scan_stream(job_id):
             while True:
                 events = case_store.get_events(job_id, after_id=cursor)
                 for stored_event in events:
-                    cursor = stored_event['id']
-                    saw_done = saw_done or stored_event['event'].get('type') == 'done'
+                    cursor = stored_event["id"]
+                    saw_done = saw_done or stored_event["event"].get("type") == "done"
                     yield (
                         f"id: {cursor}\n"
                         f"data: {json.dumps(stored_event['event'])}\n\n"
@@ -3957,25 +4048,28 @@ def scan_stream(job_id):
                 current = case_store.get_job(job_id)
                 if not current:
                     break
-                if current['status'] in TERMINAL_STATUSES and not events:
+                if current["status"] in TERMINAL_STATUSES and not events:
                     if not saw_done:
                         yield (
                             "data: "
                             + json.dumps(
                                 {
-                                    'type': 'done',
-                                    'status': current['status'],
-                                    'redirect': (
+                                    "type": "done",
+                                    "status": current["status"],
+                                    "redirect": (
                                         f"/cases/{current['case_id']}"
-                                        if current.get('kind') == 'affiliation' and current['status'] == 'completed'
+                                        if current.get("kind")
+                                        in {"affiliation", "case_fusion"}
+                                        and current["status"] == "completed"
                                         else (
                                             f"/personas/{current.get('persona_id')}"
-                                            if current.get('kind') == 'identity_enrichment'
-                                            and current['status'] == 'completed'
-                                            and current.get('persona_id')
+                                            if current.get("kind")
+                                            == "identity_enrichment"
+                                            and current["status"] == "completed"
+                                            and current.get("persona_id")
                                             else (
                                                 f"/results/{current['session_folder']}"
-                                                if current['status'] == 'completed'
+                                                if current["status"] == "completed"
                                                 else None
                                             )
                                         )
@@ -3993,10 +4087,10 @@ def scan_stream(job_id):
 
         return Response(
             persistent_events(),
-            mimetype='text/event-stream',
+            mimetype="text/event-stream",
             headers={
-                'Cache-Control': 'no-cache, no-transform',
-                'X-Accel-Buffering': 'no',
+                "Cache-Control": "no-cache, no-transform",
+                "X-Accel-Buffering": "no",
             },
         )
 
@@ -4007,14 +4101,14 @@ def scan_stream(job_id):
     def gen():
         try:
             while True:
-                event = job['queue'].get()
+                event = job["queue"].get()
                 yield f"data: {json.dumps(event)}\n\n"
-                if event.get('type') == 'done':
+                if event.get("type") == "done":
                     break
         finally:
             live_jobs.pop(job_id, None)
 
-    return Response(gen(), mimetype='text/event-stream')
+    return Response(gen(), mimetype="text/event-stream")
 
 
 @app.route('/api/scan/<job_id>/stop', methods=['POST'])
@@ -4369,50 +4463,78 @@ def _history_started_display(value: Any) -> str:
 
 def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]:
     """Describe why a retained run exists, not just its username payload."""
-    options = entry.get('options') if isinstance(entry.get('options'), dict) else {}
+    options = entry.get("options") if isinstance(entry.get("options"), dict) else {}
     specification = (
-        options.get('investigation_spec')
-        if isinstance(options.get('investigation_spec'), dict)
+        options.get("investigation_spec")
+        if isinstance(options.get("investigation_spec"), dict)
         else {}
     )
-    kind = str(
-        entry.get('kind') or specification.get('investigation_type') or 'live'
-    )
+    kind = str(entry.get("kind") or specification.get("investigation_type") or "live")
     usernames = [
-        ' '.join(str(value).split())
-        for value in list(entry.get('usernames') or [])[:100]
+        " ".join(str(value).split())
+        for value in list(entry.get("usernames") or [])[:100]
         if str(value).strip()
     ]
     context_parts = []
 
-    if kind == 'affiliation':
-        type_label = 'Organization affiliation'
-        target = ' '.join(
+    if kind == "case_fusion":
+        type_label = "Combined investigation"
+        target = " ".join(str(entry.get("case_title") or "Combined case").split())
+        try:
+            source_count = int(entry.get("source_case_count") or 0)
+        except (TypeError, ValueError):
+            source_count = 0
+        try:
+            connection_count = int(entry.get("connection_count") or 0)
+        except (TypeError, ValueError):
+            connection_count = 0
+        context_parts.append(
+            f"{source_count} source case{'s' if source_count != 1 else ''}"
+        )
+        finding_summary = (
+            f"{connection_count} exact cross-case evidence path"
+            f"{'s' if connection_count != 1 else ''}"
+        )
+    elif kind == "affiliation":
+        type_label = "Organization affiliation"
+        target = " ".join(
             str(
-                specification.get('affiliation_name')
-                or entry.get('case_title')
-                or 'Organization'
+                specification.get("affiliation_name")
+                or entry.get("case_title")
+                or "Organization"
             ).split()
         )
-        if target.startswith('Affiliation: '):
-            target = target[len('Affiliation: '):].split(' · ', 1)[0]
-        jurisdiction = specification.get('legal_jurisdiction')
+        if target.startswith("Affiliation: "):
+            target = target[len("Affiliation: ") :].split(" · ", 1)[0]
+        jurisdiction = specification.get("legal_jurisdiction")
         if isinstance(jurisdiction, dict):
-            label = ' '.join(str(jurisdiction.get('label') or '').split())
-            code = ' '.join(str(jurisdiction.get('code') or '').split())
+            label = " ".join(str(jurisdiction.get("label") or "").split())
+            code = " ".join(str(jurisdiction.get("code") or "").split())
             context_parts.append(
                 f"{label} · {code}" if label and code else label or code
             )
-        website = specification.get('official_website')
-        if isinstance(website, dict) and website.get('domain'):
-            context_parts.append(str(website['domain']))
+        website = specification.get("official_website")
+        if isinstance(website, dict) and website.get("domain"):
+            context_parts.append(str(website["domain"]))
         summary_parts = []
         for count, singular, plural in (
-            (entry.get('registry_candidate_count'), 'registry lead', 'registry leads'),
-            (entry.get('google_places_candidate_count'), 'map lead', 'map leads'),
-            (entry.get('website_address_count'), 'website location', 'website locations'),
-            (entry.get('public_web_finding_count'), 'web observation', 'web observations'),
-            (entry.get('affiliated_person_count'), 'person proposal', 'person proposals'),
+            (entry.get("registry_candidate_count"), "registry lead", "registry leads"),
+            (entry.get("google_places_candidate_count"), "map lead", "map leads"),
+            (
+                entry.get("website_address_count"),
+                "website location",
+                "website locations",
+            ),
+            (
+                entry.get("public_web_finding_count"),
+                "web observation",
+                "web observations",
+            ),
+            (
+                entry.get("affiliated_person_count"),
+                "person proposal",
+                "person proposals",
+            ),
         ):
             try:
                 count = int(count or 0)
@@ -4420,50 +4542,49 @@ def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]
                 count = 0
             if count:
                 summary_parts.append(f"{count} {singular if count == 1 else plural}")
-        finding_summary = ' · '.join(summary_parts) or 'No retained leads'
-    elif kind == 'identity_enrichment':
-        type_label = 'Confirmed-name enrichment'
-        target = ' '.join(
+        finding_summary = " · ".join(summary_parts) or "No retained leads"
+    elif kind == "identity_enrichment":
+        type_label = "Confirmed-name enrichment"
+        target = " ".join(
             str(
-                specification.get('confirmed_name')
-                or entry.get('case_title')
-                or 'Confirmed person'
+                specification.get("confirmed_name")
+                or entry.get("case_title")
+                or "Confirmed person"
             ).split()
         )
-        context_parts.append('Wikipedia and ICIJ public records')
+        context_parts.append("Wikipedia and ICIJ public records")
         proposal_count = 0
-        for field_name in ('wikipedia_claim_count', 'offshore_alert_count'):
+        for field_name in ("wikipedia_claim_count", "offshore_alert_count"):
             try:
                 proposal_count += max(0, int(entry.get(field_name) or 0))
             except (TypeError, ValueError):
                 continue
         finding_summary = (
-            f"{proposal_count} claim proposal"
-            f"{'s' if proposal_count != 1 else ''}"
+            f"{proposal_count} claim proposal" f"{'s' if proposal_count != 1 else ''}"
         )
     else:
-        grouped = specification.get('processing_mode') == 'same_subject'
-        type_label = 'Identity investigation' if grouped else 'Username investigation'
-        target = ' '.join(
-            str(specification.get('subject_label') or '').split()
-        )
+        grouped = specification.get("processing_mode") == "same_subject"
+        type_label = "Identity investigation" if grouped else "Username investigation"
+        target = " ".join(str(specification.get("subject_label") or "").split())
         if not target:
             visible = usernames[:3]
-            target = ', '.join(visible) or 'Unlabelled target'
+            target = ", ".join(visible) or "Unlabelled target"
             if len(usernames) > len(visible):
                 target += f" +{len(usernames) - len(visible)}"
-        identifier_count = len(
-            list(specification.get('identifiers') or [])
-        ) if grouped else len(usernames)
+        identifier_count = (
+            len(list(specification.get("identifiers") or []))
+            if grouped
+            else len(usernames)
+        )
         if identifier_count:
             context_parts.append(
                 f"{identifier_count} identifier"
                 f"{'s' if identifier_count != 1 else ''} checked"
             )
         found = (
-            entry.get('found_count')
-            if entry.get('status') == 'completed'
-            else (entry.get('progress') or {}).get('found', 0)
+            entry.get("found_count")
+            if entry.get("status") == "completed"
+            else (entry.get("progress") or {}).get("found", 0)
         )
         try:
             found = int(found or 0)
@@ -4471,23 +4592,23 @@ def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]
             found = 0
         finding_summary = f"{found} profile{'s' if found != 1 else ''}"
 
-    status = str(entry.get('status') or '')
-    if status == 'queued':
-        finding_summary = 'Collection queued'
-    elif status in {'running', 'cancel_requested'}:
+    status = str(entry.get("status") or "")
+    if status == "queued":
+        finding_summary = "Collection queued"
+    elif status in {"running", "cancel_requested"}:
         try:
-            progress_found = int((entry.get('progress') or {}).get('found') or 0)
+            progress_found = int((entry.get("progress") or {}).get("found") or 0)
         except (TypeError, ValueError):
             progress_found = 0
         finding_summary = f"{progress_found} findings so far"
 
     return {
-        'type_label': type_label,
-        'target': target[:500],
-        'context': ' · '.join(part for part in context_parts if part)[:1000],
-        'finding_summary': finding_summary[:500],
-        'started_display': _history_started_display(entry.get('started_at')),
-        'started_raw': str(entry.get('started_at') or ''),
+        "type_label": type_label,
+        "target": target[:500],
+        "context": " · ".join(part for part in context_parts if part)[:1000],
+        "finding_summary": finding_summary[:500],
+        "started_display": _history_started_display(entry.get("started_at")),
+        "started_raw": str(entry.get("started_at") or ""),
     }
 
 
@@ -4497,6 +4618,66 @@ def cases_workspace():
         flash('The case workspace requires persistent storage.', 'warning')
         return redirect(url_for('history'))
     return render_template('cases.html', cases=case_store.list_cases())
+
+
+@app.route("/cases/combine", methods=["GET", "POST"])
+def combine_cases_workspace():
+    if case_store is None:
+        flash("Combined investigations require persistent storage.", "warning")
+        return redirect(url_for("history"))
+    candidates = [
+        case
+        for case in case_store.list_cases()
+        if case.get("case_type") == "standalone"
+    ]
+    if request.method == "GET":
+        return render_template(
+            "combine_cases.html",
+            cases=candidates,
+            max_source_cases=MAX_COMBINED_SOURCE_CASES,
+            selected_case_ids=[],
+            submitted_title=(
+                "Combined investigation · "
+                + datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            ),
+            submitted_purpose="",
+        )
+    if not is_valid_csrf(request.form.get("csrf_token")):
+        flash("Your case session expired. Please try again.", "danger")
+        return redirect(url_for("combine_cases_workspace"))
+    selected_case_ids = request.form.getlist("case_id")
+    title = str(request.form.get("title") or "").strip()
+    purpose = str(request.form.get("purpose") or "").strip()
+    actor = session.get("username") or "local-operator"
+    try:
+        job_id = case_store.create_combined_investigation(
+            selected_case_ids,
+            title=title,
+            purpose=purpose,
+            created_by=actor,
+        )
+    except KeyError:
+        flash("One of the selected source cases no longer exists.", "danger")
+        return redirect(url_for("combine_cases_workspace"))
+    except ValueError as error:
+        flash(str(error), "danger")
+        return (
+            render_template(
+                "combine_cases.html",
+                cases=candidates,
+                max_source_cases=MAX_COMBINED_SOURCE_CASES,
+                selected_case_ids=selected_case_ids,
+                submitted_title=title,
+                submitted_purpose=purpose,
+            ),
+            400,
+        )
+    flash(
+        "Combined investigation queued. Source cases and their review records "
+        "remain unchanged.",
+        "success",
+    )
+    return redirect(url_for("live_results", job_id=job_id))
 
 
 def reserve_google_places_live_request(case_id: str) -> bool:
@@ -4598,17 +4779,62 @@ def load_case_google_places_live(
         }
 
 
-@app.route('/cases/<case_id>')
+@app.route("/cases/<case_id>")
 def case_workspace(case_id):
     if case_store is None:
-        flash('The case workspace requires persistent storage.', 'warning')
-        return redirect(url_for('history'))
+        flash("The case workspace requires persistent storage.", "warning")
+        return redirect(url_for("history"))
     case = case_store.get_case(case_id)
     if not case:
-        flash('That case does not exist.', 'danger')
-        return redirect(url_for('cases_workspace'))
-    case['google_places_live'] = load_case_google_places_live(case)
-    return render_template('case.html', case=case)
+        flash("That case does not exist.", "danger")
+        return redirect(url_for("cases_workspace"))
+    if case.get("case_type") == "combined":
+        latest_fusion_job = next(
+            (job for job in case.get("jobs", []) if job.get("kind") == "case_fusion"),
+            None,
+        )
+        latest_completed_fusion_job = next(
+            (
+                job
+                for job in case.get("jobs", [])
+                if job.get("kind") == "case_fusion" and job.get("status") == "completed"
+            ),
+            None,
+        )
+        return render_template(
+            "combined_case.html",
+            case=case,
+            latest_fusion_job=latest_fusion_job,
+            latest_completed_fusion_job=latest_completed_fusion_job,
+        )
+    case["google_places_live"] = load_case_google_places_live(case)
+    return render_template("case.html", case=case)
+
+
+@app.route("/cases/<case_id>/combine/refresh", methods=["POST"])
+def refresh_combined_case(case_id):
+    if not is_valid_csrf(request.form.get("csrf_token")):
+        flash("Your case session expired. Please try again.", "danger")
+        return redirect(url_for("case_workspace", case_id=case_id))
+    if case_store is None:
+        flash("Combined investigations require persistent storage.", "warning")
+        return redirect(url_for("history"))
+    actor = session.get("username") or "local-operator"
+    try:
+        job_id = case_store.queue_combined_investigation_refresh(
+            case_id, requested_by=actor
+        )
+    except KeyError:
+        flash("That combined investigation does not exist.", "danger")
+        return redirect(url_for("cases_workspace"))
+    except ActiveInvestigationError as error:
+        flash(str(error), "warning")
+        return redirect(url_for("case_workspace", case_id=case_id))
+    except ValueError as error:
+        flash(str(error), "danger")
+        return redirect(url_for("case_workspace", case_id=case_id))
+    flash("A refreshed approved-evidence snapshot was queued.", "success")
+    return redirect(url_for("live_results", job_id=job_id))
 
 
 @app.route('/cases/<case_id>/google-places-live', methods=['POST'])
@@ -4647,47 +4873,55 @@ def case_google_places_live(case_id):
     return render_template('case.html', case=case)
 
 
-@app.route('/cases/<case_id>/delete', methods=['POST'])
+@app.route("/cases/<case_id>/delete", methods=["POST"])
 def delete_case_workspace(case_id):
-    if not is_valid_csrf(request.form.get('csrf_token')):
-        flash('Your case session expired. Please try again.', 'danger')
-        return redirect(url_for('cases_workspace'))
+    if not is_valid_csrf(request.form.get("csrf_token")):
+        flash("Your case session expired. Please try again.", "danger")
+        return redirect(url_for("cases_workspace"))
     if case_store is None:
-        flash('The case workspace requires persistent storage.', 'warning')
-        return redirect(url_for('history'))
+        flash("The case workspace requires persistent storage.", "warning")
+        return redirect(url_for("history"))
     stored_case = case_store.get_case(case_id)
     if not stored_case:
-        flash('That case no longer exists.', 'info')
-        return redirect(url_for('cases_workspace'))
-    confirmation_name = str(request.form.get('confirmation_name') or '')
-    if confirmation_name != stored_case['title']:
-        flash('Case deletion cancelled. Type the exact case name to confirm.', 'warning')
-        return redirect(url_for('case_workspace', case_id=case_id))
-    try:
-        deleted = delete_persisted_case(
-            case_id, confirmation_name=confirmation_name
+        flash("That case no longer exists.", "info")
+        return redirect(url_for("cases_workspace"))
+    confirmation_name = str(request.form.get("confirmation_name") or "")
+    if confirmation_name != stored_case["title"]:
+        flash(
+            "Case deletion cancelled. Type the exact case name to confirm.", "warning"
         )
+        return redirect(url_for("case_workspace", case_id=case_id))
+    try:
+        deleted = delete_persisted_case(case_id, confirmation_name=confirmation_name)
     except ActiveInvestigationError:
         flash(
-            'Stop the active investigation and wait for it to finish stopping '
-            'before deleting this case.',
-            'warning',
+            "Stop the active investigation and wait for it to finish stopping "
+            "before deleting this case.",
+            "warning",
         )
-        return redirect(url_for('case_workspace', case_id=case_id))
+        return redirect(url_for("case_workspace", case_id=case_id))
+    except ReferencedCaseError as error:
+        reference_names = ", ".join(item["title"] for item in error.references[:5])
+        flash(
+            "This source case is retained by a combined investigation: "
+            f"{reference_names}. Delete the combined investigation first.",
+            "warning",
+        )
+        return redirect(url_for("case_workspace", case_id=case_id))
     except (KeyError, OSError, ValueError) as error:
-        record_internal_error('Failed to delete case', error, case_id=case_id)
-        flash('The case could not be deleted.', 'danger')
-        return redirect(url_for('case_workspace', case_id=case_id))
+        record_internal_error("Failed to delete case", error, case_id=case_id)
+        flash("The case could not be deleted.", "danger")
+        return redirect(url_for("case_workspace", case_id=case_id))
 
     if deleted:
         flash(
-            'Case, investigations, reports, chat, Personas, and evidence were '
-            'permanently deleted.',
-            'success',
+            "Case, investigations, reports, chat, Personas, and evidence were "
+            "permanently deleted.",
+            "success",
         )
     else:
-        flash('That case no longer exists.', 'info')
-    return redirect(url_for('cases_workspace'))
+        flash("That case no longer exists.", "info")
+    return redirect(url_for("cases_workspace"))
 
 
 @app.route('/cases/<case_id>/chat')
@@ -5144,60 +5378,88 @@ def configure_persona_investigation(persona_id):
     return redirect(url_for('live_results', job_id=job_id))
 
 
-@app.route('/relationships')
+@app.route("/relationships")
 def relationships_workspace():
     if case_store is None:
-        flash('The relationships workspace requires persistent storage.', 'warning')
-        return redirect(url_for('history'))
-    selected_case_id = request.args.get('case_id', '').strip()
-    mode = request.args.get('mode', 'persona').strip()
-    if mode not in {'persona', 'shared'}:
-        mode = 'persona'
+        flash("The relationships workspace requires persistent storage.", "warning")
+        return redirect(url_for("history"))
+    selected_case_id = request.args.get("case_id", "").strip()
+    mode = request.args.get("mode", "persona").strip()
+    if mode not in {"persona", "shared"}:
+        mode = "persona"
     cases = case_store.list_cases()
-    known_case_ids = {item['id'] for item in cases}
+    cases_by_id = {item["id"]: item for item in cases}
+    known_case_ids = set(cases_by_id)
     if selected_case_id and selected_case_id not in known_case_ids:
-        flash('That case does not exist.', 'warning')
-        return redirect(url_for('relationships_workspace'))
+        flash("That case does not exist.", "warning")
+        return redirect(url_for("relationships_workspace"))
+    selected_case = cases_by_id.get(selected_case_id)
+    combined_scope = bool(
+        selected_case and selected_case.get("case_type") == "combined"
+    )
+    if combined_scope:
+        mode = "shared"
     available_personas = [
         {
-            'id': persona['id'],
-            'display_name': persona['display_name'],
-            'case_id': case['id'],
-            'case_title': case['title'],
+            "id": persona["id"],
+            "display_name": persona["display_name"],
+            "case_id": case["id"],
+            "case_title": case["title"],
         }
         for case in cases
-        if not selected_case_id or case['id'] == selected_case_id
-        for persona in case['personas']
+        if not selected_case_id or case["id"] == selected_case_id
+        for persona in case["personas"]
     ]
-    selected_persona_id = request.args.get('persona_id', '').strip()
-    available_persona_ids = {item['id'] for item in available_personas}
+    selected_persona_id = request.args.get("persona_id", "").strip()
+    available_persona_ids = {item["id"] for item in available_personas}
     if selected_persona_id not in available_persona_ids:
-        selected_persona_id = (
-            available_personas[0]['id'] if available_personas else ''
-        )
-    if mode == 'persona' and selected_persona_id:
+        selected_persona_id = available_personas[0]["id"] if available_personas else ""
+    if mode == "persona" and selected_persona_id:
         graph = case_store.build_persona_graph(selected_persona_id)
-    elif mode == 'persona':
+    elif mode == "persona":
         graph = {
-            'mode': 'persona',
-            'nodes': [],
-            'edges': [],
-            'stats': {
-                'persona_count': 0,
-                'claim_count': 0,
-                'source_count': 0,
-                'pending_count': 0,
-                'field_counts': {},
-                'truncated_count': 0,
+            "mode": "persona",
+            "nodes": [],
+            "edges": [],
+            "stats": {
+                "persona_count": 0,
+                "claim_count": 0,
+                "source_count": 0,
+                "pending_count": 0,
+                "field_counts": {},
+                "truncated_count": 0,
+            },
+        }
+    elif combined_scope:
+        combined_case = case_store.get_case(selected_case_id)
+        completed_fusion = next(
+            (
+                job
+                for job in (combined_case or {}).get("jobs", [])
+                if job.get("kind") == "case_fusion" and job.get("status") == "completed"
+            ),
+            None,
+        )
+        graph = (completed_fusion or {}).get("relationship_graph") or {
+            "mode": "shared",
+            "scope": "combined_case_snapshot",
+            "nodes": [],
+            "edges": [],
+            "stats": {
+                "persona_count": 0,
+                "organization_count": 0,
+                "shared_attribute_count": 0,
+                "connection_count": 0,
+                "field_counts": {},
             },
         }
     else:
         graph = case_store.build_relationship_graph(selected_case_id or None)
-    for edge in graph.get('edges', []):
-        if edge.get('field_name'):
-            edge['label'] = field_display_label(edge['field_name'])
+    for edge in graph.get("edges", []):
+        if edge.get("field_name") and not edge.get("relationship_rule"):
+            edge["label"] = field_display_label(edge["field_name"])
     return render_template(
-        'relationships.html',
+        "relationships.html",
         graph=graph,
         cases=cases,
         mode=mode,
@@ -5205,6 +5467,7 @@ def relationships_workspace():
         available_personas=available_personas,
         selected_persona_id=selected_persona_id,
         field_display_label=field_display_label,
+        combined_scope=combined_scope,
     )
 
 
@@ -5557,6 +5820,14 @@ def delete_history_entry(session_folder):
         deleted = delete_persisted_investigation(
             session_folder, confirmation_name=confirmation_name
         )
+    except ReferencedCaseError as error:
+        reference_names = ", ".join(item["title"] for item in error.references[:5])
+        flash(
+            "This source case is retained by a combined investigation: "
+            f"{reference_names}. Delete the combined investigation first.",
+            "warning",
+        )
+        return redirect(url_for("history"))
     except (OSError, ValueError) as error:
         record_internal_error(
             'Failed to delete investigation', error, session=session_folder
@@ -5590,52 +5861,54 @@ def live_start():
     return redirect(url_for('live_results', job_id=job_id))
 
 
-@app.route('/live/<job_id>')
+@app.route("/live/<job_id>")
 def live_results(job_id):
     stored_job = case_store.get_job(job_id) if case_store is not None else None
     result = job_results.get(job_id)
     if not result:
-        loaded = load_persisted_job_result(f'search_{job_id}')
+        loaded = load_persisted_job_result(f"search_{job_id}")
         if loaded:
             _, result = loaded
             job_results[job_id] = result
     if job_id not in live_jobs and not stored_job and not result:
-        flash('Unknown or expired scan session.', 'danger')
-        return redirect(url_for('index'))
+        flash("Unknown or expired scan session.", "danger")
+        return redirect(url_for("index"))
 
     done_redirect = None
     result = result or stored_job
-    if result and result.get('status') == 'completed':
-        if result.get('kind') == 'affiliation':
-            done_redirect = url_for('case_workspace', case_id=result['case_id'])
-        elif result.get('kind') == 'identity_enrichment' and result.get('persona_id'):
+    if result and result.get("status") == "completed":
+        if result.get("kind") in {"affiliation", "case_fusion"}:
+            done_redirect = url_for("case_workspace", case_id=result["case_id"])
+        elif result.get("kind") == "identity_enrichment" and result.get("persona_id"):
             done_redirect = url_for(
-                'persona_workspace', persona_id=result['persona_id']
+                "persona_workspace", persona_id=result["persona_id"]
             )
         else:
-            done_redirect = url_for('results', session_id=result['session_folder'])
+            done_redirect = url_for("results", session_id=result["session_folder"])
 
     return render_template(
-        'live.html',
+        "live.html",
         job_id=job_id,
-        job_kind=(result or {}).get('kind', 'live'),
+        job_kind=(result or {}).get("kind", "live"),
         done_redirect=done_redirect,
-        completed_found_count=(result or {}).get('found_count', 0),
+        completed_found_count=(result or {}).get("found_count", 0),
         completed_registration_count=(result or {}).get(
-            'collector_registration_count',
-            (result or {}).get('collector_found_count', 0),
+            "collector_registration_count",
+            (result or {}).get("collector_found_count", 0),
         ),
         completed_github_enrichment_count=(result or {}).get(
-            'github_enrichment_count', 0
+            "github_enrichment_count", 0
         ),
         completed_archived_profile_count=(result or {}).get(
-            'archived_profile_count', 0
+            "archived_profile_count", 0
         ),
-        completed_affiliated_person_count=(result or {}).get('affiliated_person_count', 0),
+        completed_affiliated_person_count=(result or {}).get(
+            "affiliated_person_count", 0
+        ),
         completed_registry_candidate_count=(result or {}).get(
-            'registry_candidate_count', 0
+            "registry_candidate_count", 0
         ),
-        completed_offshore_alert_count=(result or {}).get('offshore_alert_count', 0),
+        completed_offshore_alert_count=(result or {}).get("offshore_alert_count", 0),
     )
 
 
@@ -5722,41 +5995,48 @@ def status(timestamp):
     return render_template('status.html', timestamp=timestamp)
 
 
-@app.route('/results/<session_id>')
+@app.route("/results/<session_id>")
 def results(session_id):
     result_data = find_result_by_session(session_id)
 
     if not result_data:
-        flash('No results found for this session ID.', 'danger')
+        flash("No results found for this session ID.", "danger")
         logging.error(
-            'Results for session %s not found in job_results.',
+            "Results for session %s not found in job_results.",
             safe_log_value(session_id),
         )
-        return redirect(url_for('index'))
+        return redirect(url_for("index"))
 
-    if result_data.get('kind') == 'identity_enrichment':
-        persona_id = result_data.get('persona_id')
+    if result_data.get("kind") == "identity_enrichment":
+        persona_id = result_data.get("persona_id")
         if persona_id:
-            return redirect(url_for('persona_workspace', persona_id=persona_id))
-        flash('This enrichment has no Persona workspace to open.', 'warning')
-        return redirect(url_for('history'))
+            return redirect(url_for("persona_workspace", persona_id=persona_id))
+        flash("This enrichment has no Persona workspace to open.", "warning")
+        return redirect(url_for("history"))
+
+    if result_data.get("kind") == "case_fusion":
+        case_id = result_data.get("case_id")
+        if case_id:
+            return redirect(url_for("case_workspace", case_id=case_id))
+        flash("This combined investigation has no case workspace to open.", "warning")
+        return redirect(url_for("history"))
 
     result_case = None
     if case_store is not None:
-        case_id = result_data.get('case_id')
-        if not case_id and session_id.startswith('search_'):
-            stored_job = case_store.get_job(session_id.removeprefix('search_'))
-            case_id = (stored_job or {}).get('case_id')
+        case_id = result_data.get("case_id")
+        if not case_id and session_id.startswith("search_"):
+            stored_job = case_store.get_job(session_id.removeprefix("search_"))
+            case_id = (stored_job or {}).get("case_id")
         if case_id:
             result_case = case_store.get_case(case_id)
 
     return render_template(
-        'results.html',
-        usernames=result_data['usernames'],
-        graph_file=result_data['graph_file'],
-        individual_reports=result_data['individual_reports'],
-        found_count=result_data.get('found_count', 0),
-        timestamp=session_id.replace('search_', ''),
+        "results.html",
+        usernames=result_data["usernames"],
+        graph_file=result_data["graph_file"],
+        individual_reports=result_data["individual_reports"],
+        found_count=result_data.get("found_count", 0),
+        timestamp=session_id.replace("search_", ""),
         session_id=session_id,
         ai_enabled=bool(get_openai_api_key()),
         csrf_token=get_csrf_token(),
@@ -5939,16 +6219,16 @@ def download_report(filename):
         return "File not found", 404
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     )
-    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() in ['true', '1', 't']
+    debug_mode = os.getenv("FLASK_DEBUG", "False").lower() in ["true", "1", "t"]
 
     # Host configuration: secure by default
     # Use 127.0.0.1 for local development, 0.0.0.0 only if explicitly set
-    host = os.getenv('FLASK_HOST', '127.0.0.1')
-    port = int(os.getenv('FLASK_PORT', '5000'))
+    host = os.getenv("FLASK_HOST", "127.0.0.1")
+    port = int(os.getenv("FLASK_PORT", "5000"))
 
     app.run(host=host, port=port, debug=debug_mode)

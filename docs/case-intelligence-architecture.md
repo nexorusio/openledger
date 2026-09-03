@@ -403,6 +403,38 @@ Rejected, pending, and uncertain claims do not enter the default relationship
 projection. Rejected claims are retained so an analyst can reverse a decision
 without losing provenance.
 
+## Combined investigations
+
+A combined investigation is a durable case container that references between
+two and ten standalone source cases. It never reparents or copies a Persona,
+claim, evidence row, observation, or review decision. A source case may
+participate in more than one combined investigation, while nested combined
+investigations are rejected to keep scope and deletion behavior explicit.
+
+Each run captures one transactionally consistent manifest of approved claims,
+their current review decision identifiers, evidence identifiers,
+analyst-confirmed organization selections, and source-case versions. The
+canonical JSON manifest receives a deterministic SHA-256. PostgreSQL uses a
+read-only repeatable-read transaction; SQLite reserves the bounded snapshot
+with `BEGIN IMMEDIATE`. Later source changes do not rewrite an earlier result.
+The workspace instead marks changed sources, and an analyst may explicitly
+queue a refresh that creates another retained snapshot job.
+
+The initial correlation pass is deterministic and local. Exact approved values
+produce a relationship lead only when they occur in different source cases.
+An approved Persona affiliation may also connect to an organization case when
+its normalized name exactly matches that case's separately analyst-confirmed
+organization selection. Pending, uncertain, rejected, fuzzy, and name-only
+records are excluded. Organization cases without a confirmed selection remain
+visible in the combined scope but do not create graph edges.
+
+Deleting a combined investigation deletes only its membership rows, snapshot
+jobs, and presentation record. Deleting a referenced source case is refused
+until the retaining combined investigation is deleted, preventing provenance
+from becoming dangling or silently disappearing. A future AI relationship
+stage must create separate pending, cited, reviewable relationship proposals;
+it must not write model prose into this approved-only graph projection.
+
 ## Case timeline projection
 
 The case evidence timeline is a bounded, read-only projection of records already

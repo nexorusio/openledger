@@ -5,11 +5,11 @@
 <section class="page-heading">
     <div>
         <p class="eyebrow">Active investigation</p>
-        <h1>{{ 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live discovery graph' }}</h1>
-        <p class="page-description">{{ 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Claimed profiles and extracted identifiers appear as OpenLedger checks each source.' }}</p>
+        <h1>{{ 'Combined investigation' if job_kind == 'case_fusion' else 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live discovery graph' }}</h1>
+        <p class="page-description">{{ 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Claimed profiles and extracted identifiers appear as OpenLedger checks each source.' }}</p>
     </div>
     <div class="heading-actions">
-        <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Open reports' }}</a>
+        <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open combined case' if job_kind == 'case_fusion' else 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Open reports' }}</a>
         <button type="button" id="stopBtn" class="btn btn-outline-danger">Stop investigation</button>
     </div>
 </section>
@@ -17,14 +17,18 @@
 <section class="panel-card">
     <header class="panel-header">
         <div>
-            <h2>Source discovery</h2>
+            <h2>{{ 'Approved evidence snapshot' if job_kind == 'case_fusion' else 'Source discovery' }}</h2>
             <p id="live-status" role="status">Starting…</p>
         </div>
         <span class="badge-soft"><i data-lucide="radio"></i> Live</span>
     </header>
     <div class="panel-body">
     <div class="live-stats">
-        {% if job_kind == 'identity_enrichment' %}
+        {% if job_kind == 'case_fusion' %}
+        <div class="live-stat"><span>Source cases</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
+        <div class="live-stat"><span>Evidence scope</span><strong>Approved only</strong></div>
+        <div class="live-stat"><span>Output</span><strong>Versioned graph</strong></div>
+        {% elif job_kind == 'identity_enrichment' %}
         <div class="live-stat"><span>Sources</span><strong>Wikipedia + ICIJ</strong></div>
         <div class="live-stat"><span>Offshore alerts</span><strong id="stat-offshore-alerts">{{ completed_offshore_alert_count }}</strong></div>
         <div class="live-stat"><span>Approval status</span><strong>Pending review</strong></div>
@@ -45,8 +49,12 @@
     <div class="progress mb-3" style="height: 8px;">
         <div id="live-progress" class="progress-bar" role="progressbar" style="width: 0%;"></div>
     </div>
+    {% if job_kind == 'case_fusion' %}
+    <div class="security-callout mb-0"><i data-lucide="shield-check"></i><span>Source cases and review decisions remain unchanged. Pending, uncertain, and rejected records are excluded from this snapshot.</span></div>
+    {% else %}
     <div id="graph"></div>
     <p class="form-text mt-2 mb-0">Double-click a site node to open the public profile in a new tab.</p>
+    {% endif %}
     </div>
 </section>
 
@@ -54,6 +62,7 @@
 
 <script>
     const jobId = {{ job_id|tojson }};
+    const isCaseFusion = {{ (job_kind == 'case_fusion')|tojson }};
     const isAffiliation = {{ (job_kind == 'affiliation')|tojson }};
     const isIdentityEnrichment = {{ (job_kind == 'identity_enrichment')|tojson }};
     const doneRedirect = {{ done_redirect|tojson }};
@@ -151,6 +160,7 @@
     }
 
     function completionText() {
+        if (isCaseFusion) return 'Completed — the versioned approved-evidence snapshot and exact relationship graph are ready.';
         if (isIdentityEnrichment) return 'Completed — public-record proposals are ready for analyst review.';
         if (isAffiliation) return 'Completed — ' + registryCandidateCount + ' registry candidates and ' + affiliatedPersonCount + ' people are ready for analyst review.';
         return 'Completed — ' + foundCount + ' accounts, ' + githubEnrichmentCount
@@ -183,9 +193,12 @@
         const statusEl = document.getElementById('live-status');
         if (ev.type === 'start') {
             document.getElementById('stat-total').textContent = ev.total;
-            statusEl.textContent = 'Scanning ' + ev.username + '…';
+            statusEl.textContent = isCaseFusion
+                ? 'Capturing approved evidence from the selected cases…'
+                : 'Scanning ' + ev.username + '…';
         } else if (ev.type === 'progress') {
             document.getElementById('stat-checked').textContent = ev.checked;
+            if (isCaseFusion) statusEl.textContent = 'Building exact cross-case relationship paths…';
             if (ev.total) {
                 const pct = Math.min(ev.checked, ev.total) / ev.total * 100;
                 document.getElementById('live-progress').style.width = pct + '%';

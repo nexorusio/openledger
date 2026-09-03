@@ -8,6 +8,7 @@ from sqlalchemy import func, select, update
 
 from maigret.web.case_store import (
     CaseStore,
+    ReferencedCaseError,
     cases,
     claim_evidence,
     claim_reviews,
@@ -1405,6 +1406,234 @@ def test_relationship_graph_uses_only_exact_shared_approved_claims(store):
     suppressed = store.build_relationship_graph()
     assert suppressed["nodes"] == []
     assert suppressed["edges"] == []
+
+
+def _create_case_with_company_claim(store, username, company, *, decision="approved"):
+    job_id = store.create_investigation([username], {})
+    store.claim_next(f"worker:{username}")
+    result = {
+        "status": "completed",
+        "usernames": [username],
+        "individual_reports": [
+            {
+                "username": username,
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example",
+                        "url": f"https://example.test/{username}",
+                        "confidence": "strong",
+                        "evidence": {"company": company},
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    store.sync_persona_claims(job_id, result)
+    job = store.get_job(job_id)
+    case = store.get_case(job["case_id"])
+    persona = store.get_persona(case["personas"][0]["id"])
+    company_claim = next(
+        claim for claim in persona["claims"] if claim["field_name"] == "company"
+    )
+    store.review_claim(company_claim["id"], decision, "analyst")
+    return case["id"], company_claim
+
+
+def test_combined_investigation_snapshots_only_approved_cross_case_links(store):
+    alice_case_id, alice_claim = _create_case_with_company_claim(
+        store, "alice", "Nexorus"
+    )
+    bob_case_id, bob_claim = _create_case_with_company_claim(store, "bob", "Nexorus")
+    pending_case_id, pending_claim = _create_case_with_company_claim(
+        store, "charlie", "Nexorus", decision="pending"
+    )
+
+    fusion_job_id = store.create_combined_investigation(
+        [alice_case_id, bob_case_id, pending_case_id],
+        title="Nexorus network",
+        purpose="Identify exact reviewed links across three source cases.",
+        created_by="analyst",
+    )
+    fusion_job = store.claim_next("worker:fusion")
+    assert fusion_job["job_id"] == fusion_job_id
+
+    first = store.build_case_fusion_snapshot(fusion_job_id)
+    second = store.build_case_fusion_snapshot(fusion_job_id)
+
+    assert first["snapshot"]["sha256"] == second["snapshot"]["sha256"]
+    assert first["source_case_count"] == 3
+    assert first["approved_claim_count"] == 2
+    assert first["shared_attribute_count"] == 1
+    assert first["connection_count"] == 2
+    assert {item["id"] for item in first["snapshot"]["approved_claims"]} == {
+        alice_claim["id"],
+        bob_claim["id"],
+    }
+    assert pending_claim["id"] not in {
+        item["id"] for item in first["snapshot"]["approved_claims"]
+    }
+    graph = first["relationship_graph"]
+    assert {
+        node["case_id"] for node in graph["nodes"] if node["kind"] == "persona"
+    } == {
+        alice_case_id,
+        bob_case_id,
+    }
+    assert all(
+        edge["sources"][0]["url"].startswith("https://example.test/")
+        for edge in graph["edges"]
+    )
+
+
+def test_combined_case_references_protect_sources_and_delete_independently(store):
+    first_case_id, _ = _create_case_with_company_claim(store, "alice", "Nexorus")
+    second_case_id, _ = _create_case_with_company_claim(store, "bob", "Nexorus")
+    fusion_job_id = store.create_combined_investigation(
+        [first_case_id, second_case_id],
+        title="Protected sources",
+        purpose="Preserve provenance while correlating cases.",
+        created_by="analyst",
+    )
+    fusion_case_id = store.get_job(fusion_job_id)["case_id"]
+
+    with pytest.raises(ReferencedCaseError) as captured:
+        store.delete_case(first_case_id)
+    assert captured.value.references == [
+        {"id": fusion_case_id, "title": "Protected sources"}
+    ]
+    first_source_case = store.get_case(first_case_id)
+    first_source_job_id = first_source_case["jobs"][0]["job_id"]
+    with pytest.raises(ReferencedCaseError) as job_deletion:
+        store.delete_job(
+            first_source_job_id, confirmation_name=first_source_case["title"]
+        )
+    assert job_deletion.value.references == captured.value.references
+
+    assert store.request_cancel(fusion_job_id) is True
+    assert store.delete_case(fusion_case_id) is True
+    assert store.get_case(first_case_id) is not None
+    assert store.get_case(second_case_id) is not None
+
+
+def test_combined_snapshot_links_approved_affiliation_to_confirmed_org_case(store):
+    person_case_id, company_claim = _create_case_with_company_claim(
+        store, "alice", "Example Organization"
+    )
+    affiliation_job_id = store.create_affiliation_investigation(
+        "Example Organization", official_website="https://example.org"
+    )
+    affiliation_job = store.claim_next("worker:affiliation")
+    candidate = {
+        "candidate_key": "official_website_public_content:example.org",
+        "label": "Example Organization",
+        "source_engine": "official_website_public_content",
+        "source_name": "Supplied organization website",
+        "source_record_id": "official-website:example.org",
+        "source_url": "https://example.org/",
+        "identity_scope": "first_party_operating_identity",
+        "identity_scope_label": "First-party operating identity",
+        "match_status": "operator_supplied_domain",
+        "selectable": True,
+        "basis": "The supplied website names the organization.",
+        "limitation": "This does not establish legal registration.",
+    }
+    store.finish(
+        affiliation_job_id,
+        {"status": "completed", "organization_resolution_candidates": [candidate]},
+    )
+    store.select_affiliation_organization(
+        affiliation_job["case_id"], candidate["candidate_key"], "analyst"
+    )
+    fusion_job_id = store.create_combined_investigation(
+        [person_case_id, affiliation_job["case_id"]],
+        title="Person and organization",
+        purpose="Test an exact approved affiliation link.",
+        created_by="analyst",
+    )
+    store.claim_next("worker:fusion")
+
+    snapshot = store.build_case_fusion_snapshot(fusion_job_id)
+
+    graph = snapshot["relationship_graph"]
+    assert graph["stats"]["organization_count"] == 1
+    assert graph["stats"]["connection_count"] == 1
+    organization = next(
+        node for node in graph["nodes"] if node["kind"] == "organization"
+    )
+    assert organization["source_url"] == "https://example.org/"
+    assert graph["edges"][0]["claim_id"] == company_claim["id"]
+    assert graph["edges"][0]["sources"][-1]["url"] == "https://example.org/"
+
+
+def test_combined_investigation_rejects_nested_and_duplicate_only_scopes(store):
+    first_case_id, _ = _create_case_with_company_claim(store, "alice", "One")
+    second_case_id, _ = _create_case_with_company_claim(store, "bob", "Two")
+    fusion_job_id = store.create_combined_investigation(
+        [first_case_id, second_case_id],
+        title="First combined case",
+        purpose="Test combined-case scope rules.",
+        created_by="analyst",
+    )
+    fusion_case_id = store.get_job(fusion_job_id)["case_id"]
+
+    with pytest.raises(ValueError, match="at least two"):
+        store.create_combined_investigation(
+            [first_case_id, first_case_id],
+            title="Duplicate scope",
+            purpose="This must not create a one-case fusion.",
+            created_by="analyst",
+        )
+    with pytest.raises(ValueError, match="cannot be nested"):
+        store.create_combined_investigation(
+            [fusion_case_id, first_case_id],
+            title="Nested scope",
+            purpose="Nested scopes are deliberately excluded.",
+            created_by="analyst",
+        )
+
+
+def test_combined_case_marks_changed_sources_and_refreshes_explicitly(store):
+    first_case_id, first_claim = _create_case_with_company_claim(
+        store, "alice", "One"
+    )
+    second_case_id, _ = _create_case_with_company_claim(store, "bob", "Two")
+    fusion_job_id = store.create_combined_investigation(
+        [first_case_id, second_case_id],
+        title="Versioned scope",
+        purpose="Keep completed snapshots stable until an explicit refresh.",
+        created_by="analyst",
+    )
+    fusion_job = store.claim_next("worker:fusion")
+    snapshot = store.build_case_fusion_snapshot(fusion_job_id)
+    store.finish(
+        fusion_job_id,
+        {"status": "completed", "kind": "case_fusion", **snapshot},
+    )
+
+    combined = store.get_case(fusion_job["case_id"])
+    assert combined["source_changed_count"] == 0
+    original_snapshot_sha = combined["jobs"][0]["snapshot"]["sha256"]
+    store.review_claim(first_claim["id"], "rejected", "analyst")
+    changed = store.get_case(fusion_job["case_id"])
+    assert changed["source_changed_count"] == 1
+    assert changed["jobs"][0]["snapshot"]["sha256"] == original_snapshot_sha
+    assert (
+        next(item for item in changed["source_cases"] if item["id"] == first_case_id)[
+            "changed_since_snapshot"
+        ]
+        is True
+    )
+
+    refresh_job_id = store.queue_combined_investigation_refresh(
+        fusion_job["case_id"], requested_by="analyst"
+    )
+    refresh = store.get_job(refresh_job_id)
+    assert refresh["status"] == "queued"
+    assert refresh["options"]["investigation_spec"]["source_case_ids"] == [
+        first_case_id,
+        second_case_id,
+    ]
 
 
 def test_case_timeline_projects_existing_audit_records_without_new_state(store):

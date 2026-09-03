@@ -20,6 +20,7 @@
         if (node.kind === 'persona') return {background: '#0f8b8d', border: '#30c7ca', highlight: {background: '#13a5a7', border: '#e8ffff'}};
         if (node.kind === 'source') return {background: '#152538', border: '#6f849c', highlight: {background: '#1d344d', border: '#30c7ca'}};
         if (node.kind === 'attribute') return {background: '#17314a', border: '#73a5d1', highlight: {background: '#234868', border: '#d7edff'}};
+        if (node.kind === 'organization') return {background: '#3a2a17', border: '#d6a14a', highlight: {background: '#584126', border: '#ffe0a0'}};
         if (node.review_status === 'approved') return {background: '#12392f', border: '#20bd83', highlight: {background: '#185040', border: '#b8ffe2'}};
         if (node.review_status === 'uncertain') return {background: '#41351e', border: '#d5a846', highlight: {background: '#594a2b', border: '#ffe6aa'}};
         return {background: '#26364a', border: '#8296ad', highlight: {background: '#344a64', border: '#d9e7f6'}};
@@ -36,7 +37,7 @@
     const originalNodes = graph.nodes.map((node) => ({
         ...node,
         shape: node.kind === 'persona' ? 'dot' : node.kind === 'source' ? 'ellipse' : node.kind === 'attribute' ? 'diamond' : 'box',
-        size: node.kind === 'persona' ? 25 : node.kind === 'attribute' ? 19 : 15,
+        size: node.kind === 'persona' ? 25 : ['attribute', 'organization'].includes(node.kind) ? 19 : 15,
         color: colors(node),
         font: {color: '#d8e2ed', face: 'Alliance No. 2, Arial', size: node.kind === 'persona' ? 14 : 11},
         borderWidth: node.kind === 'persona' || node.review_status === 'approved' ? 2 : 1,
@@ -208,6 +209,12 @@
             addLine('Evidence type', readable(node.evidence_type || 'source record'));
             const list = addList('Source access');
             appendSource(list, {name: node.label, url: node.url, type: node.evidence_type});
+        } else if (node.kind === 'organization') {
+            addLine('Source case', node.case_title);
+            addLine('Identity scope', readable(node.identity_scope));
+            addLine('Relationship rule', 'Exact approved affiliation and analyst-confirmed organization name');
+            const list = addList('Confirmation source');
+            appendSource(list, {name: node.source_name || 'Confirmed organization record', url: node.source_url, type: 'analyst confirmed organization'});
         } else {
             addLine('Shared field', readable(node.field_name));
             addLine('Connected Personas', node.persona_count);
@@ -231,7 +238,7 @@
         addLine('Relationship', readable(edge.label));
         addLine('Field', readable(edge.field_name));
         if (graph.mode === 'shared') {
-            addLine('Evidence rule', 'Exact normalized value · approved claim');
+            addLine('Evidence rule', edge.relationship_rule || 'Exact normalized value · approved claim');
             addLine('Evidence confidence', `${edge.confidence}%`);
             const list = addList(`Attached sources (${(edge.sources || []).length})`);
             ((edge.sources || []).length ? edge.sources : [{name: 'No source URL attached'}]).forEach((source) => appendSource(list, source));
@@ -264,6 +271,7 @@
         if (node.kind === 'persona') return node.case_title || 'Persona record';
         if (node.kind === 'claim') return `${readable(node.field_name)} · ${readable(node.review_status)} · ${node.confidence}% confidence`;
         if (node.kind === 'source') return readable(node.evidence_type || 'Evidence source');
+        if (node.kind === 'organization') return `${node.case_title || 'Source case'} · analyst-confirmed organization`;
         return `${readable(node.field_name)} · ${node.persona_count} connected Personas`;
     };
     const addTableRow = (label, type, context, dataset, faded) => {
@@ -353,7 +361,7 @@
             network.setOptions({layout: {hierarchical: false}, physics: {enabled: false}, edges: {smooth: {type: 'curvedCW', roundness: 0.08}}});
             const positions = graph.mode === 'persona'
                 ? [...ring(originalNodes.filter((node) => node.kind === 'persona'), 0), ...ring(originalNodes.filter((node) => node.kind === 'claim'), 240), ...ring(originalNodes.filter((node) => node.kind === 'source'), 455)]
-                : [...ring(originalNodes.filter((node) => node.kind === 'attribute'), 180), ...ring(originalNodes.filter((node) => node.kind === 'persona'), 390)];
+                : [...ring(originalNodes.filter((node) => ['attribute', 'organization'].includes(node.kind)), 180), ...ring(originalNodes.filter((node) => node.kind === 'persona'), 390)];
             nodes.update(positions);
         } else {
             unlock();

@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+
+{% block title %}Combine cases | OpenLedger{% endblock %}
+{% block breadcrumb %}Combine cases{% endblock %}
+
+{% block content %}
+<section class="page-heading">
+    <div>
+        <p class="eyebrow">Cross-case intelligence</p>
+        <h1>Combine cases</h1>
+        <p class="page-description">Create one auditable investigation view from selected cases without moving or copying their evidence.</p>
+    </div>
+    <a href="{{ url_for('cases_workspace') }}" class="btn btn-outline-secondary">Back to cases</a>
+</section>
+
+<section class="relationship-policy" aria-label="Combined investigation evidence policy">
+    <i data-lucide="shield-check"></i>
+    <div>
+        <strong>Approved evidence establishes the initial links</strong>
+        <span>Source cases, Personas, review decisions, and exact provenance remain unchanged. Refreshing later creates a new timestamped snapshot.</span>
+    </div>
+</section>
+
+{% if cases | length < 2 %}
+<section class="panel-card empty-state">
+    <span class="empty-state-icon"><i data-lucide="combine"></i></span>
+    <h2>At least two standalone cases are required</h2>
+    <p>Complete another investigation before creating a combined investigation.</p>
+    <a href="{{ url_for('index') }}" class="btn btn-primary">New investigation</a>
+</section>
+{% else %}
+<form method="POST" action="{{ url_for('combine_cases_workspace') }}" class="combine-case-form" id="combineCaseForm" data-max-cases="{{ max_source_cases }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="combine-case-layout">
+        <section class="panel-card combine-case-selection" aria-labelledby="sourceCasesHeading">
+            <header class="panel-card-header combine-case-selection-header">
+                <div>
+                    <p class="eyebrow">Step 1</p>
+                    <h2 id="sourceCasesHeading">Select source cases</h2>
+                    <p class="form-text">Choose between 2 and {{ max_source_cases }} standalone cases.</p>
+                </div>
+                <span class="badge-soft" id="combinedCaseSelectionCount" aria-live="polite">0 selected</span>
+            </header>
+            <label class="combine-case-search" for="combineCaseSearch">
+                <i data-lucide="search" aria-hidden="true"></i>
+                <input id="combineCaseSearch" type="search" autocomplete="off" placeholder="Search case name or identifier">
+            </label>
+            <div class="combine-case-list" id="combineCaseList">
+                {% for case in cases %}
+                <label class="combine-case-option" data-case-search="{{ (case.title ~ ' ' ~ case.id) | lower }}">
+                    <input type="checkbox" name="case_id" value="{{ case.id }}" {{ 'checked' if case.id in selected_case_ids else '' }}>
+                    <span class="combine-case-option-copy">
+                        <strong>{{ case.title }}</strong>
+                        <small>{{ case.id }}</small>
+                        <span>
+                            {{ case.personas | length }} Persona{{ '' if case.personas | length == 1 else 's' }}
+                            {% if case.latest_job %} · {{ case.latest_job.kind | replace('_', ' ') | title }} · {{ case.latest_job.status | replace('_', ' ') | title }}{% endif %}
+                        </span>
+                    </span>
+                </label>
+                {% endfor %}
+            </div>
+            <p class="form-text combine-case-no-results" id="combineCaseNoResults" hidden>No cases match this search.</p>
+        </section>
+
+        <aside class="panel-card combine-case-details" aria-labelledby="combinedDetailsHeading">
+            <div>
+                <p class="eyebrow">Step 2</p>
+                <h2 id="combinedDetailsHeading">Investigation details</h2>
+            </div>
+            <label for="combinedCaseTitle">Title</label>
+            <input id="combinedCaseTitle" name="title" type="text" maxlength="500" required value="{{ submitted_title }}">
+            <label for="combinedCasePurpose">Investigation purpose</label>
+            <textarea id="combinedCasePurpose" name="purpose" maxlength="2000" rows="6" required placeholder="Explain why these cases are being analyzed together and what relationship question should be answered.">{{ submitted_purpose }}</textarea>
+            <div class="security-callout combine-case-summary">
+                <i data-lucide="git-compare-arrows"></i>
+                <span>OpenLedger will create exact cross-case leads from approved records and analyst-confirmed organizations. Pending, uncertain, and rejected findings remain excluded.</span>
+            </div>
+            <button type="submit" class="btn btn-primary combine-case-submit" id="combineCaseSubmit" disabled>
+                <i data-lucide="play"></i>
+                Run combined investigation
+            </button>
+            <p class="form-text mb-0" id="combineCaseValidation">Select at least two cases to continue.</p>
+        </aside>
+    </div>
+</form>
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+{% if cases | length >= 2 %}<script src="{{ url_for('static', filename='combine-cases.js') }}" defer></script>{% endif %}
+{% endblock %}

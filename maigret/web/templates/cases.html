@@ -10,7 +10,10 @@
         <h1>Cases</h1>
         <p class="page-description">Open durable case records and review their evidence-backed personas.</p>
     </div>
-    <a href="{{ url_for('index') }}" class="btn btn-primary px-4">New investigation</a>
+    <div class="page-heading-actions">
+        <a href="{{ url_for('combine_cases_workspace') }}" class="btn btn-outline-secondary px-4"><i data-lucide="combine"></i> Combine cases</a>
+        <a href="{{ url_for('index') }}" class="btn btn-primary px-4">New investigation</a>
+    </div>
 </section>
 
 <section class="panel-card data-table-card">
@@ -37,10 +40,16 @@
                 {% for case in cases %}
                 <tr>
                     <td>
-                        <strong>{{ case.title }}</strong>
+                        <div class="case-title-line">
+                            <strong>{{ case.title }}</strong>
+                            {% if case.case_type == 'combined' %}<span class="badge-soft">Combined · {{ case.source_case_count }} source cases</span>{% endif %}
+                        </div>
                         <div class="form-text">{{ case.id }}</div>
                     </td>
-                    <td>{{ case.personas | length }}</td>
+                    <td>
+                        {{ case.member_persona_count if case.case_type == 'combined' else case.personas | length }}
+                        {% if case.case_type == 'combined' %}<div class="form-text">Across source cases</div>{% endif %}
+                    </td>
                     <td>
                         {% if case.latest_job %}
                         <span class="badge-soft {{ 'success' if case.latest_job.status == 'completed' else 'warning' if case.latest_job.status in ('failed', 'cancelled', 'interrupted') else '' }}">
