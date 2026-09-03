@@ -12,6 +12,7 @@ from maigret.ai import (
     get_ai_evidence_proposals,
     get_case_chat_claim_proposals,
     get_case_chat_response,
+    get_combined_case_chat_response,
     get_combined_investigation_insights,
     get_enriched_ai_analysis,
     get_organization_context_proposals,
@@ -303,6 +304,110 @@ def test_case_chat_request_sends_bounded_case_memory_and_requires_cited_research
     assert captured["payload"]["tool_choice"] == "required"
     assert "Earlier question" in captured["payload"]["input"]
     assert "Research this subject" in captured["payload"]["input"]
+
+
+def test_combined_case_chat_distinguishes_snapshot_review_and_inference(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "The approved hypothesis remains limited by the publication evidence.",
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def post(self, url, *, json, headers):
+            captured.update(url=url, payload=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai.aiohttp, "ClientSession", FakeSession)
+    result = asyncio.run(
+        get_combined_case_chat_response(
+            api_key="test-key",
+            case_context={
+                "scope": "combined_investigation",
+                "snapshot_current": True,
+                "latest_ai_assessment": {
+                    "executive_summary": "A possible link.",
+                    "proposals": [
+                        {
+                            "title": f"Hypothesis {index}",
+                            "explanation": "x" * 6_000,
+                            "sources": [
+                                {
+                                    "url": (
+                                        "https://example.test/path?"
+                                        "evidence=1&view=full"
+                                    )
+                                }
+                            ],
+                        }
+                        for index in range(100)
+                    ],
+                },
+            },
+            conversation=[
+                {
+                    "role": "user",
+                    "author": "analyst",
+                    "content": "Why is this not proof of coordination?",
+                }
+            ],
+            user_message="What evidence would change the conclusion?",
+            model="gpt-5.6-sol",
+            web_search_enabled=False,
+        )
+    )
+
+    assert "publication evidence" in result["analysis"]
+    assert "combined_investigation_json" in captured["payload"]["input"]
+    assert "Why is this not proof" in captured["payload"]["input"]
+    assert "What evidence would change" in captured["payload"]["input"]
+    structured_input = json.loads(captured["payload"]["input"])
+    bounded_context_json = structured_input["combined_investigation_json"]
+    bounded_context = json.loads(bounded_context_json)
+    assert len(bounded_context_json) <= 90_000
+    assert bounded_context["context_truncated"] is True
+    assert bounded_context["latest_ai_assessment"]["executive_summary"] == (
+        "A possible link."
+    )
+    assert bounded_context["latest_ai_assessment"]["proposals"][0]["sources"][0][
+        "url"
+    ] == "https://example.test/path?evidence=1&view=full"
+    normalized_instructions = " ".join(captured["payload"]["instructions"].split())
+    assert "approved AI relationship is still an analyst-approved hypothesis" in (
+        normalized_instructions
+    )
+    assert "private or residential details" in normalized_instructions
+    assert "tools" not in captured["payload"]
 
 
 def test_structured_proposal_response_requires_json_object_with_list():

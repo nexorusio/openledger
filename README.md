@@ -120,10 +120,12 @@ AI can:
 
 - summarize normalized case evidence;
 - perform optional public-web research with clickable citations;
-- answer questions in a persistent case conversation; and
-- propose allowlisted, cited Persona updates for analyst review; and
+- answer questions in persistent standalone and combined-investigation conversations;
+- propose allowlisted, cited Persona updates for analyst review;
 - analyze combined-case snapshots into cited cross-case hypotheses,
-  contradictions, information gaps, and next investigative actions.
+  contradictions, information gaps, and next investigative actions; and
+- let analysts challenge those assessments, test alternatives, request cited
+  follow-up research, and create additional snapshot-bound relationship proposals.
 
 AI cannot approve or reject claims, silently merge identities, convert an
 inference into a fact, or bypass the evidence and review model. A cited research

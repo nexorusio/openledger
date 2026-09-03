@@ -2488,6 +2488,9 @@ def test_relationship_module_has_no_server_mutation_transport(client):
     assert "layout === 'hierarchical'" in module
     assert "layout === 'concentric'" in module
     assert 'manuallyHiddenNodes' in module
+    assert "proposalEdgeColor(edge.review_status" in module
+    assert "new URLSearchParams(window.location.search).get('proposal_id')" in module
+    assert "selectEdge(requestedEdgeId)" in module
     network_write_apis = ('fetch(', 'XMLHttpRequest', 'sendBeacon(', '.submit(')
     for network_write_api in network_write_apis:
         assert network_write_api not in module

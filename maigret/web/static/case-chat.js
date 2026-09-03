@@ -10,6 +10,7 @@
     const propose = document.getElementById('caseChatPropose');
     const submit = document.getElementById('caseChatSubmit');
     const errorBox = document.getElementById('caseChatError');
+    const isCombined = root.dataset.combined === 'true';
 
     if (root.dataset.initialPrompt && !textarea.value.trim()) {
         textarea.value = root.dataset.initialPrompt;
@@ -82,8 +83,27 @@
             note.className = 'case-chat-proposal-note';
             note.appendChild(icon('clipboard-check'));
             const count = Number(proposalSummary.count || 0);
+            const proposalLabel = proposalSummary.kind === 'relationship'
+                ? ' relationship hypothes' + (count === 1 ? 'is' : 'es')
+                : ' Persona proposal' + (count === 1 ? '' : 's');
             note.appendChild(document.createTextNode(
-                ' ' + count + ' Persona proposal' + (count === 1 ? '' : 's') + ' sent to pending review.'
+                ' ' + count + proposalLabel + ' sent to pending review.'
+            ));
+            article.appendChild(note);
+        } else if (proposalSummary.status === 'no_supported_relationships') {
+            const note = document.createElement('div');
+            note.className = 'case-chat-proposal-note warning';
+            note.appendChild(icon('shield-alert'));
+            note.appendChild(document.createTextNode(
+                ' No new relationship met the approved-evidence requirements; the answer remains in chat for analysis.'
+            ));
+            article.appendChild(note);
+        } else if (proposalSummary.status === 'stale_snapshot') {
+            const note = document.createElement('div');
+            note.className = 'case-chat-proposal-note warning';
+            note.appendChild(icon('refresh-cw'));
+            note.appendChild(document.createTextNode(
+                ' The answer was saved, but new relationship proposals require a refreshed snapshot.'
             ));
             article.appendChild(note);
         } else if (proposalSummary.status === 'unavailable') {
@@ -91,7 +111,7 @@
             note.className = 'case-chat-proposal-note warning';
             note.appendChild(icon('triangle-alert'));
             note.appendChild(document.createTextNode(
-                ' The answer was saved, but Persona proposal extraction was unavailable.'
+                ' The answer was saved, but ' + (proposalSummary.kind === 'relationship' ? 'relationship' : 'Persona') + ' proposal extraction was unavailable.'
             ));
             article.appendChild(note);
         }
@@ -103,7 +123,7 @@
     function setBusy(busy) {
         submit.disabled = busy;
         textarea.disabled = busy;
-        persona.disabled = busy;
+        if (persona) persona.disabled = busy;
         research.disabled = busy;
         propose.disabled = busy;
         submit.classList.toggle('is-loading', busy);
@@ -115,10 +135,10 @@
         errorBox.hidden = true;
         const message = textarea.value.trim();
         if (!message) return;
-        if (propose.checked && !persona.value) {
+        if (!isCombined && propose.checked && (!persona || !persona.value)) {
             errorBox.textContent = 'Choose a target Persona before proposing supported facts.';
             errorBox.hidden = false;
-            persona.focus();
+            if (persona) persona.focus();
             return;
         }
         setBusy(true);
@@ -131,9 +151,10 @@
                 },
                 body: JSON.stringify({
                     message: message,
-                    persona_id: persona.value || null,
+                    persona_id: persona?.value || null,
                     research_enabled: research.checked,
-                    propose_to_persona: propose.checked,
+                    propose_to_persona: !isCombined && propose.checked,
+                    propose_relationships: isCombined && propose.checked,
                 }),
             });
             const payload = await response.json();

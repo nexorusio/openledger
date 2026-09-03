@@ -33,9 +33,9 @@
     };
     const readable = (value) => fieldLabels[value] || String(value || '').replaceAll('_', ' ');
     const baseEdgeColor = (opacity = 0.78) => ({color: '#536b83', highlight: '#30c7ca', hover: '#73a5d1', opacity});
-    const proposalEdgeColor = (status) => status === 'approved'
-        ? {color: '#20bd83', highlight: '#b8ffe2', hover: '#57d9aa', opacity: 1}
-        : {color: '#d5a846', highlight: '#ffe6aa', hover: '#edc76c', opacity: 0.82};
+    const proposalEdgeColor = (status, opacity) => status === 'approved'
+        ? {color: '#20bd83', highlight: '#b8ffe2', hover: '#57d9aa', opacity: opacity ?? 1}
+        : {color: '#d5a846', highlight: '#ffe6aa', hover: '#edc76c', opacity: opacity ?? 0.82};
 
     const originalNodes = graph.nodes.map((node) => ({
         ...node,
@@ -350,7 +350,16 @@
         originalNodes.forEach((node) => { if (node.kind === 'persona' && !manuallyHiddenNodes.has(node.id)) visibleNodeIds.add(node.id); });
         focusedNodeIds = focusDepth !== null && selectedNodeId && visibleNodeIds.has(selectedNodeId) ? neighborhood(selectedNodeId, focusDepth, candidates) : null;
         nodes.update(originalNodes.map((node) => ({id: node.id, hidden: !visibleNodeIds.has(node.id), opacity: focusedNodeIds && !focusedNodeIds.has(node.id) ? 0.16 : 1})));
-        edges.update(originalEdges.map((edge) => ({id: edge.id, hidden: !visibleEdgeIds.has(edge.id), color: baseEdgeColor(focusedNodeIds && (!focusedNodeIds.has(edge.from) || !focusedNodeIds.has(edge.to)) ? 0.12 : 0.78)})));
+        edges.update(originalEdges.map((edge) => {
+            const faded = focusedNodeIds && (!focusedNodeIds.has(edge.from) || !focusedNodeIds.has(edge.to));
+            return {
+                id: edge.id,
+                hidden: !visibleEdgeIds.has(edge.id),
+                color: edge.proposal_id
+                    ? proposalEdgeColor(edge.review_status, faded ? 0.12 : undefined)
+                    : baseEdgeColor(faded ? 0.12 : 0.78),
+            };
+        }));
         if (selectedNodeId && !visibleNodeIds.has(selectedNodeId)) {
             selectedNodeId = null; focusDepth = null; focusedNodeIds = null; network.unselectAll(); clearInspector('The selected node is not visible under the current filters.');
         }
@@ -433,4 +442,13 @@
 
     updateVisibility();
     applyLayout('force');
+    const requestedProposalId = new URLSearchParams(window.location.search).get('proposal_id');
+    const requestedEdgeId = requestedProposalId ? `ai-proposal:${requestedProposalId}` : '';
+    if (requestedEdgeId && edgeLookup.has(requestedEdgeId)) {
+        window.setTimeout(() => {
+            selectEdge(requestedEdgeId);
+            const edge = edgeLookup.get(requestedEdgeId);
+            network.fit({nodes: [edge.from, edge.to], animation: {duration: 260}});
+        }, 260);
+    }
 })();

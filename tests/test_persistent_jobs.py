@@ -1409,7 +1409,7 @@ def test_combined_case_selection_and_workspace_flow(client, web_app, persistent_
 
 
 def test_combined_relationship_review_controls_workspace_and_graph(
-    client, persistent_store
+    client, persistent_store, monkeypatch
 ):
     source_case_ids = []
     for username in ("alice", "bob"):
@@ -1527,12 +1527,95 @@ def test_combined_relationship_review_controls_workspace_and_graph(
     workspace = client.get(f"/cases/{combined_case_id}").get_data(as_text=True)
     assert "Shared affiliation" in workspace
     assert "Both reviewed claims name Nexorus." in workspace
-    assert "Approve link" in workspace
+    assert "Approve relationship" in workspace
+    assert "Ask AI" in workspace
     assert "https://example.test/alice" in workspace
+
+    monkeypatch.setenv("OPENAI_API_KEY", "server-only-test-key")
+
+    async def combined_chat_response(**kwargs):
+        assert kwargs["case_context"]["scope"] == "combined_investigation"
+        assert kwargs["case_context"]["snapshot_current"] is True
+        assert kwargs["case_context"]["latest_ai_assessment"][
+            "executive_summary"
+        ].startswith("The two approved")
+        assert kwargs["web_search_enabled"] is True
+        return {
+            "analysis": "The matching affiliation is a lead, not proof of contact.",
+            "sources": [
+                {
+                    "title": "Independent directory",
+                    "url": "https://example.test/directory",
+                }
+            ],
+        }
+
+    async def combined_chat_proposals(**kwargs):
+        assert kwargs["research_answer"].startswith("The matching affiliation")
+        return {
+            "executive_summary": "Chat follow-up.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": [],
+            "next_steps": [],
+            "proposals": [
+                {
+                    "title": "Follow-up shared affiliation",
+                    "relationship_type": "affiliation",
+                    "subject_ref": persona_entities[source_case_ids[0]]["reference_id"],
+                    "object_ref": persona_entities[source_case_ids[1]]["reference_id"],
+                    "explanation": "Both approved records name Nexorus.",
+                    "confidence": 65,
+                    "evidence_reference_ids": [
+                        claim["reference_id"] for claim in context["approved_claims"]
+                    ],
+                    "contradictory_reference_ids": [],
+                    "limitations": ["This does not prove direct contact."],
+                }
+            ],
+        }
+
+    monkeypatch.setattr(
+        web_app_module, "get_combined_case_chat_response", combined_chat_response
+    )
+    monkeypatch.setattr(
+        web_app_module,
+        "get_combined_investigation_insights",
+        combined_chat_proposals,
+    )
 
     with client.session_transaction() as browser_session:
         browser_session["csrf_token"] = "relationship-review-csrf"
         browser_session["username"] = "relationship.reviewer"
+    chat_page = client.get(f"/cases/{combined_case_id}/chat").get_data(as_text=True)
+    assert "Persistent cross-case assistant" in chat_page
+    assert "Propose supported relationships" in chat_page
+    chat_response = client.post(
+        f"/api/cases/{combined_case_id}/chat",
+        headers={"X-OpenLedger-CSRF": "relationship-review-csrf"},
+        json={
+            "message": "Explain the proposed link and test it against public sources.",
+            "research_enabled": True,
+            "propose_relationships": True,
+        },
+    )
+    assert chat_response.status_code == 200
+    chat_payload = chat_response.get_json()
+    assert chat_payload["proposal_summary"]["status"] == "pending_review"
+    assert chat_payload["proposal_summary"]["kind"] == "relationship"
+    assert chat_payload["proposal_summary"]["count"] == 1
+    chat_proposal_id = chat_payload["proposal_summary"]["proposal_ids"][0]
+    retained_chat_proposal = next(
+        item
+        for item in persistent_store.get_case(combined_case_id)["analysis_runs"][0][
+            "proposals"
+        ]
+        if item["id"] == chat_proposal_id
+    )
+    assert retained_chat_proposal["chat_message_id"] == (
+        chat_payload["assistant_message"]["id"]
+    )
+
     response = client.post(
         f"/cases/{combined_case_id}/relationships/{proposal_id}/review",
         data={
@@ -1544,9 +1627,11 @@ def test_combined_relationship_review_controls_workspace_and_graph(
     )
     body = response.get_data(as_text=True)
     assert response.status_code == 200
-    assert "Relationship hypothesis review recorded" in body
-    assert "relationship.reviewer" in body
-    assert "Approved" in body
+    assert "Relationship approved and added to the combined graph" in body
+    assert "Analyst-approved AI link" in body
+    assert f"ai-proposal:{proposal_id}" in body
+    assert response.request.path == "/relationships"
+    assert response.request.args["proposal_id"] == proposal_id
 
     graph = client.get(
         f"/relationships?mode=shared&case_id={combined_case_id}"

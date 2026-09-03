@@ -449,6 +449,28 @@ not modify source Personas, claims, evidence, or their review decisions. If the
 OpenAI connection is unavailable or analysis fails, the approved-evidence
 snapshot still completes and reports that insight status separately.
 
+The combined investigation also owns a durable AI conversation. Each turn
+receives the latest retained assessment, its relationship-review history, recent
+chat memory, and the bounded approved-evidence catalogue only while the source
+cases still match the snapshot SHA-256. Analysts can ask for clarification,
+challenge a conclusion, test an alternative explanation, or explicitly enable
+cited public-web research. If a source case changed, chat can explain the
+retained assessment but cannot create a new relationship proposal until a new
+snapshot completes.
+
+An optional second structured pass can turn a combined-chat answer into new
+relationship hypotheses. The same cross-case evidence validator applies: exact
+entity references, approved anchors from both source cases, bounded confidence,
+and the organization-evidence protections are mandatory. Accepted hypotheses
+remain pending and retain the originating assistant message as provenance. Chat
+cannot approve them. Immediately before insertion, the store locks the combined
+and source-case state, rejects any newer refresh job, and recomputes the snapshot
+SHA-256 in the same transaction; an AI request that raced a source change is
+retained as chat but cannot create a proposal. Approval redirects to and focuses
+the resulting graph edge;
+the edge is solid green only after that decision, while uncertain paths remain
+dashed and rejected paths are omitted.
+
 Deleting a combined investigation deletes only its membership rows, snapshot
 jobs, AI analysis/proposal records, and presentation record. Deleting a
 referenced source case is refused until the retaining combined investigation is
