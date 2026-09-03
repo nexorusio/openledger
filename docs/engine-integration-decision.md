@@ -78,10 +78,12 @@ Its schema also does not preserve OpenLedger's evidence contract:
 | Import failures must be explicit | OGI import catches row exceptions and reports aggregate skips |
 | Edge provenance must survive import | The JSON importer does not map incoming edge properties |
 
-OGI is AGPL-3.0-or-later while OpenLedger and User Scanner are MIT-licensed.
-Keeping OGI as a separately operated service with a documented projection API
-avoids copying AGPL code into OpenLedger, but operators must still comply with
-OGI's network-use source obligations when they deploy or modify OGI.
+OGI is AGPL-3.0-or-later. Maigret and User Scanner are MIT-licensed third-party
+components, while post-transition OpenLedger material may be proprietary under
+the repository's scoped [licensing notice](../LICENSE). Keeping OGI as a
+separately operated service with a documented projection API avoids copying
+AGPL code into OpenLedger, but operators must still comply with OGI's
+network-use source obligations when they deploy or modify OGI.
 
 ## Safe OGI introduction criteria
 

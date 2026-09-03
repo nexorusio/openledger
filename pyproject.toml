@@ -3,15 +3,20 @@ requires = ["poetry-core"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.poetry]
-name = "maigret"
+name = "openledger"
 version = "0.6.5"
-description = "🕵️‍♂️ Collect a dossier on a person by username from thousands of sites."
-authors = ["Soxoj <soxoj@protonmail.com>"]
+description = "Governed OSINT case intelligence for evidence-backed investigations."
+authors = ["PT Daya Prana Inovasi <jati@nexorus.io>"]
 readme = "README.md"
-license = "MIT License"
-homepage = "https://pypi.org/project/maigret"
-documentation = "https://maigret.readthedocs.io"
-repository = "https://github.com/soxoj/maigret"
+license = "Proprietary"
+homepage = "https://openledger.nexorus.io"
+documentation = "https://github.com/nexorusio/openledger/tree/main/docs"
+repository = "https://github.com/nexorusio/openledger"
+packages = [{include = "maigret"}]
+include = [
+    {path = "LICENSES/MAIGRET-MIT.txt", format = ["sdist", "wheel"]},
+    {path = "THIRD_PARTY_NOTICES.md", format = ["sdist", "wheel"]},
+]
 classifiers = [
     "Development Status :: 5 - Production/Stable",
     "Programming Language :: Python :: 3",
@@ -22,13 +27,13 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Intended Audience :: Information Technology",
     "Operating System :: OS Independent",
-    "License :: OSI Approved :: MIT License",
+    "License :: Other/Proprietary License",
     "Natural Language :: English"
 ]
 
 [tool.poetry.urls]
-"Bug Tracker" = "https://github.com/soxoj/maigret/issues"
-"Funding" = "https://www.patreon.com/soxoj"
+"Bug Tracker" = "https://github.com/nexorusio/openledger/issues"
+"License and notices" = "https://github.com/nexorusio/openledger/blob/main/THIRD_PARTY_NOTICES.md"
 
 [tool.poetry.dependencies]
 # poetry install

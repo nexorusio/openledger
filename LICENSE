@@ -1,21 +1,81 @@
-MIT License
+OPENLEDGER LICENSING NOTICE
 
-Copyright (c) 2020-2026 Soxoj
+Copyright (c) 2026 PT Daya Prana Inovasi. All rights reserved.
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+OpenLedger is a mixed-license work. This notice separates proprietary
+OpenLedger material from third-party material; it does not remove or restrict
+rights that were previously granted.
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Provenance and OpenLedger ownership
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+This repository was forked from Maigret at commit
+af3de564c706e677221ab9f82f90166bb8b346ea. The first OpenLedger-specific
+modification is commit 8bc569097af94d992ac2f32a7293eeb6b140bfd4.
+
+To the extent owned through authorship or written assignment, PT Daya Prana
+Inovasi asserts copyright in the original OpenLedger additions and
+modifications introduced beginning with that first OpenLedger commit. This
+ownership statement does not claim Maigret code, later upstream integrations,
+third-party contributions, dependencies, data, trademarks, ideas, systems, or
+methods of operation.
+
+2. Previously granted MIT permissions
+
+Material published in this repository at or before commit
+60b187135c94621d729a42b0d09294c59a3d8cb7 was made available under the MIT
+License that accompanied that revision. Nothing in this notice withdraws or
+limits permissions already granted for those historical versions, including
+permissions covering original OpenLedger modifications in those versions.
+Those grants remain effective according to their terms.
+
+Copyright ownership and licensing are distinct: identifying PT Daya Prana
+Inovasi as the owner of original OpenLedger work does not cancel a license
+already granted for a public copy of that work.
+
+3. Proprietary OpenLedger distribution
+
+Beginning with the first default-branch revision containing this notice, and
+unless a file or accompanying notice states otherwise, PT Daya Prana Inovasi
+offers its copyrightable original OpenLedger material under proprietary terms.
+This includes company-owned OpenLedger material originating with commit
+8bc569097af94d992ac2f32a7293eeb6b140bfd4 and new company-owned OpenLedger
+material first published after the transition. A recipient's continuing rights
+under a previously granted MIT license are not affected.
+
+Except under such a continuing earlier license, an express file-level license,
+a written agreement with PT Daya Prana Inovasi, or as required for
+repository-hosting functionality, no permission is granted to use, copy,
+modify, distribute, sublicense, or create derivative works from proprietary
+OpenLedger material.
+
+The standalone terms for the file-level identifier
+`LicenseRef-Nexorus-Proprietary` are preserved in
+LICENSES/LicenseRef-Nexorus-Proprietary.txt.
+
+4. Third-party material
+
+Third-party components and derived portions remain subject to their own
+licenses. In particular, retained and modified portions of Maigret remain
+available under Maigret's MIT License. Its complete copyright and permission
+notice is preserved in LICENSES/MAIGRET-MIT.txt and described in
+THIRD_PARTY_NOTICES.md.
+
+No proprietary term in this repository limits any permission granted by an
+applicable third-party license. A proprietary license or commercial agreement
+for OpenLedger does not grant ownership of, or exclusive rights in, Maigret or
+any other third-party component.
+
+5. Identifying the applicable license
+
+An explicit file-level license or copyright notice controls for that file.
+Where no file-level notice exists, use the repository history and
+THIRD_PARTY_NOTICES.md to determine whether the material predates this
+transition or incorporates third-party work. Do not remove third-party notices.
+
+6. No warranty for proprietary material
+
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, PROPRIETARY OPENLEDGER
+MATERIAL IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO WARRANTIES OF MERCHANTABILITY, FITNESS
+FOR A PARTICULAR PURPOSE, TITLE, AND NON-INFRINGEMENT. THE APPLICABLE
+THIRD-PARTY LICENSE CONTROLS WARRANTIES AND LIABILITY FOR THIRD-PARTY MATERIAL.
