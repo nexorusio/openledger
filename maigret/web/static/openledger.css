@@ -2772,6 +2772,11 @@ textarea.form-control.compact-textarea {
     gap: 15px;
 }
 
+.persona-export-button {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
 .persona-avatar {
     width: 56px;
     height: 56px;

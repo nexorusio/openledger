@@ -3,6 +3,7 @@ from flask import (
     jsonify,
     render_template,
     request,
+    send_file,
     send_from_directory,
     Response,
     flash,
@@ -13,6 +14,7 @@ from flask import (
 from werkzeug.exceptions import NotFound
 from werkzeug.middleware.proxy_fix import ProxyFix
 import base64
+import io
 import logging
 import os
 import asyncio
@@ -101,6 +103,7 @@ from maigret.web.persona_intelligence import (
     field_display_label,
     group_claims,
 )
+from maigret.web.persona_pdf import generate_persona_pdf, persona_pdf_filename
 
 app = Flask(__name__)
 try:
@@ -5056,6 +5059,37 @@ def persona_workspace(persona_id):
             'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
         ),
     )
+
+
+@app.route('/personas/<persona_id>/export.pdf')
+def export_persona_pdf(persona_id):
+    if case_store is None:
+        flash('Persona PDF export requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    persona, generated_at = case_store.get_persona_export_snapshot(persona_id)
+    if not persona:
+        flash('That persona does not exist.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    try:
+        pdf_bytes = generate_persona_pdf(
+            persona,
+            generated_by=session.get('username') or 'local-operator',
+            generated_at=generated_at,
+        )
+    except Exception as error:
+        record_internal_error('Failed to export the curated Persona PDF', error)
+        flash('The Persona PDF could not be generated.', 'danger')
+        return redirect(url_for('persona_workspace', persona_id=persona_id))
+    response = send_file(
+        io.BytesIO(pdf_bytes),
+        mimetype='application/pdf',
+        as_attachment=True,
+        download_name=persona_pdf_filename(persona, generated_at=generated_at),
+        max_age=0,
+    )
+    response.headers['Cache-Control'] = 'private, no-store, max-age=0'
+    response.headers['Pragma'] = 'no-cache'
+    return response
 
 
 @app.route('/personas/<persona_id>/investigate', methods=['GET', 'POST'])

@@ -1,3 +1,6 @@
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
 import pytest
@@ -335,6 +338,117 @@ def test_completed_findings_create_traceable_persona_claims(store):
     assert full_name["confidence"] == 90
     assert full_name["review_status"] == "pending"
     assert full_name["evidence"][0]["source_url"].startswith("https://")
+
+
+def test_persona_export_snapshot_blocks_concurrent_review_until_capture(
+    store, monkeypatch
+):
+    job_id = store.create_investigation(["alice"], {})
+    store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": "Alice Example"},
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    store.sync_persona_claims(job_id, result)
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    claim = next(
+        item
+        for item in store.get_persona(persona_id)["claims"]
+        if item["field_name"] == "full_name"
+    )
+    store.review_claim(claim["id"], "approved", "first-analyst")
+    tied_observed_at = utcnow()
+    with store.engine.begin() as connection:
+        connection.execute(
+            claim_evidence.insert(),
+            [
+                {
+                    "id": "00000000-0000-0000-0000-00000000000b",
+                    "claim_id": claim["id"],
+                    "evidence_type": "cited_public_web",
+                    "source_name": "Source B",
+                    "source_url": "https://example.test/b",
+                    "details": {},
+                    "fingerprint": "b" * 64,
+                    "observed_at": tied_observed_at,
+                },
+                {
+                    "id": "00000000-0000-0000-0000-00000000000a",
+                    "claim_id": claim["id"],
+                    "evidence_type": "cited_public_web",
+                    "source_name": "Source A",
+                    "source_url": "https://example.test/a",
+                    "details": {},
+                    "fingerprint": "a" * 64,
+                    "observed_at": tied_observed_at,
+                },
+            ],
+        )
+
+    snapshot_loaded = threading.Event()
+    release_snapshot = threading.Event()
+    original_loader = store._get_persona_with_connection
+
+    def paused_loader(connection, selected_persona_id):
+        persona = original_loader(connection, selected_persona_id)
+        snapshot_loaded.set()
+        assert release_snapshot.wait(timeout=5)
+        return persona
+
+    monkeypatch.setattr(store, "_get_persona_with_connection", paused_loader)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        export_future = executor.submit(store.get_persona_export_snapshot, persona_id)
+        assert snapshot_loaded.wait(timeout=5)
+        review_future = executor.submit(
+            store.review_claim,
+            claim["id"],
+            "rejected",
+            "second-analyst",
+        )
+        time.sleep(0.1)
+        assert not review_future.done()
+        release_snapshot.set()
+        snapshot, generated_at = export_future.result(timeout=5)
+        review_future.result(timeout=5)
+
+    exported_claim = next(
+        item for item in snapshot["claims"] if item["id"] == claim["id"]
+    )
+    assert exported_claim["review_status"] == "approved"
+    assert [
+        evidence["id"]
+        for evidence in exported_claim["evidence"]
+        if evidence["id"]
+        in {
+            "00000000-0000-0000-0000-00000000000a",
+            "00000000-0000-0000-0000-00000000000b",
+        }
+    ] == [
+        "00000000-0000-0000-0000-00000000000a",
+        "00000000-0000-0000-0000-00000000000b",
+    ]
+    assert generated_at.tzinfo is not None
+    current_claim = next(
+        item
+        for item in store.get_persona(persona_id)["claims"]
+        if item["id"] == claim["id"]
+    )
+    assert current_claim["review_status"] == "rejected"
 
 
 def test_same_subject_email_hint_is_a_pending_claim_not_an_approved_fact(store):
