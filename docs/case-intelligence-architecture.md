@@ -463,7 +463,11 @@ relationship hypotheses. The same cross-case evidence validator applies: exact
 entity references, approved anchors from both source cases, bounded confidence,
 and the organization-evidence protections are mandatory. Accepted hypotheses
 remain pending and retain the originating assistant message as provenance. Chat
-cannot approve them. Approval redirects to and focuses the resulting graph edge;
+cannot approve them. Immediately before insertion, the store locks the combined
+and source-case state, rejects any newer refresh job, and recomputes the snapshot
+SHA-256 in the same transaction; an AI request that raced a source change is
+retained as chat but cannot create a proposal. Approval redirects to and focuses
+the resulting graph edge;
 the edge is solid green only after that decision, while uncertain paths remain
 dashed and rejected paths are omitted.
 

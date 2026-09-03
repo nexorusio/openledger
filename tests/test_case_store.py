@@ -9,6 +9,7 @@ from sqlalchemy import func, select, update
 from maigret.web.case_store import (
     CaseStore,
     ReferencedCaseError,
+    StaleCombinedSnapshotError,
     _bounded_round_robin_case_records,
     cases,
     claim_evidence,
@@ -1608,7 +1609,9 @@ def test_combined_ai_proposals_are_snapshot_bound_and_reviewed_separately(store)
 
 
 def test_combined_chat_relationship_proposals_retain_message_lineage(store):
-    alice_case_id, _ = _create_case_with_company_claim(store, "alice", "Nexorus")
+    alice_case_id, alice_claim = _create_case_with_company_claim(
+        store, "alice", "Nexorus"
+    )
     bob_case_id, _ = _create_case_with_company_claim(store, "bob", "Nexorus")
     job_id = store.create_combined_investigation(
         [alice_case_id, bob_case_id],
@@ -1697,6 +1700,56 @@ def test_combined_chat_relationship_proposals_retain_message_lineage(store):
     assert retained[0]["id"] == inserted[0]
     assert retained[0]["chat_message_id"] == message["id"]
     assert retained[0]["review_status"] == "pending"
+
+    refresh_job_id = store.queue_combined_investigation_refresh(
+        job["case_id"], requested_by="analyst"
+    )
+    store.claim_next("worker:combined-chat-refresh")
+    refresh_snapshot = store.build_case_fusion_snapshot(refresh_job_id)
+    refresh_snapshot.pop("analysis_context")
+    refresh_run_id = store.start_combined_analysis_run(
+        refresh_job_id,
+        refresh_snapshot["snapshot"]["sha256"],
+        model="gpt-5.6-sol",
+        web_search_enabled=True,
+    )
+    store.complete_combined_analysis_run(
+        refresh_run_id,
+        {
+            "executive_summary": "Refreshed assessment.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": [],
+            "next_steps": [],
+            "sources": [],
+            "proposals": [],
+        },
+    )
+    store.finish(
+        refresh_job_id,
+        {"status": "completed", "kind": "case_fusion", **refresh_snapshot},
+    )
+    with pytest.raises(StaleCombinedSnapshotError, match="newer"):
+        store.append_combined_relationship_proposals(
+            job["case_id"],
+            run_id,
+            message["id"],
+            [{**proposal, "title": "Superseded snapshot hypothesis"}],
+        )
+
+    store.review_claim(alice_claim["id"], "rejected", "second-analyst")
+    with pytest.raises(StaleCombinedSnapshotError, match="source cases changed"):
+        store.append_combined_relationship_proposals(
+            job["case_id"],
+            refresh_run_id,
+            message["id"],
+            [{**proposal, "title": "Stale source evidence hypothesis"}],
+        )
+    runs = store.get_case(job["case_id"])["analysis_runs"]
+    original_run = next(item for item in runs if item["id"] == run_id)
+    refreshed_run = next(item for item in runs if item["id"] == refresh_run_id)
+    assert len(original_run["proposals"]) == 1
+    assert refreshed_run["proposals"] == []
 
 
 def test_combined_case_references_protect_sources_and_delete_independently(store):

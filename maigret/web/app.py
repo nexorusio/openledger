@@ -55,6 +55,7 @@ from maigret.web.case_store import (
     ActiveInvestigationError,
     MAX_COMBINED_SOURCE_CASES,
     ReferencedCaseError,
+    StaleCombinedSnapshotError,
     TERMINAL_STATUSES,
     CaseStore,
     database_url_from_environment,
@@ -5426,6 +5427,12 @@ def case_chat_message(case_id):
                         "kind": "relationship",
                         "analysis_run_id": latest_analysis["id"],
                         "proposal_ids": proposal_ids,
+                    }
+                except StaleCombinedSnapshotError:
+                    proposal_summary = {
+                        "status": "stale_snapshot",
+                        "count": 0,
+                        "kind": "relationship",
                     }
                 except Exception as error:
                     record_internal_error(

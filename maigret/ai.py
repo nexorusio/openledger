@@ -910,12 +910,7 @@ async def _get_scoped_chat_response(
         conversation_budget -= len(content)
         if conversation_budget <= 0:
             break
-    serialized_context = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
-    if len(serialized_context) > 90_000:
-        serialized_context = (
-            serialized_context[:90_000]
-            + "\n[Investigation context truncated at the server safety limit.]"
-        )
+    serialized_context = _serialize_bounded_chat_context(context)
     structured_input = json.dumps(
         {
             context_key: serialized_context,
@@ -947,6 +942,66 @@ async def _get_scoped_chat_response(
         response_data,
         require_web_search=web_search_enabled,
     )
+
+
+def _serialize_bounded_chat_context(context, *, maximum_chars: int = 90_000) -> str:
+    """Serialize model context without ever cutting through JSON syntax."""
+    serialized = json.dumps(context, ensure_ascii=False, separators=(",", ":"))
+    if len(serialized) <= maximum_chars:
+        return serialized
+
+    def bounded_value(value, *, list_limit: int, text_limit: int, key=""):
+        if isinstance(value, dict):
+            return {
+                str(item_key): bounded_value(
+                    item_value,
+                    list_limit=list_limit,
+                    text_limit=text_limit,
+                    key=str(item_key),
+                )
+                for item_key, item_value in list(value.items())[:100]
+            }
+        if isinstance(value, list):
+            return [
+                bounded_value(
+                    item,
+                    list_limit=list_limit,
+                    text_limit=text_limit,
+                    key=key,
+                )
+                for item in value[:list_limit]
+            ]
+        if isinstance(value, str):
+            if key in {"url", "source_url"}:
+                return value
+            if len(value) > text_limit:
+                return value[:text_limit] + "\n[Text omitted at the context limit.]"
+        return value
+
+    for list_limit, text_limit in (
+        (50, 4_000),
+        (25, 3_000),
+        (10, 2_000),
+        (5, 1_000),
+        (2, 500),
+        (1, 300),
+        (0, 200),
+    ):
+        bounded = bounded_value(
+            context,
+            list_limit=list_limit,
+            text_limit=text_limit,
+        )
+        if isinstance(bounded, dict):
+            bounded["context_truncated"] = True
+            bounded["context_truncation_note"] = (
+                "Some collection items or long text were omitted at the server "
+                "safety limit. Retained URLs are exact."
+            )
+        serialized = json.dumps(bounded, ensure_ascii=False, separators=(",", ":"))
+        if len(serialized) <= maximum_chars:
+            return serialized
+    raise ValueError("Investigation context could not be bounded safely")
 
 
 async def get_case_chat_claim_proposals(

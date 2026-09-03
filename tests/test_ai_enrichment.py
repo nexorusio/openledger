@@ -355,7 +355,24 @@ def test_combined_case_chat_distinguishes_snapshot_review_and_inference(monkeypa
             case_context={
                 "scope": "combined_investigation",
                 "snapshot_current": True,
-                "latest_ai_assessment": {"executive_summary": "A possible link."},
+                "latest_ai_assessment": {
+                    "executive_summary": "A possible link.",
+                    "proposals": [
+                        {
+                            "title": f"Hypothesis {index}",
+                            "explanation": "x" * 6_000,
+                            "sources": [
+                                {
+                                    "url": (
+                                        "https://example.test/path?"
+                                        "evidence=1&view=full"
+                                    )
+                                }
+                            ],
+                        }
+                        for index in range(100)
+                    ],
+                },
             },
             conversation=[
                 {
@@ -374,6 +391,17 @@ def test_combined_case_chat_distinguishes_snapshot_review_and_inference(monkeypa
     assert "combined_investigation_json" in captured["payload"]["input"]
     assert "Why is this not proof" in captured["payload"]["input"]
     assert "What evidence would change" in captured["payload"]["input"]
+    structured_input = json.loads(captured["payload"]["input"])
+    bounded_context_json = structured_input["combined_investigation_json"]
+    bounded_context = json.loads(bounded_context_json)
+    assert len(bounded_context_json) <= 90_000
+    assert bounded_context["context_truncated"] is True
+    assert bounded_context["latest_ai_assessment"]["executive_summary"] == (
+        "A possible link."
+    )
+    assert bounded_context["latest_ai_assessment"]["proposals"][0]["sources"][0][
+        "url"
+    ] == "https://example.test/path?evidence=1&view=full"
     normalized_instructions = " ".join(captured["payload"]["instructions"].split())
     assert "approved AI relationship is still an analyst-approved hypothesis" in (
         normalized_instructions
