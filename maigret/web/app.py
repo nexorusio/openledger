@@ -5373,8 +5373,7 @@ def case_chat_message(case_id):
                 raise
             logging.warning(
                 "Cited case-chat research could not corroborate an "
-                "analyst-supplied URL for case_id=%s",
-                safe_log_value(case_id),
+                "analyst-supplied URL"
             )
             uncited_url_fallback = True
             answer = (
