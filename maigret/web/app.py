@@ -5820,6 +5820,14 @@ def delete_history_entry(session_folder):
         deleted = delete_persisted_investigation(
             session_folder, confirmation_name=confirmation_name
         )
+    except ReferencedCaseError as error:
+        reference_names = ", ".join(item["title"] for item in error.references[:5])
+        flash(
+            "This source case is retained by a combined investigation: "
+            f"{reference_names}. Delete the combined investigation first.",
+            "warning",
+        )
+        return redirect(url_for("history"))
     except (OSError, ValueError) as error:
         record_internal_error(
             'Failed to delete investigation', error, session=session_folder

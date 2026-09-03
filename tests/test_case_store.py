@@ -1502,6 +1502,13 @@ def test_combined_case_references_protect_sources_and_delete_independently(store
     assert captured.value.references == [
         {"id": fusion_case_id, "title": "Protected sources"}
     ]
+    first_source_case = store.get_case(first_case_id)
+    first_source_job_id = first_source_case["jobs"][0]["job_id"]
+    with pytest.raises(ReferencedCaseError) as job_deletion:
+        store.delete_job(
+            first_source_job_id, confirmation_name=first_source_case["title"]
+        )
+    assert job_deletion.value.references == captured.value.references
 
     assert store.request_cancel(fusion_job_id) is True
     assert store.delete_case(fusion_case_id) is True

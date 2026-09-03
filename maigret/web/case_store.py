@@ -4998,6 +4998,26 @@ class CaseStore:
             )
         return int(result.rowcount or 0)
 
+    @staticmethod
+    def _combined_case_references_with_connection(
+        connection: Connection, source_case_id: str
+    ) -> list[Dict[str, str]]:
+        parent_cases = cases.alias("parent_cases")
+        rows = connection.execute(
+            select(parent_cases.c.id, parent_cases.c.title)
+            .select_from(
+                combined_case_members.join(
+                    parent_cases,
+                    parent_cases.c.id == combined_case_members.c.combined_case_id,
+                )
+            )
+            .where(combined_case_members.c.source_case_id == source_case_id)
+            .order_by(parent_cases.c.created_at, parent_cases.c.id)
+        ).mappings()
+        return [
+            {"id": str(row["id"]), "title": str(row["title"])} for row in rows
+        ]
+
     def delete_job(
         self, job_id: str, *, confirmation_name: Optional[str] = None
     ) -> bool:
@@ -5007,6 +5027,7 @@ class CaseStore:
                     investigation_jobs.c.case_id,
                     investigation_jobs.c.status,
                     cases.c.title.label("case_title"),
+                    cases.c.case_type,
                 )
                 .join(cases, cases.c.id == investigation_jobs.c.case_id)
                 .where(investigation_jobs.c.id == job_id)
@@ -5042,6 +5063,12 @@ class CaseStore:
                     .values(updated_at=utcnow())
                 )
             else:
+                if row["case_type"] == "standalone":
+                    references = self._combined_case_references_with_connection(
+                        connection, str(row["case_id"])
+                    )
+                    if references:
+                        raise ReferencedCaseError(references)
                 connection.execute(delete(cases).where(cases.c.id == row["case_id"]))
         return True
 
@@ -5076,31 +5103,11 @@ class CaseStore:
                     "Cases with active investigations cannot be deleted"
                 )
             if stored_case["case_type"] == "standalone":
-                parent_cases = cases.alias("parent_cases")
-                references = list(
-                    connection.execute(
-                        select(
-                            parent_cases.c.id,
-                            parent_cases.c.title,
-                        )
-                        .select_from(
-                            combined_case_members.join(
-                                parent_cases,
-                                parent_cases.c.id
-                                == combined_case_members.c.combined_case_id,
-                            )
-                        )
-                        .where(combined_case_members.c.source_case_id == case_id)
-                        .order_by(parent_cases.c.created_at, parent_cases.c.id)
-                    ).mappings()
+                references = self._combined_case_references_with_connection(
+                    connection, case_id
                 )
                 if references:
-                    raise ReferencedCaseError(
-                        [
-                            {"id": str(row["id"]), "title": str(row["title"])}
-                            for row in references
-                        ]
-                    )
+                    raise ReferencedCaseError(references)
             connection.execute(delete(cases).where(cases.c.id == case_id))
         return True
 

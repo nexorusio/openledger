@@ -1245,6 +1245,21 @@ def test_combined_case_selection_and_workspace_flow(client, web_app, persistent_
         f"/relationships?mode=shared&case_id={combined_case['id']}"
     ).get_data(as_text=True)
     assert "Versioned combined-case snapshot" in relationships
+    source_case = persistent_store.get_case(source_case_ids[0])
+    source_job_id = source_case["jobs"][0]["job_id"]
+    protected_delete = client.post(
+        f"/history/search_{source_job_id}/delete",
+        data={
+            "csrf_token": "combine-csrf",
+            "confirmation_name": source_case["title"],
+        },
+        follow_redirects=True,
+    )
+    assert protected_delete.status_code == 200
+    assert "retained by a combined investigation" in protected_delete.get_data(
+        as_text=True
+    )
+    assert persistent_store.get_case(source_case_ids[0]) is not None
 
 
 def _affiliation_worker_observation():
