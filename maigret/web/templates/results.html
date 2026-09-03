@@ -292,12 +292,18 @@ if (aiButton) {
             }
             if (payload.research_status === 'no_cited_web_findings') {
                 status.textContent = payload.cached
-                    ? 'Loaded the saved case-evidence assessment; the existing Persona remains available.'
-                    : 'No new public sources were found. Assessment completed from stored case evidence; the existing Persona remains available.';
+                    ? 'Loaded the saved case-evidence assessment.'
+                    : 'No new public sources were found. Assessment completed from stored case evidence.';
+                if (payload.proposal_status === 'case_evidence_only') {
+                    status.textContent += ' The existing Persona remains available.';
+                }
             } else if (payload.research_status === 'case_evidence_only') {
                 status.textContent = payload.cached
                     ? 'Loaded the saved case-evidence assessment.'
-                    : 'Assessment completed from stored case evidence; the existing Persona remains available.';
+                    : 'Assessment completed from stored case evidence.';
+                if (payload.proposal_status === 'case_evidence_only') {
+                    status.textContent += ' The existing Persona remains available.';
+                }
             } else {
                 status.textContent = payload.cached
                     ? 'Loaded the saved assessment and synchronized its proposals.'

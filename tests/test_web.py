@@ -953,6 +953,82 @@ def test_ai_analysis_falls_back_to_case_evidence_when_research_has_no_citations(
         store.dispose()
 
 
+@pytest.mark.parametrize(
+    ('persona_state', 'expected_status'),
+    [
+        ('storage_missing', 'storage_unavailable'),
+        ('investigation_missing', 'investigation_unavailable'),
+    ],
+)
+def test_ai_analysis_fallback_preserves_unavailable_persona_status(
+    client,
+    web_app,
+    monkeypatch,
+    tmp_path,
+    persona_state,
+    expected_status,
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = None
+    if persona_state == 'investigation_missing':
+        store = CaseStore(
+            f"sqlite:///{tmp_path / 'unlinked-fallback.db'}",
+            create_schema=True,
+        )
+    monkeypatch.setattr(web_app, 'case_store', store)
+    calls = []
+
+    async def fake_analysis(**kwargs):
+        calls.append(kwargs['web_search_enabled'])
+        if kwargs['web_search_enabled']:
+            raise AIEnrichmentContractError('no cited public sources')
+        return {
+            'analysis': '# Assessment\n\nStored evidence remains reviewable.',
+            'sources': [],
+        }
+
+    monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
+    result = {
+        'status': 'completed',
+        'session_folder': 'search_orphan',
+        'graph_file': 'search_orphan/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [],
+    }
+    web_app.job_results['orphan'] = result
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    try:
+        first = client.post(
+            '/api/analysis/search_orphan',
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+        )
+        second = client.post(
+            '/api/analysis/search_orphan',
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+        )
+
+        assert first.status_code == 200
+        assert first.get_json()['proposal_status'] == expected_status
+        assert second.status_code == 200
+        assert second.get_json()['cached'] is True
+        assert second.get_json()['proposal_status'] == expected_status
+        assert calls == [True, False]
+
+        metadata = json.loads(
+            (tmp_path / 'search_orphan' / 'ai_analysis.json').read_text(
+                encoding='utf-8'
+            )
+        )
+        assert metadata['proposal_status'] == expected_status
+        page = client.get('/results/search_orphan').get_data(as_text=True)
+        assert '<strong>Unavailable</strong>' in page
+    finally:
+        if store is not None:
+            store.dispose()
+
+
 def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
     client, web_app, monkeypatch, tmp_path
 ):

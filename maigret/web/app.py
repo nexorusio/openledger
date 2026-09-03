@@ -6570,7 +6570,11 @@ def analyze_session(session_id):
                         sources=metadata['sources'],
                         model=metadata['model'],
                     )
-                    if metadata.get('proposal_status') == 'case_evidence_only':
+                    if (
+                        metadata.get('proposal_status') == 'case_evidence_only'
+                        and proposal_sync['status']
+                        in {'pending_review', 'no_valid_proposals'}
+                    ):
                         proposal_sync['status'] = 'case_evidence_only'
                     with open(analysis_path, encoding='utf-8') as analysis_file:
                         return {
@@ -6619,9 +6623,8 @@ def analyze_session(session_id):
             if not web_search_enabled:
                 raise
             logging.info(
-                'No cited public-web findings for AI assessment session %s; '
-                'running a separate case-evidence-only assessment',
-                safe_log_value(session_id),
+                'No cited public-web findings for AI assessment; running a '
+                'separate case-evidence-only assessment'
             )
             enriched = asyncio.run(
                 get_enriched_ai_analysis(
@@ -6669,10 +6672,12 @@ def analyze_session(session_id):
         )
         if proposal_error:
             proposal_sync['status'] = 'unavailable'
-        elif research_status in {
-            'case_evidence_only',
-            'no_cited_web_findings',
-        }:
+        elif (
+            research_status
+            in {'case_evidence_only', 'no_cited_web_findings'}
+            and proposal_sync['status']
+            in {'pending_review', 'no_valid_proposals'}
+        ):
             proposal_sync['status'] = 'case_evidence_only'
 
         os.makedirs(os.path.dirname(analysis_path), exist_ok=True)
