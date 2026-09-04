@@ -426,12 +426,23 @@
             numbers.forEach(number => [first + last, first[0] + last].forEach(base =>
                 add(base + number, 84, `Name pattern with analyst-approved contextual number ${number}`)));
         });
-        const selectionLimit = userScannerUsernameToggle && userScannerUsernameToggle.checked
-            ? Math.max(0, 16 - exactIdentifierTargets().length)
-            : 16;
+        const scannerEnabled = userScannerUsernameToggle && userScannerUsernameToggle.checked;
+        const scannerTargetKeys = new Set(exactIdentifierTargets().map(value => value.toLocaleLowerCase()));
+        let selectedAliasCount = 0;
         return Array.from(candidates.values())
             .sort((a, b) => b.score - a.score || a.value.localeCompare(b.value))
-            .slice(0, 24).map((candidate, index) => ({ ...candidate, selected: index < selectionLimit && candidate.score >= 78 }));
+            .slice(0, 24).map((candidate, index) => {
+                const key = candidate.value.toLocaleLowerCase();
+                const selected = scannerEnabled
+                    ? candidate.score >= 78 && !scannerTargetKeys.has(key)
+                        && scannerTargetKeys.size < 16 && selectedAliasCount < 16
+                    : index < 16 && candidate.score >= 78;
+                if (selected) {
+                    scannerTargetKeys.add(key);
+                    selectedAliasCount++;
+                }
+                return { ...candidate, selected };
+            });
     }
 
     function selectedAliases() {
@@ -448,10 +459,22 @@
 
     function enforceAliasSelectionLimit() {
         if (!userScannerUsernameToggle || !userScannerUsernameToggle.checked) return;
-        const selectionLimit = Math.max(0, 16 - exactIdentifierTargets().length);
+        const scannerTargetKeys = new Set(exactIdentifierTargets().map(value => value.toLocaleLowerCase()));
+        const selectedAliasKeys = new Set();
         const selectedControls = Array.from(aliasList.querySelectorAll('.alias-selected'))
             .filter(control => control.checked);
-        selectedControls.slice(selectionLimit).forEach(control => { control.checked = false; });
+        selectedControls.forEach(control => {
+            const row = control.closest('.alias-candidate-row');
+            const key = row.querySelector('.alias-value').value.trim().toLocaleLowerCase();
+            const duplicateAlias = !key || selectedAliasKeys.has(key);
+            const unionIsFull = !scannerTargetKeys.has(key) && scannerTargetKeys.size >= 16;
+            if (duplicateAlias || selectedAliasKeys.size >= 16 || unionIsFull) {
+                control.checked = false;
+                return;
+            }
+            selectedAliasKeys.add(key);
+            scannerTargetKeys.add(key);
+        });
         updateAliasCount();
     }
 
@@ -476,6 +499,8 @@
                 selected.value = value.value.trim();
                 row.querySelector('.alias-score').textContent = 'edited';
                 row.querySelector('.alias-reason').textContent = 'Analyst-edited alias candidate';
+                enforceAliasSelectionLimit();
+                updateAliasCount();
                 updatePlan();
             });
             return row;

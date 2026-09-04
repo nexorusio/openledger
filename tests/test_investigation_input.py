@@ -347,3 +347,38 @@ def test_username_verification_rejects_more_than_sixteen_total_targets():
                 "user_scanner_platform": ["instagram"],
             }
         )
+
+
+def test_username_verification_cap_counts_the_deduplicated_target_union():
+    exact_usernames = ["johndoe"] + [f"exact{index}" for index in range(14)]
+    submitted = build_investigation_plan(
+        {
+            "identifier_type": ["username"] * len(exact_usernames) + ["full_name"],
+            "identifier_value": exact_usernames + ["John Doe"],
+            "generate_name_variants": "on",
+            "alias_candidates_present": "1",
+            "alias_candidate": ["johndoe", "john.doe"],
+            "selected_alias": ["johndoe", "john.doe"],
+            "enable_user_scanner_username": "on",
+            "user_scanner_platforms_present": "1",
+            "user_scanner_platform": ["instagram"],
+        }
+    )
+
+    assert len(search_usernames(submitted)) == 16
+    assert search_usernames(submitted).count("johndoe") == 1
+
+    generated = build_investigation_plan(
+        {
+            "identifier_type": ["username", "full_name"],
+            "identifier_value": ["johnmichaeldoe", "John Michael Doe"],
+            "generate_name_variants": "on",
+            "alias_nicknames": "Johnny, JD",
+            "enable_user_scanner_username": "on",
+            "user_scanner_platforms_present": "1",
+            "user_scanner_platform": ["instagram"],
+        }
+    )
+
+    assert len(search_usernames(generated)) == 16
+    assert search_usernames(generated).count("johnmichaeldoe") == 1

@@ -387,25 +387,33 @@ def build_investigation_plan(
             f"Select no more than {MAX_SELECTED_ALIASES} username aliases."
         )
     if enable_user_scanner_username:
-        remaining_scanner_slots = max(
-            0, MAX_USER_SCANNER_USERNAME_TARGETS - len(search_targets)
-        )
+        scanner_target_keys = {
+            str(target["value"]).casefold() for target in search_targets
+        }
         if submitted_alias_plan:
-            if len(selected_aliases) > remaining_scanner_slots:
+            scanner_target_keys.update(
+                str(candidate["value"]).casefold()
+                for candidate in selected_aliases
+            )
+            if len(scanner_target_keys) > MAX_USER_SCANNER_USERNAME_TARGETS:
                 raise InvestigationInputError(
                     "User Scanner username verification accepts no more than "
                     f"{MAX_USER_SCANNER_USERNAME_TARGETS} total account targets. "
                     "Deselect aliases or disable the additional verification."
                 )
         else:
-            selected_keys = {
-                str(candidate["value"]).casefold()
-                for candidate in selected_aliases[:remaining_scanner_slots]
-            }
+            selected_alias_count = 0
             for candidate in alias_candidates:
-                candidate["selected"] = (
-                    str(candidate["value"]).casefold() in selected_keys
+                candidate_key = str(candidate["value"]).casefold()
+                candidate["selected"] = bool(
+                    int(candidate["score"]) >= 78
+                    and candidate_key not in scanner_target_keys
+                    and len(scanner_target_keys) < MAX_USER_SCANNER_USERNAME_TARGETS
+                    and selected_alias_count < MAX_SELECTED_ALIASES
                 )
+                if candidate["selected"]:
+                    scanner_target_keys.add(candidate_key)
+                    selected_alias_count += 1
             selected_aliases = [
                 candidate for candidate in alias_candidates if candidate.get("selected")
             ]
