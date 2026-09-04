@@ -226,7 +226,11 @@ class StreamNotify:
             self.sites, result.site_name
         )
         if not is_similar:
-            entry = {'status': result, 'url_user': result.site_url_user}
+            entry = {
+                'status': result,
+                'url_user': result.site_url_user,
+                'http_status': getattr(result, 'http_status', None),
+            }
             if selected_site is not None:
                 entry['site'] = selected_site
                 entry['url_main'] = selected_site.url_main
@@ -248,6 +252,7 @@ class StreamNotify:
                 ),
                 status_context=result.context,
                 status_error=str(result.error) if result.error else '',
+                http_status=getattr(result, 'http_status', None),
             )
             self.q.put(
                 {
@@ -413,6 +418,7 @@ EMBEDDED_GRAPH_PATH_PATTERN = re.compile(
 )
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
+PROFILE_RELIABILITY_VERSION = 1
 AI_ANALYSIS_SCHEMA_VERSION = 7
 AUTH_SCHEMA_VERSION = 2
 LEGACY_AUTH_SCHEMA_VERSION = 1
@@ -1300,6 +1306,9 @@ def profile_detection_record(
         health_state=health_state,
         status_context=status.context,
         status_error=str(status.error) if status.error else '',
+        http_status=site_data.get(
+            'http_status', getattr(status, 'http_status', None)
+        ),
     )
     return {
         'site_name': site_name,
@@ -1407,15 +1416,63 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
             normalized.get('individual_reports'), list
         ):
             raise ValueError('Incomplete report session metadata')
+        reliability_version = normalized.get('profile_reliability_version')
+        if reliability_version is None:
+            reliability_version = 0
+        if reliability_version not in {0, PROFILE_RELIABILITY_VERSION}:
+            raise ValueError('Unsupported profile reliability version')
+        normalized['profile_reliability_version'] = reliability_version
+
         found_count = normalized.get('found_count', 0)
         if not isinstance(found_count, int) or found_count < 0:
             raise ValueError('Invalid profile count in report session metadata')
+        if reliability_version == 0:
+            raw_claimed_count = normalized.get('raw_claimed_count', found_count)
+            if not isinstance(raw_claimed_count, int) or raw_claimed_count < 0:
+                raise ValueError(
+                    'Invalid raw claimed count in report session metadata'
+                )
+            migrated_reports = []
+            for raw_report in normalized['individual_reports']:
+                if not isinstance(raw_report, dict):
+                    raise ValueError('Invalid individual report metadata')
+                report = dict(raw_report)
+                legacy_profiles = report.get('untriaged_profiles')
+                if legacy_profiles is None:
+                    legacy_profiles = report.get('claimed_profiles', [])
+                if not isinstance(legacy_profiles, list):
+                    raise ValueError('Invalid legacy profile metadata')
+                report['untriaged_profiles'] = [
+                    {
+                        **profile,
+                        'classification': 'untriaged',
+                        'classification_reason': (
+                            'Saved before reliability triage; rerun required.'
+                        ),
+                        'identity_status': 'unverified',
+                    }
+                    for profile in legacy_profiles
+                    if isinstance(profile, dict)
+                ]
+                report['claimed_profiles'] = []
+                report.setdefault('candidate_profiles', [])
+                report.setdefault('suppressed_profiles', [])
+                migrated_reports.append(report)
+            normalized['individual_reports'] = migrated_reports
+            normalized['found_count'] = 0
+            normalized['candidate_count'] = 0
+            normalized['suppressed_count'] = 0
+            normalized['raw_claimed_count'] = raw_claimed_count
+            normalized['untriaged_count'] = raw_claimed_count
+            return normalized
+
         normalized['found_count'] = found_count
         count_defaults = {
             'candidate_count': 0,
             'suppressed_count': 0,
-            # Before reliability triage found_count represented every raw
-            # CLAIMED result. Preserve that audit count for legacy sessions.
+            'untriaged_count': 0,
+            # Versioned results normally persist the raw count explicitly;
+            # retain a safe fallback for partially written metadata.
             'raw_claimed_count': found_count,
         }
         for count_key, default_count in count_defaults.items():
@@ -1797,6 +1854,12 @@ def build_ai_markdown(
         profiles = report.get('claimed_profiles', [])
         candidates = report.get('candidate_profiles', [])
         suppressed = report.get('suppressed_profiles', [])
+        untriaged = report.get('untriaged_profiles', [])
+        if untriaged:
+            lines.append(
+                'Legacy raw CLAIMED responses withheld pending rescan: '
+                f'{len(untriaged)}'
+            )
         diagnostics = report.get('diagnostics', {})
         if diagnostics:
             lines.append(
@@ -2395,6 +2458,8 @@ def build_reports(
         'candidate_count': candidate_count,
         'suppressed_count': suppressed_count,
         'raw_claimed_count': raw_claimed_count,
+        'untriaged_count': 0,
+        'profile_reliability_version': PROFILE_RELIABILITY_VERSION,
         'collector_observations': list(collector_observations or []),
         'collector_found_count': sum(
             1
@@ -6734,6 +6799,10 @@ def results(session_id):
         raw_claimed_count=result_data.get(
             "raw_claimed_count", result_data.get("found_count", 0)
         ),
+        untriaged_count=result_data.get('untriaged_count', 0),
+        legacy_untriaged=(
+            result_data.get('profile_reliability_version') == 0
+        ),
         timestamp=session_id.replace("search_", ""),
         session_id=session_id,
         ai_enabled=bool(get_openai_api_key()),
@@ -6756,6 +6825,13 @@ def analyze_session(session_id):
     result_data = find_result_by_session(session_id)
     if not result_data:
         return {'error': 'Unknown or expired scan session.'}, 404
+    if result_data.get('profile_reliability_version') == 0:
+        return {
+            'error': (
+                'This legacy investigation predates profile reliability triage. '
+                'Rerun it before requesting AI analysis.'
+            )
+        }, 409
 
     lock = analysis_locks.setdefault(session_id, Lock())
     if not lock.acquire(blocking=False):

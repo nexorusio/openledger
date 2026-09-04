@@ -31,6 +31,7 @@ def _classify(**overrides):
         "health_state": "healthy",
         "status_context": "",
         "status_error": "",
+        "http_status": 200,
     }
     values.update(overrides)
     return classify_profile_detection(**values)
@@ -88,6 +89,16 @@ def test_degraded_detector_never_auto_promotes_rich_profile_content():
 
     assert decision["classification"] == "candidate"
     assert decision["health_state"] == "degraded"
+
+
+def test_blocked_http_status_suppresses_claimed_profile_metadata():
+    decision = _classify(
+        http_status=403,
+        evidence={"fullname": "Access denied", "description": "Alice"},
+    )
+
+    assert decision["classification"] == "suppressed"
+    assert "HTTP status 403" in decision["reason"]
 
 
 def test_registry_validation_and_case_insensitive_lookup(tmp_path):

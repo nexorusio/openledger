@@ -210,6 +210,7 @@ def test_worker_execution_persists_terminal_result(
             "individual_reports": [],
             "graph_file": f"search_{session_key}/graph.html",
             "found_count": 1,
+            "profile_reliability_version": 1,
         },
     )
     monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
@@ -243,6 +244,7 @@ def test_worker_shutdown_saves_partial_findings_as_interrupted_collection(
             "individual_reports": [],
             "graph_file": f"search_{session_key}/graph.html",
             "found_count": 1,
+            "profile_reliability_version": 1,
         },
     )
     monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)

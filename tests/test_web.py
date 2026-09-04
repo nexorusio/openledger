@@ -2123,13 +2123,58 @@ def test_legacy_persisted_result_preserves_raw_claimed_count(web_app):
             'session_folder': 'search_legacy',
             'graph_file': 'search_legacy/combined_graph.html',
             'usernames': ['alice'],
-            'individual_reports': [],
-            'found_count': 7,
+            'individual_reports': [
+                {
+                    'username': 'alice',
+                    'claimed_profiles': [
+                        {
+                            'site_name': 'Legacy Social',
+                            'url': 'https://legacy.example/alice',
+                        }
+                    ],
+                }
+            ],
+            'found_count': 1,
         },
     )
 
-    assert normalized['found_count'] == 7
-    assert normalized['raw_claimed_count'] == 7
+    assert normalized['profile_reliability_version'] == 0
+    assert normalized['found_count'] == 0
+    assert normalized['raw_claimed_count'] == 1
+    assert normalized['untriaged_count'] == 1
+    individual = normalized['individual_reports'][0]
+    assert individual['claimed_profiles'] == []
+    assert individual['untriaged_profiles'][0]['classification'] == 'untriaged'
+    assert 'https://legacy.example/alice' not in web_app.build_ai_markdown(
+        normalized
+    )
+
+
+def test_legacy_untriaged_session_requires_rescan_before_ai(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setattr(web_app, 'get_openai_api_key', lambda: 'test-key')
+    web_app.job_results['legacy'] = web_app.normalize_persisted_result(
+        'legacy',
+        {
+            'status': 'completed',
+            'session_folder': 'search_legacy',
+            'graph_file': 'search_legacy/combined_graph.html',
+            'usernames': ['alice'],
+            'individual_reports': [],
+            'found_count': 1,
+        },
+    )
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    response = client.post(
+        '/api/analysis/search_legacy',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+
+    assert response.status_code == 409
+    assert 'Rerun it' in response.get_json()['error']
 
 
 def test_live_scan_empty_username_rejected(client, web_app):
@@ -2656,7 +2701,14 @@ def test_build_reports_triages_raw_claimed_results_before_counting(
         lambda _path, results, _db: graph_inputs.append(results),
     )
 
-    def claimed(site_name, ids_data, *, context=None, check_type='message'):
+    def claimed(
+        site_name,
+        ids_data,
+        *,
+        context=None,
+        check_type='message',
+        http_status=200,
+    ):
         status = MaigretCheckResult(
             username='alice',
             site_name=site_name,
@@ -2669,6 +2721,7 @@ def test_build_reports_triages_raw_claimed_results_before_counting(
             'status': status,
             'url_user': status.site_url_user,
             'site': types.SimpleNamespace(check_type=check_type),
+            'http_status': http_status,
         }
 
     raw_results = {
@@ -2680,16 +2733,21 @@ def test_build_reports_triages_raw_claimed_results_before_counting(
         'GenericShell': claimed(
             'GenericShell', {'description': 'Log in or create an account'}
         ),
+        'BlockedTransport': claimed(
+            'BlockedTransport',
+            {'fullname': 'Alice Example', 'description': 'Researcher'},
+            http_status=403,
+        ),
     }
 
     report = web_app.build_reports(
         [('alice', 'username', raw_results)], ['alice'], 'triaged'
     )
 
-    assert report['raw_claimed_count'] == 3
+    assert report['raw_claimed_count'] == 4
     assert report['found_count'] == 1
     assert report['candidate_count'] == 1
-    assert report['suppressed_count'] == 1
+    assert report['suppressed_count'] == 2
     individual = report['individual_reports'][0]
     assert [item['site_name'] for item in individual['claimed_profiles']] == [
         'Supported'
@@ -2698,12 +2756,13 @@ def test_build_reports_triages_raw_claimed_results_before_counting(
         'StatusOnly'
     ]
     assert [item['site_name'] for item in individual['suppressed_profiles']] == [
-        'GenericShell'
+        'GenericShell',
+        'BlockedTransport',
     ]
     assert list(graph_inputs[0][0][2]) == ['Supported']
     ai_input = web_app.build_ai_markdown(report)
     assert 'Low-signal candidates (not findings)' in ai_input
-    assert 'Suppressed unreliable detector hits: 1' in ai_input
+    assert 'Suppressed unreliable detector hits: 2' in ai_input
 
 
 def test_site_selection_excludes_reviewed_quarantined_detector(web_app):

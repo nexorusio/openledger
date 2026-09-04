@@ -51,12 +51,22 @@
             <small class="metric-detail">{{ raw_claimed_count }} raw CLAIMED responses triaged in total</small>
         </div>
     </article>
+    {% if untriaged_count %}
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="history"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Legacy untriaged hits</span>
+            <strong class="metric-value">{{ untriaged_count }}</strong>
+            <small class="metric-detail">Not findings; rerun required before AI or Persona synchronization</small>
+        </div>
+    </article>
+    {% endif %}
     <article class="metric-card">
         <span class="metric-icon"><i data-lucide="sparkles"></i></span>
         <div class="metric-copy">
             <span class="metric-label">AI assessment</span>
-            <strong class="metric-value">{{ 'Available' if ai_enabled else 'Not configured' }}</strong>
-            <small class="metric-detail">Generated only when requested</small>
+            <strong class="metric-value">{{ 'Requires rerun' if legacy_untriaged else 'Available' if ai_enabled else 'Not configured' }}</strong>
+            <small class="metric-detail">{{ 'Legacy hits are withheld from AI analysis' if legacy_untriaged else 'Generated only when requested' }}</small>
         </div>
     </article>
 </section>
@@ -88,8 +98,8 @@
                 <h2 id="ai-analysis-heading">AI investigation assessment</h2>
                 <p>Analyze stored case evidence, research the identity hypothesis, and propose cited evidence for analyst review.</p>
             </div>
-            <span class="badge-soft {{ 'success' if ai_enabled else 'warning' }}">
-                {{ 'Connected' if ai_enabled else 'Connection required' }}
+            <span class="badge-soft {{ 'success' if ai_enabled and not legacy_untriaged else 'warning' }}">
+                {{ 'Rerun required' if legacy_untriaged else 'Connected' if ai_enabled else 'Connection required' }}
             </span>
         </header>
         <div class="panel-body">
@@ -103,7 +113,12 @@
                 </p>
             </div>
             {% include '_ai_pipeline_status.html' %}
-            {% if ai_enabled %}
+            {% if legacy_untriaged %}
+            <div class="security-callout mt-3">
+                <i data-lucide="history"></i>
+                <span>This saved investigation predates reliability triage. Rerun the usernames before requesting AI analysis or synchronizing profile evidence to Personas.</span>
+            </div>
+            {% elif ai_enabled %}
             <div class="d-flex align-items-center flex-wrap gap-2 mt-3">
                 <button type="button" class="btn btn-primary" id="generateAiAnalysis">Analyze and propose evidence</button>
                 <span class="form-text" id="aiAnalysisStatus" role="status"></span>
@@ -218,6 +233,22 @@
                         </ul>
                         {% else %}
                         <p class="form-text mb-0">No supported profile leads found for this username.</p>
+                        {% endif %}
+                        {% if report.untriaged_profiles %}
+                        <details class="reliability-suppressed mt-3">
+                            <summary>Legacy untriaged hits ({{ report.untriaged_profiles | length }})</summary>
+                            <p class="form-text">Saved before reliability triage. These are raw leads, not findings, and are excluded from graph, AI evidence, and Personas until the investigation is rerun.</p>
+                            <ul class="profile-list">
+                                {% for profile in report.untriaged_profiles %}
+                                <li class="profile-item">
+                                    <div class="profile-link">
+                                        <span><a href="{{ profile.url }}" target="_blank" rel="noopener">{{ profile.site_name }}</a><small>{{ profile.classification_reason }}</small></span>
+                                    </div>
+                                    <span class="badge-soft warning">Untriaged · rerun</span>
+                                </li>
+                                {% endfor %}
+                            </ul>
+                        </details>
                         {% endif %}
                         {% if report.candidate_profiles %}
                         <p class="form-label mt-3 mb-0">Candidates requiring corroboration</p>

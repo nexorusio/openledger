@@ -100,6 +100,9 @@ BLOCKED_OR_INTERSTITIAL_MARKERS = (
     "temporarily blocked",
     "verify you are human",
 )
+BLOCKED_OR_TRANSIENT_HTTP_STATUSES = frozenset(
+    {401, 403, 407, 408, 425, 429, 451, 500, 502, 503, 504, 999}
+)
 GENERIC_PAGE_MARKERS = (
     "access denied",
     "create an account",
@@ -370,6 +373,7 @@ def classify_profile_detection(
     health_state: Any = "untested",
     status_context: Any = "",
     status_error: Any = "",
+    http_status: Any = None,
 ) -> Dict[str, Any]:
     """Triage one raw ``CLAIMED`` result without asserting subject identity."""
     investigated_username = "".join(str(username or "").split()).lstrip("@").casefold()
@@ -388,6 +392,10 @@ def classify_profile_detection(
         )
         if value
     ).casefold()
+    try:
+        response_status = int(http_status)
+    except (TypeError, ValueError):
+        response_status = None
 
     if health == "quarantined":
         return {
@@ -405,6 +413,18 @@ def classify_profile_detection(
             "identity_status": "unverified",
             "health_state": health,
             "reason": "The response was a block, challenge, login, or rate-limit page.",
+            "signals": [],
+        }
+    if response_status in BLOCKED_OR_TRANSIENT_HTTP_STATUSES:
+        return {
+            "classification": "suppressed",
+            "detection_confidence": "unreliable",
+            "identity_status": "unverified",
+            "health_state": health,
+            "reason": (
+                "The detector returned blocked or transient HTTP status "
+                f"{response_status}."
+            ),
             "signals": [],
         }
     if not _has_public_profile_url(url):
