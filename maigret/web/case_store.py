@@ -6399,10 +6399,9 @@ class CaseStore:
             else set()
         )
         surviving_by_claim: Dict[str, Dict[str, Any]] = {}
+        surviving_evidence_by_claim: Dict[str, set[str]] = {}
         for observation in observations:
             claim_id = str(observation["claim_id"])
-            if claim_id in surviving_by_claim:
-                continue
             provenance_type = str(observation["provenance_type"])
             source_engine = str(observation["source_engine"])
             job = jobs_by_id.get(str(observation["job_id"] or ""))
@@ -6425,7 +6424,21 @@ class CaseStore:
                     in surviving_evidence_ids
                 )
             if valid:
-                surviving_by_claim[claim_id] = dict(observation)
+                surviving_by_claim.setdefault(claim_id, dict(observation))
+                observation_details = dict(observation["details"] or {})
+                evidence_fingerprints = observation_details.get(
+                    "evidence_fingerprints"
+                )
+                if isinstance(evidence_fingerprints, list):
+                    surviving_evidence_by_claim.setdefault(
+                        claim_id,
+                        set(),
+                    ).update(
+                        str(fingerprint)
+                        for fingerprint in evidence_fingerprints
+                        if fingerprint is not None
+                        and str(fingerprint).strip()
+                    )
 
         retire_rows = []
         now = utcnow()
@@ -6458,16 +6471,10 @@ class CaseStore:
                     str(claim["id"]),
                     now=now,
                 )
-                survivor_details = dict(survivor.get("details") or {})
-                evidence_fingerprints = survivor_details.get(
-                    "evidence_fingerprints"
-                )
                 CaseStore._restore_claim_evidence_fingerprints_with_connection(
                     connection,
                     str(claim["id"]),
-                    evidence_fingerprints
-                    if isinstance(evidence_fingerprints, list)
-                    else [],
+                    surviving_evidence_by_claim.get(str(claim["id"]), set()),
                 )
         return retire_rows
 

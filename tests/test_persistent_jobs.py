@@ -1075,6 +1075,11 @@ def test_deleting_latest_job_repoints_claims_to_surviving_current_lineage(
         surviving_by_field["social_account"]["source_engine"]
         == "case_chat_user_statement"
     )
+    assert {
+        evidence["source_name"]
+        for evidence in surviving_by_field["social_account"]["evidence"]
+    } == {"Example Social"}
+    assert surviving_by_field["social_account"]["retired_evidence"] == []
     assert all(claim["review_status"] == "approved" for claim in surviving_claims)
     assert all(
         claim["reliability_status"] == "current" for claim in surviving_claims
@@ -1082,6 +1087,9 @@ def test_deleting_latest_job_repoints_claims_to_surviving_current_lineage(
     assert persistent_store.build_persona_graph(persona_id)["stats"][
         "claim_count"
     ] == 2
+    assert persistent_store.build_persona_graph(persona_id)["stats"][
+        "source_count"
+    ] == 1
 
 
 def test_persona_pdf_route_exports_only_curated_records(client, persistent_store):
