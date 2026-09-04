@@ -234,7 +234,7 @@ def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
 
     assert 'Saved investigations' in body
     assert '1 completed · 1 failed' in body
-    assert 'Profiles discovered' in body
+    assert 'Supported profiles' in body
     assert '>7</strong>' in body
     assert 'AI assessments' in body
     assert '>1</strong>' in body
@@ -1695,7 +1695,11 @@ def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
             site_name='GitHub',
             site_url_user='https://github.com/soxoj',
             status=MaigretCheckStatus.CLAIMED,
-            ids_data={'fullname': 'Soxoj', '_extractor': 'x'},
+            ids_data={
+                'fullname': 'Soxoj',
+                'description': 'Public developer profile',
+                '_extractor': 'x',
+            },
             tags=['dev'],
         )
         notify.update(result)
@@ -2075,18 +2079,19 @@ def test_live_scan_done_event_offers_redirect_not_auto_navigation(
 
     result = web_app.job_results[job_id]
     assert result['status'] == 'completed'
-    assert result['found_count'] == 1
+    assert result['found_count'] == 0
+    assert result['candidate_count'] == 1
     assert 'started_at' in result
 
 
-def test_live_scan_stop_mid_scan_keeps_already_found_results(
+def test_live_scan_stop_mid_scan_keeps_already_collected_results(
     client, web_app, monkeypatch
 ):
     """Regression: clicking Stop while a username's scan is still in-flight
-    used to discard every 'found' result already streamed to the live graph,
+    used to discard every result already streamed to the live view,
     because the cancelled search() task never returns its own results dict —
     general_results stayed empty, build_reports never ran, and the browser
-    got 'Completed — nothing to analyze.' despite the graph showing hits.
+    got 'Completed — nothing to analyze.' despite collection showing hits.
 
     StreamNotify now keeps a running copy of what it already streamed, and
     that's what gets reported when the task is cancelled mid-scan.
@@ -2128,8 +2133,8 @@ def test_live_scan_stop_mid_scan_keeps_already_found_results(
     ]
     types_seen = [e['type'] for e in events]
     assert 'stopped' in types_seen
-    found = [e for e in events if e['type'] == 'found']
-    assert found and found[0]['site'] == 'ValidActive'
+    candidates = [e for e in events if e['type'] == 'candidate']
+    assert candidates and candidates[0]['site'] == 'ValidActive'
 
     done_event = next(e for e in events if e['type'] == 'done')
     assert (
@@ -2138,8 +2143,9 @@ def test_live_scan_stop_mid_scan_keeps_already_found_results(
 
     result = web_app.job_results[job_id]
     assert result['status'] == 'completed'
-    assert result['found_count'] == 1
-    assert result['individual_reports'][0]['claimed_profiles'][0]['site_name'] == (
+    assert result['found_count'] == 0
+    assert result['candidate_count'] == 1
+    assert result['individual_reports'][0]['candidate_profiles'][0]['site_name'] == (
         'ValidActive'
     )
 
@@ -2227,7 +2233,7 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
 
     assert '2026-07-28 10:00 UTC' in body
     assert 'soxoj, alice' in body
-    assert '7 profiles' in body
+    assert '7 supported profiles' in body
     assert 'completed' in body
     assert '/results/search_ts_completed' in body
 
@@ -2407,7 +2413,7 @@ def test_internal_session_metadata_cannot_be_downloaded(client, web_app):
 
 def test_build_reports_computes_found_count(web_app, monkeypatch):
     """Regression guard: History reads `found_count` off the dict build_reports
-    returns, so it must count claimed profiles across all usernames."""
+    returns, so it must count supported profiles across all usernames."""
     monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
@@ -2444,6 +2450,115 @@ def test_build_reports_computes_found_count(web_app, monkeypatch):
     assert 'Deddy Corbuzier' in ai_input
     assert 'Indonesian mentalist' in ai_input
     assert 'Maigret' not in ai_input
+
+
+def test_build_reports_triages_raw_claimed_results_before_counting(
+    web_app, monkeypatch
+):
+    for report_writer in (
+        'save_csv_report',
+        'save_json_report',
+        'save_pdf_report',
+        'save_html_report',
+    ):
+        monkeypatch.setattr(maigret.report, report_writer, lambda *a, **kw: None)
+    monkeypatch.setattr(
+        maigret.report, 'generate_report_context', lambda *a, **kw: {}
+    )
+    graph_inputs = []
+    monkeypatch.setattr(
+        maigret.report,
+        'save_graph_report',
+        lambda _path, results, _db: graph_inputs.append(results),
+    )
+
+    def claimed(site_name, ids_data, *, context=None, check_type='message'):
+        status = MaigretCheckResult(
+            username='alice',
+            site_name=site_name,
+            site_url_user=f'https://example.test/{site_name}/alice',
+            status=MaigretCheckStatus.CLAIMED,
+            ids_data=ids_data,
+            context=context,
+        )
+        return {
+            'status': status,
+            'url_user': status.site_url_user,
+            'site': types.SimpleNamespace(check_type=check_type),
+        }
+
+    raw_results = {
+        'Supported': claimed(
+            'Supported',
+            {'fullname': 'Alice Example', 'description': 'Researcher'},
+        ),
+        'StatusOnly': claimed('StatusOnly', {}, check_type='status_code'),
+        'GenericShell': claimed(
+            'GenericShell', {'description': 'Log in or create an account'}
+        ),
+    }
+
+    report = web_app.build_reports(
+        [('alice', 'username', raw_results)], ['alice'], 'triaged'
+    )
+
+    assert report['raw_claimed_count'] == 3
+    assert report['found_count'] == 1
+    assert report['candidate_count'] == 1
+    assert report['suppressed_count'] == 1
+    individual = report['individual_reports'][0]
+    assert [item['site_name'] for item in individual['claimed_profiles']] == [
+        'Supported'
+    ]
+    assert [item['site_name'] for item in individual['candidate_profiles']] == [
+        'StatusOnly'
+    ]
+    assert [item['site_name'] for item in individual['suppressed_profiles']] == [
+        'GenericShell'
+    ]
+    assert list(graph_inputs[0][0][2]) == ['Supported']
+    ai_input = web_app.build_ai_markdown(report)
+    assert 'Low-signal candidates (not findings)' in ai_input
+    assert 'Suppressed unreliable detector hits: 1' in ai_input
+
+
+def test_site_selection_excludes_reviewed_quarantined_detector(web_app):
+    database = web_app.MaigretDatabase().load_from_path(TEST_DB)
+    baseline = web_app.select_sites_for_search(
+        database,
+        top_sites=100,
+        all_sites=True,
+        tags=[],
+        excluded_tags=[],
+        site_list=[],
+        detector_health_registry={
+            'schema_version': 1,
+            'generated_at': None,
+            'sites': {},
+        },
+    )
+    quarantined_name = next(iter(baseline))
+    filtered = web_app.select_sites_for_search(
+        database,
+        top_sites=100,
+        all_sites=True,
+        tags=[],
+        excluded_tags=[],
+        site_list=[],
+        detector_health_registry={
+            'schema_version': 1,
+            'generated_at': None,
+            'sites': {
+                quarantined_name.casefold(): {
+                    'site_name': quarantined_name,
+                    'state': 'quarantined',
+                }
+            },
+        },
+    )
+
+    assert quarantined_name not in filtered
+    assert len(filtered) == len(baseline) - 1
 
 
 def test_ai_markdown_includes_only_explicitly_approved_operator_context(web_app):

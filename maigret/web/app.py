@@ -117,6 +117,13 @@ from maigret.web.persona_intelligence import (
     group_claims,
 )
 from maigret.web.persona_pdf import generate_persona_pdf, persona_pdf_filename
+from maigret.web.profile_reliability import (
+    DetectorHealthRegistryError,
+    classify_profile_detection,
+    detector_health_for_site,
+    empty_detector_health_registry,
+    load_detector_health_registry,
+)
 
 app = Flask(__name__)
 try:
@@ -217,13 +224,32 @@ class StreamNotify:
                 for k, v in (result.ids_data or {}).items()
                 if k != '_extractor' and isinstance(v, (str, int, float))
             }
+            site = self.sites.get(result.site_name)
+            decision = classify_profile_detection(
+                username=result.username or self.username,
+                site_name=result.site_name,
+                url=result.site_url_user,
+                evidence=result.ids_data or {},
+                check_type=getattr(site, 'check_type', '') or '',
+                health_state=detector_health_for_site(
+                    get_detector_health_registry(), result.site_name
+                ),
+                status_context=result.context,
+                status_error=str(result.error) if result.error else '',
+            )
             self.q.put(
                 {
-                    'type': 'found',
+                    'type': (
+                        'found'
+                        if decision['classification'] == 'supported'
+                        else decision['classification']
+                    ),
                     'username': result.username or self.username,
                     'site': result.site_name,
                     'url': result.site_url_user,
                     'ids': ids,
+                    'classification': decision['classification'],
+                    'reason': decision['reason'],
                 }
             )
         self.q.put(
@@ -258,6 +284,14 @@ class StreamNotify:
 # Configuration
 app.config["MAIGRET_DB_FILE"] = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), 'resources', 'data.json'
+)
+app.config["DETECTOR_HEALTH_FILE"] = os.getenv(
+    "OPENLEDGER_DETECTOR_HEALTH_FILE",
+    os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        'resources',
+        'detector_health.json',
+    ),
 )
 app.config["COOKIES_FILE"] = "cookies.txt"
 app.config["UPLOAD_FOLDER"] = 'uploads'
@@ -1016,6 +1050,28 @@ def get_available_tags():
     return _available_tags_for_database(database_path, modified_at)
 
 
+@lru_cache(maxsize=4)
+def _detector_health_registry_for_path(registry_path, modified_at):
+    del modified_at  # File modification time is the cache invalidation key.
+    return load_detector_health_registry(registry_path)
+
+
+def get_detector_health_registry():
+    """Load the reviewed detector-health registry without breaking collection."""
+    registry_path = os.path.abspath(app.config["DETECTOR_HEALTH_FILE"])
+    try:
+        modified_at = os.path.getmtime(registry_path)
+        return _detector_health_registry_for_path(registry_path, modified_at)
+    except FileNotFoundError:
+        return empty_detector_health_registry()
+    except DetectorHealthRegistryError as error:
+        logging.error(
+            'Ignoring invalid detector-health registry: %s',
+            safe_log_value(error),
+        )
+        return empty_detector_health_registry()
+
+
 def setup_logger(log_level, name):
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
@@ -1023,9 +1079,16 @@ def setup_logger(log_level, name):
 
 
 def select_sites_for_search(
-    db, *, top_sites, all_sites, tags, excluded_tags, site_list
+    db,
+    *,
+    top_sites,
+    all_sites,
+    tags,
+    excluded_tags,
+    site_list,
+    detector_health_registry=None,
 ):
-    """Select sources while treating country codes as coverage preferences."""
+    """Select sources while excluding detectors quarantined by reviewed canaries."""
     country_tags = {
         tag.lower() for tag in tags if is_country_tag(tag) and tag != 'global'
     }
@@ -1052,6 +1115,12 @@ def select_sites_for_search(
         ranked_sites = filtered_sites
     if not all_sites:
         ranked_sites = dict(list(ranked_sites.items())[:top_sites])
+    health_registry = detector_health_registry or get_detector_health_registry()
+    ranked_sites = {
+        name: site
+        for name, site in ranked_sites.items()
+        if detector_health_for_site(health_registry, name) != 'quarantined'
+    }
     return ranked_sites
 
 
@@ -1162,16 +1231,6 @@ MAJOR_PLATFORM_NAMES = {
     'twitter',
     'youtube',
 }
-STRONG_IDENTITY_FIELDS = {
-    'bio',
-    'description',
-    'fullname',
-    'location',
-    'name',
-    'website',
-}
-
-
 def normalize_evidence_value(value, depth=0):
     """Make extracted profile evidence small, JSON-safe, and prompt-safe."""
     if depth > 2:
@@ -1195,19 +1254,6 @@ def normalize_evidence_value(value, depth=0):
     return None
 
 
-def profile_confidence(ids_data, check_type):
-    """Classify account evidence without pretending username equality is identity."""
-    keys = {str(key).lower() for key in ids_data}
-    if keys.intersection(STRONG_IDENTITY_FIELDS):
-        return 'strong'
-    useful_keys = {key for key in keys if key not in {'_extractor', 'extractor'}}
-    if len(useful_keys) >= 2:
-        return 'moderate'
-    if check_type in {'status_code', 'message'} and not useful_keys:
-        return 'weak'
-    return 'unverified'
-
-
 def result_status_details(site_data):
     status = site_data.get('status')
     if not status:
@@ -1215,6 +1261,69 @@ def result_status_details(site_data):
     state = status.status.value.lower()
     reason = status.context or (str(status.error) if status.error else '')
     return state, str(reason)[:500]
+
+
+def profile_detection_record(
+    username,
+    site_name,
+    site_data,
+    *,
+    detector_health_registry=None,
+):
+    """Build one triaged profile record from raw Maigret site output."""
+    status = site_data.get('status')
+    if not status or status.status != MaigretCheckStatus.CLAIMED:
+        return None
+    site = site_data.get('site')
+    check_type = getattr(site, 'check_type', '') or ''
+    evidence = normalize_evidence_value(status.ids_data or {}) or {}
+    registry = detector_health_registry or get_detector_health_registry()
+    health_state = detector_health_for_site(registry, site_name)
+    decision = classify_profile_detection(
+        username=username,
+        site_name=site_name,
+        url=site_data.get('url_user', ''),
+        evidence=evidence,
+        check_type=check_type,
+        health_state=health_state,
+        status_context=status.context,
+        status_error=str(status.error) if status.error else '',
+    )
+    return {
+        'site_name': site_name,
+        'url': site_data.get('url_user', ''),
+        'tags': status.tags or [],
+        'evidence': evidence,
+        # Keep the legacy key for persisted-session and Persona compatibility;
+        # it now describes account-detection evidence, never subject identity.
+        'confidence': decision['detection_confidence'],
+        'detection_confidence': decision['detection_confidence'],
+        'classification': decision['classification'],
+        'classification_reason': decision['reason'],
+        'identity_status': decision['identity_status'],
+        'detector_health': decision['health_state'],
+        'evidence_signals': decision['signals'],
+        'check_type': check_type or 'unknown',
+    }
+
+
+def supported_general_results(general_results, detector_health_registry=None):
+    """Return the Maigret result shape containing supported detections only."""
+    registry = detector_health_registry or get_detector_health_registry()
+    supported = []
+    for username, id_type, results in general_results:
+        reliable_sites = {}
+        for site_name, site_data in results.items():
+            profile = profile_detection_record(
+                username,
+                site_name,
+                site_data,
+                detector_health_registry=registry,
+            )
+            if profile and profile['classification'] == 'supported':
+                reliable_sites[site_name] = site_data
+        supported.append((username, id_type, reliable_sites))
+    return supported
 
 
 def get_session_metadata_path(session_folder: str) -> str:
@@ -1267,6 +1376,17 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
         if not isinstance(found_count, int) or found_count < 0:
             raise ValueError('Invalid profile count in report session metadata')
         normalized['found_count'] = found_count
+        for count_key in (
+            'candidate_count',
+            'suppressed_count',
+            'raw_claimed_count',
+        ):
+            count = normalized.get(count_key, 0)
+            if not isinstance(count, int) or count < 0:
+                raise ValueError(
+                    f'Invalid {count_key.replace("_", " ")} in report session metadata'
+                )
+            normalized[count_key] = count
     else:
         normalized['error'] = str(normalized.get('error', 'Unknown error occurred.'))
     return normalized
@@ -1637,6 +1757,8 @@ def build_ai_markdown(
     for report in result_data.get('individual_reports', []):
         lines.extend([f"## Username: {report.get('username', 'unknown')}", ''])
         profiles = report.get('claimed_profiles', [])
+        candidates = report.get('candidate_profiles', [])
+        suppressed = report.get('suppressed_profiles', [])
         diagnostics = report.get('diagnostics', {})
         if diagnostics:
             lines.append(
@@ -1651,24 +1773,48 @@ def build_ai_markdown(
                 lines.append(
                     f"- {platform.get('site_name')}: {platform.get('status')}{detail}"
                 )
-        if not profiles:
-            lines.extend(['No claimed profiles were found.', ''])
-            continue
-        lines.extend(['', '### Claimed profile evidence'])
-        for profile in profiles:
-            tags = ', '.join(profile.get('tags') or []) or 'none'
-            lines.append(
-                f"- {profile.get('site_name', 'Unknown site')}: "
-                f"{profile.get('url', '')} (tags: {tags}; "
-                f"local confidence: {profile.get('confidence', 'unverified')}; "
-                f"check: {profile.get('check_type', 'unknown')})"
-            )
-            evidence = profile.get('evidence') or {}
-            if evidence:
+        if profiles:
+            lines.extend(['', '### Supported account-existence evidence'])
+            for profile in profiles:
+                tags = ', '.join(profile.get('tags') or []) or 'none'
                 lines.append(
-                    '  Extracted evidence: '
-                    + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+                    f"- {profile.get('site_name', 'Unknown site')}: "
+                    f"{profile.get('url', '')} (tags: {tags}; "
+                    f"account evidence: {profile.get('confidence', 'unverified')}; "
+                    f"identity: unverified; "
+                    f"check: {profile.get('check_type', 'unknown')})"
                 )
+                evidence = profile.get('evidence') or {}
+                if evidence:
+                    lines.append(
+                        '  Extracted evidence: '
+                        + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+                    )
+        else:
+            lines.append('No supported profile leads were found.')
+        if candidates:
+            lines.extend(
+                [
+                    '',
+                    '### Low-signal candidates (not findings)',
+                    'These detector hits are supplied only for corroboration. Do not '
+                    'treat them as account-existence or identity evidence.',
+                ]
+            )
+            for profile in candidates[:100]:
+                lines.append(
+                    f"- {profile.get('site_name', 'Unknown site')}: "
+                    f"{profile.get('url', '')} - "
+                    f"{profile.get('classification_reason', 'Needs corroboration')}"
+                )
+        if suppressed:
+            lines.extend(
+                [
+                    '',
+                    f"Suppressed unreliable detector hits: {len(suppressed)}. "
+                    'They are not evidence and are excluded from reasoning.',
+                ]
+            )
         lines.append('')
 
     observations = result_data.get('collector_observations') or []
@@ -2109,14 +2255,18 @@ def build_reports(
     os.makedirs(session_folder, exist_ok=True)
 
     graph_path = os.path.join(session_folder, "combined_graph.html")
+    detector_health_registry = get_detector_health_registry()
     maigret.report.save_graph_report(
         graph_path,
-        general_results,
+        supported_general_results(general_results, detector_health_registry),
         MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"]),
     )
 
     individual_reports = []
     found_count = 0
+    candidate_count = 0
+    suppressed_count = 0
+    raw_claimed_count = 0
     for username, id_type, results in general_results:
         safe_username = sanitize_username_for_path(username)
         report_base = os.path.join(session_folder, f"report_{safe_username}")
@@ -2136,14 +2286,20 @@ def build_reports(
         maigret.report.save_html_report(html_path, context)
 
         claimed_profiles = []
+        candidate_profiles = []
+        suppressed_profiles = []
         diagnostics = {'claimed': 0, 'available': 0, 'unknown': 0, 'illegal': 0}
         major_platforms = []
         for site_name, site_data in results.items():
             state, reason = result_status_details(site_data)
             diagnostics[state] = diagnostics.get(state, 0) + 1
-            site = site_data.get('site')
-            check_type = getattr(site, 'check_type', '') or ''
             status = site_data.get('status')
+            profile = profile_detection_record(
+                username,
+                site_name,
+                site_data,
+                detector_health_registry=detector_health_registry,
+            )
             if site_name.lower() in MAJOR_PLATFORM_NAMES:
                 major_platforms.append(
                     {
@@ -2151,22 +2307,23 @@ def build_reports(
                         'status': state,
                         'reason': reason,
                         'url': site_data.get('url_user', ''),
+                        'classification': (
+                            profile.get('classification') if profile else None
+                        ),
                     }
                 )
             if status and status.status == MaigretCheckStatus.CLAIMED:
-                evidence = normalize_evidence_value(status.ids_data or {}) or {}
-                claimed_profiles.append(
-                    {
-                        'site_name': site_name,
-                        'url': site_data.get('url_user', ''),
-                        'tags': status.tags or [],
-                        'evidence': evidence,
-                        'confidence': profile_confidence(evidence, check_type),
-                        'check_type': check_type or 'unknown',
-                    }
-                )
+                raw_claimed_count += 1
+                if profile['classification'] == 'supported':
+                    claimed_profiles.append(profile)
+                elif profile['classification'] == 'candidate':
+                    candidate_profiles.append(profile)
+                else:
+                    suppressed_profiles.append(profile)
 
         found_count += len(claimed_profiles)
+        candidate_count += len(candidate_profiles)
+        suppressed_count += len(suppressed_profiles)
         individual_reports.append(
             {
                 'username': username,
@@ -2183,6 +2340,8 @@ def build_reports(
                     f"search_{session_key}", f"report_{safe_username}.html"
                 ),
                 'claimed_profiles': claimed_profiles,
+                'candidate_profiles': candidate_profiles,
+                'suppressed_profiles': suppressed_profiles,
                 'diagnostics': diagnostics,
                 'major_platforms': major_platforms,
             }
@@ -2195,6 +2354,9 @@ def build_reports(
         'usernames': usernames,
         'individual_reports': individual_reports,
         'found_count': found_count,
+        'candidate_count': candidate_count,
+        'suppressed_count': suppressed_count,
+        'raw_claimed_count': raw_claimed_count,
         'collector_observations': list(collector_observations or []),
         'collector_found_count': sum(
             1
@@ -4843,7 +5005,9 @@ def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]
             found = int(found or 0)
         except (TypeError, ValueError):
             found = 0
-        finding_summary = f"{found} profile{'s' if found != 1 else ''}"
+        finding_summary = (
+            f"{found} supported profile{'s' if found != 1 else ''}"
+        )
 
     status = str(entry.get("status") or "")
     if status == "queued":
@@ -6374,6 +6538,8 @@ def live_results(job_id):
         job_kind=(result or {}).get("kind", "live"),
         done_redirect=done_redirect,
         completed_found_count=(result or {}).get("found_count", 0),
+        completed_candidate_count=(result or {}).get("candidate_count", 0),
+        completed_suppressed_count=(result or {}).get("suppressed_count", 0),
         completed_registration_count=(result or {}).get(
             "collector_registration_count",
             (result or {}).get("collector_found_count", 0),
@@ -6518,6 +6684,11 @@ def results(session_id):
         graph_file=result_data["graph_file"],
         individual_reports=result_data["individual_reports"],
         found_count=result_data.get("found_count", 0),
+        candidate_count=result_data.get("candidate_count", 0),
+        suppressed_count=result_data.get("suppressed_count", 0),
+        raw_claimed_count=result_data.get(
+            "raw_claimed_count", result_data.get("found_count", 0)
+        ),
         timestamp=session_id.replace("search_", ""),
         session_id=session_id,
         ai_enabled=bool(get_openai_api_key()),

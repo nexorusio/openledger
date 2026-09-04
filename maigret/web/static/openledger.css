@@ -1947,6 +1947,39 @@ textarea.form-control.compact-textarea {
     overflow-wrap: anywhere;
 }
 
+.profile-link > span {
+    display: grid;
+    min-width: 0;
+    gap: 2px;
+}
+
+.profile-link small {
+    color: var(--ol-muted);
+    font-size: 0.72rem;
+    line-height: 1.4;
+}
+
+.reliability-candidate-list {
+    padding: 0 12px;
+    border: 1px solid rgba(216, 149, 36, 0.28);
+    border-radius: 10px;
+    background: rgba(216, 149, 36, 0.04);
+}
+
+.reliability-suppressed {
+    padding: 12px;
+    border: 1px solid var(--ol-border);
+    border-radius: 10px;
+    background: var(--ol-background);
+}
+
+.reliability-suppressed summary {
+    cursor: pointer;
+    color: var(--ol-muted);
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
 .tag-container {
     flex-wrap: wrap;
     justify-content: flex-end;

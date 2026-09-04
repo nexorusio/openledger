@@ -8,7 +8,7 @@
     <div>
         <p class="eyebrow">Completed investigation</p>
         <h1>Investigation results</h1>
-        <p class="page-description">Review the relationship graph, claimed profiles, reports, and optional AI assessment.</p>
+        <p class="page-description">Review supported profile leads, low-signal candidates, suppressed detector noise, reports, and optional AI assessment.</p>
     </div>
     <div class="heading-actions">
         {% if result_case %}
@@ -30,9 +30,25 @@
     <article class="metric-card">
         <span class="metric-icon"><i data-lucide="circle-check-big"></i></span>
         <div class="metric-copy">
-            <span class="metric-label">Claimed profiles</span>
+            <span class="metric-label">Supported profiles</span>
             <strong class="metric-value">{{ found_count }}</strong>
-            <small class="metric-detail">Leads requiring independent verification</small>
+            <small class="metric-detail">Account existence supported; subject identity remains unverified</small>
+        </div>
+    </article>
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="search-check"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Review candidates</span>
+            <strong class="metric-value">{{ candidate_count }}</strong>
+            <small class="metric-detail">Low-signal hits excluded from findings and Personas</small>
+        </div>
+    </article>
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="shield-x"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Suppressed noise</span>
+            <strong class="metric-value">{{ suppressed_count }}</strong>
+            <small class="metric-detail">{{ raw_claimed_count }} raw CLAIMED responses triaged in total</small>
         </div>
     </article>
     <article class="metric-card">
@@ -51,7 +67,7 @@
         <header class="panel-header">
             <div>
                 <h2>Discovery evidence graph</h2>
-                <p>Source-level links between investigated usernames and discovered public profiles.</p>
+                <p>Only detections with profile-specific account evidence appear in this graph.</p>
             </div>
             <span class="badge-soft"><i data-lucide="network"></i> Interactive</span>
         </header>
@@ -146,7 +162,7 @@
         <header class="panel-header">
             <div>
                 <h2>Individual reports</h2>
-                <p>Open a username to review claimed profiles and download its report files.</p>
+                <p>Open a username to review reliability-triaged profiles and raw scanner diagnostics.</p>
             </div>
             <span class="badge-soft">{{ individual_reports | length }} report{{ '' if individual_reports | length == 1 else 's' }}</span>
         </header>
@@ -162,24 +178,24 @@
                     </button>
                     <div id="report-{{ loop.index }}" class="report-content">
                         <div class="d-flex flex-wrap gap-2 mb-3">
-                            <a href="{{ url_for('download_report', filename=report.csv_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">CSV Report</a>
-                            <a href="{{ url_for('download_report', filename=report.json_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">JSON Report</a>
-                            <a href="{{ url_for('download_report', filename=report.pdf_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">PDF Report</a>
-                            <a href="{{ url_for('download_report', filename=report.html_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">HTML Report</a>
+                            <a href="{{ url_for('download_report', filename=report.csv_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">CSV Report · raw</a>
+                            <a href="{{ url_for('download_report', filename=report.json_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">JSON Report · raw</a>
+                            <a href="{{ url_for('download_report', filename=report.pdf_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">PDF Report · raw</a>
+                            <a href="{{ url_for('download_report', filename=report.html_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">HTML Report · raw</a>
                         </div>
                         {% if report.major_platforms %}
                         <p class="form-label mb-2">Major-platform coverage</p>
                         <div class="d-flex flex-wrap gap-2 mb-3">
                             {% for platform in report.major_platforms %}
-                            <span class="badge-soft {{ 'success' if platform.status == 'claimed' else 'warning' if platform.status == 'unknown' else '' }}"
+                            <span class="badge-soft {{ 'success' if platform.classification == 'supported' else 'warning' if platform.classification == 'candidate' or platform.status == 'unknown' else '' }}"
                                 title="{{ platform.reason or 'No additional diagnostic detail' }}">
-                                {{ platform.site_name }}: {{ platform.status | title }}
+                                {{ platform.site_name }}: {{ (platform.classification or platform.status) | title }}
                             </span>
                             {% endfor %}
                         </div>
                         {% endif %}
                         {% if report.claimed_profiles %}
-                        <p class="form-label mb-0">Claimed profiles</p>
+                        <p class="form-label mb-0">Supported profile leads</p>
                         <ul class="profile-list">
                             {% for profile in report.claimed_profiles %}
                             <li class="profile-item">
@@ -193,14 +209,46 @@
                                     {% for tag in profile.tags %}<span class="tag-badge">{{ tag }}</span>{% endfor %}
                                 </div>
                                 {% endif %}
-                                <span class="badge-soft {{ 'success' if profile.confidence == 'strong' else 'warning' }}">
-                                    {{ profile.confidence | default('unverified') | title }} evidence
+                                <span class="badge-soft {{ 'success' if profile.detection_confidence == 'strong' else 'warning' }}"
+                                    title="{{ profile.classification_reason }} Identity remains {{ profile.identity_status }}.">
+                                    {{ profile.detection_confidence | default(profile.confidence) | default('unverified') | title }} account evidence
                                 </span>
                             </li>
                             {% endfor %}
                         </ul>
                         {% else %}
-                        <p class="form-text mb-0">No claimed profiles found for this username.</p>
+                        <p class="form-text mb-0">No supported profile leads found for this username.</p>
+                        {% endif %}
+                        {% if report.candidate_profiles %}
+                        <p class="form-label mt-3 mb-0">Candidates requiring corroboration</p>
+                        <ul class="profile-list reliability-candidate-list">
+                            {% for profile in report.candidate_profiles %}
+                            <li class="profile-item">
+                                <div class="profile-link">
+                                    <img class="favicon" src="https://www.google.com/s2/favicons?domain={{ profile.url }}"
+                                        onerror="this.style.display='none'" alt="">
+                                    <span><a href="{{ profile.url }}" target="_blank" rel="noopener">{{ profile.site_name }}</a><small>{{ profile.classification_reason }}</small></span>
+                                </div>
+                                <span class="badge-soft warning">Candidate · not counted</span>
+                            </li>
+                            {% endfor %}
+                        </ul>
+                        {% endif %}
+                        {% if report.suppressed_profiles %}
+                        <details class="reliability-suppressed mt-3">
+                            <summary>Suppressed detector hits ({{ report.suppressed_profiles | length }})</summary>
+                            <p class="form-text">Retained in raw reports, excluded from findings, graph, AI evidence and Personas.</p>
+                            <ul class="profile-list">
+                                {% for profile in report.suppressed_profiles %}
+                                <li class="profile-item">
+                                    <div class="profile-link">
+                                        <span><a href="{{ profile.url }}" target="_blank" rel="noopener">{{ profile.site_name }}</a><small>{{ profile.classification_reason }}</small></span>
+                                    </div>
+                                    <span class="badge-soft">Suppressed</span>
+                                </li>
+                                {% endfor %}
+                            </ul>
+                        </details>
                         {% endif %}
                     </div>
                 </article>
