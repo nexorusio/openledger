@@ -117,7 +117,7 @@ def test_username_verification_requires_explicit_browser_opt_in(
     assert 'enforceAliasSelectionLimit()' in handler
     assert 'refreshAliasCandidates()' not in handler
     assert "const aliasSourceTypes = new Set(['full_name', 'profile_url']);" in template
-    assert "if (aliasSourceTypes.has(type.value))" in template
+    assert "refreshAliasesForIdentifierChanges(type.value)" in template
     selection_handler = template.index("selected.addEventListener('change'")
     selection_handler_end = template.index('});', selection_handler)
     assert (

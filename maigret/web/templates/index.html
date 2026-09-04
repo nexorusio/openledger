@@ -344,6 +344,7 @@
     const includedSourceTags = document.getElementById('caseTags');
     const excludedSourceTags = document.getElementById('caseExcludedTags');
     const aliasSourceTypes = new Set(['full_name', 'profile_url']);
+    const aliasResetTypes = new Set(['full_name']);
 
     const behavior = {
         username: ['e.g. johndoe', 'Exact account check'],
@@ -584,6 +585,16 @@
         updateAliasCount();
     }
 
+    function refreshAliasesForIdentifierChanges(...types) {
+        if (types.some(type => aliasResetTypes.has(type))) {
+            refreshAliasCandidates();
+        } else if (types.some(type => aliasSourceTypes.has(type))) {
+            refreshAliasCandidates({ preserveAnalystChoices: true });
+        } else {
+            enforceAliasSelectionLimit();
+        }
+    }
+
     function profileHandle(value) {
         try {
             const url = new URL(value);
@@ -685,20 +696,12 @@
         let previousType = type.value;
         type.addEventListener('change', () => {
             updateRow(row);
-            if (aliasSourceTypes.has(previousType) || aliasSourceTypes.has(type.value)) {
-                refreshAliasCandidates();
-            } else {
-                enforceAliasSelectionLimit();
-            }
+            refreshAliasesForIdentifierChanges(previousType, type.value);
             previousType = type.value;
             updatePlan();
         });
         row.querySelector('.identifier-value').addEventListener('input', () => {
-            if (aliasSourceTypes.has(type.value)) {
-                refreshAliasCandidates();
-            } else {
-                enforceAliasSelectionLimit();
-            }
+            refreshAliasesForIdentifierChanges(type.value);
             updatePlan();
         });
         row.querySelector('.identifier-remove').addEventListener('click', () => {
@@ -707,11 +710,8 @@
             list.querySelectorAll('.identifier-remove').forEach((button, index, buttons) => {
                 button.disabled = buttons.length === 1;
             });
-            if (removedAliasSource) {
-                refreshAliasCandidates();
-            } else {
-                enforceAliasSelectionLimit();
-            }
+            refreshAliasesForIdentifierChanges(
+                removedAliasSource ? type.value : null);
             updatePlan();
         });
         updateRow(row);
