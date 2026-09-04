@@ -355,9 +355,15 @@
     };
 
     function cleanNameTokens(value) {
-        const normalized = value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
-            .toLocaleLowerCase();
-        return (normalized.match(/[a-z0-9]+/g) || []).slice(0, 6);
+        const rawTokens = value.normalize('NFKC').toLocaleLowerCase()
+            .match(/[\p{L}\p{N}]+/gu) || [];
+        const tokens = [];
+        rawTokens.forEach(rawToken => {
+            const folded = rawToken.normalize('NFKD').replace(/\p{M}/gu, '');
+            const asciiTokens = folded.match(/[a-z0-9]+/g) || [];
+            tokens.push(...(asciiTokens.length ? asciiTokens : [rawToken]));
+        });
+        return tokens.slice(0, 6);
     }
 
     function exactIdentifierTargets() {

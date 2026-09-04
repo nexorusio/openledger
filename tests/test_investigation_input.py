@@ -239,6 +239,27 @@ def test_ranked_aliases_are_explainable_transliterated_and_context_bounded():
     )
 
 
+@pytest.mark.parametrize(
+    ("full_name", "expected_alias"),
+    [
+        ("Иван Иванов", "иваниванов"),
+        ("王小明", "王小明"),
+        ("محمد علي", "محمدعلي"),
+        ("José 王", "jose王"),
+    ],
+)
+def test_ranked_aliases_preserve_non_latin_name_tokens(full_name, expected_alias):
+    plan = build_investigation_plan(
+        {
+            "identifier_type": ["full_name"],
+            "identifier_value": [full_name],
+            "generate_name_variants": "on",
+        }
+    )
+
+    assert expected_alias in search_usernames(plan)
+
+
 def test_analyst_can_edit_and_deselect_ranked_aliases():
     plan = build_investigation_plan(
         {

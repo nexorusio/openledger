@@ -15,10 +15,29 @@ _SEPARATORS = ("", ".", "_", "-")
 _CONTEXT_NUMBER_RE = re.compile(r"^[0-9]{1,6}$")
 
 
-def _ascii_tokens(value: Any) -> List[str]:
-    text = unicodedata.normalize("NFKD", str(value or ""))
-    text = text.encode("ascii", "ignore").decode("ascii").casefold()
-    return [token for token in re.findall(r"[a-z0-9]+", text) if token][:6]
+def _alias_tokens(value: Any) -> List[str]:
+    """Fold Latin text to ASCII and retain non-Latin alphanumeric tokens."""
+    normalized = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    raw_tokens: List[str] = []
+    current: List[str] = []
+    for character in normalized:
+        if character.isalnum():
+            current.append(character)
+        elif current:
+            raw_tokens.append("".join(current))
+            current = []
+    if current:
+        raw_tokens.append("".join(current))
+
+    tokens: List[str] = []
+    for raw_token in raw_tokens:
+        folded = unicodedata.normalize("NFKD", raw_token)
+        folded = folded.encode("ascii", "ignore").decode("ascii").casefold()
+        ascii_tokens = re.findall(r"[a-z0-9]+", folded)
+        tokens.extend(ascii_tokens or [raw_token])
+        if len(tokens) >= 6:
+            break
+    return tokens[:6]
 
 
 def normalize_context_numbers(values: Iterable[Any]) -> List[str]:
@@ -41,7 +60,7 @@ def normalize_nicknames(values: Iterable[Any]) -> List[str]:
     nicknames: List[str] = []
     for raw_value in values:
         for item in re.split(r"[,\n\r]+", str(raw_value or "")):
-            tokens = _ascii_tokens(item)
+            tokens = _alias_tokens(item)
             if len(tokens) != 1:
                 if item.strip():
                     raise ValueError("Enter one nickname per comma-separated value.")
@@ -76,7 +95,7 @@ def rank_username_aliases(
     normalized_nicknames = [
         tokens[0]
         for nickname in nicknames
-        if len(tokens := _ascii_tokens(nickname)) == 1
+        if len(tokens := _alias_tokens(nickname)) == 1
     ][:MAX_NICKNAMES]
 
     def add(value: str, score: int, reason: str) -> None:
@@ -93,7 +112,7 @@ def rank_username_aliases(
             candidates[value.casefold()] = entry
 
     for full_name in full_names:
-        tokens = _ascii_tokens(full_name)
+        tokens = _alias_tokens(full_name)
         if not tokens:
             continue
         if len(tokens) == 1:
