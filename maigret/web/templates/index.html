@@ -464,8 +464,11 @@
     }
 
     function enforceAliasSelectionLimit() {
-        if (!userScannerUsernameToggle || !userScannerUsernameToggle.checked) return;
-        const scannerTargetKeys = new Set(exactIdentifierTargets().map(value => value.toLocaleLowerCase()));
+        const scannerEnabled = userScannerUsernameToggle
+            && userScannerUsernameToggle.checked;
+        const scannerTargetKeys = new Set(scannerEnabled
+            ? exactIdentifierTargets().map(value => value.toLocaleLowerCase())
+            : []);
         const selectedAliasKeys = new Set();
         const selectedControls = Array.from(aliasList.querySelectorAll('.alias-selected'))
             .filter(control => control.checked);
@@ -473,7 +476,8 @@
             const row = control.closest('.alias-candidate-row');
             const key = row.querySelector('.alias-value').value.trim().toLocaleLowerCase();
             const duplicateAlias = !key || selectedAliasKeys.has(key);
-            const unionIsFull = !scannerTargetKeys.has(key) && scannerTargetKeys.size >= 16;
+            const unionIsFull = scannerEnabled
+                && !scannerTargetKeys.has(key) && scannerTargetKeys.size >= 16;
             if (duplicateAlias || selectedAliasKeys.size >= 16 || unionIsFull) {
                 control.checked = false;
                 return;
@@ -484,12 +488,73 @@
         updateAliasCount();
     }
 
-    function refreshAliasCandidates() {
-        const aliases = rankedAliases();
+    function currentAnalystAliasChoices() {
+        return Array.from(aliasList.querySelectorAll('.alias-candidate-row'))
+            .filter(row => row.dataset.analystChanged === 'true')
+            .map(row => ({
+                generatedKey: row.dataset.generatedKey,
+                value: row.querySelector('.alias-value').value.trim(),
+                selected: row.querySelector('.alias-selected').checked,
+                edited: row.dataset.aliasEdited === 'true',
+                score: row.querySelector('.alias-score').textContent,
+                reason: row.querySelector('.alias-reason').textContent
+            }))
+            .filter(candidate => candidate.value);
+    }
+
+    function mergeAnalystAliasChoices(aliases, analystChoices) {
+        const generatedKeys = new Set(
+            aliases.map(candidate => candidate.value.toLocaleLowerCase()));
+        const choicesByGeneratedKey = new Map(
+            analystChoices.map(candidate => [candidate.generatedKey, candidate]));
+        const merged = aliases.map(candidate => {
+            const generatedKey = candidate.value.toLocaleLowerCase();
+            const choice = choicesByGeneratedKey.get(generatedKey);
+            if (!choice) return { ...candidate, generatedKey };
+            return {
+                ...candidate,
+                value: choice.value,
+                selected: choice.selected,
+                score: choice.edited ? 'edited' : candidate.score,
+                reason: choice.edited
+                    ? 'Analyst-edited alias candidate'
+                    : candidate.reason,
+                generatedKey,
+                analystChanged: true,
+                edited: choice.edited
+            };
+        });
+        const orphanedChoices = analystChoices
+            .filter(candidate => !generatedKeys.has(candidate.generatedKey))
+            .map(candidate => ({
+                ...candidate,
+                analystChanged: true
+            }));
+        const seenValues = new Set();
+        return [...orphanedChoices, ...merged].filter(candidate => {
+            const key = candidate.value.toLocaleLowerCase();
+            if (!key || seenValues.has(key)) return false;
+            seenValues.add(key);
+            return true;
+        }).slice(0, 24);
+    }
+
+    function refreshAliasCandidates({ preserveAnalystChoices = false } = {}) {
+        const analystChoices = preserveAnalystChoices
+            ? currentAnalystAliasChoices()
+            : [];
+        let aliases = rankedAliases();
+        if (preserveAnalystChoices) {
+            aliases = mergeAnalystAliasChoices(aliases, analystChoices);
+        }
         aliasList.replaceChildren(...aliases.map((candidate, index) => {
             const row = aliasTemplate.content.firstElementChild.cloneNode(true);
             const selected = row.querySelector('.alias-selected');
             const value = row.querySelector('.alias-value');
+            row.dataset.generatedKey = candidate.generatedKey
+                || candidate.value.toLocaleLowerCase();
+            row.dataset.analystChanged = candidate.analystChanged ? 'true' : 'false';
+            row.dataset.aliasEdited = candidate.edited ? 'true' : 'false';
             selected.checked = candidate.selected;
             selected.value = candidate.value;
             value.value = candidate.value;
@@ -497,11 +562,14 @@
             row.querySelector('.alias-score').textContent = `${candidate.score}`;
             row.querySelector('.alias-reason').textContent = candidate.reason;
             selected.addEventListener('change', () => {
+                row.dataset.analystChanged = 'true';
                 enforceAliasSelectionLimit();
                 updateAliasCount();
                 updatePlan();
             });
             value.addEventListener('input', () => {
+                row.dataset.analystChanged = 'true';
+                row.dataset.aliasEdited = 'true';
                 selected.value = value.value.trim();
                 row.querySelector('.alias-score').textContent = 'edited';
                 row.querySelector('.alias-reason').textContent = 'Analyst-edited alias candidate';
@@ -512,6 +580,7 @@
             return row;
         }));
         aliasEmpty.hidden = aliases.length > 0;
+        enforceAliasSelectionLimit();
         updateAliasCount();
     }
 
@@ -681,7 +750,10 @@
     });
     generateToggle.addEventListener('change', () => { refreshAliasCandidates(); updatePlan(); });
     [aliasNicknameInput, aliasContextNumberInput].forEach(control =>
-        control.addEventListener('input', () => { refreshAliasCandidates(); updatePlan(); }));
+        control.addEventListener('input', () => {
+            refreshAliasCandidates({ preserveAnalystChoices: true });
+            updatePlan();
+        }));
     form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
     form.addEventListener('submit', event => {
         if (!queryTargets().length) {
