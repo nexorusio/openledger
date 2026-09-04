@@ -34,6 +34,7 @@ from maigret.web.collector_adapters import (
     _resolve_wikidata_organization_classes,
     _wikidata_people_query,
     build_business_context_assessment,
+    count_user_scanner_username_accounts,
     build_organization_resolution_candidates,
     claimed_profile_url_targets,
     extract_github_profile_claims,
@@ -271,6 +272,30 @@ def test_username_results_normalize_health_existence_and_identity_separately():
     assert observations[3]["detector_status"] == "disabled"
     assert observations[3]["source_url"] == ""
     assert observations[0]["source_engine"] == USER_SCANNER_USERNAME_ENGINE
+
+
+def test_username_account_count_deduplicates_provenance_observations():
+    observations = [
+        {
+            "source_engine": USER_SCANNER_USERNAME_ENGINE,
+            "status": "found",
+            "site_name": "Instagram",
+            "subject_value": "alice_alt",
+            "seed_username": seed,
+        }
+        for seed in ("alice", "alice84")
+    ]
+    observations.append(
+        {
+            "source_engine": USER_SCANNER_USERNAME_ENGINE,
+            "status": "found",
+            "site_name": "TikTok",
+            "subject_value": "alice_alt",
+            "seed_username": "alice",
+        }
+    )
+
+    assert count_user_scanner_username_accounts(observations) == 2
 
 
 def test_only_corroborated_username_hits_become_pending_claim_candidates():

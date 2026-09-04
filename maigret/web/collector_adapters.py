@@ -6464,6 +6464,25 @@ def normalize_user_scanner_username_results(
     return observations
 
 
+def count_user_scanner_username_accounts(
+    observations: Iterable[Dict[str, Any]],
+) -> int:
+    """Count unique found accounts while retaining every provenance observation."""
+    account_keys = {
+        (
+            str(observation.get("site_name") or "").strip().casefold(),
+            str(observation.get("subject_value") or "").strip().casefold(),
+        )
+        for observation in observations
+        if isinstance(observation, dict)
+        and observation.get("source_engine") == USER_SCANNER_USERNAME_ENGINE
+        and str(observation.get("status") or "").casefold() == "found"
+        and str(observation.get("site_name") or "").strip()
+        and str(observation.get("subject_value") or "").strip()
+    }
+    return len(account_keys)
+
+
 async def _run_user_scanner_subprocess(
     request: Dict[str, Any],
     *,

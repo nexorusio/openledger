@@ -359,6 +359,19 @@
         return (normalized.match(/[a-z0-9]+/g) || []).slice(0, 6);
     }
 
+    function exactIdentifierTargets() {
+        const exactTargets = [];
+        list.querySelectorAll('.identifier-row').forEach(row => {
+            const type = row.querySelector('.identifier-type').value;
+            const value = row.querySelector('.identifier-value').value.trim();
+            const candidate = type === 'username' || type === 'social_handle'
+                ? value.replace(/^@+/, '')
+                : type === 'profile_url' ? profileHandle(value) : '';
+            if (candidate && !exactTargets.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) exactTargets.push(candidate);
+        });
+        return exactTargets;
+    }
+
     function rankedAliases() {
         if (!generateToggle.checked) return [];
         const names = Array.from(list.querySelectorAll('.identifier-row'))
@@ -412,17 +425,8 @@
             numbers.forEach(number => [first + last, first[0] + last].forEach(base =>
                 add(base + number, 84, `Name pattern with analyst-approved contextual number ${number}`)));
         });
-        const exactTargets = [];
-        list.querySelectorAll('.identifier-row').forEach(row => {
-            const type = row.querySelector('.identifier-type').value;
-            const value = row.querySelector('.identifier-value').value.trim();
-            const candidate = type === 'username' || type === 'social_handle'
-                ? value.replace(/^@+/, '')
-                : type === 'profile_url' ? profileHandle(value) : '';
-            if (candidate && !exactTargets.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) exactTargets.push(candidate);
-        });
         const selectionLimit = userScannerUsernameToggle && userScannerUsernameToggle.checked
-            ? Math.max(0, 16 - exactTargets.length)
+            ? Math.max(0, 16 - exactIdentifierTargets().length)
             : 16;
         return Array.from(candidates.values())
             .sort((a, b) => b.score - a.score || a.value.localeCompare(b.value))
@@ -439,6 +443,15 @@
     function updateAliasCount() {
         const selected = selectedAliases().length;
         aliasSelectedCount.textContent = `${selected} selected`;
+    }
+
+    function enforceAliasSelectionLimit() {
+        if (!userScannerUsernameToggle || !userScannerUsernameToggle.checked) return;
+        const selectionLimit = Math.max(0, 16 - exactIdentifierTargets().length);
+        const selectedControls = Array.from(aliasList.querySelectorAll('.alias-selected'))
+            .filter(control => control.checked);
+        selectedControls.slice(selectionLimit).forEach(control => { control.checked = false; });
+        updateAliasCount();
     }
 
     function refreshAliasCandidates() {
@@ -612,7 +625,7 @@
     [aiContextToggle, userScannerToggle, vxtwitterToggle, githubEnrichmentToggle, ...userScannerPlatforms].filter(Boolean)
         .forEach(control => control.addEventListener('change', updatePlan));
     if (userScannerUsernameToggle) userScannerUsernameToggle.addEventListener('change', () => {
-        refreshAliasCandidates();
+        enforceAliasSelectionLimit();
         updatePlan();
     });
     generateToggle.addEventListener('change', () => { refreshAliasCandidates(); updatePlan(); });

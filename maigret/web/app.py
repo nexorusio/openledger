@@ -71,6 +71,7 @@ from maigret.web.collector_adapters import (
     build_business_context_assessment,
     build_organization_resolution_candidates,
     claimed_profile_url_targets,
+    count_user_scanner_username_accounts,
     extract_official_website_affiliated_people,
     extract_registry_affiliated_people,
     extract_wikidata_affiliation_people,
@@ -2635,12 +2636,8 @@ def build_reports(
             if isinstance(observation, dict)
             and str(observation.get('status') or '').casefold() == 'registered'
         ),
-        'username_verification_found_count': sum(
-            1
-            for observation in list(collector_observations or [])
-            if isinstance(observation, dict)
-            and observation.get('source_engine') == 'user_scanner_username'
-            and str(observation.get('status') or '').casefold() == 'found'
+        'username_verification_found_count': count_user_scanner_username_accounts(
+            list(collector_observations or [])
         ),
         'username_verification_unknown_count': sum(
             1
@@ -3102,11 +3099,7 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                     'type': 'collector_completed',
                     'collector': 'user-scanner-username',
                     'observations': len(collected),
-                    'found': sum(
-                        1
-                        for item in collected
-                        if str(item.get('status') or '').casefold() == 'found'
-                    ),
+                    'found': count_user_scanner_username_accounts(collected),
                 }
             )
         except asyncio.CancelledError:

@@ -104,6 +104,18 @@ def test_username_verification_requires_explicit_browser_opt_in(
 
     assert 'checked' not in body[input_start:input_end]
 
+    template = open(
+        os.path.join(CUR_PATH, '../maigret/web/templates/index.html'),
+        encoding='utf-8',
+    ).read()
+    handler_start = template.index(
+        "userScannerUsernameToggle.addEventListener('change'"
+    )
+    handler_end = template.index('});', handler_start)
+    handler = template[handler_start:handler_end]
+    assert 'enforceAliasSelectionLimit()' in handler
+    assert 'refreshAliasCandidates()' not in handler
+
 
 def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
     response = client.get('/')
@@ -3102,6 +3114,26 @@ def test_live_scan_runs_bounded_user_scanner_username_verification(
             cancelled=cancellation_check(),
         )
         return [
+            {
+                'source_engine': 'user_scanner_username',
+                'subject_type': 'username',
+                'subject_value': 'alice',
+                'seed_username': 'alice_alt',
+                'status': 'found',
+                'native_status': 'Found',
+                'detector_status': 'operational',
+                'account_status': 'exists',
+                'identity_confidence': 'likely',
+                'identity_status': 'unverified',
+                'site_name': 'Instagram',
+                'category': 'Social',
+                'source_url': 'https://instagram.com/alice',
+                'source_record_id': 'user_scanner_username:alice-instagram-cross',
+                'scan_stage': 'cross_scan',
+                'reason': '',
+                'extra': {},
+                'media': {},
+            },
             {
                 'source_engine': 'user_scanner_username',
                 'subject_type': 'username',
