@@ -3639,6 +3639,45 @@ class CaseStore:
         return retired
 
     @staticmethod
+    def _restore_claim_evidence_fingerprints_with_connection(
+        connection: Connection,
+        claim_id: str,
+        fingerprints: Iterable[str],
+    ) -> int:
+        """Restore only evidence explicitly linked to the surviving observation."""
+        normalized = {
+            str(fingerprint)
+            for fingerprint in fingerprints
+            if fingerprint is not None and str(fingerprint).strip()
+        }
+        if not normalized:
+            return 0
+        rows = list(
+            connection.execute(
+                select(
+                    claim_evidence.c.id,
+                    claim_evidence.c.details,
+                ).where(
+                    claim_evidence.c.claim_id == claim_id,
+                    claim_evidence.c.fingerprint.in_(normalized),
+                )
+            ).mappings()
+        )
+        restored = 0
+        for row in rows:
+            details = dict(row["details"] or {})
+            if not _is_retired_legacy_evidence(details):
+                continue
+            details.pop(LEGACY_EVIDENCE_MARKER, None)
+            connection.execute(
+                update(claim_evidence)
+                .where(claim_evidence.c.id == row["id"])
+                .values(details=details)
+            )
+            restored += 1
+        return restored
+
+    @staticmethod
     def _upsert_persona_candidates(
         connection: Connection,
         *,
@@ -6292,6 +6331,7 @@ class CaseStore:
                     claim_observations.c.external_evidence_id,
                     claim_observations.c.chat_message_id,
                     claim_observations.c.source_engine,
+                    claim_observations.c.details,
                     claim_observations.c.observed_at,
                 )
                 .where(
@@ -6399,7 +6439,7 @@ class CaseStore:
                 if claim["source_job_id"] is None
                 else persona_claims.c.source_job_id == claim["source_job_id"]
             )
-            connection.execute(
+            repointed = connection.execute(
                 update(persona_claims)
                 .where(
                     persona_claims.c.id == claim["id"],
@@ -6412,6 +6452,23 @@ class CaseStore:
                     updated_at=now,
                 )
             )
+            if repointed.rowcount == 1:
+                CaseStore._retire_claim_evidence_with_connection(
+                    connection,
+                    str(claim["id"]),
+                    now=now,
+                )
+                survivor_details = dict(survivor.get("details") or {})
+                evidence_fingerprints = survivor_details.get(
+                    "evidence_fingerprints"
+                )
+                CaseStore._restore_claim_evidence_fingerprints_with_connection(
+                    connection,
+                    str(claim["id"]),
+                    evidence_fingerprints
+                    if isinstance(evidence_fingerprints, list)
+                    else [],
+                )
         return retire_rows
 
     def delete_job(

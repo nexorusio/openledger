@@ -959,6 +959,23 @@ def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
         assert preserved["review_status"] == "approved"
         assert preserved["reliability_status"] == "current"
         assert preserved["source_engine"] == "case_chat_user_statement"
+        assert preserved["evidence"] == []
+        assert {
+            evidence["source_name"]
+            for evidence in preserved["retired_evidence"]
+        } == {"Example Social"}
+        assert persistent_store.build_persona_graph(persona_id)["stats"][
+            "source_count"
+        ] == 0
+        export_snapshot, _generated_at = (
+            persistent_store.get_persona_export_snapshot(persona_id)
+        )
+        exported_social = next(
+            claim
+            for claim in export_snapshot["claims"]
+            if claim["field_name"] == "social_account"
+        )
+        assert exported_social["evidence"] == []
 
     persistent_store.claim_next("worker:orphan-refresh")
     refreshed_result = {
