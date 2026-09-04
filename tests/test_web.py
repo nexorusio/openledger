@@ -3070,6 +3070,156 @@ def test_ai_markdown_uses_user_scanner_evidence_without_leaking_withheld_email(w
     assert 'lookup_email' in approved
 
 
+def test_live_scan_runs_bounded_user_scanner_username_verification(
+    client, web_app, monkeypatch
+):
+    requested = {}
+
+    async def fake_search(*args, **kwargs):
+        return {}
+
+    async def fake_username_scan(
+        usernames, *, platforms, allow_vxtwitter, cancellation_check
+    ):
+        requested.update(
+            usernames=usernames,
+            platforms=platforms,
+            allow_vxtwitter=allow_vxtwitter,
+            cancelled=cancellation_check(),
+        )
+        return [
+            {
+                'source_engine': 'user_scanner_username',
+                'subject_type': 'username',
+                'subject_value': 'alice',
+                'seed_username': 'alice',
+                'status': 'found',
+                'native_status': 'Found',
+                'detector_status': 'operational',
+                'account_status': 'exists',
+                'identity_confidence': 'candidate',
+                'identity_status': 'unverified',
+                'site_name': 'Instagram',
+                'category': 'Social',
+                'source_url': 'https://instagram.com/alice',
+                'source_record_id': 'user_scanner_username:alice-instagram',
+                'scan_stage': 'direct',
+                'reason': '',
+                'extra': {},
+                'media': {},
+            },
+            {
+                'source_engine': 'user_scanner_username',
+                'subject_type': 'username',
+                'subject_value': 'alice',
+                'seed_username': 'alice',
+                'status': 'blocked',
+                'native_status': 'Skipped',
+                'detector_status': 'blocked',
+                'account_status': 'unknown',
+                'identity_confidence': 'candidate',
+                'identity_status': 'unverified',
+                'site_name': 'X (Twitter)',
+                'category': 'Social',
+                'source_url': 'https://x.com/alice',
+                'source_record_id': 'user_scanner_username:alice-x',
+                'scan_stage': 'policy',
+                'reason': 'api.vxtwitter.com disabled by policy',
+                'extra': {},
+                'media': {},
+            },
+        ]
+
+    monkeypatch.setattr(maigret, 'search', fake_search)
+    monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
+    monkeypatch.setattr(web_app, 'run_user_scanner_usernames', fake_username_scan)
+    monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
+    monkeypatch.setattr(
+        maigret.report, 'generate_report_context', lambda *a, **kw: {}
+    )
+
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={
+            'identifier_type': 'username',
+            'identifier_value': 'alice',
+            'processing_mode': 'independent',
+            'enable_user_scanner_username': 'on',
+            'user_scanner_platforms_present': '1',
+            'user_scanner_platform': ['instagram', 'x'],
+        },
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
+    assert start.status_code == 200
+    job_id = start.get_json()['job_id']
+    body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
+    events = [
+        json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
+    ]
+
+    assert requested == {
+        'usernames': ['alice'],
+        'platforms': ['instagram', 'x'],
+        'allow_vxtwitter': False,
+        'cancelled': False,
+    }
+    collector_events = [
+        event
+        for event in events
+        if event.get('collector') == 'user-scanner-username'
+    ]
+    assert [event['type'] for event in collector_events] == [
+        'collector_started',
+        'collector_completed',
+    ]
+    result = web_app.job_results[job_id]
+    assert result['username_verification_found_count'] == 1
+    assert result['username_verification_unknown_count'] == 1
+    assert result['found_count'] == 0
+
+
+def test_ai_markdown_excludes_uncorroborated_username_scanner_hits(web_app):
+    base = {
+        'source_engine': 'user_scanner_username',
+        'subject_type': 'username',
+        'subject_value': 'alice',
+        'status': 'found',
+        'site_name': 'Instagram',
+        'category': 'Social',
+        'detector_status': 'operational',
+        'account_status': 'exists',
+        'identity_status': 'unverified',
+    }
+    result = {
+        'individual_reports': [],
+        'collector_observations': [
+            {**base, 'identity_confidence': 'candidate'},
+            {
+                **base,
+                'subject_value': 'alice_alt',
+                'identity_confidence': 'likely',
+            },
+        ],
+        'options': {
+            'investigation_spec': {
+                'allow_ai_context': True,
+                'identifiers': [{'type': 'username', 'value': 'alice'}],
+            }
+        },
+    }
+
+    markdown = web_app.build_ai_markdown(result)
+
+    assert 'alice_alt' in markdown
+    assert '"subject_value": "alice"' not in markdown
+    assert '"identity_confidence": "likely"' in markdown
+
+
 @pytest.mark.parametrize(
     'relative_path',
     [

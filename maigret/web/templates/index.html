@@ -118,14 +118,54 @@
 
                     <div class="form-check investigation-check">
                         <input class="form-check-input" type="checkbox" id="generate-name-variants" name="generate_name_variants" checked>
-                        <label class="form-check-label" for="generate-name-variants">Generate reviewable username variants from full names</label>
-                        <div class="form-text">Creates a bounded list such as <code>johndoe</code>, <code>john.doe</code>, and <code>john_doe</code>. Phone and email values are never permuted.</div>
+                        <label class="form-check-label" for="generate-name-variants">Plan ranked username aliases from full names</label>
+                        <div class="form-text">Builds a bounded, explainable set. Phone and email values are never permuted.</div>
+                    </div>
+                    <div class="row g-3 mt-1 alias-context-fields">
+                        <div class="col-md-6">
+                            <label class="form-label" for="alias-nicknames">Analyst-supplied nicknames</label>
+                            <input class="form-control" id="alias-nicknames" name="alias_nicknames" autocomplete="off" placeholder="e.g. Johnny, JD" value="{{ initial_alias_nicknames | join(', ') }}">
+                            <div class="form-text">Optional; comma-separated.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="alias-context-numbers">Approved contextual numbers</label>
+                            <input class="form-control" id="alias-context-numbers" name="alias_context_numbers" inputmode="numeric" autocomplete="off" placeholder="e.g. 84, 1990">
+                            <div class="form-text">Optional known numbers only. OpenLedger never sprays 00–99 combinations.</div>
+                        </div>
+                    </div>
+                    <input type="hidden" name="alias_candidates_present" value="1">
+                    <div class="alias-plan mt-3" id="alias-plan">
+                        <div class="section-heading-row">
+                            <div>
+                                <h4 class="form-label mb-1">Ranked alias candidates</h4>
+                                <p class="form-text mb-0">Edit values or deselect candidates before collection.</p>
+                            </div>
+                            <span class="badge-soft" id="alias-selected-count">0 selected</span>
+                        </div>
+                        <div class="alias-candidate-list mt-2" id="alias-candidate-list"></div>
+                        <p class="form-text mb-0" id="alias-empty">Add a full name to build alias candidates.</p>
                     </div>
                 </fieldset>
 
                 {% if user_scanner_available %}
                 <fieldset class="investigation-section">
-                    <legend class="form-label mb-2">Additional email evidence</legend>
+                    <legend class="form-label mb-2">User Scanner verification</legend>
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="enable-user-scanner-username" name="enable_user_scanner_username" checked>
+                        <label class="form-check-label" for="enable-user-scanner-username">Verify selected usernames on major social platforms</label>
+                        <div class="form-text">Checks account existence separately from identity. Direct hits remain candidates until evidence ties the account to the investigated person.</div>
+                    </div>
+                    <input type="hidden" name="user_scanner_platforms_present" value="1">
+                    <div class="d-flex flex-wrap gap-3 mt-2" id="user-scanner-platforms">
+                        {% for platform, label in [('facebook', 'Facebook'), ('instagram', 'Instagram'), ('threads', 'Threads'), ('tiktok', 'TikTok'), ('x', 'X')] %}
+                        <label class="form-check-label"><input class="form-check-input me-1" type="checkbox" name="user_scanner_platform" value="{{ platform }}" checked> {{ label }}</label>
+                        {% endfor %}
+                    </div>
+                    <div class="form-check investigation-check mt-2">
+                        <input class="form-check-input" type="checkbox" id="allow-user-scanner-vxtwitter" name="allow_user_scanner_vxtwitter">
+                        <label class="form-check-label" for="allow-user-scanner-vxtwitter">Explicitly allow User Scanner’s third-party X lookup via api.vxtwitter.com</label>
+                        <div class="form-text">Off by default. When off, X is recorded as policy-blocked and no request reaches that service.</div>
+                    </div>
                     <div class="form-check investigation-check">
                         <input class="form-check-input" type="checkbox" id="enable-user-scanner-email" name="enable_user_scanner_email">
                         <label class="form-check-label" for="enable-user-scanner-email">Check email registrations with User Scanner</label>
@@ -260,6 +300,15 @@
                     </button>
                 </div>
             </template>
+            <template id="alias-candidate-template">
+                <label class="alias-candidate-row">
+                    <input class="form-check-input alias-selected" type="checkbox" name="selected_alias">
+                    <span class="alias-rank"></span>
+                    <input class="form-control form-control-sm alias-value" name="alias_candidate" autocomplete="off" spellcheck="false" aria-label="Username alias candidate">
+                    <span class="alias-score badge-soft"></span>
+                    <small class="alias-reason"></small>
+                </label>
+            </template>
         </div>
     </article>
 
@@ -274,8 +323,17 @@
     const template = document.getElementById('identifier-row-template');
     const addButton = document.getElementById('add-identifier');
     const generateToggle = document.getElementById('generate-name-variants');
+    const aliasNicknameInput = document.getElementById('alias-nicknames');
+    const aliasContextNumberInput = document.getElementById('alias-context-numbers');
+    const aliasList = document.getElementById('alias-candidate-list');
+    const aliasTemplate = document.getElementById('alias-candidate-template');
+    const aliasEmpty = document.getElementById('alias-empty');
+    const aliasSelectedCount = document.getElementById('alias-selected-count');
     const aiContextToggle = document.getElementById('allow-ai-context');
     const userScannerToggle = document.getElementById('enable-user-scanner-email');
+    const userScannerUsernameToggle = document.getElementById('enable-user-scanner-username');
+    const vxtwitterToggle = document.getElementById('allow-user-scanner-vxtwitter');
+    const userScannerPlatforms = Array.from(document.querySelectorAll('input[name="user_scanner_platform"]'));
     const githubEnrichmentToggle = document.getElementById('enable-github-profile-enrichment');
     const count = document.getElementById('query-plan-count');
     const summary = document.getElementById('query-plan-summary');
@@ -296,33 +354,116 @@
     };
 
     function cleanNameTokens(value) {
-        return value.toLocaleLowerCase().trim().split(/\s+/)
-            .map(token => Array.from(token).filter(char => /[\p{L}\p{N}]/u.test(char)).join(''))
-            .filter(Boolean).slice(0, 6);
+        const normalized = value.normalize('NFKD').replace(/[\u0300-\u036f]/g, '')
+            .toLocaleLowerCase();
+        return (normalized.match(/[a-z0-9]+/g) || []).slice(0, 6);
     }
 
-    function generateVariants(value) {
-        const nameTokens = cleanNameTokens(value);
-        if (!nameTokens.length) return [];
-        const groups = [nameTokens];
-        if (nameTokens.length > 1) {
-            groups.push([nameTokens[0], nameTokens[nameTokens.length - 1]]);
-            groups.push([nameTokens[nameTokens.length - 1], nameTokens[0]]);
-        }
-        const output = [];
-        groups.forEach(parts => {
-            ['', '.', '_', '-'].forEach(separator => {
-                const candidate = parts.join(separator);
-                if (candidate && !output.includes(candidate)) output.push(candidate);
-            });
-            if (parts.length > 1) {
-                [parts[0][0] + parts[parts.length - 1], parts[0] + parts[parts.length - 1][0]]
-                    .forEach(candidate => {
-                        if (candidate && !output.includes(candidate)) output.push(candidate);
-                    });
-            }
+    function rankedAliases() {
+        if (!generateToggle.checked) return [];
+        const names = Array.from(list.querySelectorAll('.identifier-row'))
+            .filter(row => row.querySelector('.identifier-type').value === 'full_name')
+            .map(row => row.querySelector('.identifier-value').value.trim()).filter(Boolean);
+        const nicknames = aliasNicknameInput.value.split(/[,\n\r]+/)
+            .map(value => cleanNameTokens(value)).filter(parts => parts.length === 1)
+            .map(parts => parts[0]).slice(0, 8);
+        const numbers = aliasContextNumberInput.value.split(/[,\s]+/)
+            .filter(value => /^[0-9]{1,6}$/.test(value)).slice(0, 6);
+        const learnedSeparators = new Set();
+        list.querySelectorAll('.identifier-row').forEach(row => {
+            if (row.querySelector('.identifier-type').value !== 'profile_url') return;
+            const handle = profileHandle(row.querySelector('.identifier-value').value.trim());
+            ['.', '_', '-'].forEach(separator => { if (handle.includes(separator)) learnedSeparators.add(separator); });
         });
-        return output.slice(0, 16);
+        const candidates = new Map();
+        const add = (value, score, reason) => {
+            value = value.replace(/^[._-]+|[._-]+$/g, '');
+            if (!value || value.length > 128) return;
+            score = Math.max(0, Math.min(100, Number(score)));
+            const key = value.toLocaleLowerCase();
+            const current = candidates.get(key);
+            if (!current || score > current.score) candidates.set(key, { value, score, reason });
+        };
+        names.forEach(name => {
+            const tokens = cleanNameTokens(name);
+            if (!tokens.length) return;
+            if (tokens.length === 1) {
+                add(tokens[0], 100, 'Transliterated mononym');
+                numbers.forEach(number => add(tokens[0] + number, 86, `Mononym with analyst-approved contextual number ${number}`));
+                return;
+            }
+            const first = tokens[0], last = tokens[tokens.length - 1];
+            [[tokens, 100, 'Full name in natural order'], [[first, last], 96, 'First and last name'], [[last, first], 82, 'Reversed last and first name']]
+                .forEach(([parts, base, reason]) => ['', '.', '_', '-'].forEach((separator, index) => {
+                    const learnedBonus = separator && learnedSeparators.has(separator) ? 3 : 0;
+                    add(parts.join(separator), base - index + learnedBonus,
+                        reason + (learnedBonus ? '; separator learned from a confirmed profile' : ''));
+                }));
+            add(first[0] + last, 90, 'First initial plus last name');
+            add(first + last[0], 88, 'First name plus last initial');
+            add(tokens.map(token => token[0]).join(''), 78, 'Name initials');
+            add(first, 64, 'First-name mononym; collision risk');
+            add(last, 60, 'Last-name mononym; collision risk');
+            nicknames.forEach(nickname => {
+                add(nickname + last, 94, 'Analyst-supplied nickname plus last name');
+                add(nickname + '.' + last, 92, 'Nickname and last name with separator');
+                add(nickname, 70, 'Analyst-supplied nickname; collision risk');
+            });
+            numbers.forEach(number => [first + last, first[0] + last].forEach(base =>
+                add(base + number, 84, `Name pattern with analyst-approved contextual number ${number}`)));
+        });
+        const exactTargets = [];
+        list.querySelectorAll('.identifier-row').forEach(row => {
+            const type = row.querySelector('.identifier-type').value;
+            const value = row.querySelector('.identifier-value').value.trim();
+            const candidate = type === 'username' || type === 'social_handle'
+                ? value.replace(/^@+/, '')
+                : type === 'profile_url' ? profileHandle(value) : '';
+            if (candidate && !exactTargets.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) exactTargets.push(candidate);
+        });
+        const selectionLimit = userScannerUsernameToggle && userScannerUsernameToggle.checked
+            ? Math.max(0, 16 - exactTargets.length)
+            : 16;
+        return Array.from(candidates.values())
+            .sort((a, b) => b.score - a.score || a.value.localeCompare(b.value))
+            .slice(0, 24).map((candidate, index) => ({ ...candidate, selected: index < selectionLimit && candidate.score >= 78 }));
+    }
+
+    function selectedAliases() {
+        return Array.from(aliasList.querySelectorAll('.alias-candidate-row'))
+            .filter(row => row.querySelector('.alias-selected').checked)
+            .map(row => row.querySelector('.alias-value').value.trim())
+            .filter(Boolean);
+    }
+
+    function updateAliasCount() {
+        const selected = selectedAliases().length;
+        aliasSelectedCount.textContent = `${selected} selected`;
+    }
+
+    function refreshAliasCandidates() {
+        const aliases = rankedAliases();
+        aliasList.replaceChildren(...aliases.map((candidate, index) => {
+            const row = aliasTemplate.content.firstElementChild.cloneNode(true);
+            const selected = row.querySelector('.alias-selected');
+            const value = row.querySelector('.alias-value');
+            selected.checked = candidate.selected;
+            selected.value = candidate.value;
+            value.value = candidate.value;
+            row.querySelector('.alias-rank').textContent = `#${index + 1}`;
+            row.querySelector('.alias-score').textContent = `${candidate.score}`;
+            row.querySelector('.alias-reason').textContent = candidate.reason;
+            selected.addEventListener('change', () => { updateAliasCount(); updatePlan(); });
+            value.addEventListener('input', () => {
+                selected.value = value.value.trim();
+                row.querySelector('.alias-score').textContent = 'edited';
+                row.querySelector('.alias-reason').textContent = 'Analyst-edited alias candidate';
+                updatePlan();
+            });
+            return row;
+        }));
+        aliasEmpty.hidden = aliases.length > 0;
+        updateAliasCount();
     }
 
     function profileHandle(value) {
@@ -345,10 +486,12 @@
             let candidates = [];
             if (type === 'username' || type === 'social_handle') candidates = [value.replace(/^@+/, '')];
             if (type === 'profile_url') candidates = [profileHandle(value)];
-            if (type === 'full_name' && generateToggle.checked) candidates = generateVariants(value);
             candidates.filter(Boolean).forEach(candidate => {
                 if (!output.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) output.push(candidate);
             });
+        });
+        selectedAliases().forEach(candidate => {
+            if (!output.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) output.push(candidate);
         });
         return output;
     }
@@ -373,6 +516,14 @@
             userScannerToggle.disabled = !grouped || emails !== 1;
             if (userScannerToggle.disabled) userScannerToggle.checked = false;
         }
+        if (userScannerUsernameToggle) {
+            userScannerPlatforms.forEach(control => {
+                control.disabled = !userScannerUsernameToggle.checked;
+            });
+            const xSelected = userScannerPlatforms.some(control => control.value === 'x' && control.checked);
+            vxtwitterToggle.disabled = !userScannerUsernameToggle.checked || !xSelected;
+            if (vxtwitterToggle.disabled) vxtwitterToggle.checked = false;
+        }
         count.textContent = `${planned.length} account ${planned.length === 1 ? 'check' : 'checks'}`;
         summary.textContent = planned.length
             ? `${planned.length} exact account candidate${planned.length === 1 ? '' : 's'} will be checked independently${contextual ? `; ${contextual} context value${contextual === 1 ? '' : 's'} will remain attached to the case` : ''}.`
@@ -386,10 +537,13 @@
         const scannerNote = userScannerToggle && userScannerToggle.checked
             ? ' Silent User Scanner email registrations will enter the same pending evidence review.'
             : '';
+        const usernameScannerNote = userScannerUsernameToggle && userScannerUsernameToggle.checked
+            ? ' Selected aliases will also receive bounded major-platform account checks; identity remains unverified.'
+            : '';
         const githubNote = githubEnrichmentToggle && githubEnrichmentToggle.checked
             ? ' Claimed GitHub user profiles will be enriched through the public API and queued for review.'
             : '';
-        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${scannerNote}${githubNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
+        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${usernameScannerNote}${scannerNote}${githubNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
         error.hidden = true;
     }
 
@@ -412,14 +566,19 @@
         const type = row.querySelector('.identifier-type');
         type.addEventListener('change', () => {
             updateRow(row);
+            refreshAliasCandidates();
             updatePlan();
         });
-        row.querySelector('.identifier-value').addEventListener('input', updatePlan);
+        row.querySelector('.identifier-value').addEventListener('input', () => {
+            refreshAliasCandidates();
+            updatePlan();
+        });
         row.querySelector('.identifier-remove').addEventListener('click', () => {
             row.remove();
             list.querySelectorAll('.identifier-remove').forEach((button, index, buttons) => {
                 button.disabled = buttons.length === 1;
             });
+            refreshAliasCandidates();
             updatePlan();
         });
         updateRow(row);
@@ -450,8 +609,15 @@
             updateSourceTagSelects();
         });
     });
-    [generateToggle, aiContextToggle, userScannerToggle, githubEnrichmentToggle].filter(Boolean)
+    [aiContextToggle, userScannerToggle, vxtwitterToggle, githubEnrichmentToggle, ...userScannerPlatforms].filter(Boolean)
         .forEach(control => control.addEventListener('change', updatePlan));
+    if (userScannerUsernameToggle) userScannerUsernameToggle.addEventListener('change', () => {
+        refreshAliasCandidates();
+        updatePlan();
+    });
+    generateToggle.addEventListener('change', () => { refreshAliasCandidates(); updatePlan(); });
+    [aliasNicknameInput, aliasContextNumberInput].forEach(control =>
+        control.addEventListener('input', () => { refreshAliasCandidates(); updatePlan(); }));
     form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
     form.addEventListener('submit', event => {
         if (!queryTargets().length) {
@@ -461,6 +627,7 @@
             error.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
     });
+    refreshAliasCandidates();
     updatePlan();
 })();
 </script>

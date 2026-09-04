@@ -173,8 +173,9 @@ hardening step.
 1. Merge this schema, lineage, validation, and deployment hardening change.
 2. Deploy migrations before application startup using the existing migration
    service; confirm backups and health checks.
-3. Merge the User Scanner adapter separately and keep it disabled by default
-   until its output and resource limits pass comparison against Maigret.
+3. Roll out User Scanner capabilities independently: keep email-registration
+   checks opt-in, bound username verification to selected major-platform
+   aliases, and require explicit approval for X's third-party API path.
 4. Implement one read-only connector in a separate process with client identity,
    least privilege, secret-file delivery, egress allowlisting, timeouts, row and
    byte limits, cancellation, and audit logs.

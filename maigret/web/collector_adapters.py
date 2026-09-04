@@ -28,7 +28,16 @@ from maigret.web.persona_intelligence import (
 )
 
 USER_SCANNER_ENGINE = "user_scanner_email"
+USER_SCANNER_USERNAME_ENGINE = "user_scanner_username"
 USER_SCANNER_TIMEOUT_SECONDS = 420
+USER_SCANNER_USERNAME_PLATFORMS = (
+    "facebook",
+    "instagram",
+    "threads",
+    "tiktok",
+    "x",
+)
+MAX_USER_SCANNER_USERNAME_TARGETS = 16
 MAX_COLLECTOR_OUTPUT_BYTES = 8_000_000
 MAX_OBSERVATIONS = 600
 
@@ -290,6 +299,40 @@ def user_scanner_email_targets(plan: Any) -> List[str]:
         if value and value not in targets:
             targets.append(value)
     return targets[:1]
+
+
+def user_scanner_username_targets(plan: Any) -> List[str]:
+    """Return the analyst-approved, bounded username verification targets."""
+    if not isinstance(plan, dict) or not plan.get("enable_user_scanner_username"):
+        return []
+    targets: List[str] = []
+    for target in list(plan.get("search_targets") or []):
+        if not isinstance(target, dict):
+            continue
+        value = str(target.get("value") or "").strip().lstrip("@")
+        if value and value.casefold() not in {item.casefold() for item in targets}:
+            targets.append(value[:128])
+        if len(targets) >= MAX_USER_SCANNER_USERNAME_TARGETS:
+            break
+    return targets
+
+
+def user_scanner_username_policy(plan: Any) -> Dict[str, Any]:
+    """Return validated platform scope and the explicit third-party X consent."""
+    if not isinstance(plan, dict):
+        return {"platforms": [], "allow_vxtwitter": False}
+    requested = plan.get("user_scanner_username_platforms")
+    if not isinstance(requested, list):
+        requested = list(USER_SCANNER_USERNAME_PLATFORMS)
+    platforms = []
+    for raw_platform in requested:
+        platform = str(raw_platform or "").strip().casefold()
+        if platform in USER_SCANNER_USERNAME_PLATFORMS and platform not in platforms:
+            platforms.append(platform)
+    return {
+        "platforms": platforms,
+        "allow_vxtwitter": bool(plan.get("allow_user_scanner_vxtwitter")),
+    }
 
 
 def _safe_public_url(value: Any) -> str:
@@ -6306,12 +6349,127 @@ def normalize_user_scanner_results(
     return observations
 
 
-async def run_user_scanner_email(
-    target_email: str,
+def _user_scanner_username_outcome(status: str, reason: str) -> str:
+    native_status = status.strip().casefold()
+    reason_text = reason.strip().casefold()
+    if native_status == "found":
+        return "found"
+    if native_status == "not found":
+        return "not_found"
+    if native_status == "skipped":
+        return "blocked"
+    if native_status != "error":
+        return "unknown"
+    if any(
+        marker in reason_text
+        for marker in (
+            "rate limit",
+            "cloudflare",
+            "blocked",
+            "bot protection",
+            "http 401",
+            "http 403",
+            "http 429",
+        )
+    ):
+        return "blocked"
+    if any(
+        marker in reason_text
+        for marker in (
+            "no public account",
+            "private",
+            "unexpected response",
+            "unexpected status",
+            "unrecognised",
+            "unrecognized",
+        )
+    ):
+        return "unknown"
+    return "error"
+
+
+def normalize_user_scanner_username_results(
+    raw_results: Any,
+) -> List[Dict[str, Any]]:
+    """Separate detector health, account existence and identity confidence."""
+    if not isinstance(raw_results, list):
+        raise ValueError("User Scanner returned a non-list username result")
+    observations: List[Dict[str, Any]] = []
+    for raw in raw_results[:MAX_OBSERVATIONS]:
+        if not isinstance(raw, dict):
+            continue
+        native_status = str(raw.get("status") or "Error").strip()[:40]
+        reason = str(raw.get("reason") or "").strip()[:1000]
+        outcome = _user_scanner_username_outcome(native_status, reason)
+        extra = _bounded_mapping(raw.get("extra"))
+        confidence = str(extra.get("confidence") or "candidate").casefold()
+        if confidence not in {"confirmed", "likely", "candidate", "conflicting"}:
+            confidence = "candidate"
+        username = str(raw.get("username") or "").strip().lstrip("@")[:128]
+        if not username:
+            continue
+        seed_username = str(extra.get("seed_username") or username).strip()[:128]
+        site_name = str(raw.get("site_name") or "Unknown source").strip()[:300]
+        source_url = _safe_public_url(raw.get("url"))
+        record_material = "\0".join(
+            (
+                seed_username.casefold(),
+                username.casefold(),
+                site_name.casefold(),
+                str(extra.get("scan_stage") or "direct"),
+            )
+        )
+        observations.append(
+            {
+                "source_engine": USER_SCANNER_USERNAME_ENGINE,
+                "subject_type": "username",
+                "subject_value": username,
+                "seed_username": seed_username,
+                "status": outcome,
+                "native_status": native_status,
+                "detector_status": (
+                    "operational"
+                    if outcome in {"found", "not_found"}
+                    else "disabled"
+                    if outcome == "blocked"
+                    and "disabled by openledger policy" in reason.casefold()
+                    else "blocked" if outcome == "blocked" else "degraded"
+                ),
+                "account_status": (
+                    "exists"
+                    if outcome == "found"
+                    else "absent" if outcome == "not_found" else "unknown"
+                ),
+                "identity_confidence": confidence,
+                "identity_status": "unverified",
+                "site_name": site_name or "Unknown source",
+                "category": str(raw.get("category") or "").strip()[:100],
+                "source_url": source_url,
+                "source_record_id": (
+                    f"{USER_SCANNER_USERNAME_ENGINE}:"
+                    f"{hashlib.sha256(record_material.encode('utf-8')).hexdigest()}"
+                ),
+                "scan_stage": str(extra.get("scan_stage") or "direct")[:40],
+                "reason": reason,
+                "extra": extra,
+                "media": {
+                    key: url
+                    for key, value in _bounded_mapping(
+                        raw.get("media"), limit=12
+                    ).items()
+                    if (url := _safe_public_url(value))
+                },
+            }
+        )
+    return observations
+
+
+async def _run_user_scanner_subprocess(
+    request: Dict[str, Any],
     *,
     timeout_seconds: int = USER_SCANNER_TIMEOUT_SECONDS,
     cancellation_check: Optional[Callable[[], bool]] = None,
-) -> List[Dict[str, Any]]:
+) -> Dict[str, Any]:
     """Run User Scanner outside the worker process and parse its JSON envelope."""
     if not user_scanner_available():
         raise RuntimeError("User Scanner is not installed in the worker image")
@@ -6329,7 +6487,7 @@ async def run_user_scanner_email(
         stderr=asyncio.subprocess.PIPE,
         env=environment,
     )
-    request_payload = json.dumps({"email": target_email}).encode("utf-8")
+    request_payload = json.dumps(request).encode("utf-8")
     communicate_task = asyncio.create_task(process.communicate(request_payload))
     started_at = asyncio.get_running_loop().time()
     try:
@@ -6360,7 +6518,47 @@ async def run_user_scanner_email(
         raise RuntimeError("User Scanner returned invalid JSON") from exc
     if not isinstance(envelope, dict) or envelope.get("schema_version") != 1:
         raise RuntimeError("User Scanner returned an unsupported result schema")
+    return envelope
+
+
+async def run_user_scanner_email(
+    target_email: str,
+    *,
+    timeout_seconds: int = USER_SCANNER_TIMEOUT_SECONDS,
+    cancellation_check: Optional[Callable[[], bool]] = None,
+) -> List[Dict[str, Any]]:
+    envelope = await _run_user_scanner_subprocess(
+        {"mode": "email", "email": target_email},
+        timeout_seconds=timeout_seconds,
+        cancellation_check=cancellation_check,
+    )
     return normalize_user_scanner_results(target_email, envelope.get("results"))
+
+
+async def run_user_scanner_usernames(
+    usernames: List[str],
+    *,
+    platforms: Optional[List[str]] = None,
+    allow_vxtwitter: bool = False,
+    timeout_seconds: int = USER_SCANNER_TIMEOUT_SECONDS,
+    cancellation_check: Optional[Callable[[], bool]] = None,
+) -> List[Dict[str, Any]]:
+    """Run bounded major-platform username verification in the isolated process."""
+    envelope = await _run_user_scanner_subprocess(
+        {
+            "mode": "username",
+            "usernames": list(usernames)[:MAX_USER_SCANNER_USERNAME_TARGETS],
+            "platforms": list(
+                USER_SCANNER_USERNAME_PLATFORMS
+                if platforms is None
+                else platforms
+            ),
+            "allow_vxtwitter": allow_vxtwitter is True,
+        },
+        timeout_seconds=timeout_seconds,
+        cancellation_check=cancellation_check,
+    )
+    return normalize_user_scanner_username_results(envelope.get("results"))
 
 
 def extract_user_scanner_claims(
@@ -6415,6 +6613,73 @@ def extract_user_scanner_claims(
                 # of the email address in the lineage index.
                 "source_record_id": f"{USER_SCANNER_ENGINE}:{fingerprint}",
                 "native_status": "registered",
+                "evidence": [
+                    dict(evidence, fingerprint=evidence_fingerprint(evidence))
+                ],
+            }
+        )
+    return candidates
+
+
+def extract_user_scanner_username_claims(
+    observations: Iterable[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Promote only corroborated username hits to pending Persona proposals."""
+    candidates: List[Dict[str, Any]] = []
+    for observation in observations:
+        if not isinstance(observation, dict):
+            continue
+        if observation.get("source_engine") != USER_SCANNER_USERNAME_ENGINE:
+            continue
+        if str(observation.get("status") or "").casefold() != "found":
+            continue
+        confidence_class = str(
+            observation.get("identity_confidence") or "candidate"
+        ).casefold()
+        if confidence_class not in {"confirmed", "likely"}:
+            continue
+        username = str(observation.get("subject_value") or "").strip()[:128]
+        site_name = str(observation.get("site_name") or "").strip()[:300]
+        source_url = _safe_public_url(observation.get("source_url"))
+        if not username or not site_name or not source_url:
+            continue
+        value = {
+            "platform": site_name,
+            "username": username,
+            "url": source_url,
+        }
+        fingerprint = claim_fingerprint("social_account", value)
+        evidence = {
+            "evidence_type": "username_module_verification",
+            "source_name": site_name,
+            "source_url": source_url,
+            "details": {
+                "detector_status": observation.get("detector_status"),
+                "account_status": observation.get("account_status"),
+                "identity_confidence": confidence_class,
+                "identity_status": "unverified",
+                "seed_username": str(observation.get("seed_username") or "")[:128],
+                "scan_stage": str(observation.get("scan_stage") or "")[:40],
+                "native_status": str(observation.get("native_status") or "")[:40],
+                "human_review_required": True,
+            },
+        }
+        candidates.append(
+            {
+                "field_name": "social_account",
+                "value": value,
+                "display_value": f"{site_name}: @{username}"[:4000],
+                "normalized_value": (f"{site_name.casefold()}\0{username.casefold()}")[
+                    :4000
+                ],
+                "confidence": 70 if confidence_class == "confirmed" else 60,
+                "fingerprint": fingerprint,
+                "source_engine": USER_SCANNER_USERNAME_ENGINE,
+                "source_record_id": str(
+                    observation.get("source_record_id")
+                    or f"{USER_SCANNER_USERNAME_ENGINE}:{fingerprint}"
+                )[:500],
+                "native_status": "found",
                 "evidence": [
                     dict(evidence, fingerprint=evidence_fingerprint(evidence))
                 ],

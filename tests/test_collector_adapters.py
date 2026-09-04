@@ -23,6 +23,7 @@ from maigret.web.collector_adapters import (
     UNFURL_ENGINE,
     UNFURL_VERSION,
     USER_SCANNER_ENGINE,
+    USER_SCANNER_USERNAME_ENGINE,
     WAYBACK_API_BASE_URL,
     WAYBACK_ENGINE,
     WIKIDATA_ENGINE,
@@ -42,6 +43,7 @@ from maigret.web.collector_adapters import (
     extract_official_website_affiliated_people,
     extract_profile_url_evidence_claims,
     extract_user_scanner_claims,
+    extract_user_scanner_username_claims,
     extract_wikidata_affiliation_people,
     extract_wikipedia_person_claims,
     github_profile_targets,
@@ -58,6 +60,7 @@ from maigret.web.collector_adapters import (
     normalize_public_web_organization_sources,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
+    normalize_user_scanner_username_results,
     normalize_wayback_capture_index,
     normalize_wikidata_affiliated_people,
     normalize_wikidata_entity_candidates,
@@ -71,10 +74,13 @@ from maigret.web.collector_adapters import (
     run_cloudflare_dns_context,
     run_icij_offshore_match,
     run_official_website_public_content,
+    run_user_scanner_usernames,
     run_wayback_capture_index,
     run_wikidata_affiliation_discovery,
     run_wikipedia_person_enrichment,
     user_scanner_email_targets,
+    user_scanner_username_policy,
+    user_scanner_username_targets,
     validate_google_places_connection,
 )
 
@@ -197,6 +203,135 @@ def test_only_positive_registrations_become_pending_claim_candidates():
     assert candidates[0]["source_record_id"].startswith(f"{USER_SCANNER_ENGINE}:")
     assert candidates[0]["confidence"] == 55
     assert candidates[0]["evidence"][0]["evidence_type"] == "email_registration_probe"
+
+
+def test_username_targets_and_platform_policy_are_bounded_and_opted_in():
+    plan = {
+        "enable_user_scanner_username": True,
+        "search_targets": [{"value": f"alias{index}"} for index in range(30)],
+        "user_scanner_username_platforms": ["instagram", "x", "unknown"],
+        "allow_user_scanner_vxtwitter": False,
+    }
+
+    assert user_scanner_username_targets(plan) == [
+        f"alias{index}" for index in range(16)
+    ]
+    assert (
+        user_scanner_username_targets({**plan, "enable_user_scanner_username": False})
+        == []
+    )
+    assert user_scanner_username_policy(plan) == {
+        "platforms": ["instagram", "x"],
+        "allow_vxtwitter": False,
+    }
+
+
+def test_username_results_normalize_health_existence_and_identity_separately():
+    observations = normalize_user_scanner_username_results(
+        [
+            {
+                "status": "Found",
+                "username": "alice",
+                "site_name": "Instagram",
+                "url": "https://instagram.com/alice",
+                "extra": {"confidence": "likely", "scan_stage": "cross_scan"},
+            },
+            {
+                "status": "Error",
+                "reason": "Rate limit / Cloudflare protection block (HTTP 429)",
+                "username": "alice",
+                "site_name": "Instagram",
+            },
+            {
+                "status": "Error",
+                "reason": "No public account (a private one looks the same)",
+                "username": "alice",
+                "site_name": "Tiktok",
+            },
+            {
+                "status": "Skipped",
+                "reason": "Disabled by OpenLedger policy because the pinned X module contacts api.vxtwitter.com",
+                "username": "alice",
+                "site_name": "X (Twitter)",
+            },
+        ]
+    )
+
+    assert [item["status"] for item in observations] == [
+        "found",
+        "blocked",
+        "unknown",
+        "blocked",
+    ]
+    assert observations[0]["detector_status"] == "operational"
+    assert observations[0]["account_status"] == "exists"
+    assert observations[0]["identity_confidence"] == "likely"
+    assert observations[0]["identity_status"] == "unverified"
+    assert observations[1]["account_status"] == "unknown"
+    assert observations[3]["detector_status"] == "disabled"
+    assert observations[3]["source_url"] == ""
+    assert observations[0]["source_engine"] == USER_SCANNER_USERNAME_ENGINE
+
+
+def test_only_corroborated_username_hits_become_pending_claim_candidates():
+    base = {
+        "source_engine": USER_SCANNER_USERNAME_ENGINE,
+        "subject_value": "alice_alt",
+        "seed_username": "alice",
+        "status": "found",
+        "detector_status": "operational",
+        "account_status": "exists",
+        "identity_status": "unverified",
+        "site_name": "Instagram",
+        "source_url": "https://instagram.com/alice_alt",
+        "source_record_id": "user_scanner_username:record",
+        "scan_stage": "cross_scan",
+        "native_status": "Found",
+    }
+    candidates = extract_user_scanner_username_claims(
+        [
+            {**base, "identity_confidence": "candidate"},
+            {**base, "identity_confidence": "conflicting"},
+            {**base, "identity_confidence": "likely"},
+        ]
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["field_name"] == "social_account"
+    assert candidates[0]["source_engine"] == USER_SCANNER_USERNAME_ENGINE
+    assert candidates[0]["native_status"] == "found"
+    details = candidates[0]["evidence"][0]["details"]
+    assert details["account_status"] == "exists"
+    assert details["identity_status"] == "unverified"
+    assert details["human_review_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_username_runner_receives_bounded_policy_payload(monkeypatch):
+    captured = {}
+
+    async def fake_subprocess(request, **kwargs):
+        captured.update(request=request, kwargs=kwargs)
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "maigret.web.collector_adapters._run_user_scanner_subprocess",
+        fake_subprocess,
+    )
+
+    assert await run_user_scanner_usernames(
+        ["alice"],
+        platforms=["instagram", "x"],
+        allow_vxtwitter=False,
+        timeout_seconds=123,
+    ) == []
+    assert captured["request"] == {
+        "mode": "username",
+        "usernames": ["alice"],
+        "platforms": ["instagram", "x"],
+        "allow_vxtwitter": False,
+    }
+    assert captured["kwargs"]["timeout_seconds"] == 123
 
 
 def test_github_targets_require_opt_in_and_a_native_claimed_exact_profile():
