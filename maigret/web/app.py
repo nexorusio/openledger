@@ -3181,9 +3181,10 @@ def finalize_stream_job(
     interrupted=False,
 ):
     """Persist one terminal scan result and publish its final progress event."""
+    collector_observations = list(collector_observations or [])
     done_event = {'type': 'done'}
     terminal_status = 'failed'
-    if general_results:
+    if general_results or collector_observations:
         try:
             report_kwargs = (
                 {'collector_observations': collector_observations}
