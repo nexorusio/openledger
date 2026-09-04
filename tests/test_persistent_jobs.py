@@ -5,8 +5,9 @@ import time
 from threading import Timer
 
 import pytest
+from sqlalchemy import delete
 
-from maigret.web.case_store import CaseStore
+from maigret.web.case_store import CaseStore, investigation_jobs
 from maigret.web import app as web_app_module
 
 
@@ -576,8 +577,9 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
     ] == 2
 
 
+@pytest.mark.parametrize("preexisting_orphan", [False, True])
 def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
-    persistent_store,
+    persistent_store, preexisting_orphan
 ):
     job_id = persistent_store.create_investigation(["alice"], {})
     persistent_store.claim_next("worker:legacy-orphan")
@@ -611,13 +613,32 @@ def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
         persistent_store.review_claim(claim["id"], "approved", "analyst")
 
     refresh_job_id = persistent_store.repeat_persona_investigation(persona_id)
-    assert persistent_store.delete_job(job_id) is True
+    if preexisting_orphan:
+        # Simulate a source job deleted before the reliability migration
+        # existed. The upgrade sweep must recover this state on startup.
+        with persistent_store.engine.begin() as connection:
+            connection.execute(
+                delete(investigation_jobs).where(
+                    investigation_jobs.c.id == job_id
+                )
+            )
+        assert all(
+            claim["reliability_status"] == "current"
+            for claim in persistent_store.get_persona(persona_id)["claims"]
+        )
+        assert persistent_store.retire_pretriage_profile_claims(
+            current_reliability_version=1
+        ) == 2
+    else:
+        # New deletions retire their claims in the same transaction, leaving no
+        # active-but-unverifiable window before the next process restart.
+        assert persistent_store.delete_job(job_id) is True
+        assert persistent_store.retire_pretriage_profile_claims(
+            current_reliability_version=1
+        ) == 0
     orphaned_claims = persistent_store.get_persona(persona_id)["claims"]
     assert all(claim["source_job_id"] is None for claim in orphaned_claims)
 
-    assert persistent_store.retire_pretriage_profile_claims(
-        current_reliability_version=1
-    ) == 2
     assert persistent_store.retire_pretriage_profile_claims(
         current_reliability_version=1
     ) == 0

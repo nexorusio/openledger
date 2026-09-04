@@ -119,6 +119,7 @@ from maigret.web.persona_intelligence import (
 from maigret.web.persona_pdf import generate_persona_pdf, persona_pdf_filename
 from maigret.web.profile_reliability import (
     DetectorHealthRegistryError,
+    PROFILE_RELIABILITY_VERSION,
     classify_profile_detection,
     detector_health_for_site,
     empty_detector_health_registry,
@@ -418,7 +419,6 @@ EMBEDDED_GRAPH_PATH_PATTERN = re.compile(
 )
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
-PROFILE_RELIABILITY_VERSION = 1
 LEGACY_PROFILE_DERIVED_COLLECTOR_ENGINES = frozenset(
     {'github_public_profile', 'unfurl_url_analysis', 'wayback_cdx'}
 )

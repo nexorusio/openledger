@@ -51,6 +51,7 @@ from maigret.web.external_evidence import (
     stable_fingerprint,
     validate_locator_authority,
 )
+from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
@@ -4189,6 +4190,126 @@ class CaseStore:
             )
         return synchronized
 
+    @staticmethod
+    def _retire_profile_claim_rows(
+        connection: Connection,
+        claim_rows: Iterable[Dict[str, Any]],
+        *,
+        current_reliability_version: int,
+        source_job_becoming_unavailable: bool = False,
+    ) -> int:
+        now = utcnow()
+        retired = 0
+        affected_personas = set()
+        for claim in claim_rows:
+            previous_status = str(claim["review_status"])
+            previous_engine = str(claim["source_engine"])
+            next_status = (
+                "rejected" if previous_status == "rejected" else "uncertain"
+            )
+            values: Dict[str, Any] = {
+                "review_status": next_status,
+                "source_engine": _legacy_untriaged_source(
+                    previous_status,
+                    previous_engine,
+                ),
+                "updated_at": now,
+            }
+            if previous_status != "rejected":
+                values.update(
+                    reviewed_at=now,
+                    reviewed_by=RELIABILITY_MIGRATION_REVIEWER,
+                )
+            source_job_id = claim["source_job_id"]
+            source_job_match = (
+                persona_claims.c.source_job_id.is_(None)
+                if source_job_id is None
+                else persona_claims.c.source_job_id == source_job_id
+            )
+            updated = connection.execute(
+                update(persona_claims)
+                .where(
+                    persona_claims.c.id == claim["id"],
+                    source_job_match,
+                    persona_claims.c.source_engine == previous_engine,
+                )
+                .values(**values)
+            )
+            if updated.rowcount != 1:
+                continue
+            source_job_orphaned = (
+                source_job_id is None or source_job_becoming_unavailable
+            )
+            if previous_status != "rejected":
+                provenance_note = (
+                    "Source job is no longer available, so its reliability "
+                    "version cannot be verified."
+                    if source_job_orphaned
+                    else "Source investigation predates profile reliability triage."
+                )
+                connection.execute(
+                    insert(claim_reviews).values(
+                        claim_id=claim["id"],
+                        decision="uncertain",
+                        reviewer=RELIABILITY_MIGRATION_REVIEWER,
+                        note=(
+                            f"{provenance_note} Previous status was "
+                            f"{previous_status}. "
+                            "Rerun required before this claim becomes active."
+                        ),
+                        created_at=now,
+                    )
+                )
+            provenance_id = (
+                str(source_job_id)
+                if source_job_id is not None
+                else connection.scalar(
+                    select(claim_observations.c.provenance_id)
+                    .where(
+                        claim_observations.c.claim_id == claim["id"],
+                        claim_observations.c.provenance_type
+                        == "investigation_job",
+                        claim_observations.c.source_engine == previous_engine,
+                    )
+                    .order_by(claim_observations.c.observed_at.desc())
+                    .limit(1)
+                )
+                or f"orphaned-claim:{claim['id']}"
+            )
+            CaseStore._record_claim_observation_with_connection(
+                connection,
+                claim_id=claim["id"],
+                provenance_type="investigation_job",
+                provenance_id=str(provenance_id),
+                job_id=(str(source_job_id) if source_job_id is not None else None),
+                external_evidence_id=None,
+                chat_message_id=None,
+                source_engine=RELIABILITY_MIGRATION_REVIEWER,
+                source_record_id=None,
+                confidence=None,
+                native_status="legacy_untriaged",
+                details={
+                    "profile_reliability_version": current_reliability_version,
+                    "previous_review_status": previous_status,
+                    "previous_source_engine": previous_engine,
+                    "rerun_required": True,
+                    "source_job_orphaned": source_job_orphaned,
+                },
+                now=now,
+            )
+            affected_personas.add(str(claim["persona_id"]))
+            retired += 1
+        if affected_personas:
+            case_ids = select(personas.c.case_id).where(
+                personas.c.id.in_(affected_personas)
+            )
+            connection.execute(
+                update(cases)
+                .where(cases.c.id.in_(case_ids))
+                .values(updated_at=now)
+            )
+        return retired
+
     def retire_pretriage_profile_claims(
         self,
         *,
@@ -4196,8 +4317,6 @@ class CaseStore:
         job_id: Optional[str] = None,
     ) -> int:
         """Retire claims from version-0 or unverifiable profile jobs."""
-        now = utcnow()
-        retired = 0
         with self.engine.begin() as connection:
             job_statement = select(
                 investigation_jobs.c.id,
@@ -4241,116 +4360,11 @@ class CaseStore:
                     )
                 ).mappings()
             )
-            affected_personas = set()
-            for claim in claim_rows:
-                previous_status = str(claim["review_status"])
-                previous_engine = str(claim["source_engine"])
-                next_status = (
-                    "rejected" if previous_status == "rejected" else "uncertain"
-                )
-                values: Dict[str, Any] = {
-                    "review_status": next_status,
-                    "source_engine": _legacy_untriaged_source(
-                        previous_status,
-                        previous_engine,
-                    ),
-                    "updated_at": now,
-                }
-                if previous_status != "rejected":
-                    values.update(
-                        reviewed_at=now,
-                        reviewed_by=RELIABILITY_MIGRATION_REVIEWER,
-                    )
-                source_job_id = claim["source_job_id"]
-                source_job_match = (
-                    persona_claims.c.source_job_id.is_(None)
-                    if source_job_id is None
-                    else persona_claims.c.source_job_id == source_job_id
-                )
-                updated = connection.execute(
-                    update(persona_claims)
-                    .where(
-                        persona_claims.c.id == claim["id"],
-                        source_job_match,
-                        persona_claims.c.source_engine == previous_engine,
-                    )
-                    .values(**values)
-                )
-                if updated.rowcount != 1:
-                    continue
-                if previous_status != "rejected":
-                    provenance_note = (
-                        "Source job is no longer available, so its reliability "
-                        "version cannot be verified."
-                        if source_job_id is None
-                        else "Source investigation predates profile reliability triage."
-                    )
-                    connection.execute(
-                        insert(claim_reviews).values(
-                            claim_id=claim["id"],
-                            decision="uncertain",
-                            reviewer=RELIABILITY_MIGRATION_REVIEWER,
-                            note=(
-                                f"{provenance_note} Previous status was "
-                                f"{previous_status}. "
-                                "Rerun required before this claim becomes active."
-                            ),
-                            created_at=now,
-                        )
-                    )
-                provenance_id = (
-                    str(source_job_id)
-                    if source_job_id is not None
-                    else connection.scalar(
-                        select(claim_observations.c.provenance_id)
-                        .where(
-                            claim_observations.c.claim_id == claim["id"],
-                            claim_observations.c.provenance_type
-                            == "investigation_job",
-                            claim_observations.c.source_engine == previous_engine,
-                        )
-                        .order_by(claim_observations.c.observed_at.desc())
-                        .limit(1)
-                    )
-                    or f"orphaned-claim:{claim['id']}"
-                )
-                self._record_claim_observation_with_connection(
-                    connection,
-                    claim_id=claim["id"],
-                    provenance_type="investigation_job",
-                    provenance_id=str(provenance_id),
-                    job_id=(
-                        str(source_job_id)
-                        if source_job_id is not None
-                        else None
-                    ),
-                    external_evidence_id=None,
-                    chat_message_id=None,
-                    source_engine=RELIABILITY_MIGRATION_REVIEWER,
-                    source_record_id=None,
-                    confidence=None,
-                    native_status="legacy_untriaged",
-                    details={
-                        "profile_reliability_version": current_reliability_version,
-                        "previous_review_status": previous_status,
-                        "previous_source_engine": previous_engine,
-                        "rerun_required": True,
-                        "source_job_orphaned": source_job_id is None,
-                    },
-                    now=now,
-                )
-                affected_personas.add(str(claim["persona_id"]))
-                retired += 1
-            if affected_personas:
-                case_ids = select(personas.c.case_id).where(
-                    personas.c.id.in_(affected_personas)
-                )
-                connection.execute(
-                    update(cases)
-                    .where(cases.c.id.in_(case_ids))
-                    .values(updated_at=now)
-                )
-        return retired
+            return self._retire_profile_claim_rows(
+                connection,
+                claim_rows,
+                current_reliability_version=current_reliability_version,
+            )
 
     def sync_ai_persona_claims(
         self,
@@ -6110,6 +6124,28 @@ class CaseStore:
                 .limit(1)
             )
             if sibling_job:
+                claim_rows = list(
+                    connection.execute(
+                        select(
+                            persona_claims.c.id,
+                            persona_claims.c.persona_id,
+                            persona_claims.c.source_job_id,
+                            persona_claims.c.source_engine,
+                            persona_claims.c.review_status,
+                        ).where(
+                            persona_claims.c.source_job_id == job_id,
+                            persona_claims.c.source_engine.in_(
+                                LEGACY_PROFILE_CLAIM_ENGINES
+                            ),
+                        )
+                    ).mappings()
+                )
+                self._retire_profile_claim_rows(
+                    connection,
+                    claim_rows,
+                    current_reliability_version=PROFILE_RELIABILITY_VERSION,
+                    source_job_becoming_unavailable=True,
+                )
                 connection.execute(
                     delete(investigation_jobs).where(investigation_jobs.c.id == job_id)
                 )

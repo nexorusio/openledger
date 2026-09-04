@@ -37,7 +37,9 @@ review history remain auditable in the review queue. A current-version rerun
 that supports the same claim reactivates it and restores the latest human review
 decision; an untriaged claim cannot be newly approved before that rerun. An
 orphaned profile claim whose source job was deleted is handled the same way,
-because its reliability version can no longer be verified.
+because its reliability version can no longer be verified. New source-job
+deletions retire affected claims in the deletion transaction; the upgrade sweep
+also catches claims orphaned by an older deployment.
 
 ## Canary and quarantine policy
 

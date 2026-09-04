@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 
 
 DETECTOR_HEALTH_SCHEMA_VERSION = 1
+PROFILE_RELIABILITY_VERSION = 1
 DETECTOR_HEALTH_STATES = frozenset(
     {"healthy", "degraded", "quarantined", "untested"}
 )
