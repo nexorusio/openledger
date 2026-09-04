@@ -128,9 +128,10 @@ def test_only_discovery_graph_report_can_be_framed_same_origin(
         'session_folder': 'search_frameable',
         'graph_file': 'search_frameable/combined_graph.html',
         'usernames': ['alice'],
-        'individual_reports': [],
-        'found_count': 0,
-    }
+            'individual_reports': [],
+            'found_count': 0,
+            'profile_reliability_version': 1,
+        }
 
     results_response = client.get('/results/search_frameable')
     assert results_response.status_code == 200
@@ -2142,6 +2143,28 @@ def test_legacy_persisted_result_preserves_raw_claimed_count(web_app):
                 }
             ],
             'found_count': 1,
+            'collector_observations': [
+                {
+                    'source_engine': 'unfurl_url_analysis',
+                    'source_url': 'https://legacy.example/alice',
+                    'status': 'analyzed',
+                },
+                {
+                    'source_engine': 'wayback_cdx',
+                    'source_url': 'https://legacy.example/alice',
+                    'status': 'archived',
+                },
+                {
+                    'source_engine': 'github_public_profile',
+                    'source_url': 'https://github.com/alice',
+                    'status': 'observed',
+                },
+                {
+                    'source_engine': 'user_scanner_email',
+                    'site_name': 'Gravatar',
+                    'status': 'registered',
+                },
+            ],
         },
     )
 
@@ -2152,9 +2175,27 @@ def test_legacy_persisted_result_preserves_raw_claimed_count(web_app):
     individual = normalized['individual_reports'][0]
     assert individual['claimed_profiles'] == []
     assert individual['untriaged_profiles'][0]['classification'] == 'untriaged'
+    assert normalized['collector_observations'] == [
+        {
+            'source_engine': 'user_scanner_email',
+            'site_name': 'Gravatar',
+            'status': 'registered',
+        }
+    ]
+    assert normalized['withheld_profile_observation_count'] == 3
+    assert {
+        observation['source_engine']
+        for observation in normalized['withheld_profile_observations']
+    } == {'github_public_profile', 'unfurl_url_analysis', 'wayback_cdx'}
+    assert normalized['collector_found_count'] == 1
     assert 'https://legacy.example/alice' not in web_app.build_ai_markdown(
         normalized
     )
+    renormalized = web_app.normalize_persisted_result('legacy', normalized)
+    assert renormalized['withheld_profile_observation_count'] == 3
+    assert renormalized['collector_observations'] == normalized[
+        'collector_observations'
+    ]
 
 
 def test_legacy_untriaged_session_requires_rescan_before_ai(
@@ -2175,11 +2216,14 @@ def test_legacy_untriaged_session_requires_rescan_before_ai(
     with client.session_transaction() as browser_session:
         browser_session['csrf_token'] = 'test-csrf'
 
+    results_page = client.get('/results/search_legacy').get_data(as_text=True)
     response = client.post(
         '/api/analysis/search_legacy',
         headers={'X-OpenLedger-CSRF': 'test-csrf'},
     )
 
+    assert 'Discovery evidence graph' not in results_page
+    assert 'combined_graph.html' not in results_page
     assert response.status_code == 409
     assert 'Rerun it' in response.get_json()['error']
 

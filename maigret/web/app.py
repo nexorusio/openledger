@@ -419,6 +419,9 @@ EMBEDDED_GRAPH_PATH_PATTERN = re.compile(
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
 PROFILE_RELIABILITY_VERSION = 1
+LEGACY_PROFILE_DERIVED_COLLECTOR_ENGINES = frozenset(
+    {'github_public_profile', 'unfurl_url_analysis', 'wayback_cdx'}
+)
 AI_ANALYSIS_SCHEMA_VERSION = 7
 AUTH_SCHEMA_VERSION = 2
 LEGACY_AUTH_SCHEMA_VERSION = 1
@@ -1473,6 +1476,47 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
             normalized['suppressed_count'] = 0
             normalized['raw_claimed_count'] = raw_claimed_count
             normalized['untriaged_count'] = raw_claimed_count
+            raw_observations = normalized.get('collector_observations') or []
+            if not isinstance(raw_observations, list):
+                raw_observations = []
+            profile_observations = [
+                observation
+                for observation in raw_observations
+                if isinstance(observation, dict)
+                and str(observation.get('source_engine') or '').casefold()
+                in LEGACY_PROFILE_DERIVED_COLLECTOR_ENGINES
+            ]
+            independent_observations = [
+                observation
+                for observation in raw_observations
+                if isinstance(observation, dict)
+                and str(observation.get('source_engine') or '').casefold()
+                not in LEGACY_PROFILE_DERIVED_COLLECTOR_ENGINES
+            ]
+            existing_withheld = normalized.get(
+                'withheld_profile_observations', []
+            )
+            if not isinstance(existing_withheld, list):
+                existing_withheld = []
+            normalized['collector_observations'] = independent_observations
+            normalized['withheld_profile_observations'] = [
+                observation
+                for observation in [*existing_withheld, *profile_observations]
+                if isinstance(observation, dict)
+            ]
+            normalized['withheld_profile_observation_count'] = len(
+                normalized['withheld_profile_observations']
+            )
+            registration_count = sum(
+                1
+                for observation in independent_observations
+                if str(observation.get('status') or '').casefold()
+                == 'registered'
+            )
+            normalized['collector_found_count'] = registration_count
+            normalized['collector_registration_count'] = registration_count
+            normalized['github_enrichment_count'] = 0
+            normalized['archived_profile_count'] = 0
             return normalized
 
         normalized['found_count'] = found_count
@@ -6880,10 +6924,16 @@ def results(session_id):
         if case_id:
             result_case = case_store.get_case(case_id)
 
+    legacy_untriaged = (
+        result_data.get('profile_reliability_version')
+        != PROFILE_RELIABILITY_VERSION
+    )
     return render_template(
         "results.html",
         usernames=result_data["usernames"],
-        graph_file=result_data["graph_file"],
+        # Preserve the old artifact for audit, but never present a graph that
+        # predates evidence triage as if it contained supported profiles only.
+        graph_file=None if legacy_untriaged else result_data["graph_file"],
         individual_reports=result_data["individual_reports"],
         found_count=result_data.get("found_count", 0),
         candidate_count=result_data.get("candidate_count", 0),
@@ -6892,10 +6942,7 @@ def results(session_id):
             "raw_claimed_count", result_data.get("found_count", 0)
         ),
         untriaged_count=result_data.get('untriaged_count', 0),
-        legacy_untriaged=(
-            result_data.get('profile_reliability_version')
-            != PROFILE_RELIABILITY_VERSION
-        ),
+        legacy_untriaged=legacy_untriaged,
         timestamp=session_id.replace("search_", ""),
         session_id=session_id,
         ai_enabled=bool(get_openai_api_key()),
