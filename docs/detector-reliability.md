@@ -35,7 +35,9 @@ marked `legacy_untriaged` rather than deleted. They leave the default Persona,
 maps, relationship graphs, exports and AI context, while their evidence and
 review history remain auditable in the review queue. A current-version rerun
 that supports the same claim reactivates it and restores the latest human review
-decision; an untriaged claim cannot be newly approved before that rerun.
+decision; an untriaged claim cannot be newly approved before that rerun. An
+orphaned profile claim whose source job was deleted is handled the same way,
+because its reliability version can no longer be verified.
 
 ## Canary and quarantine policy
 

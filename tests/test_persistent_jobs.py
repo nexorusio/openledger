@@ -538,7 +538,7 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
         )
 
     persona_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
-    assert "Legacy untriaged · rerun" in persona_page
+    assert "Reliability unverified · rerun" in persona_page
     assert "Rerun required before approval" in persona_page
 
     # Re-importing or re-syncing the same pre-triage result must not make its
@@ -574,6 +574,91 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
     assert persistent_store.build_persona_graph(persona_id)["stats"][
         "claim_count"
     ] == 2
+
+
+def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
+    persistent_store,
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:legacy-orphan")
+    legacy_result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": "Alice Example"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, legacy_result)
+    persistent_store.sync_persona_claims(job_id, legacy_result)
+    case = persistent_store.get_case(
+        persistent_store.get_job(job_id)["case_id"]
+    )
+    persona_id = case["personas"][0]["id"]
+    for claim in persistent_store.get_persona(persona_id)["claims"]:
+        persistent_store.review_claim(claim["id"], "approved", "analyst")
+
+    refresh_job_id = persistent_store.repeat_persona_investigation(persona_id)
+    assert persistent_store.delete_job(job_id) is True
+    orphaned_claims = persistent_store.get_persona(persona_id)["claims"]
+    assert all(claim["source_job_id"] is None for claim in orphaned_claims)
+
+    assert persistent_store.retire_pretriage_profile_claims(
+        current_reliability_version=1
+    ) == 2
+    assert persistent_store.retire_pretriage_profile_claims(
+        current_reliability_version=1
+    ) == 0
+    retired_claims = persistent_store.get_persona(persona_id)["claims"]
+    assert all(
+        claim["reliability_status"] == "legacy_untriaged"
+        for claim in retired_claims
+    )
+    assert all(claim["review_status"] == "uncertain" for claim in retired_claims)
+    assert all(claim["evidence"] for claim in retired_claims)
+    assert all(
+        {review["decision"] for review in claim["reviews"]}
+        == {"approved", "uncertain"}
+        for claim in retired_claims
+    )
+    for claim in retired_claims:
+        lineage = persistent_store.get_claim_lineage(claim["id"])
+        migration = next(
+            item for item in lineage if item["native_status"] == "legacy_untriaged"
+        )
+        assert migration["details"]["source_job_orphaned"] is True
+        assert migration["provenance_id"] == job_id
+
+    persistent_store.claim_next("worker:orphan-refresh")
+    refreshed_result = {
+        **legacy_result,
+        "session_folder": f"search_{refresh_job_id}",
+        "graph_file": f"search_{refresh_job_id}/graph.html",
+        "profile_reliability_version": 1,
+    }
+    persistent_store.finish(refresh_job_id, refreshed_result)
+    persistent_store.sync_persona_claims(refresh_job_id, refreshed_result)
+    restored_claims = persistent_store.get_persona(persona_id)["claims"]
+    assert all(claim["review_status"] == "approved" for claim in restored_claims)
+    assert all(claim["reviewed_by"] == "analyst" for claim in restored_claims)
+    assert all(
+        claim["reliability_status"] == "current" for claim in restored_claims
+    )
+    assert all(
+        claim["source_job_id"] == refresh_job_id for claim in restored_claims
+    )
 
 
 def test_persona_pdf_route_exports_only_curated_records(client, persistent_store):

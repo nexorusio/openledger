@@ -28,7 +28,7 @@
         </div>
         <div class="claim-badges">
             {% if claim.reliability_status == 'legacy_untriaged' %}
-            <span class="badge-soft warning" title="The source investigation predates profile reliability triage">Legacy untriaged · rerun</span>
+            <span class="badge-soft warning" title="The source investigation predates reliability triage or no longer has verifiable reliability provenance">Reliability unverified · rerun</span>
             {% endif %}
             {% if claim.evidence | selectattr('evidence_type', 'equalto', 'cited_public_web') | list %}
             <span class="badge-soft warning" title="Includes cited AI-assisted public-web evidence">AI-assisted evidence</span>
