@@ -1631,6 +1631,18 @@ def find_result_by_session(session_id: str):
     if case_store is not None and session_id.startswith('search_'):
         stored = case_store.get_job(session_id.removeprefix('search_'))
         if stored and stored.get('status') == 'completed':
+            if stored.get('kind') in {'identity_enrichment', 'case_fusion'}:
+                job_results[stored['job_id']] = stored
+                return stored
+            try:
+                stored = normalize_persisted_result(stored['job_id'], stored)
+            except (TypeError, ValueError) as error:
+                record_internal_error(
+                    'Invalid completed investigation in case store',
+                    error,
+                    session=session_id,
+                )
+                return None
             job_results[stored['job_id']] = stored
             return stored
 
@@ -6801,7 +6813,8 @@ def results(session_id):
         ),
         untriaged_count=result_data.get('untriaged_count', 0),
         legacy_untriaged=(
-            result_data.get('profile_reliability_version') == 0
+            result_data.get('profile_reliability_version')
+            != PROFILE_RELIABILITY_VERSION
         ),
         timestamp=session_id.replace("search_", ""),
         session_id=session_id,
@@ -6825,7 +6838,10 @@ def analyze_session(session_id):
     result_data = find_result_by_session(session_id)
     if not result_data:
         return {'error': 'Unknown or expired scan session.'}, 404
-    if result_data.get('profile_reliability_version') == 0:
+    if (
+        result_data.get('profile_reliability_version')
+        != PROFILE_RELIABILITY_VERSION
+    ):
         return {
             'error': (
                 'This legacy investigation predates profile reliability triage. '

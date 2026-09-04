@@ -821,6 +821,7 @@ def test_ai_analysis_is_generated_once_and_cached(
     monkeypatch.setattr(web_app, 'get_ai_evidence_proposals', fake_proposals)
     web_app.job_results['session1'] = {
         'status': 'completed',
+        'profile_reliability_version': 1,
         'session_folder': 'search_session1',
         'graph_file': 'search_session1/combined_graph.html',
         'usernames': ['soxoj'],
@@ -903,6 +904,7 @@ def test_ai_analysis_falls_back_to_case_evidence_when_research_has_no_citations(
         store.claim_next('worker:test')
         result = {
             'status': 'completed',
+            'profile_reliability_version': 1,
             'session_folder': f'search_{job_id}',
             'graph_file': f'search_{job_id}/combined_graph.html',
             'usernames': ['alice'],
@@ -990,6 +992,7 @@ def test_ai_analysis_fallback_preserves_unavailable_persona_status(
     monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
     result = {
         'status': 'completed',
+        'profile_reliability_version': 1,
         'session_folder': 'search_orphan',
         'graph_file': 'search_orphan/combined_graph.html',
         'usernames': ['alice'],
@@ -1053,6 +1056,7 @@ def test_cached_ai_fallback_restores_persona_status_after_storage_recovers(
         store.claim_next('worker:test')
         result = {
             'status': 'completed',
+            'profile_reliability_version': 1,
             'session_folder': f'search_{job_id}',
             'graph_file': f'search_{job_id}/combined_graph.html',
             'usernames': ['alice'],
@@ -1104,6 +1108,7 @@ def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
     store.claim_next('worker:test')
     result = {
         'status': 'completed',
+        'profile_reliability_version': 1,
         'session_folder': f'search_{job_id}',
         'graph_file': f'search_{job_id}/combined_graph.html',
         'usernames': ['alice'],
@@ -1501,6 +1506,7 @@ def test_ai_assessment_survives_structured_proposal_failure(
     monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
     web_app.job_results['session1'] = {
         'status': 'completed',
+        'profile_reliability_version': 1,
         'session_folder': 'search_session1',
         'graph_file': 'search_session1/combined_graph.html',
         'usernames': ['alice'],
@@ -2175,6 +2181,42 @@ def test_legacy_untriaged_session_requires_rescan_before_ai(
 
     assert response.status_code == 409
     assert 'Rerun it' in response.get_json()['error']
+
+
+def test_case_store_fallback_normalizes_missing_reliability_version(
+    web_app, monkeypatch
+):
+    stored = {
+        'job_id': 'database-legacy',
+        'status': 'completed',
+        'session_folder': 'search_database-legacy',
+        'graph_file': 'search_database-legacy/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [
+            {
+                'username': 'alice',
+                'claimed_profiles': [
+                    {
+                        'site_name': 'Legacy Social',
+                        'url': 'https://legacy.example/alice',
+                    }
+                ],
+            }
+        ],
+        'found_count': 1,
+    }
+    monkeypatch.setattr(
+        web_app,
+        'case_store',
+        types.SimpleNamespace(get_job=lambda _job_id: stored),
+    )
+
+    result = web_app.find_result_by_session('search_database-legacy')
+
+    assert result['profile_reliability_version'] == 0
+    assert result['found_count'] == 0
+    assert result['untriaged_count'] == 1
+    assert result['individual_reports'][0]['claimed_profiles'] == []
 
 
 def test_live_scan_empty_username_rejected(client, web_app):
