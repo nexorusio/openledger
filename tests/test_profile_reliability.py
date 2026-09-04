@@ -221,6 +221,31 @@ def test_shell_phrases_do_not_collide_inside_legitimate_words(description):
     assert decision["classification"] == "supported"
 
 
+@pytest.mark.parametrize(
+    ("health_state", "evidence"),
+    [
+        ("healthy", {"name": "Instagram"}),
+        ("healthy", {"name": "Instagram User"}),
+        (
+            "untested",
+            {
+                "name": "Instagram",
+                "image": "https://example.test/default.png",
+            },
+        ),
+    ],
+)
+def test_site_brand_metadata_is_not_account_specific(health_state, evidence):
+    decision = _classify(
+        site_name="Instagram",
+        health_state=health_state,
+        evidence=evidence,
+    )
+
+    assert decision["classification"] == "candidate"
+    assert "name" not in decision["signals"]
+
+
 def test_canary_plan_uses_existing_missing_and_high_entropy_handles():
     site = MaigretSite(
         "Example",

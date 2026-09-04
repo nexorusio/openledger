@@ -3245,24 +3245,33 @@ class CaseStore:
         confidence: Optional[int] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Append idempotent provenance without overwriting claim history."""
+        """Append idempotent provenance without overwriting audit history."""
         provenance_values = (job_id, external_evidence_id, chat_message_id)
         if sum(value is not None for value in provenance_values) != 1:
             raise ExternalEvidenceValidationError(
                 "Provide exactly one provenance record"
             )
         with self.engine.begin() as connection:
-            claim_case_id = connection.scalar(
-                select(personas.c.case_id)
-                .select_from(
-                    persona_claims.join(
-                        personas, personas.c.id == persona_claims.c.persona_id
+            claim = (
+                connection.execute(
+                    select(
+                        personas.c.case_id,
+                        persona_claims.c.source_engine,
                     )
+                    .select_from(
+                        persona_claims.join(
+                            personas,
+                            personas.c.id == persona_claims.c.persona_id,
+                        )
+                    )
+                    .where(persona_claims.c.id == claim_id)
                 )
-                .where(persona_claims.c.id == claim_id)
+                .mappings()
+                .first()
             )
-            if not claim_case_id:
+            if not claim:
                 raise KeyError(claim_id)
+            claim_case_id = claim["case_id"]
             provenance_id = str(job_id or external_evidence_id or chat_message_id)
             if job_id:
                 provenance_case_id = connection.scalar(
@@ -3291,7 +3300,8 @@ class CaseStore:
                 raise ExternalEvidenceValidationError(
                     "Claim and provenance belong to different cases"
                 )
-            return self._record_claim_observation_with_connection(
+            now = utcnow()
+            observation_id = self._record_claim_observation_with_connection(
                 connection,
                 claim_id=claim_id,
                 provenance_type=provenance_type,
@@ -3304,8 +3314,47 @@ class CaseStore:
                 confidence=confidence,
                 native_status=native_status,
                 details=details or {},
-                now=utcnow(),
+                now=now,
             )
+            existing_legacy = _legacy_untriaged_source_details(
+                claim["source_engine"]
+            )
+            normalized_engine = bounded_text(
+                source_engine, "source_engine", max_chars=100
+            )
+            independent = (
+                normalized_engine not in LEGACY_PROFILE_CLAIM_ENGINES
+                and normalized_engine != RELIABILITY_MIGRATION_REVIEWER
+                and not normalized_engine.startswith(
+                    LEGACY_UNTRIAGED_SOURCE_PREFIX
+                )
+            )
+            if existing_legacy and independent:
+                values: Dict[str, Any] = {
+                    "review_status": "pending",
+                    "reviewed_at": None,
+                    "reviewed_by": None,
+                    "source_engine": normalized_engine,
+                    "source_job_id": job_id,
+                    "last_seen_at": now,
+                    "updated_at": now,
+                }
+                if confidence is not None:
+                    values["confidence"] = int(confidence)
+                connection.execute(
+                    update(persona_claims)
+                    .where(
+                        persona_claims.c.id == claim_id,
+                        persona_claims.c.source_engine == claim["source_engine"],
+                    )
+                    .values(**values)
+                )
+                connection.execute(
+                    update(cases)
+                    .where(cases.c.id == claim_case_id)
+                    .values(updated_at=now)
+                )
+            return observation_id
 
     def get_claim_lineage(self, claim_id: str) -> list[Dict[str, Any]]:
         with self.engine.connect() as connection:
@@ -3573,11 +3622,22 @@ class CaseStore:
                 legacy_source = _legacy_untriaged_source_details(
                     existing["source_engine"]
                 )
-                reactivate_legacy = bool(
+                candidate_engine = str(candidate.get("source_engine") or "")
+                reactivate_from_profile = bool(
                     legacy_source
                     and allow_legacy_reactivation
-                    and candidate.get("source_engine")
-                    in LEGACY_PROFILE_CLAIM_ENGINES
+                    and candidate_engine in LEGACY_PROFILE_CLAIM_ENGINES
+                )
+                reactivate_from_independent = bool(
+                    legacy_source
+                    and candidate_engine not in LEGACY_PROFILE_CLAIM_ENGINES
+                    and candidate_engine != RELIABILITY_MIGRATION_REVIEWER
+                    and not candidate_engine.startswith(
+                        LEGACY_UNTRIAGED_SOURCE_PREFIX
+                    )
+                )
+                reactivate_legacy = (
+                    reactivate_from_profile or reactivate_from_independent
                 )
                 confidence = int(existing["confidence"])
                 if (
@@ -3598,7 +3658,7 @@ class CaseStore:
                     "last_seen_at": now,
                     "updated_at": now,
                 }
-                if legacy_source and reactivate_legacy:
+                if legacy_source and reactivate_from_profile:
                     restored_status, _original_engine = legacy_source
                     updated_values.update(
                         review_status=restored_status,
@@ -3640,12 +3700,24 @@ class CaseStore:
                                 reviewed_at=None,
                                 reviewed_by=None,
                             )
+                elif legacy_source and reactivate_from_independent:
+                    updated_values.update(
+                        confidence=int(candidate["confidence"]),
+                        review_status="pending",
+                        reviewed_at=None,
+                        reviewed_by=None,
+                        source_engine=candidate_engine,
+                        source_job_id=job_id,
+                    )
                 if job_id is not None and (
                     not legacy_source or reactivate_legacy
                 ):
                     updated_values["source_job_id"] = job_id
                 if (
-                    existing["review_status"] == "pending"
+                    (
+                        existing["review_status"] == "pending"
+                        or updated_values.get("review_status") == "pending"
+                    )
                     and existing["latitude"] is None
                     and existing["longitude"] is None
                     and candidate.get("latitude") is not None
@@ -4361,9 +4433,15 @@ class CaseStore:
                     )
                 ).mappings()
             )
+            retire_claim_rows = (
+                self._repoint_profile_claims_with_surviving_lineage(
+                    connection,
+                    claim_rows,
+                )
+            )
             return self._retire_profile_claim_rows(
                 connection,
-                claim_rows,
+                retire_claim_rows,
                 current_reliability_version=current_reliability_version,
             )
 
@@ -6094,13 +6172,14 @@ class CaseStore:
         connection: Connection,
         claim_rows: Iterable[Dict[str, Any]],
         *,
-        deleting_job_id: str,
+        excluded_job_ids: Iterable[str] = (),
     ) -> list[Dict[str, Any]]:
-        """Keep claims active only when another current job still supports them."""
+        """Repoint claims with valid lineage and return unsupported claims."""
         claims = list(claim_rows)
         claim_ids = [str(claim["id"]) for claim in claims]
         if not claim_ids:
             return []
+        excluded_jobs = {str(job_id) for job_id in excluded_job_ids}
         observations = list(
             connection.execute(
                 select(
@@ -6131,7 +6210,7 @@ class CaseStore:
             str(observation["job_id"])
             for observation in observations
             if observation["job_id"] is not None
-            and str(observation["job_id"]) != deleting_job_id
+            and str(observation["job_id"]) not in excluded_jobs
         }
         job_rows = (
             connection.execute(
@@ -6213,11 +6292,16 @@ class CaseStore:
             if not survivor:
                 retire_rows.append(claim)
                 continue
+            source_job_match = (
+                persona_claims.c.source_job_id.is_(None)
+                if claim["source_job_id"] is None
+                else persona_claims.c.source_job_id == claim["source_job_id"]
+            )
             connection.execute(
                 update(persona_claims)
                 .where(
                     persona_claims.c.id == claim["id"],
-                    persona_claims.c.source_job_id == deleting_job_id,
+                    source_job_match,
                     persona_claims.c.source_engine == claim["source_engine"],
                 )
                 .values(
@@ -6284,7 +6368,7 @@ class CaseStore:
                     self._repoint_profile_claims_with_surviving_lineage(
                         connection,
                         claim_rows,
-                        deleting_job_id=job_id,
+                        excluded_job_ids={job_id},
                     )
                 )
                 self._retire_profile_claim_rows(

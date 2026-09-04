@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy import delete
 
 from maigret.web.case_store import CaseStore, investigation_jobs
+from maigret.web.persona_intelligence import extract_case_chat_persona_claims
 from maigret.web import app as web_app_module
 
 
@@ -552,6 +553,69 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
     )
     assert all(claim["source_job_id"] == job_id for claim in still_retired)
 
+    user_message = persistent_store.append_case_chat_message(
+        case["id"],
+        role="user",
+        author="analyst",
+        content="Alice's full name is Alice Example.",
+        persona_id=persona_id,
+    )
+    assistant_message = persistent_store.append_case_chat_message(
+        case["id"],
+        role="assistant",
+        author="OpenLedger AI",
+        content="The analyst-supplied name is ready for review.",
+        persona_id=persona_id,
+        model="test-model",
+    )
+    candidates = extract_case_chat_persona_claims(
+        [
+            {
+                "field_name": "full_name",
+                "value": "Alice Example",
+                "confidence": 50,
+                "evidence_basis": "user_statement",
+                "source_url": None,
+                "source_title": None,
+                "reason": "The analyst explicitly supplied the full name.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            }
+        ],
+        sources=[],
+        target_persona="alice",
+        model="test-model",
+        user_message=user_message["content"],
+        user_message_id=user_message["id"],
+        assistant_message_id=assistant_message["id"],
+        provided_by="analyst",
+        diagnostics={},
+    )
+    assert persistent_store.sync_case_chat_persona_claims(
+        case["id"], persona_id, candidates
+    )["count"] == 1
+    independently_refreshed = {
+        claim["field_name"]: claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+    }
+    assert independently_refreshed["full_name"]["review_status"] == "pending"
+    assert (
+        independently_refreshed["full_name"]["reliability_status"]
+        == "current"
+    )
+    assert (
+        independently_refreshed["full_name"]["source_engine"]
+        == "case_chat_user_statement"
+    )
+    assert (
+        independently_refreshed["social_account"]["reliability_status"]
+        == "legacy_untriaged"
+    )
+    persistent_store.review_claim(
+        independently_refreshed["full_name"]["id"], "approved", "analyst"
+    )
+
     refresh_job_id = persistent_store.repeat_persona_investigation(persona_id)
     persistent_store.claim_next("worker:refresh")
     refreshed_result = {
@@ -575,6 +639,71 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
     assert persistent_store.build_persona_graph(persona_id)["stats"][
         "claim_count"
     ] == 2
+
+
+def test_independent_observation_reactivates_legacy_claim_as_pending(
+    persistent_store,
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:independent-reactivation")
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(
+        persistent_store.get_job(job_id)["case_id"]
+    )
+    persona_id = case["personas"][0]["id"]
+    claim = persistent_store.get_persona(persona_id)["claims"][0]
+    persistent_store.review_claim(claim["id"], "approved", "analyst")
+    assert persistent_store.retire_pretriage_profile_claims(
+        current_reliability_version=1
+    ) == 1
+
+    message = persistent_store.append_case_chat_message(
+        case["id"],
+        role="user",
+        author="analyst",
+        content="This account is independently known.",
+        persona_id=persona_id,
+    )
+    persistent_store.record_claim_observation(
+        claim["id"],
+        source_engine="case_chat_user_statement",
+        native_status="analyst_statement",
+        chat_message_id=message["id"],
+        confidence=50,
+        details={"independent_of_profile_scan": True},
+    )
+
+    reactivated = persistent_store.get_persona(persona_id)["claims"][0]
+    assert reactivated["review_status"] == "pending"
+    assert reactivated["reviewed_by"] is None
+    assert reactivated["reliability_status"] == "current"
+    assert reactivated["source_engine"] == "case_chat_user_statement"
+    assert reactivated["source_job_id"] is None
+    assert {review["decision"] for review in reactivated["reviews"]} == {
+        "approved",
+        "uncertain",
+    }
 
 
 @pytest.mark.parametrize("preexisting_orphan", [False, True])
@@ -609,7 +738,8 @@ def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
         persistent_store.get_job(job_id)["case_id"]
     )
     persona_id = case["personas"][0]["id"]
-    for claim in persistent_store.get_persona(persona_id)["claims"]:
+    approved_claims = persistent_store.get_persona(persona_id)["claims"]
+    for claim in approved_claims:
         persistent_store.review_claim(claim["id"], "approved", "analyst")
 
     refresh_job_id = persistent_store.repeat_persona_investigation(persona_id)
@@ -626,9 +756,29 @@ def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
             claim["reliability_status"] == "current"
             for claim in persistent_store.get_persona(persona_id)["claims"]
         )
+        social_claim = next(
+            claim
+            for claim in approved_claims
+            if claim["field_name"] == "social_account"
+        )
+        message = persistent_store.append_case_chat_message(
+            case["id"],
+            role="user",
+            author="analyst",
+            content="This account is independently known.",
+            persona_id=persona_id,
+        )
+        persistent_store.record_claim_observation(
+            social_claim["id"],
+            source_engine="case_chat_user_statement",
+            native_status="analyst_statement",
+            chat_message_id=message["id"],
+            confidence=50,
+            details={"independent_of_profile_scan": True},
+        )
         assert persistent_store.retire_pretriage_profile_claims(
             current_reliability_version=1
-        ) == 2
+        ) == 1
     else:
         # New deletions retire their claims in the same transaction, leaving no
         # active-but-unverifiable window before the next process restart.
@@ -642,11 +792,13 @@ def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
     assert persistent_store.retire_pretriage_profile_claims(
         current_reliability_version=1
     ) == 0
-    retired_claims = persistent_store.get_persona(persona_id)["claims"]
-    assert all(
-        claim["reliability_status"] == "legacy_untriaged"
-        for claim in retired_claims
-    )
+    migrated_claims = persistent_store.get_persona(persona_id)["claims"]
+    retired_claims = [
+        claim
+        for claim in migrated_claims
+        if claim["reliability_status"] == "legacy_untriaged"
+    ]
+    assert len(retired_claims) == (1 if preexisting_orphan else 2)
     assert all(claim["review_status"] == "uncertain" for claim in retired_claims)
     assert all(claim["evidence"] for claim in retired_claims)
     assert all(
@@ -661,6 +813,15 @@ def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
         )
         assert migration["details"]["source_job_orphaned"] is True
         assert migration["provenance_id"] == job_id
+    if preexisting_orphan:
+        preserved = next(
+            claim
+            for claim in migrated_claims
+            if claim["field_name"] == "social_account"
+        )
+        assert preserved["review_status"] == "approved"
+        assert preserved["reliability_status"] == "current"
+        assert preserved["source_engine"] == "case_chat_user_statement"
 
     persistent_store.claim_next("worker:orphan-refresh")
     refreshed_result = {

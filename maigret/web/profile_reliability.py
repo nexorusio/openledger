@@ -110,11 +110,18 @@ GENERIC_PAGE_MARKERS = (
     "create an account",
     "hear the world's sounds",
     "log in",
+    "log-in",
+    "login",
     "not found",
     "page isn't available",
     "page not found",
     "sign in",
+    "sign-in",
+    "signin",
     "something went wrong",
+)
+GENERIC_IDENTITY_LABELS = frozenset(
+    {"account", "anonymous", "guest", "home", "profile", "unknown", "user"}
 )
 
 
@@ -124,6 +131,40 @@ def _contains_standalone_marker(value: str, markers: tuple[str, ...]) -> bool:
     return any(
         re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", normalized)
         for marker in markers
+    )
+
+
+def _normalized_identity_label(value: Any) -> str:
+    return " ".join(re.sub(r"[^\w]+", " ", str(value or "").casefold()).split())
+
+
+def _site_brand_labels(site_name: Any) -> frozenset[str]:
+    raw = str(site_name or "")
+    labels = {_normalized_identity_label(raw)}
+    without_qualifiers = re.sub(r"\[[^\]]+\]|\([^\)]+\)", " ", raw)
+    labels.add(_normalized_identity_label(without_qualifiers))
+    labels.update(
+        _normalized_identity_label(value)
+        for qualifiers in re.findall(r"\[([^\]]+)\]|\(([^\)]+)\)", raw)
+        for value in qualifiers
+    )
+    return frozenset(label for label in labels if label)
+
+
+def _is_account_specific_identity(
+    value: Any, site_brand_labels: frozenset[str]
+) -> bool:
+    label = _normalized_identity_label(value)
+    if (
+        not label
+        or label in site_brand_labels
+        or label in GENERIC_IDENTITY_LABELS
+    ):
+        return False
+    return not any(
+        label in {f"{brand} {generic}", f"{generic} {brand}"}
+        for brand in site_brand_labels
+        for generic in GENERIC_IDENTITY_LABELS
     )
 
 
@@ -388,7 +429,7 @@ def classify_profile_detection(
 ) -> Dict[str, Any]:
     """Triage one raw ``CLAIMED`` result without asserting subject identity."""
     investigated_username = "".join(str(username or "").split()).lstrip("@").casefold()
-    del site_name  # Retained for a stable call contract and future site policies.
+    site_brand_labels = _site_brand_labels(site_name)
     health = str(health_state or "untested").casefold()
     if health not in DETECTOR_HEALTH_STATES:
         health = "untested"
@@ -455,9 +496,11 @@ def classify_profile_detection(
         == investigated_username
     }
     identity_keys = sorted(
-        keys.intersection(PROFILE_IDENTITY_FIELDS).difference(
+        key
+        for key in keys.intersection(PROFILE_IDENTITY_FIELDS).difference(
             reflected_username_keys
         )
+        if _is_account_specific_identity(useful[key], site_brand_labels)
     )
     stable_id_keys = sorted(keys.intersection(STABLE_ACCOUNT_IDENTIFIER_FIELDS))
     supporting_keys = sorted(keys.intersection(PROFILE_SUPPORTING_FIELDS))
