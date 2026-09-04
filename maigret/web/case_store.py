@@ -65,6 +65,7 @@ LEGACY_PROFILE_CLAIM_ENGINES = frozenset(
 )
 LEGACY_UNTRIAGED_SOURCE_PREFIX = "legacy_untriaged:"
 RELIABILITY_MIGRATION_REVIEWER = "openledger-reliability-migration"
+LEGACY_EVIDENCE_MARKER = "_openledger_reliability"
 
 
 def _legacy_untriaged_source(
@@ -90,6 +91,14 @@ def _legacy_untriaged_source_details(source_engine: Any) -> Optional[tuple[str, 
     ):
         return None
     return status, original_engine
+
+
+def _is_retired_legacy_evidence(details: Any) -> bool:
+    if not isinstance(details, dict):
+        return False
+    marker = details.get(LEGACY_EVIDENCE_MARKER)
+    return isinstance(marker, dict) and marker.get("status") == "legacy_untriaged"
+
 
 cases = Table(
     "cases",
@@ -3341,7 +3350,7 @@ class CaseStore:
                 }
                 if confidence is not None:
                     values["confidence"] = int(confidence)
-                connection.execute(
+                reactivated = connection.execute(
                     update(persona_claims)
                     .where(
                         persona_claims.c.id == claim_id,
@@ -3349,11 +3358,17 @@ class CaseStore:
                     )
                     .values(**values)
                 )
-                connection.execute(
-                    update(cases)
-                    .where(cases.c.id == claim_case_id)
-                    .values(updated_at=now)
-                )
+                if reactivated.rowcount == 1:
+                    self._retire_claim_evidence_with_connection(
+                        connection,
+                        claim_id,
+                        now=now,
+                    )
+                    connection.execute(
+                        update(cases)
+                        .where(cases.c.id == claim_case_id)
+                        .values(updated_at=now)
+                    )
             return observation_id
 
     def get_claim_lineage(self, claim_id: str) -> list[Dict[str, Any]]:
@@ -3580,6 +3595,40 @@ class CaseStore:
         return dict(row) if row else None
 
     @staticmethod
+    def _retire_claim_evidence_with_connection(
+        connection: Connection,
+        claim_id: str,
+        *,
+        now: datetime,
+    ) -> int:
+        """Keep legacy evidence as audit history without presenting it as support."""
+        retired = 0
+        rows = list(
+            connection.execute(
+                select(
+                    claim_evidence.c.id,
+                    claim_evidence.c.details,
+                ).where(claim_evidence.c.claim_id == claim_id)
+            ).mappings()
+        )
+        for row in rows:
+            details = dict(row["details"] or {})
+            if _is_retired_legacy_evidence(details):
+                continue
+            details[LEGACY_EVIDENCE_MARKER] = {
+                "status": "legacy_untriaged",
+                "retired_at": _as_iso(now),
+                "reason": "claim_reactivated_from_new_provenance",
+            }
+            connection.execute(
+                update(claim_evidence)
+                .where(claim_evidence.c.id == row["id"])
+                .values(details=details)
+            )
+            retired += 1
+        return retired
+
+    @staticmethod
     def _upsert_persona_candidates(
         connection: Connection,
         *,
@@ -3595,6 +3644,7 @@ class CaseStore:
         """Persist validated candidates without changing a human decision."""
         synchronized = 0
         for candidate in candidates:
+            reactivate_legacy = False
             identity_match = persona_claims.c.fingerprint == candidate["fingerprint"]
             if (
                 candidate.get("source_engine") == "openai_web_research"
@@ -3732,6 +3782,12 @@ class CaseStore:
                     .where(persona_claims.c.id == claim_id)
                     .values(**updated_values)
                 )
+                if reactivate_legacy:
+                    CaseStore._retire_claim_evidence_with_connection(
+                        connection,
+                        claim_id,
+                        now=now,
+                    )
             else:
                 claim_id = str(uuid.uuid4())
                 connection.execute(
@@ -3756,13 +3812,33 @@ class CaseStore:
                     )
                 )
             for evidence in candidate["evidence"]:
-                present = connection.scalar(
-                    select(claim_evidence.c.id).where(
-                        claim_evidence.c.claim_id == claim_id,
-                        claim_evidence.c.fingerprint == evidence["fingerprint"],
+                present = (
+                    connection.execute(
+                        select(
+                            claim_evidence.c.id,
+                            claim_evidence.c.details,
+                        ).where(
+                            claim_evidence.c.claim_id == claim_id,
+                            claim_evidence.c.fingerprint
+                            == evidence["fingerprint"],
+                        )
                     )
+                    .mappings()
+                    .first()
                 )
                 if present:
+                    if _is_retired_legacy_evidence(present["details"]):
+                        connection.execute(
+                            update(claim_evidence)
+                            .where(claim_evidence.c.id == present["id"])
+                            .values(
+                                evidence_type=evidence["evidence_type"],
+                                source_name=evidence["source_name"],
+                                source_url=evidence["source_url"] or None,
+                                details=evidence["details"],
+                                observed_at=now,
+                            )
+                        )
                     continue
                 connection.execute(
                     insert(claim_evidence).values(
@@ -6006,6 +6082,27 @@ class CaseStore:
         legacy_untriaged = _legacy_untriaged_source_details(
             claim_row["source_engine"]
         )
+        serialized_evidence = [
+            {
+                "id": row["id"],
+                "evidence_type": row["evidence_type"],
+                "source_name": row["source_name"],
+                "source_url": row["source_url"],
+                "details": dict(row["details"] or {}),
+                "observed_at": _as_iso(row["observed_at"]),
+            }
+            for row in evidence_rows
+        ]
+        active_evidence = [
+            row
+            for row in serialized_evidence
+            if not _is_retired_legacy_evidence(row["details"])
+        ]
+        retired_evidence = [
+            row
+            for row in serialized_evidence
+            if _is_retired_legacy_evidence(row["details"])
+        ]
         return {
             "id": claim_row["id"],
             "field_name": claim_row["field_name"],
@@ -6025,17 +6122,8 @@ class CaseStore:
             "normalized_value": claim_row["normalized_value"],
             "latitude": claim_row["latitude"],
             "longitude": claim_row["longitude"],
-            "evidence": [
-                {
-                    "id": row["id"],
-                    "evidence_type": row["evidence_type"],
-                    "source_name": row["source_name"],
-                    "source_url": row["source_url"],
-                    "details": dict(row["details"] or {}),
-                    "observed_at": _as_iso(row["observed_at"]),
-                }
-                for row in evidence_rows
-            ],
+            "evidence": active_evidence,
+            "retired_evidence": retired_evidence,
             "reviews": [
                 {
                     "decision": row["decision"],

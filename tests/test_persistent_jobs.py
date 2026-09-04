@@ -608,6 +608,25 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
         independently_refreshed["full_name"]["source_engine"]
         == "case_chat_user_statement"
     )
+    assert {
+        evidence["source_name"]
+        for evidence in independently_refreshed["full_name"]["evidence"]
+    } == {"Case chat · analyst"}
+    assert {
+        evidence["source_name"]
+        for evidence in independently_refreshed["full_name"]["retired_evidence"]
+    } == {"Example Social"}
+    exported_persona, _generated_at = (
+        persistent_store.get_persona_export_snapshot(persona_id)
+    )
+    exported_full_name = next(
+        claim
+        for claim in exported_persona["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    assert {
+        evidence["source_name"] for evidence in exported_full_name["evidence"]
+    } == {"Case chat · analyst"}
     assert (
         independently_refreshed["social_account"]["reliability_status"]
         == "legacy_untriaged"
@@ -700,6 +719,13 @@ def test_independent_observation_reactivates_legacy_claim_as_pending(
     assert reactivated["reliability_status"] == "current"
     assert reactivated["source_engine"] == "case_chat_user_statement"
     assert reactivated["source_job_id"] is None
+    assert reactivated["evidence"] == []
+    assert {
+        evidence["source_name"] for evidence in reactivated["retired_evidence"]
+    } == {"Example Social"}
+    reactivated_graph = persistent_store.build_persona_graph(persona_id)
+    assert reactivated_graph["stats"]["claim_count"] == 1
+    assert reactivated_graph["stats"]["source_count"] == 0
     assert {review["decision"] for review in reactivated["reviews"]} == {
         "approved",
         "uncertain",
