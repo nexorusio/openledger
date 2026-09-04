@@ -54,6 +54,41 @@ from maigret.web.external_evidence import (
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
+LEGACY_PROFILE_CLAIM_ENGINES = frozenset(
+    {
+        "github_public_profile",
+        "openledger_profile_discovery",
+        "unfurl_url_analysis",
+        "wayback_cdx",
+    }
+)
+LEGACY_UNTRIAGED_SOURCE_PREFIX = "legacy_untriaged:"
+RELIABILITY_MIGRATION_REVIEWER = "openledger-reliability-migration"
+
+
+def _legacy_untriaged_source(
+    review_status: str,
+    source_engine: str,
+) -> str:
+    return (
+        f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}{review_status}:{source_engine}"
+    )[:100]
+
+
+def _legacy_untriaged_source_details(source_engine: Any) -> Optional[tuple[str, str]]:
+    value = str(source_engine or "")
+    if not value.startswith(LEGACY_UNTRIAGED_SOURCE_PREFIX):
+        return None
+    status, separator, original_engine = value.removeprefix(
+        LEGACY_UNTRIAGED_SOURCE_PREFIX
+    ).partition(":")
+    if (
+        not separator
+        or status not in {"pending", "approved", "rejected", "uncertain"}
+        or not original_engine
+    ):
+        return None
+    return status, original_engine
 
 cases = Table(
     "cases",
@@ -2441,7 +2476,12 @@ class CaseStore:
                 list(
                     connection.execute(
                         select(persona_claims)
-                        .where(persona_claims.c.persona_id.in_(persona_ids))
+                        .where(
+                            persona_claims.c.persona_id.in_(persona_ids),
+                            ~persona_claims.c.source_engine.like(
+                                f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}%"
+                            ),
+                        )
                         .order_by(
                             persona_claims.c.persona_id,
                             persona_claims.c.field_name,
@@ -3500,6 +3540,7 @@ class CaseStore:
         chat_message_id: Optional[str] = None,
         candidates: Iterable[Dict[str, Any]],
         now: datetime,
+        allow_legacy_reactivation: bool = False,
     ) -> int:
         """Persist validated candidates without changing a human decision."""
         synchronized = 0
@@ -3528,6 +3569,15 @@ class CaseStore:
             )
             if existing:
                 claim_id = existing["id"]
+                legacy_source = _legacy_untriaged_source_details(
+                    existing["source_engine"]
+                )
+                reactivate_legacy = bool(
+                    legacy_source
+                    and allow_legacy_reactivation
+                    and candidate.get("source_engine")
+                    in LEGACY_PROFILE_CLAIM_ENGINES
+                )
                 confidence = int(existing["confidence"])
                 if (
                     candidate.get("source_engine")
@@ -3547,7 +3597,51 @@ class CaseStore:
                     "last_seen_at": now,
                     "updated_at": now,
                 }
-                if job_id is not None:
+                if legacy_source and reactivate_legacy:
+                    restored_status, _original_engine = legacy_source
+                    updated_values.update(
+                        review_status=restored_status,
+                        source_engine=candidate["source_engine"],
+                    )
+                    if restored_status == "pending":
+                        updated_values.update(
+                            reviewed_at=None,
+                            reviewed_by=None,
+                        )
+                    else:
+                        latest_human_review = (
+                            connection.execute(
+                                select(claim_reviews)
+                                .where(
+                                    claim_reviews.c.claim_id == claim_id,
+                                    claim_reviews.c.reviewer
+                                    != RELIABILITY_MIGRATION_REVIEWER,
+                                )
+                                .order_by(
+                                    claim_reviews.c.created_at.desc(),
+                                    claim_reviews.c.id.desc(),
+                                )
+                                .limit(1)
+                            )
+                            .mappings()
+                            .first()
+                        )
+                        if latest_human_review:
+                            updated_values.update(
+                                reviewed_at=latest_human_review["created_at"],
+                                reviewed_by=latest_human_review["reviewer"],
+                            )
+                        else:
+                            # A status without a matching human review is not
+                            # safe to revive as a curated decision.
+                            updated_values.update(
+                                review_status="pending",
+                                reviewed_at=None,
+                                reviewed_by=None,
+                            )
+                if job_id is not None and (
+                    not legacy_source or reactivate_legacy
+                ):
                     updated_values["source_job_id"] = job_id
                 if (
                     existing["review_status"] == "pending"
@@ -3947,6 +4041,9 @@ class CaseStore:
 
         now = utcnow()
         synchronized = 0
+        allow_legacy_reactivation = (
+            result.get("profile_reliability_version") == 1
+        )
         with self.engine.begin() as connection:
             job_row = (
                 connection.execute(
@@ -4004,6 +4101,7 @@ class CaseStore:
                         investigation_spec
                     ),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
             for report in result.get("individual_reports") or []:
                 username = str(report.get("username") or "").strip()
@@ -4018,6 +4116,7 @@ class CaseStore:
                     job_id=job_id,
                     candidates=extract_persona_claims(report),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
             collector_observations = [
                 observation
@@ -4033,6 +4132,7 @@ class CaseStore:
                         collector_observations
                     ),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
                 synchronized += self._upsert_persona_candidates(
                     connection,
@@ -4042,6 +4142,7 @@ class CaseStore:
                         collector_observations
                     ),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
                 synchronized += self._upsert_persona_candidates(
                     connection,
@@ -4051,6 +4152,7 @@ class CaseStore:
                         collector_observations
                     ),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
             else:
                 observations_by_username: Dict[str, list] = {}
@@ -4072,6 +4174,7 @@ class CaseStore:
                         job_id=job_id,
                         candidates=extract_github_profile_claims(observations),
                         now=now,
+                        allow_legacy_reactivation=allow_legacy_reactivation,
                     )
                     synchronized += self._upsert_persona_candidates(
                         connection,
@@ -4079,11 +4182,138 @@ class CaseStore:
                         job_id=job_id,
                         candidates=extract_profile_url_evidence_claims(observations),
                         now=now,
+                        allow_legacy_reactivation=allow_legacy_reactivation,
                     )
             connection.execute(
                 update(cases).where(cases.c.id == case_id).values(updated_at=now)
             )
         return synchronized
+
+    def retire_pretriage_profile_claims(
+        self,
+        *,
+        current_reliability_version: int,
+        job_id: Optional[str] = None,
+    ) -> int:
+        """Mark profile-derived claims from version-0 jobs inactive and auditable."""
+        now = utcnow()
+        retired = 0
+        with self.engine.begin() as connection:
+            job_statement = select(
+                investigation_jobs.c.id,
+                investigation_jobs.c.result,
+            ).where(
+                investigation_jobs.c.status == "completed",
+                investigation_jobs.c.kind.not_in(
+                    {"affiliation", "case_fusion", "identity_enrichment"}
+                ),
+            )
+            if job_id is not None:
+                job_statement = job_statement.where(
+                    investigation_jobs.c.id == job_id
+                )
+            legacy_job_ids = []
+            for job_row in connection.execute(job_statement).mappings():
+                result = dict(job_row["result"] or {})
+                version = result.get("profile_reliability_version")
+                if version is None or version == 0:
+                    legacy_job_ids.append(str(job_row["id"]))
+            if not legacy_job_ids:
+                return 0
+
+            claim_rows = list(
+                connection.execute(
+                    select(
+                        persona_claims.c.id,
+                        persona_claims.c.persona_id,
+                        persona_claims.c.source_job_id,
+                        persona_claims.c.source_engine,
+                        persona_claims.c.review_status,
+                    ).where(
+                        persona_claims.c.source_job_id.in_(legacy_job_ids),
+                        persona_claims.c.source_engine.in_(
+                            LEGACY_PROFILE_CLAIM_ENGINES
+                        ),
+                    )
+                ).mappings()
+            )
+            affected_personas = set()
+            for claim in claim_rows:
+                previous_status = str(claim["review_status"])
+                previous_engine = str(claim["source_engine"])
+                next_status = (
+                    "rejected" if previous_status == "rejected" else "uncertain"
+                )
+                values: Dict[str, Any] = {
+                    "review_status": next_status,
+                    "source_engine": _legacy_untriaged_source(
+                        previous_status,
+                        previous_engine,
+                    ),
+                    "updated_at": now,
+                }
+                if previous_status != "rejected":
+                    values.update(
+                        reviewed_at=now,
+                        reviewed_by=RELIABILITY_MIGRATION_REVIEWER,
+                    )
+                updated = connection.execute(
+                    update(persona_claims)
+                    .where(
+                        persona_claims.c.id == claim["id"],
+                        persona_claims.c.source_job_id == claim["source_job_id"],
+                        persona_claims.c.source_engine == previous_engine,
+                    )
+                    .values(**values)
+                )
+                if updated.rowcount != 1:
+                    continue
+                if previous_status != "rejected":
+                    connection.execute(
+                        insert(claim_reviews).values(
+                            claim_id=claim["id"],
+                            decision="uncertain",
+                            reviewer=RELIABILITY_MIGRATION_REVIEWER,
+                            note=(
+                                "Source investigation predates profile reliability "
+                                f"triage; previous status was {previous_status}. "
+                                "Rerun required before this claim becomes active."
+                            ),
+                            created_at=now,
+                        )
+                    )
+                self._record_claim_observation_with_connection(
+                    connection,
+                    claim_id=claim["id"],
+                    provenance_type="investigation_job",
+                    provenance_id=str(claim["source_job_id"]),
+                    job_id=str(claim["source_job_id"]),
+                    external_evidence_id=None,
+                    chat_message_id=None,
+                    source_engine=RELIABILITY_MIGRATION_REVIEWER,
+                    source_record_id=None,
+                    confidence=None,
+                    native_status="legacy_untriaged",
+                    details={
+                        "profile_reliability_version": current_reliability_version,
+                        "previous_review_status": previous_status,
+                        "previous_source_engine": previous_engine,
+                        "rerun_required": True,
+                    },
+                    now=now,
+                )
+                affected_personas.add(str(claim["persona_id"]))
+                retired += 1
+            if affected_personas:
+                case_ids = select(personas.c.case_id).where(
+                    personas.c.id.in_(affected_personas)
+                )
+                connection.execute(
+                    update(cases)
+                    .where(cases.c.id.in_(case_ids))
+                    .values(updated_at=now)
+                )
+        return retired
 
     def sync_ai_persona_claims(
         self,
@@ -4281,6 +4511,7 @@ class CaseStore:
                     select(
                         persona_claims.c.persona_id,
                         persona_claims.c.field_name,
+                        persona_claims.c.source_engine,
                         personas.c.case_id,
                     )
                     .select_from(
@@ -4296,6 +4527,14 @@ class CaseStore:
             )
             if not claim:
                 return None
+            legacy_source = _legacy_untriaged_source_details(
+                claim["source_engine"]
+            )
+            if legacy_source and decision == "approved":
+                raise ValueError(
+                    "Rerun the source investigation before approving this "
+                    "legacy untriaged claim"
+                )
             if coordinates and claim["field_name"] not in {
                 "address",
                 "current_location",
@@ -4309,6 +4548,12 @@ class CaseStore:
                 "reviewed_by": reviewer,
                 "updated_at": now,
             }
+            if legacy_source:
+                _previous_status, original_engine = legacy_source
+                values["source_engine"] = _legacy_untriaged_source(
+                    decision,
+                    original_engine,
+                )
             if coordinates:
                 values.update(
                     latitude=coordinates[0],
@@ -5549,7 +5794,10 @@ class CaseStore:
             ),
         )
         graph_claims = [
-            claim for claim in graph_claims if claim["review_status"] != "rejected"
+            claim
+            for claim in graph_claims
+            if claim["review_status"] != "rejected"
+            and claim.get("reliability_status") != "legacy_untriaged"
         ]
         displayed_claims = graph_claims[:120]
         for claim in displayed_claims:
@@ -5625,6 +5873,9 @@ class CaseStore:
 
     @staticmethod
     def _serialize_claim(claim_row, evidence_rows, review_rows) -> Dict[str, Any]:
+        legacy_untriaged = _legacy_untriaged_source_details(
+            claim_row["source_engine"]
+        )
         return {
             "id": claim_row["id"],
             "field_name": claim_row["field_name"],
@@ -5633,6 +5884,9 @@ class CaseStore:
             "confidence": int(claim_row["confidence"]),
             "review_status": claim_row["review_status"],
             "source_engine": claim_row["source_engine"],
+            "reliability_status": (
+                "legacy_untriaged" if legacy_untriaged else "current"
+            ),
             "source_job_id": claim_row["source_job_id"],
             "first_seen_at": _as_iso(claim_row["first_seen_at"]),
             "last_seen_at": _as_iso(claim_row["last_seen_at"]),

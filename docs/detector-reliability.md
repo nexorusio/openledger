@@ -22,6 +22,21 @@ The downloadable scanner reports retain raw results for lawful diagnostic and
 audit use. The OpenLedger graph, headline count and Persona pipeline consume only
 the supported class.
 
+## Pre-triage investigations
+
+Completed investigations saved without a reliability version remain available
+as raw, explicitly untriaged leads. They contribute zero supported profiles;
+their historical graph and profile-derived collector observations are withheld
+from graph, AI and Persona synchronization until the usernames are rerun.
+Independent evidence such as silent email-registration checks remains separate.
+
+On upgrade, Persona claims previously synchronized from a pre-triage profile are
+marked `legacy_untriaged` rather than deleted. They leave the default Persona,
+maps, relationship graphs, exports and AI context, while their evidence and
+review history remain auditable in the review queue. A current-version rerun
+that supports the same claim reactivates it and restores the latest human review
+decision; an untriaged claim cannot be newly approved before that rerun.
+
 ## Canary and quarantine policy
 
 The `Maigret detector health` GitHub Actions workflow runs weekly and on manual

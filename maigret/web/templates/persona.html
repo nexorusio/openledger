@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% macro claim_record(claim, context='profile') %}
-<article class="claim-record review-{{ claim.review_status }}" data-review-status="{{ claim.review_status }}">
+<article class="claim-record review-{{ claim.review_status }}" data-review-status="{{ claim.review_status }}" data-reliability-status="{{ claim.reliability_status }}">
     <div class="claim-main">
         <div class="claim-value">
             {% if claim.field_name == 'social_account' and claim.value is mapping %}
@@ -27,6 +27,9 @@
             {% endif %}
         </div>
         <div class="claim-badges">
+            {% if claim.reliability_status == 'legacy_untriaged' %}
+            <span class="badge-soft warning" title="The source investigation predates profile reliability triage">Legacy untriaged · rerun</span>
+            {% endif %}
             {% if claim.evidence | selectattr('evidence_type', 'equalto', 'cited_public_web') | list %}
             <span class="badge-soft warning" title="Includes cited AI-assisted public-web evidence">AI-assisted evidence</span>
             {% endif %}
@@ -108,7 +111,11 @@
             <label class="visually-hidden" for="note-{{ context }}-{{ claim.id }}">Review note</label>
             <input id="note-{{ context }}-{{ claim.id }}" type="text" name="note" maxlength="2000" placeholder="Optional analyst note">
             <div class="review-actions" role="group" aria-label="Review this record">
+                {% if claim.reliability_status != 'legacy_untriaged' %}
                 <button name="decision" value="approved" class="btn btn-sm btn-review approve" type="submit"><i data-lucide="check"></i> {{ 'Save approval' if claim.review_status == 'approved' else 'Approve' }}</button>
+                {% else %}
+                <span class="form-text">Rerun required before approval</span>
+                {% endif %}
                 <button name="decision" value="uncertain" class="btn btn-sm btn-review uncertain" type="submit"><i data-lucide="circle-help"></i> Uncertain</button>
                 <button name="decision" value="rejected" class="btn btn-sm btn-review reject" type="submit"><i data-lucide="x"></i> Reject</button>
             </div>

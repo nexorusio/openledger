@@ -1634,6 +1634,14 @@ def record_job_result(session_key: str, result: Dict[str, Any]):
         if normalized.get('status') == 'completed':
             try:
                 case_store.sync_persona_claims(session_key, normalized)
+                if (
+                    normalized.get('profile_reliability_version')
+                    != PROFILE_RELIABILITY_VERSION
+                ):
+                    case_store.retire_pretriage_profile_claims(
+                        current_reliability_version=PROFILE_RELIABILITY_VERSION,
+                        job_id=session_key,
+                    )
             except Exception as error:
                 record_internal_error(
                     'Failed to synchronize persona claims',
@@ -1705,6 +1713,10 @@ def refresh_job_results_from_disk():
                 case_store.import_legacy_result(session_key, result)
                 if result.get('status') == 'completed':
                     case_store.sync_persona_claims(session_key, result)
+                    case_store.retire_pretriage_profile_claims(
+                        current_reliability_version=PROFILE_RELIABILITY_VERSION,
+                        job_id=session_key,
+                    )
             except Exception as error:
                 record_internal_error(
                     'Failed to index legacy investigation in the case store',
@@ -1910,6 +1922,21 @@ def delete_persisted_case(
 # also perform targeted lazy recovery so alternate report paths used in tests or
 # embedded deployments remain supported.
 refresh_job_results_from_disk()
+if case_store is not None:
+    try:
+        retired_legacy_claims = case_store.retire_pretriage_profile_claims(
+            current_reliability_version=PROFILE_RELIABILITY_VERSION,
+        )
+        if retired_legacy_claims:
+            logging.warning(
+                'Marked %s pre-triage profile claims as legacy untriaged',
+                retired_legacy_claims,
+            )
+    except Exception as error:
+        record_internal_error(
+            'Failed to mark pre-triage Persona claims as untriaged',
+            error,
+        )
 
 
 def get_investigation_plan(result_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -6088,7 +6115,10 @@ def persona_workspace(persona_id):
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
     active_claims = [
-        claim for claim in persona['claims'] if claim['review_status'] != 'rejected'
+        claim
+        for claim in persona['claims']
+        if claim['review_status'] != 'rejected'
+        and claim.get('reliability_status') != 'legacy_untriaged'
     ]
     review_claims = [
         claim for claim in persona['claims'] if claim['review_status'] != 'approved'

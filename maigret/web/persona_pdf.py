@@ -209,9 +209,15 @@ def _display_value(claim: Mapping[str, Any]) -> str:
 
 def _approved_review_note(claim: Mapping[str, Any]) -> str:
     reviews = claim.get("reviews") or []
-    if not reviews or reviews[0].get("decision") != "approved":
-        return ""
-    return _clean_text(reviews[0].get("note"))
+    return next(
+        (
+            _clean_text(review.get("note"))
+            for review in reviews
+            if review.get("decision") == "approved"
+            and review.get("reviewer") != "openledger-reliability-migration"
+        ),
+        "",
+    )
 
 
 def build_persona_export_snapshot(
