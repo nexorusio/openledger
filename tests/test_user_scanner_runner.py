@@ -101,7 +101,10 @@ def test_x_module_is_not_imported_or_run_without_explicit_vxtwitter_consent(
     policy_result = results[-1]
     assert policy_result["site_name"] == "X (Twitter)"
     assert policy_result["status"] == "Skipped"
-    assert "api.vxtwitter.com" in policy_result["reason"]
+    assert policy_result["reason"] == (
+        "Disabled by OpenLedger policy because the pinned X module contacts "
+        "api.vxtwitter.com"
+    )
 
 
 def test_x_module_requires_explicit_vxtwitter_consent(monkeypatch):
