@@ -8,6 +8,13 @@ from typing import Any, Callable, Dict, List, Optional
 from urllib.parse import unquote, urlsplit
 
 from maigret.utils import is_plausible_username
+from maigret.web.username_aliases import (
+    MAX_ALIAS_CANDIDATES,
+    MAX_SELECTED_ALIASES,
+    normalize_context_numbers,
+    normalize_nicknames,
+    rank_username_aliases,
+)
 
 SCHEMA_VERSION = 1
 IDENTIFIER_TYPES = {
@@ -25,6 +32,14 @@ MAX_SOURCE_TAGS = 64
 MAX_USERNAME_LENGTH = 128
 MAX_CONTEXT_LENGTH = 500
 MAX_VARIANTS = 16
+MAX_USER_SCANNER_USERNAME_TARGETS = 16
+USER_SCANNER_USERNAME_PLATFORMS = {
+    "facebook",
+    "instagram",
+    "threads",
+    "tiktok",
+    "x",
+}
 
 _EMAIL_PATTERN = re.compile(
     r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+$",
@@ -146,38 +161,13 @@ def extract_profile_usernames(
     return resolved
 
 
-def _name_tokens(full_name: str) -> List[str]:
-    tokens = []
-    for raw_token in full_name.casefold().split():
-        token = "".join(character for character in raw_token if character.isalnum())
-        if token:
-            tokens.append(token)
-    return tokens[:6]
-
-
 def generate_username_variants(full_name: str) -> List[str]:
-    """Generate a small, reviewable set rather than a Cartesian explosion."""
-    tokens = _name_tokens(full_name)
-    if not tokens:
-        return []
-    combinations: List[List[str]] = [tokens]
-    if len(tokens) > 1:
-        first_last = [tokens[0], tokens[-1]]
-        last_first = [tokens[-1], tokens[0]]
-        combinations.extend([first_last, last_first])
-    variants: List[str] = []
-    for parts in combinations:
-        for separator in ("", ".", "_", "-"):
-            candidate = separator.join(parts)
-            if candidate and candidate not in variants:
-                variants.append(candidate)
-        if len(parts) > 1:
-            for candidate in (parts[0][0] + parts[-1], parts[0] + parts[-1][0]):
-                if candidate and candidate not in variants:
-                    variants.append(candidate)
-        if len(variants) >= MAX_VARIANTS:
-            break
-    return variants[:MAX_VARIANTS]
+    """Backward-compatible value view of the ranked alias planner."""
+    return [
+        candidate["value"]
+        for candidate in rank_username_aliases([full_name])
+        if candidate.get("selected")
+    ][:MAX_VARIANTS]
 
 
 def parse_terms(value: Any) -> List[str]:
@@ -235,6 +225,7 @@ def build_investigation_plan(
     generate_variants = "generate_name_variants" in form
     allow_ai_context = "allow_ai_context" in form
     enable_user_scanner_email = "enable_user_scanner_email" in form
+    enable_user_scanner_username = "enable_user_scanner_username" in form
     enable_github_profile_enrichment = "enable_github_profile_enrichment" in form
     enable_archived_url_evidence = "enable_archived_url_evidence" in form
     if enable_user_scanner_email and processing_mode != "same_subject":
@@ -242,6 +233,29 @@ def build_investigation_plan(
             "User Scanner email evidence requires One subject mode so observations "
             "cannot be attached to the wrong Persona."
         )
+    requested_username_platforms = _form_list(form, "user_scanner_platform")
+    if (
+        enable_user_scanner_username
+        and not requested_username_platforms
+        and "user_scanner_platforms_present" not in form
+    ):
+        requested_username_platforms = sorted(USER_SCANNER_USERNAME_PLATFORMS)
+    username_platforms: List[str] = []
+    for raw_platform in requested_username_platforms:
+        platform = str(raw_platform or "").strip().casefold()
+        if platform not in USER_SCANNER_USERNAME_PLATFORMS:
+            raise InvestigationInputError("Select a supported username platform.")
+        if platform not in username_platforms:
+            username_platforms.append(platform)
+    if enable_user_scanner_username and not username_platforms:
+        raise InvestigationInputError(
+            "Select at least one platform for User Scanner username verification."
+        )
+    allow_user_scanner_vxtwitter = bool(
+        enable_user_scanner_username
+        and "x" in username_platforms
+        and "allow_user_scanner_vxtwitter" in form
+    )
     tags = parse_source_tags(form, "tags")
     excluded_tags = parse_source_tags(form, "excluded_tags")
     if set(tags).intersection(excluded_tags):
@@ -249,20 +263,31 @@ def build_investigation_plan(
             "A source category or country cannot be both included and excluded."
         )
     identifiers: List[Dict[str, Any]] = []
-    search_targets: List[Dict[str, str]] = []
+    search_targets: List[Dict[str, Any]] = []
+    full_names: List[str] = []
+    confirmed_usernames: List[str] = []
 
-    def add_target(username: str, source_type: str, source_value: str) -> None:
+    def add_target(
+        username: str,
+        source_type: str,
+        source_value: str,
+        *,
+        alias_score: Optional[int] = None,
+        alias_reason: str = "",
+    ) -> None:
         if username.casefold() in {
             target["value"].casefold() for target in search_targets
         }:
             return
-        search_targets.append(
-            {
-                "value": username,
-                "source_type": source_type,
-                "source_value": source_value,
-            }
-        )
+        target: Dict[str, Any] = {
+            "value": username,
+            "source_type": source_type,
+            "source_value": source_value,
+        }
+        if alias_score is not None:
+            target["alias_score"] = alias_score
+            target["alias_reason"] = alias_reason[:240]
+        search_targets.append(target)
 
     for identifier_type, raw_value in zip(types, values):
         identifier_type = identifier_type.strip()
@@ -282,18 +307,132 @@ def build_investigation_plan(
                 normalized, resolver=profile_url_resolver
             ):
                 add_target(username, identifier_type, normalized)
+                confirmed_usernames.append(username)
         elif identifier_type == "full_name":
             normalized = _normalize_text(raw_value)
             if len(normalized) < 2:
                 raise InvestigationInputError("Enter a complete name.")
-            if generate_variants:
-                for username in generate_username_variants(normalized):
-                    add_target(username, "generated_name_variant", normalized)
+            full_names.append(normalized)
         elif identifier_type == "email":
             normalized = normalize_email(raw_value)
         else:
             normalized = normalize_phone(raw_value)
         identifiers.append({"type": identifier_type, "value": normalized})
+
+    try:
+        alias_nicknames = normalize_nicknames(_form_list(form, "alias_nicknames"))
+        alias_context_numbers = normalize_context_numbers(
+            _form_list(form, "alias_context_numbers")
+        )
+    except ValueError as error:
+        raise InvestigationInputError(str(error)) from error
+
+    generated_aliases = (
+        rank_username_aliases(
+            full_names,
+            nicknames=alias_nicknames,
+            contextual_numbers=alias_context_numbers,
+            confirmed_usernames=confirmed_usernames,
+        )
+        if generate_variants
+        else []
+    )
+    generated_by_value = {
+        str(candidate["value"]).casefold(): candidate for candidate in generated_aliases
+    }
+    alias_candidates: List[Dict[str, Any]] = []
+    raw_alias_candidates = _form_list(form, "alias_candidate")
+    submitted_alias_plan = bool(
+        generate_variants
+        and "alias_candidates_present" in form
+        and raw_alias_candidates
+    )
+    if submitted_alias_plan:
+        selected_values = {
+            str(value).strip().casefold()
+            for value in _form_list(form, "selected_alias")
+            if str(value).strip()
+        }
+        seen_aliases = set()
+        for raw_candidate in raw_alias_candidates[:MAX_ALIAS_CANDIDATES]:
+            candidate_value = normalize_username(raw_candidate)
+            key = candidate_value.casefold()
+            if key in seen_aliases:
+                continue
+            seen_aliases.add(key)
+            generated = generated_by_value.get(key)
+            alias_candidates.append(
+                {
+                    "value": candidate_value,
+                    "score": int((generated or {}).get("score", 70)),
+                    "reason": str(
+                        (generated or {}).get(
+                            "reason", "Analyst-edited alias candidate"
+                        )
+                    )[:240],
+                    "selected": key in selected_values,
+                }
+            )
+        unknown_selections = selected_values.difference(seen_aliases)
+        if unknown_selections:
+            raise InvestigationInputError("Select aliases from the displayed plan.")
+    else:
+        alias_candidates = [dict(candidate) for candidate in generated_aliases]
+
+    selected_aliases = [
+        candidate for candidate in alias_candidates if candidate.get("selected")
+    ]
+    if len(selected_aliases) > MAX_SELECTED_ALIASES:
+        raise InvestigationInputError(
+            f"Select no more than {MAX_SELECTED_ALIASES} username aliases."
+        )
+    if enable_user_scanner_username:
+        scanner_target_keys = {
+            str(target["value"]).casefold() for target in search_targets
+        }
+        if submitted_alias_plan:
+            scanner_target_keys.update(
+                str(candidate["value"]).casefold()
+                for candidate in selected_aliases
+            )
+            if len(scanner_target_keys) > MAX_USER_SCANNER_USERNAME_TARGETS:
+                raise InvestigationInputError(
+                    "User Scanner username verification accepts no more than "
+                    f"{MAX_USER_SCANNER_USERNAME_TARGETS} total account targets. "
+                    "Deselect aliases or disable the additional verification."
+                )
+        else:
+            selected_alias_count = 0
+            for candidate in alias_candidates:
+                candidate_key = str(candidate["value"]).casefold()
+                candidate["selected"] = bool(
+                    int(candidate["score"]) >= 78
+                    and candidate_key not in scanner_target_keys
+                    and len(scanner_target_keys) < MAX_USER_SCANNER_USERNAME_TARGETS
+                    and selected_alias_count < MAX_SELECTED_ALIASES
+                )
+                if candidate["selected"]:
+                    scanner_target_keys.add(candidate_key)
+                    selected_alias_count += 1
+            selected_aliases = [
+                candidate for candidate in alias_candidates if candidate.get("selected")
+            ]
+    for candidate in selected_aliases:
+        add_target(
+            str(candidate["value"]),
+            "ranked_alias",
+            full_names[0] if full_names else str(candidate["value"]),
+            alias_score=int(candidate["score"]),
+            alias_reason=str(candidate["reason"]),
+        )
+    if (
+        enable_user_scanner_username
+        and len(search_targets) > MAX_USER_SCANNER_USERNAME_TARGETS
+    ):
+        raise InvestigationInputError(
+            "User Scanner username verification accepts no more than "
+            f"{MAX_USER_SCANNER_USERNAME_TARGETS} total account targets."
+        )
 
     if not identifiers:
         raise InvestigationInputError("Add at least one investigation identifier.")
@@ -332,10 +471,16 @@ def build_investigation_plan(
         "generate_name_variants": generate_variants,
         "allow_ai_context": allow_ai_context,
         "enable_user_scanner_email": enable_user_scanner_email,
+        "enable_user_scanner_username": enable_user_scanner_username,
+        "user_scanner_username_platforms": username_platforms,
+        "allow_user_scanner_vxtwitter": allow_user_scanner_vxtwitter,
         "enable_github_profile_enrichment": enable_github_profile_enrichment,
         "enable_archived_url_evidence": enable_archived_url_evidence,
         "subject_label": subject_label,
         "identifiers": identifiers,
+        "alias_nicknames": alias_nicknames,
+        "alias_context_numbers": alias_context_numbers,
+        "alias_candidates": alias_candidates,
         "tags": tags,
         "excluded_tags": excluded_tags,
         # Retain legacy keys so old stored jobs and API clients remain readable.

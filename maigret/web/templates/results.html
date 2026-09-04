@@ -173,6 +173,42 @@
     </section>
     {% endif %}
 
+    {% if username_verifications %}
+    <section class="panel-card">
+        <header class="panel-header">
+            <div>
+                <h2>Major-platform username verification</h2>
+                <p>User Scanner independently checks account existence. These results do not establish who owns an account.</p>
+            </div>
+            <span class="badge-soft">{{ username_verification_found_count }} found · {{ username_verification_unknown_count }} unknown/blocked</span>
+        </header>
+        <div class="panel-body">
+            {% for seed, observations in username_verifications | groupby('seed_username') %}
+            <details class="reliability-suppressed" {{ 'open' if loop.first }}>
+                <summary>@{{ seed }} · {{ observations | length }} checks</summary>
+                <ul class="profile-list mt-2">
+                    {% for observation in observations %}
+                    <li class="profile-item">
+                        <div class="profile-link">
+                            <span>
+                                {% if observation.source_url %}<a href="{{ observation.source_url }}" target="_blank" rel="noopener">{{ observation.site_name }}</a>{% else %}<strong>{{ observation.site_name }}</strong>{% endif %}
+                                <small>@{{ observation.subject_value }} · detector {{ observation.detector_status }} · account {{ observation.account_status }} · identity {{ observation.identity_status }}</small>
+                                {% if observation.reason %}<small>{{ observation.reason }}</small>{% endif %}
+                            </span>
+                        </div>
+                        <span class="badge-soft {{ 'success' if observation.status == 'found' and observation.identity_confidence in ['confirmed', 'likely'] else 'warning' if observation.status in ['unknown', 'blocked', 'error'] else '' }}">
+                            {{ observation.status | replace('_', ' ') | title }} · {{ observation.identity_confidence | title }}
+                        </span>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </details>
+            {% endfor %}
+            <p class="form-text mt-3 mb-0">Only corroborated confirmed/likely cross-scan links may enter Persona review as pending evidence. Direct candidate hits, conflicts, blocks, and errors stay diagnostic-only.</p>
+        </div>
+    </section>
+    {% endif %}
+
     <section class="panel-card">
         <header class="panel-header">
             <div>

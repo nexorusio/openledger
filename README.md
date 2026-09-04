@@ -92,7 +92,7 @@ governed adapters through the existing worker and evidence model.
 | Source | OpenLedger use | Boundary |
 |---|---|---|
 | Maigret and Socid Extractor | Public account discovery and normalized profile evidence. | Account matches and extracted values remain reviewable evidence. |
-| User Scanner | Optional email-registration observations. | One-subject mode and explicit opt-in; notification-producing and adult modules remain disabled. |
+| User Scanner | Optional email-registration observations plus bounded major-platform username verification. | Email checks require one-subject opt-in; username checks use selected aliases, capped depth/breadth, and explicit approval for X's `api.vxtwitter.com` path. |
 | GitHub public API | Enrich exact claimed GitHub user profiles. | Fixed origin, no credential, bounded profiles and response size. |
 | Unfurl | Decompose claimed profile URLs. | Pinned, offline, isolated runtime with remote lookups disabled. |
 | Wayback CDX | Record historical capture metadata for exact claimed URLs. | No wildcard search and no archived page download. |

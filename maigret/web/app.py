@@ -71,6 +71,7 @@ from maigret.web.collector_adapters import (
     build_business_context_assessment,
     build_organization_resolution_candidates,
     claimed_profile_url_targets,
+    count_user_scanner_username_accounts,
     extract_official_website_affiliated_people,
     extract_registry_affiliated_people,
     extract_wikidata_affiliation_people,
@@ -89,11 +90,14 @@ from maigret.web.collector_adapters import (
     run_official_website_public_content,
     run_unfurl_url_analysis,
     run_user_scanner_email,
+    run_user_scanner_usernames,
     run_wayback_capture_index,
     run_wikidata_affiliation_discovery,
     run_wikipedia_person_enrichment,
     user_scanner_available,
     user_scanner_email_targets,
+    user_scanner_username_policy,
+    user_scanner_username_targets,
     validate_google_places_connection,
 )
 from maigret.web.combined_intelligence import (
@@ -1515,6 +1519,8 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
             )
             normalized['collector_found_count'] = registration_count
             normalized['collector_registration_count'] = registration_count
+            normalized['username_verification_found_count'] = 0
+            normalized['username_verification_unknown_count'] = 0
             normalized['github_enrichment_count'] = 0
             normalized['archived_profile_count'] = 0
             return normalized
@@ -1524,6 +1530,8 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
             'candidate_count': 0,
             'suppressed_count': 0,
             'untriaged_count': 0,
+            'username_verification_found_count': 0,
+            'username_verification_unknown_count': 0,
             # Versioned results normally persist the raw count explicitly;
             # retain a safe fallback for partially written metadata.
             'raw_claimed_count': found_count,
@@ -2068,12 +2076,28 @@ def build_ai_markdown(
         for observation in list(observations)[:600]:
             if not isinstance(observation, dict):
                 continue
+            if observation.get('source_engine') == 'user_scanner_username':
+                if (
+                    str(observation.get('status') or '').casefold() != 'found'
+                    or str(
+                        observation.get('identity_confidence') or ''
+                    ).casefold()
+                    not in {'confirmed', 'likely'}
+                ):
+                    continue
             summary = {
                 'source_engine': observation.get('source_engine'),
                 'status': observation.get('status'),
                 'site_name': observation.get('site_name'),
                 'category': observation.get('category'),
             }
+            if observation.get('source_engine') == 'user_scanner_username':
+                summary.update(
+                    detector_status=observation.get('detector_status'),
+                    account_status=observation.get('account_status'),
+                    identity_confidence=observation.get('identity_confidence'),
+                    identity_status=observation.get('identity_status'),
+                )
             if allow_subject_value:
                 summary['subject_type'] = observation.get('subject_type')
                 summary['subject_value'] = observation.get('subject_value')
@@ -2612,6 +2636,17 @@ def build_reports(
             if isinstance(observation, dict)
             and str(observation.get('status') or '').casefold() == 'registered'
         ),
+        'username_verification_found_count': count_user_scanner_username_accounts(
+            list(collector_observations or [])
+        ),
+        'username_verification_unknown_count': sum(
+            1
+            for observation in list(collector_observations or [])
+            if isinstance(observation, dict)
+            and observation.get('source_engine') == 'user_scanner_username'
+            and str(observation.get('status') or '').casefold()
+            in {'unknown', 'blocked', 'error'}
+        ),
         'github_enrichment_count': sum(
             1
             for observation in list(collector_observations or [])
@@ -2687,9 +2722,12 @@ def parse_investigation_submission(form):
             form,
             profile_url_resolver=resolve_profile_url_identifiers,
         )
-        if plan.get('enable_user_scanner_email') and not user_scanner_available():
+        if (
+            plan.get('enable_user_scanner_email')
+            or plan.get('enable_user_scanner_username')
+        ) and not user_scanner_available():
             raise InvestigationInputError(
-                'User Scanner email checks are unavailable in this deployment.'
+                'User Scanner checks are unavailable in this deployment.'
             )
         return search_usernames(plan), plan
 
@@ -2703,6 +2741,9 @@ def parse_investigation_submission(form):
         'generate_name_variants': False,
         'allow_ai_context': False,
         'enable_user_scanner_email': False,
+        'enable_user_scanner_username': False,
+        'user_scanner_username_platforms': [],
+        'allow_user_scanner_vxtwitter': False,
         'enable_github_profile_enrichment': False,
         'enable_archived_url_evidence': False,
         'subject_label': usernames[0],
@@ -3027,6 +3068,56 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                         'found': archived_profile_count,
                     }
                 )
+    username_verification_targets = user_scanner_username_targets(
+        investigation_plan
+    )
+    if username_verification_targets and not (
+        job['cancelled'] or (cancellation_check and cancellation_check())
+    ):
+        username_policy = user_scanner_username_policy(investigation_plan)
+        q.put(
+            {
+                'type': 'collector_started',
+                'collector': 'user-scanner-username',
+                'target_type': 'username',
+                'targets': len(username_verification_targets),
+            }
+        )
+        try:
+            collected = await run_user_scanner_usernames(
+                username_verification_targets,
+                platforms=username_policy['platforms'],
+                allow_vxtwitter=username_policy['allow_vxtwitter'],
+                cancellation_check=lambda: (
+                    bool(job.get('cancelled'))
+                    or bool(cancellation_check and cancellation_check())
+                ),
+            )
+            observations.extend(collected)
+            q.put(
+                {
+                    'type': 'collector_completed',
+                    'collector': 'user-scanner-username',
+                    'observations': len(collected),
+                    'found': count_user_scanner_username_accounts(collected),
+                }
+            )
+        except asyncio.CancelledError:
+            q.put({'type': 'stopped', 'collector': 'user-scanner-username'})
+        except Exception as error:
+            public_error = record_internal_error(
+                'User Scanner username collection failed',
+                error,
+                target_type='username',
+            )
+            q.put(
+                {
+                    'type': 'collector_error',
+                    'collector': 'user-scanner-username',
+                    'message': public_error,
+                }
+            )
+
     for email in user_scanner_email_targets(investigation_plan):
         if job['cancelled'] or (cancellation_check and cancellation_check()):
             break
@@ -3090,9 +3181,10 @@ def finalize_stream_job(
     interrupted=False,
 ):
     """Persist one terminal scan result and publish its final progress event."""
+    collector_observations = list(collector_observations or [])
     done_event = {'type': 'done'}
     terminal_status = 'failed'
-    if general_results:
+    if general_results or collector_observations:
         try:
             report_kwargs = (
                 {'collector_observations': collector_observations}
@@ -4883,6 +4975,7 @@ def investigation_builder_context(persona=None):
         except (KeyError, TypeError, ValueError):
             continue
     initial_identifiers = [{"type": "username", "value": ""}]
+    initial_alias_nicknames: list[str] = []
     if persona:
         display_identifier_type = persona_display_identifier_type(persona)
         initial_identifiers = [
@@ -4901,6 +4994,18 @@ def investigation_builder_context(persona=None):
             if claim.get("review_status") != "approved":
                 continue
             field_name = str(claim.get("field_name") or "")
+            if field_name == "nickname":
+                nickname = " ".join(str(claim.get("display_value") or "").split())
+                nickname_keys = {
+                    item.casefold() for item in initial_alias_nicknames
+                }
+                if (
+                    len(initial_alias_nicknames) < 8
+                    and nickname
+                    and nickname.casefold() not in nickname_keys
+                ):
+                    initial_alias_nicknames.append(nickname)
+                continue
             identifier_type = (
                 field_name if field_name in {"full_name", "email", "phone"} else ""
             )
@@ -4932,6 +5037,7 @@ def investigation_builder_context(persona=None):
         },
         'investigation_persona': persona,
         'initial_identifiers': initial_identifiers,
+        'initial_alias_nicknames': initial_alias_nicknames,
     }
 
 
@@ -6832,6 +6938,9 @@ def live_results(job_id):
             "collector_registration_count",
             (result or {}).get("collector_found_count", 0),
         ),
+        completed_username_verification_count=(result or {}).get(
+            "username_verification_found_count", 0
+        ),
         completed_github_enrichment_count=(result or {}).get(
             "github_enrichment_count", 0
         ),
@@ -6984,6 +7093,25 @@ def results(session_id):
             "raw_claimed_count", result_data.get("found_count", 0)
         ),
         untriaged_count=result_data.get('untriaged_count', 0),
+        username_verification_found_count=result_data.get(
+            'username_verification_found_count', 0
+        ),
+        username_verification_unknown_count=result_data.get(
+            'username_verification_unknown_count', 0
+        ),
+        username_verifications=sorted(
+            [
+                observation
+                for observation in result_data.get('collector_observations', [])
+                if isinstance(observation, dict)
+                and observation.get('source_engine') == 'user_scanner_username'
+            ],
+            key=lambda observation: (
+                str(observation.get('seed_username') or '').casefold(),
+                str(observation.get('site_name') or '').casefold(),
+                str(observation.get('subject_value') or '').casefold(),
+            ),
+        ),
         legacy_untriaged=legacy_untriaged,
         timestamp=session_id.replace("search_", ""),
         session_id=session_id,

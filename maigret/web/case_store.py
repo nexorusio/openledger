@@ -4231,6 +4231,7 @@ class CaseStore:
             extract_github_profile_claims,
             extract_profile_url_evidence_claims,
             extract_user_scanner_claims,
+            extract_user_scanner_username_claims,
         )
         from maigret.web.persona_intelligence import (
             extract_investigation_identifier_claims,
@@ -4337,6 +4338,16 @@ class CaseStore:
                     connection,
                     persona_id=grouped_persona_id,
                     job_id=job_id,
+                    candidates=extract_user_scanner_username_claims(
+                        collector_observations
+                    ),
+                    now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
+                )
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=grouped_persona_id,
+                    job_id=job_id,
                     candidates=extract_github_profile_claims(
                         collector_observations
                     ),
@@ -4357,7 +4368,14 @@ class CaseStore:
                 observations_by_username: Dict[str, list] = {}
                 for observation in collector_observations:
                     username_key = str(
-                        observation.get("subject_value") or ""
+                        (
+                            observation.get("seed_username")
+                            or observation.get("subject_value")
+                            or ""
+                        )
+                        if observation.get("source_engine")
+                        == "user_scanner_username"
+                        else observation.get("subject_value") or ""
                     ).strip().casefold()
                     if username_key:
                         observations_by_username.setdefault(username_key, []).append(
@@ -4367,6 +4385,16 @@ class CaseStore:
                     persona_id = personas_by_name.get(username_key)
                     if not persona_id:
                         continue
+                    synchronized += self._upsert_persona_candidates(
+                        connection,
+                        persona_id=persona_id,
+                        job_id=job_id,
+                        candidates=extract_user_scanner_username_claims(
+                            observations
+                        ),
+                        now=now,
+                        allow_legacy_reactivation=allow_legacy_reactivation,
+                    )
                     synchronized += self._upsert_persona_candidates(
                         connection,
                         persona_id=persona_id,
