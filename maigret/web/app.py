@@ -174,6 +174,17 @@ live_jobs: Dict[str, Any] = {}
 PERSISTENT_CANCEL_POLL_SECONDS = 0.25
 
 
+def resolve_selected_site(sites, result_site_name):
+    """Resolve Maigret's mirror display name back to its canonical site key."""
+    direct = sites.get(result_site_name)
+    if direct is not None:
+        return result_site_name, direct
+    for canonical_name, site in sites.items():
+        if getattr(site, 'pretty_name', canonical_name) == result_site_name:
+            return canonical_name, site
+    return result_site_name, None
+
+
 class StreamNotify:
     """query_notify shim: pushes each per-site check into a queue as an SSE event.
 
@@ -211,28 +222,29 @@ class StreamNotify:
             self.cancel_requested = True
             raise asyncio.CancelledError()
         self.checked += 1
+        canonical_site_name, selected_site = resolve_selected_site(
+            self.sites, result.site_name
+        )
         if not is_similar:
             entry = {'status': result, 'url_user': result.site_url_user}
-            site = self.sites.get(result.site_name)
-            if site is not None:
-                entry['site'] = site
-                entry['url_main'] = site.url_main
-            self.results[result.site_name] = entry
+            if selected_site is not None:
+                entry['site'] = selected_site
+                entry['url_main'] = selected_site.url_main
+            self.results[canonical_site_name] = entry
         if result.status == MaigretCheckStatus.CLAIMED and not is_similar:
             ids = {
                 k: v
                 for k, v in (result.ids_data or {}).items()
                 if k != '_extractor' and isinstance(v, (str, int, float))
             }
-            site = self.sites.get(result.site_name)
             decision = classify_profile_detection(
                 username=result.username or self.username,
-                site_name=result.site_name,
+                site_name=canonical_site_name,
                 url=result.site_url_user,
                 evidence=result.ids_data or {},
-                check_type=getattr(site, 'check_type', '') or '',
+                check_type=getattr(selected_site, 'check_type', '') or '',
                 health_state=detector_health_for_site(
-                    get_detector_health_registry(), result.site_name
+                    get_detector_health_registry(), canonical_site_name
                 ),
                 status_context=result.context,
                 status_error=str(result.error) if result.error else '',
@@ -1307,12 +1319,17 @@ def profile_detection_record(
     }
 
 
-def supported_general_results(general_results, detector_health_registry=None):
-    """Return the Maigret result shape containing supported detections only."""
+def general_results_for_classifications(
+    general_results,
+    allowed_classifications,
+    detector_health_registry=None,
+):
+    """Return the Maigret result shape containing only allowed result classes."""
     registry = detector_health_registry or get_detector_health_registry()
-    supported = []
+    allowed = set(allowed_classifications)
+    filtered = []
     for username, id_type, results in general_results:
-        reliable_sites = {}
+        retained_sites = {}
         for site_name, site_data in results.items():
             profile = profile_detection_record(
                 username,
@@ -1320,10 +1337,28 @@ def supported_general_results(general_results, detector_health_registry=None):
                 site_data,
                 detector_health_registry=registry,
             )
-            if profile and profile['classification'] == 'supported':
-                reliable_sites[site_name] = site_data
-        supported.append((username, id_type, reliable_sites))
-    return supported
+            if profile and profile['classification'] in allowed:
+                retained_sites[site_name] = site_data
+        filtered.append((username, id_type, retained_sites))
+    return filtered
+
+
+def supported_general_results(general_results, detector_health_registry=None):
+    """Return the Maigret result shape containing supported detections only."""
+    return general_results_for_classifications(
+        general_results,
+        {'supported'},
+        detector_health_registry,
+    )
+
+
+def actionable_general_results(general_results, detector_health_registry=None):
+    """Exclude suppressed hits before optional profile corroboration collectors."""
+    return general_results_for_classifications(
+        general_results,
+        {'supported', 'candidate'},
+        detector_health_registry,
+    )
 
 
 def get_session_metadata_path(session_folder: str) -> str:
@@ -1376,12 +1411,15 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
         if not isinstance(found_count, int) or found_count < 0:
             raise ValueError('Invalid profile count in report session metadata')
         normalized['found_count'] = found_count
-        for count_key in (
-            'candidate_count',
-            'suppressed_count',
-            'raw_claimed_count',
-        ):
-            count = normalized.get(count_key, 0)
+        count_defaults = {
+            'candidate_count': 0,
+            'suppressed_count': 0,
+            # Before reliability triage found_count represented every raw
+            # CLAIMED result. Preserve that audit count for legacy sessions.
+            'raw_claimed_count': found_count,
+        }
+        for count_key, default_count in count_defaults.items():
+            count = normalized.get(count_key, default_count)
             if not isinstance(count, int) or count < 0:
                 raise ValueError(
                     f'Invalid {count_key.replace("_", " ")} in report session metadata'
@@ -2605,7 +2643,10 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     observations = []
     job['collector_observations'] = observations
     investigation_plan = options.get('investigation_spec') or {}
-    github_targets = github_profile_targets(general_results, investigation_plan)
+    corroboration_results = actionable_general_results(general_results)
+    github_targets = github_profile_targets(
+        corroboration_results, investigation_plan
+    )
     if github_targets and not (
         job['cancelled'] or (cancellation_check and cancellation_check())
     ):
@@ -2664,7 +2705,7 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 }
             )
     profile_url_targets = claimed_profile_url_targets(
-        general_results, investigation_plan
+        corroboration_results, investigation_plan
     )
     if profile_url_targets and not (
         job['cancelled'] or (cancellation_check and cancellation_check())

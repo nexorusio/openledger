@@ -29,6 +29,21 @@ from maigret.web.profile_reliability import (
 )
 
 
+TRANSPORT_UNKNOWN_STATUS_CODES = frozenset(
+    {401, 403, 407, 408, 425, 429, 451, 500, 502, 503, 504, 999}
+)
+TRANSPORT_UNKNOWN_MARKERS = (
+    "access denied",
+    "blocked",
+    "captcha",
+    "challenge",
+    "cloudflare",
+    "login required",
+    "rate limit",
+    "verify you are human",
+)
+
+
 def repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -137,6 +152,25 @@ def evaluate_probe_results(results: Iterable[Mapping[str, Any]]) -> Dict[str, st
     return {"outcome": "pass", "reason": "All detector canaries matched expectations."}
 
 
+def transport_aware_status(
+    actual: str,
+    *,
+    http_status: Any = None,
+    context: Any = "",
+) -> str:
+    """Keep anti-bot and transient transport responses out of failure streaks."""
+    try:
+        status_code = int(http_status)
+    except (TypeError, ValueError):
+        status_code = None
+    context_text = " ".join(str(context or "").split()).casefold()
+    if status_code in TRANSPORT_UNKNOWN_STATUS_CODES or any(
+        marker in context_text for marker in TRANSPORT_UNKNOWN_MARKERS
+    ):
+        return "unknown"
+    return actual
+
+
 async def probe_site(
     site: MaigretSite,
     *,
@@ -167,7 +201,8 @@ async def probe_site(
                     is_parsing_enabled=False,
                     retries=1,
                 )
-            result = (raw.get(site.name) or {}).get("status")
+            site_result = raw.get(site.name) or {}
+            result = site_result.get("status")
             actual = (
                 result.status.value.casefold()
                 if result is not None
@@ -178,10 +213,26 @@ async def probe_site(
                 if result is not None
                 else "No result returned"
             )
+            http_status = site_result.get("http_status")
+            actual = transport_aware_status(
+                actual,
+                http_status=http_status,
+                context=context,
+            )
         except Exception as error:  # Preserve a bounded diagnostic; continue all sites.
             actual = "error"
             context = type(error).__name__
-        results.append({**probe, "actual": actual, "context": context})
+            http_status = None
+        results.append(
+            {
+                **probe,
+                "actual": actual,
+                "context": context,
+                "http_status": http_status,
+                "check_type": site.check_type,
+                "protection": list(site.protection or [])[:20],
+            }
+        )
 
     evaluation = evaluate_probe_results(results)
     return {

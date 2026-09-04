@@ -1948,6 +1948,127 @@ def test_live_scan_analyzes_and_archives_only_native_claimed_profile_urls(
     }
 
 
+def test_live_scan_does_not_enrich_suppressed_profile_hit(
+    client, web_app, monkeypatch
+):
+    collector_calls = []
+
+    async def fake_search(*args, **kwargs):
+        notify = kwargs['query_notify']
+        result = MaigretCheckResult(
+            username='alice',
+            site_name='Generic Social',
+            site_url_user='https://social.example/alice',
+            status=MaigretCheckStatus.CLAIMED,
+            ids_data={'description': 'Log in or create an account'},
+        )
+        notify.update(result)
+        return {
+            'Generic Social': {
+                'status': result,
+                'url_user': result.site_url_user,
+            }
+        }
+
+    async def unexpected_collector(_target):
+        collector_calls.append(_target)
+        raise AssertionError('suppressed hit reached a follow-up collector')
+
+    monkeypatch.setattr(maigret, 'search', fake_search)
+    monkeypatch.setattr(web_app, 'run_unfurl_url_analysis', unexpected_collector)
+    monkeypatch.setattr(web_app, 'run_wayback_capture_index', unexpected_collector)
+    monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
+    monkeypatch.setattr(
+        maigret.report, 'generate_report_context', lambda *a, **kw: {}
+    )
+
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={
+            'identifier_type': 'username',
+            'identifier_value': 'alice',
+            'processing_mode': 'independent',
+            'enable_archived_url_evidence': 'on',
+        },
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
+    job_id = start.get_json()['job_id']
+    body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
+
+    assert collector_calls == []
+    assert '"type": "suppressed"' in body
+    result = web_app.job_results[job_id]
+    assert result['found_count'] == 0
+    assert result['suppressed_count'] == 1
+    assert result['collector_observations'] == []
+
+
+def test_stream_notify_resolves_mirror_to_canonical_detector(
+    web_app, monkeypatch
+):
+    event_queue = web_app.queue.Queue()
+    mirror = web_app.MaigretDatabase().load_from_path(TEST_DB).sites[0]
+    mirror.name = 'Mirror'
+    mirror.source = 'Parent'
+    mirror.check_type = 'message'
+    monkeypatch.setattr(
+        web_app,
+        'get_detector_health_registry',
+        lambda: {
+            'schema_version': 1,
+            'generated_at': None,
+            'sites': {
+                'mirror': {
+                    'site_name': 'Mirror',
+                    'state': 'degraded',
+                }
+            },
+        },
+    )
+    notify = web_app.StreamNotify(event_queue, 'alice')
+    notify.set_sites({'Mirror': mirror})
+    result = MaigretCheckResult(
+        username='alice',
+        site_name='Mirror [Parent]',
+        site_url_user='https://mirror.example/alice',
+        status=MaigretCheckStatus.CLAIMED,
+        ids_data={'fullname': 'Alice Example', 'description': 'Researcher'},
+    )
+
+    notify.update(result)
+    events = []
+    while not event_queue.empty():
+        events.append(event_queue.get_nowait())
+
+    assert 'Mirror' in notify.results
+    assert 'Mirror [Parent]' not in notify.results
+    candidate = next(event for event in events if event['type'] == 'candidate')
+    assert candidate['site'] == 'Mirror [Parent]'
+    assert 'degraded' in candidate['reason']
+
+
+def test_legacy_persisted_result_preserves_raw_claimed_count(web_app):
+    normalized = web_app.normalize_persisted_result(
+        'legacy',
+        {
+            'status': 'completed',
+            'session_folder': 'search_legacy',
+            'graph_file': 'search_legacy/combined_graph.html',
+            'usernames': ['alice'],
+            'individual_reports': [],
+            'found_count': 7,
+        },
+    )
+
+    assert normalized['found_count'] == 7
+    assert normalized['raw_claimed_count'] == 7
+
+
 def test_live_scan_empty_username_rejected(client, web_app):
     client.get('/')
     resp = client.post(

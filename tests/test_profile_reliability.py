@@ -17,6 +17,7 @@ from maigret.web.profile_reliability import (
 from utils.detector_health_canary import (
     build_probe_plan,
     evaluate_probe_results,
+    transport_aware_status,
 )
 
 
@@ -210,3 +211,15 @@ def test_canary_evaluation_distinguishes_contradiction_from_unknown():
 
     assert failed["outcome"] == "fail"
     assert unknown["outcome"] == "unknown"
+
+
+@pytest.mark.parametrize("http_status", [403, 429, 503, 999])
+def test_canary_treats_anti_bot_transport_as_unknown(http_status):
+    assert (
+        transport_aware_status("available", http_status=http_status)
+        == "unknown"
+    )
+
+
+def test_canary_keeps_normal_missing_response_available():
+    assert transport_aware_status("available", http_status=404) == "available"
