@@ -269,6 +269,27 @@ def test_canary_plan_preserves_required_username_separators():
     assert all(probe["username"].count("-") == 3 for probe in random_probes)
 
 
+def test_canary_rejects_low_entropy_mutations_of_short_known_handles():
+    site = MaigretSite(
+        "Short-template",
+        {
+            "urlMain": "https://example.test/",
+            "url": "https://example.test/{username}",
+            "regexCheck": r"^[a-z0-9_]{1,15}$",
+            "usernameClaimed": "blue",
+            "usernameUnclaimed": "gone",
+        },
+    )
+
+    plan = build_probe_plan(site, samples=3, rng=random.Random(19))
+    random_probes = [
+        probe for probe in plan if probe["kind"] == "high_entropy_missing"
+    ]
+
+    assert len(random_probes) == 3
+    assert all(len(probe["username"]) >= 10 for probe in random_probes)
+
+
 def test_canary_evaluation_distinguishes_contradiction_from_unknown():
     failed = evaluate_probe_results(
         [

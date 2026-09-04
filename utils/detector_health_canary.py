@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import random
 import re
 import string
@@ -42,6 +43,7 @@ TRANSPORT_UNKNOWN_MARKERS = (
     "rate limit",
     "verify you are human",
 )
+MIN_HIGH_ENTROPY_BITS = 40.0
 
 
 def repo_root() -> Path:
@@ -79,6 +81,21 @@ def _randomize_username_template(template: str, rng: random.Random) -> str:
     return "".join(characters)
 
 
+def _template_mutation_entropy_bits(template: str, candidate: str) -> float:
+    """Conservatively estimate entropy added by randomized template positions."""
+    if len(template) != len(candidate):
+        return 0.0
+    entropy = 0.0
+    for original, replacement in zip(template, candidate):
+        if original == replacement:
+            continue
+        if original.isdigit() and replacement.isdigit():
+            entropy += math.log2(9)
+        elif original.isalpha() and replacement.isalpha():
+            entropy += math.log2(25)
+    return entropy
+
+
 def high_entropy_usernames(
     site: MaigretSite,
     *,
@@ -105,14 +122,18 @@ def high_entropy_usernames(
         alphabet = alphabets[_attempt % len(alphabets)]
         length = lengths[(_attempt // len(alphabets)) % len(lengths)]
         if templates and _attempt % 2 == 0:
+            template = templates[(_attempt // 2) % len(templates)]
             candidate = _randomize_username_template(
-                templates[(_attempt // 2) % len(templates)],
+                template,
                 rng,
             )
+            entropy_bits = _template_mutation_entropy_bits(template, candidate)
         else:
             candidate = "".join(rng.choice(alphabet) for _ in range(length))
+            entropy_bits = length * math.log2(len(alphabet))
         if (
-            candidate.casefold() not in existing
+            entropy_bits >= MIN_HIGH_ENTROPY_BITS
+            and candidate.casefold() not in existing
             and candidate not in generated
             and _matches_site(site, candidate)
         ):
