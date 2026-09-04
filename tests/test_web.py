@@ -2345,12 +2345,50 @@ def test_live_results_for_finished_job_skips_sse_and_shows_reports(client, web_a
         'usernames': ['soxoj'],
         'individual_reports': [],
         'found_count': 0,
+        'profile_reliability_version': 1,
     }
 
     resp = client.get('/live/finishedjob')
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert 'const doneRedirect = "/results/search_finishedjob";' in body
+
+
+def test_live_results_normalizes_database_only_legacy_completion(
+    client, web_app, monkeypatch
+):
+    legacy = {
+        'job_id': 'database-live-legacy',
+        'kind': 'legacy',
+        'status': 'completed',
+        'session_folder': 'search_database-live-legacy',
+        'graph_file': 'search_database-live-legacy/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [
+            {
+                'username': 'alice',
+                'claimed_profiles': [
+                    {'site_name': 'One', 'url': 'https://example.test/one'},
+                    {'site_name': 'Two', 'url': 'https://example.test/two'},
+                ],
+            }
+        ],
+        'found_count': 2,
+    }
+    monkeypatch.setattr(
+        web_app,
+        'case_store',
+        types.SimpleNamespace(get_job=lambda _job_id: legacy),
+    )
+
+    body = client.get('/live/database-live-legacy').get_data(as_text=True)
+
+    assert 'const completedFoundCount = 0;' in body
+    assert 'const completedUntriagedCount = 2;' in body
+    assert 'const legacyUntriaged = true;' in body
+    assert 'Legacy untriaged hits' in body
+    assert 'Rerun required' in body
+    assert 'id="graph"' not in body
 
 
 def test_live_scan_done_event_offers_redirect_not_auto_navigation(

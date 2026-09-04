@@ -6776,7 +6776,17 @@ def live_results(job_id):
                 "persona_workspace", persona_id=result["persona_id"]
             )
         else:
+            result = normalize_job_summary_entry(result)
             done_redirect = url_for("results", session_id=result["session_folder"])
+
+    legacy_untriaged = bool(
+        result
+        and result.get("status") == "completed"
+        and result.get("kind")
+        not in {"affiliation", "case_fusion", "identity_enrichment"}
+        and result.get("profile_reliability_version")
+        != PROFILE_RELIABILITY_VERSION
+    )
 
     return render_template(
         "live.html",
@@ -6786,6 +6796,8 @@ def live_results(job_id):
         completed_found_count=(result or {}).get("found_count", 0),
         completed_candidate_count=(result or {}).get("candidate_count", 0),
         completed_suppressed_count=(result or {}).get("suppressed_count", 0),
+        completed_untriaged_count=(result or {}).get("untriaged_count", 0),
+        legacy_untriaged=legacy_untriaged,
         completed_registration_count=(result or {}).get(
             "collector_registration_count",
             (result or {}).get("collector_found_count", 0),
