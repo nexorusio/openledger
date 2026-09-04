@@ -91,6 +91,20 @@ def test_index_renders(client):
     assert 'Nexorus, urban planning' not in body
 
 
+def test_username_verification_requires_explicit_browser_opt_in(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
+
+    body = client.get('/').get_data(as_text=True)
+    marker = 'id="enable-user-scanner-username"'
+    marker_position = body.index(marker)
+    input_start = body.rindex('<input', 0, marker_position)
+    input_end = body.index('>', marker_position)
+
+    assert 'checked' not in body[input_start:input_end]
+
+
 def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
     response = client.get('/')
 
