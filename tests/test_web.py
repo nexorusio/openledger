@@ -221,6 +221,7 @@ def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
                 'status': 'completed',
                 'session_folder': 'search_assessed',
                 'found_count': 7,
+                'profile_reliability_version': 1,
             },
             'failed': {
                 'status': 'failed',
@@ -2489,6 +2490,7 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
         'usernames': ['soxoj', 'alice'],
         'individual_reports': [],
         'found_count': 7,
+        'profile_reliability_version': 1,
         'started_at': '2026-07-28 10:00:00',
     }
     web_app.job_results['ts_failed'] = {
@@ -2514,6 +2516,45 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
 
     # Newest run listed first.
     assert body.index('search_ts_completed') < body.index('bob')
+
+
+def test_history_and_dashboard_withhold_database_legacy_claims(
+    client, web_app, monkeypatch
+):
+    legacy = {
+        'job_id': 'database-history-legacy',
+        'kind': 'legacy',
+        'status': 'completed',
+        'session_folder': 'search_database-history-legacy',
+        'graph_file': 'search_database-history-legacy/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [
+            {
+                'username': 'alice',
+                'claimed_profiles': [
+                    {
+                        'site_name': 'Legacy Social',
+                        'url': 'https://example.test/alice',
+                    }
+                ],
+            }
+        ],
+        'found_count': 1,
+        'started_at': '2026-07-28 10:00:00',
+    }
+    monkeypatch.setattr(
+        web_app,
+        'case_store',
+        types.SimpleNamespace(list_jobs=lambda: [legacy]),
+    )
+
+    history_body = client.get('/history').get_data(as_text=True)
+    dashboard_body = client.get('/').get_data(as_text=True)
+
+    assert '1 untriaged profile · rerun required' in history_body
+    assert '1 supported profile' not in history_body
+    assert '1 legacy hit require rerun' in dashboard_body
+    assert '<strong class="metric-value">0</strong>' in dashboard_body
 
 
 def test_history_can_permanently_delete_one_investigation(client, web_app):
@@ -2844,6 +2885,36 @@ def test_site_selection_excludes_reviewed_quarantined_detector(web_app):
 
     assert quarantined_name not in filtered
     assert len(filtered) == len(baseline) - 1
+
+
+def test_site_selection_backfills_quarantined_detector_before_limit(web_app):
+    sites = {
+        name: types.SimpleNamespace(tags=['social'])
+        for name in ('First', 'Second', 'Third')
+    }
+
+    class FakeDatabase:
+        def ranked_sites_dict(self, **kwargs):
+            assert kwargs['top'] == 3
+            return dict(list(sites.items())[: kwargs['top']])
+
+    selected = web_app.select_sites_for_search(
+        FakeDatabase(),
+        top_sites=2,
+        all_sites=False,
+        tags=[],
+        excluded_tags=[],
+        site_list=[],
+        detector_health_registry={
+            'schema_version': 1,
+            'generated_at': None,
+            'sites': {
+                'first': {'site_name': 'First', 'state': 'quarantined'},
+            },
+        },
+    )
+
+    assert list(selected) == ['Second', 'Third']
 
 
 def test_ai_markdown_includes_only_explicitly_approved_operator_context(web_app):

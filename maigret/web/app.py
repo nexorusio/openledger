@@ -1107,11 +1107,21 @@ def select_sites_for_search(
     detector_health_registry=None,
 ):
     """Select sources while excluding detectors quarantined by reviewed canaries."""
+    health_registry = detector_health_registry or get_detector_health_registry()
+    quarantined_count = sum(
+        1
+        for entry in health_registry.get('sites', {}).values()
+        if isinstance(entry, dict) and entry.get('state') == 'quarantined'
+    )
     country_tags = {
         tag.lower() for tag in tags if is_country_tag(tag) and tag != 'global'
     }
     category_tags = [tag for tag in tags if not is_country_tag(tag)]
-    ranking_limit = 999999999 if country_tags or all_sites else top_sites
+    ranking_limit = (
+        999999999
+        if country_tags or all_sites
+        else top_sites + quarantined_count
+    )
     ranked_sites = db.ranked_sites_dict(
         top=ranking_limit,
         tags=category_tags,
@@ -1131,14 +1141,13 @@ def select_sites_for_search(
             if not site_countries or allowed_coverage.intersection(site_countries):
                 filtered_sites[name] = site
         ranked_sites = filtered_sites
-    if not all_sites:
-        ranked_sites = dict(list(ranked_sites.items())[:top_sites])
-    health_registry = detector_health_registry or get_detector_health_registry()
     ranked_sites = {
         name: site
         for name, site in ranked_sites.items()
         if detector_health_for_site(health_registry, name) != 'quarantined'
     }
+    if not all_sites:
+        ranked_sites = dict(list(ranked_sites.items())[:top_sites])
     return ranked_sites
 
 
@@ -1484,6 +1493,53 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
             normalized[count_key] = count
     else:
         normalized['error'] = str(normalized.get('error', 'Unknown error occurred.'))
+    return normalized
+
+
+def normalize_job_summary_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Withhold pre-triage counts in list/dashboard views as well as results."""
+    normalized = dict(entry)
+    if normalized.get('status') != 'completed' or normalized.get('kind') in {
+        'affiliation',
+        'case_fusion',
+        'identity_enrichment',
+    }:
+        return normalized
+    if (
+        normalized.get('profile_reliability_version')
+        == PROFILE_RELIABILITY_VERSION
+    ):
+        return normalized
+
+    session_key = str(normalized.get('job_id') or '')
+    if not SESSION_KEY_PATTERN.fullmatch(session_key):
+        session_folder = str(normalized.get('session_folder') or '')
+        if session_folder.startswith('search_'):
+            session_key = session_folder.removeprefix('search_')
+    if SESSION_KEY_PATTERN.fullmatch(session_key):
+        try:
+            return normalize_persisted_result(session_key, normalized)
+        except (TypeError, ValueError):
+            # Some old database rows contain only summary fields. They still
+            # must fail closed instead of presenting raw CLAIMED hits as facts.
+            pass
+
+    raw_count = normalized.get(
+        'raw_claimed_count',
+        normalized.get('found_count', 0),
+    )
+    try:
+        raw_count = max(0, int(raw_count or 0))
+    except (TypeError, ValueError):
+        raw_count = 0
+    normalized.update(
+        {
+            'profile_reliability_version': 0,
+            'found_count': 0,
+            'raw_claimed_count': raw_count,
+            'untriaged_count': raw_count,
+        }
+    )
     return normalized
 
 
@@ -4730,17 +4786,23 @@ def persona_display_identifier_type(persona):
 def investigation_builder_context(persona=None):
     """Build the shared New investigation and Persona-rerun form context."""
     refresh_job_results_from_disk()
-    entries = (
+    raw_entries = (
         case_store.list_jobs()
         if case_store is not None
         else list(job_results.values())
     )
+    entries = [normalize_job_summary_entry(entry) for entry in raw_entries]
     completed = sum(1 for entry in entries if entry.get('status') == 'completed')
     failed = sum(1 for entry in entries if entry.get('status') == 'failed')
     profiles_found = sum(
         entry.get('found_count', 0)
         for entry in entries
         if isinstance(entry.get('found_count', 0), int)
+    )
+    untriaged_profiles = sum(
+        entry.get('untriaged_count', 0)
+        for entry in entries
+        if isinstance(entry.get('untriaged_count', 0), int)
     )
     ai_assessments = 0
     for entry in entries:
@@ -4794,6 +4856,7 @@ def investigation_builder_context(persona=None):
             'completed': completed,
             'failed': failed,
             'profiles_found': profiles_found,
+            'untriaged_profiles': untriaged_profiles,
             'ai_assessments': ai_assessments,
         },
         'investigation_persona': persona,
@@ -4966,9 +5029,11 @@ def history():
     refresh_job_results_from_disk()
     entries_by_folder = {}
     for entry in (case_store.list_jobs() if case_store is not None else []):
+        entry = normalize_job_summary_entry(entry)
         key = entry.get('session_folder') or f"database:{entry.get('job_id')}"
         entries_by_folder[key] = entry
     for session_key, entry in job_results.items():
+        entry = normalize_job_summary_entry(entry)
         key = entry.get('session_folder') or f"legacy:{session_key}"
         entries_by_folder.setdefault(key, entry)
     entries = sorted(
@@ -5118,18 +5183,33 @@ def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]
                 f"{identifier_count} identifier"
                 f"{'s' if identifier_count != 1 else ''} checked"
             )
+        legacy_untriaged = (
+            entry.get("status") == "completed"
+            and entry.get("profile_reliability_version")
+            != PROFILE_RELIABILITY_VERSION
+        )
         found = (
-            entry.get("found_count")
-            if entry.get("status") == "completed"
-            else (entry.get("progress") or {}).get("found", 0)
+            entry.get("untriaged_count", entry.get("raw_claimed_count", 0))
+            if legacy_untriaged
+            else (
+                entry.get("found_count")
+                if entry.get("status") == "completed"
+                else (entry.get("progress") or {}).get("found", 0)
+            )
         )
         try:
             found = int(found or 0)
         except (TypeError, ValueError):
             found = 0
-        finding_summary = (
-            f"{found} supported profile{'s' if found != 1 else ''}"
-        )
+        if legacy_untriaged:
+            finding_summary = (
+                f"{found} untriaged profile{'s' if found != 1 else ''}"
+                " · rerun required"
+            )
+        else:
+            finding_summary = (
+                f"{found} supported profile{'s' if found != 1 else ''}"
+            )
 
     status = str(entry.get("status") or "")
     if status == "queued":

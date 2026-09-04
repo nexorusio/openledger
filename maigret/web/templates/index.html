@@ -41,7 +41,10 @@
         <div class="metric-copy">
             <span class="metric-label">Supported profiles</span>
             <strong class="metric-value">{{ dashboard_metrics.profiles_found }}</strong>
-            <small class="metric-detail">Claimed matches across saved investigations</small>
+            <small class="metric-detail">
+                Evidence-triaged matches across saved investigations{% if dashboard_metrics.untriaged_profiles %}
+                · {{ dashboard_metrics.untriaged_profiles }} legacy hit{{ 's' if dashboard_metrics.untriaged_profiles != 1 else '' }} require rerun{% endif %}
+            </small>
         </div>
     </article>
     <article class="metric-card">
