@@ -238,6 +238,16 @@ claim_evidence = Table(
 )
 Index("ix_claim_evidence_claim_id", claim_evidence.c.claim_id)
 
+
+def _active_claim_evidence_clause():
+    marker_status = claim_evidence.c.details[LEGACY_EVIDENCE_MARKER][
+        "status"
+    ].as_string()
+    return or_(
+        marker_status.is_(None),
+        marker_status != "legacy_untriaged",
+    )
+
 claim_reviews = Table(
     "claim_reviews",
     metadata,
@@ -4917,7 +4927,10 @@ class CaseStore:
             evidence_rows = list(
                 connection.execute(
                     select(claim_evidence)
-                    .where(claim_evidence.c.claim_id.in_(claim_ids))
+                    .where(
+                        claim_evidence.c.claim_id.in_(claim_ids),
+                        _active_claim_evidence_clause(),
+                    )
                     .order_by(
                         claim_evidence.c.claim_id,
                         claim_evidence.c.observed_at,
@@ -5892,7 +5905,8 @@ class CaseStore:
             if claim_ids:
                 for evidence in connection.execute(
                     select(claim_evidence).where(
-                        claim_evidence.c.claim_id.in_(claim_ids)
+                        claim_evidence.c.claim_id.in_(claim_ids),
+                        _active_claim_evidence_clause(),
                     )
                 ).mappings():
                     evidence_by_claim.setdefault(str(evidence["claim_id"]), []).append(

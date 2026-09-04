@@ -487,7 +487,10 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
         "site_name": "Example Social",
         "url": "https://example.test/alice",
         "confidence": "strong",
-        "evidence": {"fullname": "Alice Example"},
+        "evidence": {
+            "fullname": "Alice Example",
+            "company": "Nexorus",
+        },
     }
     legacy_result = {
         "status": "completed",
@@ -506,13 +509,13 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
     )
     persona_id = case["personas"][0]["id"]
     claims = persistent_store.get_persona(persona_id)["claims"]
-    assert len(claims) == 2
+    assert len(claims) == 3
     for claim in claims:
         persistent_store.review_claim(claim["id"], "approved", "analyst")
 
     assert persistent_store.retire_pretriage_profile_claims(
         current_reliability_version=1
-    ) == 2
+    ) == 3
     assert persistent_store.retire_pretriage_profile_claims(
         current_reliability_version=1
     ) == 0
@@ -557,7 +560,7 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
         case["id"],
         role="user",
         author="analyst",
-        content="Alice's full name is Alice Example.",
+        content="Alice's full name is Alice Example and her company is Nexorus.",
         persona_id=persona_id,
     )
     assistant_message = persistent_store.append_case_chat_message(
@@ -581,7 +584,19 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
                 "latitude": None,
                 "longitude": None,
                 "coordinate_precision": None,
-            }
+            },
+            {
+                "field_name": "company",
+                "value": "Nexorus",
+                "confidence": 50,
+                "evidence_basis": "user_statement",
+                "source_url": None,
+                "source_title": None,
+                "reason": "The analyst explicitly supplied the company.",
+                "latitude": None,
+                "longitude": None,
+                "coordinate_precision": None,
+            },
         ],
         sources=[],
         target_persona="alice",
@@ -594,7 +609,7 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
     )
     assert persistent_store.sync_case_chat_persona_claims(
         case["id"], persona_id, candidates
-    )["count"] == 1
+    )["count"] == 2
     independently_refreshed = {
         claim["field_name"]: claim
         for claim in persistent_store.get_persona(persona_id)["claims"]
@@ -634,6 +649,102 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
     persistent_store.review_claim(
         independently_refreshed["full_name"]["id"], "approved", "analyst"
     )
+    persistent_store.review_claim(
+        independently_refreshed["company"]["id"], "approved", "analyst"
+    )
+
+    corroborating_job_id = persistent_store.create_investigation(["ally"], {})
+    persistent_store.claim_next("worker:corroborating-current")
+    corroborating_result = {
+        "status": "completed",
+        "session_folder": f"search_{corroborating_job_id}",
+        "usernames": ["ally"],
+        "graph_file": f"search_{corroborating_job_id}/graph.html",
+        "found_count": 1,
+        "profile_reliability_version": 1,
+        "individual_reports": [
+            {
+                "username": "ally",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Corroborating Social",
+                        "url": "https://corroborating.example/ally",
+                        "confidence": "strong",
+                        "evidence": {
+                            "fullname": "Alice Example",
+                            "company": "Nexorus",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(corroborating_job_id, corroborating_result)
+    persistent_store.sync_persona_claims(
+        corroborating_job_id,
+        corroborating_result,
+    )
+    corroborating_case = persistent_store.get_case(
+        persistent_store.get_job(corroborating_job_id)["case_id"]
+    )
+    corroborating_persona = persistent_store.get_persona(
+        corroborating_case["personas"][0]["id"]
+    )
+    corroborating_name = next(
+        claim
+        for claim in corroborating_persona["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    persistent_store.review_claim(
+        corroborating_name["id"],
+        "approved",
+        "analyst",
+    )
+    corroborating_company = next(
+        claim
+        for claim in corroborating_persona["claims"]
+        if claim["field_name"] == "company"
+    )
+    persistent_store.review_claim(
+        corroborating_company["id"],
+        "approved",
+        "analyst",
+    )
+
+    relationship_graph = persistent_store.build_relationship_graph()
+    reactivated_edge = next(
+        edge
+        for edge in relationship_graph["edges"]
+        if edge["claim_id"] == independently_refreshed["company"]["id"]
+    )
+    assert {source["name"] for source in reactivated_edge["sources"]} == {
+        "Case chat · analyst"
+    }
+
+    fusion_job_id = persistent_store.create_combined_investigation(
+        [case["id"], corroborating_case["id"]],
+        title="Evidence isolation regression",
+        purpose="Ensure retired profile evidence stays outside active analysis.",
+        created_by="analyst",
+    )
+    persistent_store.claim_next("worker:evidence-isolation-fusion")
+    fusion_snapshot = persistent_store.build_case_fusion_snapshot(fusion_job_id)
+    fused_claim = next(
+        claim
+        for claim in fusion_snapshot["analysis_context"]["approved_claims"]
+        if claim["claim_id"] == independently_refreshed["company"]["id"]
+    )
+    assert {source["name"] for source in fused_claim["sources"]} == {
+        "Case chat · analyst"
+    }
+    manifest_claim = next(
+        claim
+        for claim in fusion_snapshot["snapshot"]["approved_claims"]
+        if claim["id"] == independently_refreshed["company"]["id"]
+    )
+    assert manifest_claim["evidence_ids"] == [
+        independently_refreshed["company"]["evidence"][0]["id"]
+    ]
 
     refresh_job_id = persistent_store.repeat_persona_investigation(persona_id)
     persistent_store.claim_next("worker:refresh")
@@ -657,7 +768,7 @@ def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
     )
     assert persistent_store.build_persona_graph(persona_id)["stats"][
         "claim_count"
-    ] == 2
+    ] == 3
 
 
 def test_independent_observation_reactivates_legacy_claim_as_pending(
