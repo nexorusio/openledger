@@ -730,10 +730,36 @@ def test_deleting_latest_job_repoints_claims_to_surviving_current_lineage(
     assert all(
         claim["source_job_id"] == refresh_job_id for claim in latest_claims
     )
+    social_claim = next(
+        claim for claim in latest_claims if claim["field_name"] == "social_account"
+    )
+    chat_message = persistent_store.append_case_chat_message(
+        case["id"],
+        role="user",
+        author="analyst",
+        content="This public account is independently known.",
+        persona_id=persona_id,
+    )
+    persistent_store.record_claim_observation(
+        social_claim["id"],
+        source_engine="case_chat_user_statement",
+        native_status="analyst_statement",
+        chat_message_id=chat_message["id"],
+        confidence=50,
+        details={"independent_of_profile_scan": True},
+    )
 
     assert persistent_store.delete_job(refresh_job_id) is True
     surviving_claims = persistent_store.get_persona(persona_id)["claims"]
-    assert all(claim["source_job_id"] == job_id for claim in surviving_claims)
+    surviving_by_field = {
+        claim["field_name"]: claim for claim in surviving_claims
+    }
+    assert surviving_by_field["full_name"]["source_job_id"] == job_id
+    assert surviving_by_field["social_account"]["source_job_id"] is None
+    assert (
+        surviving_by_field["social_account"]["source_engine"]
+        == "case_chat_user_statement"
+    )
     assert all(claim["review_status"] == "approved" for claim in surviving_claims)
     assert all(
         claim["reliability_status"] == "current" for claim in surviving_claims

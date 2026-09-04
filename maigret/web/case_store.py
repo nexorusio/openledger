@@ -6101,41 +6101,109 @@ class CaseStore:
         claim_ids = [str(claim["id"]) for claim in claims]
         if not claim_ids:
             return []
-        observations = connection.execute(
-            select(
-                claim_observations.c.id,
-                claim_observations.c.claim_id,
-                claim_observations.c.job_id,
-                claim_observations.c.source_engine,
-                claim_observations.c.observed_at,
-                investigation_jobs.c.result,
+        observations = list(
+            connection.execute(
+                select(
+                    claim_observations.c.id,
+                    claim_observations.c.claim_id,
+                    claim_observations.c.provenance_type,
+                    claim_observations.c.job_id,
+                    claim_observations.c.external_evidence_id,
+                    claim_observations.c.chat_message_id,
+                    claim_observations.c.source_engine,
+                    claim_observations.c.observed_at,
+                )
+                .where(
+                    claim_observations.c.claim_id.in_(claim_ids),
+                    claim_observations.c.source_engine
+                    != RELIABILITY_MIGRATION_REVIEWER,
+                    ~claim_observations.c.source_engine.like(
+                        f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}%"
+                    ),
+                )
+                .order_by(
+                    claim_observations.c.observed_at.desc(),
+                    claim_observations.c.id.desc(),
+                )
+            ).mappings()
+        )
+        job_ids = {
+            str(observation["job_id"])
+            for observation in observations
+            if observation["job_id"] is not None
+            and str(observation["job_id"]) != deleting_job_id
+        }
+        job_rows = (
+            connection.execute(
+                select(
+                    investigation_jobs.c.id,
+                    investigation_jobs.c.status,
+                    investigation_jobs.c.result,
+                ).where(investigation_jobs.c.id.in_(job_ids))
+            ).mappings()
+            if job_ids
+            else []
+        )
+        jobs_by_id = {str(row["id"]): dict(row) for row in job_rows}
+        chat_message_ids = {
+            str(observation["chat_message_id"])
+            for observation in observations
+            if observation["chat_message_id"] is not None
+        }
+        surviving_chat_ids = (
+            set(
+                connection.scalars(
+                    select(case_chat_messages.c.id).where(
+                        case_chat_messages.c.id.in_(chat_message_ids)
+                    )
+                )
             )
-            .join(
-                investigation_jobs,
-                investigation_jobs.c.id == claim_observations.c.job_id,
+            if chat_message_ids
+            else set()
+        )
+        evidence_ids = {
+            str(observation["external_evidence_id"])
+            for observation in observations
+            if observation["external_evidence_id"] is not None
+        }
+        surviving_evidence_ids = (
+            set(
+                connection.scalars(
+                    select(external_evidence_records.c.id).where(
+                        external_evidence_records.c.id.in_(evidence_ids)
+                    )
+                )
             )
-            .where(
-                claim_observations.c.claim_id.in_(claim_ids),
-                claim_observations.c.job_id != deleting_job_id,
-                claim_observations.c.source_engine.in_(
-                    LEGACY_PROFILE_CLAIM_ENGINES
-                ),
-                investigation_jobs.c.status == "completed",
-            )
-            .order_by(
-                claim_observations.c.observed_at.desc(),
-                claim_observations.c.id.desc(),
-            )
-        ).mappings()
+            if evidence_ids
+            else set()
+        )
         surviving_by_claim: Dict[str, Dict[str, Any]] = {}
         for observation in observations:
             claim_id = str(observation["claim_id"])
-            result = dict(observation["result"] or {})
-            if (
-                claim_id not in surviving_by_claim
-                and result.get("profile_reliability_version")
-                == PROFILE_RELIABILITY_VERSION
-            ):
+            if claim_id in surviving_by_claim:
+                continue
+            provenance_type = str(observation["provenance_type"])
+            source_engine = str(observation["source_engine"])
+            job = jobs_by_id.get(str(observation["job_id"] or ""))
+            valid = False
+            if source_engine in LEGACY_PROFILE_CLAIM_ENGINES:
+                result = dict(job["result"] or {}) if job else {}
+                valid = bool(
+                    job
+                    and job["status"] == "completed"
+                    and result.get("profile_reliability_version")
+                    == PROFILE_RELIABILITY_VERSION
+                )
+            elif provenance_type == "investigation_job":
+                valid = bool(job and job["status"] == "completed")
+            elif provenance_type == "case_chat_message":
+                valid = observation["chat_message_id"] in surviving_chat_ids
+            elif provenance_type == "external_evidence":
+                valid = (
+                    observation["external_evidence_id"]
+                    in surviving_evidence_ids
+                )
+            if valid:
                 surviving_by_claim[claim_id] = dict(observation)
 
         retire_rows = []
