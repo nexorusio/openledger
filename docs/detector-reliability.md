@@ -38,7 +38,8 @@ that supports the same claim reactivates it and restores the latest human review
 decision; an untriaged claim cannot be newly approved before that rerun. An
 orphaned profile claim whose source job was deleted is handled the same way,
 because its reliability version can no longer be verified. New source-job
-deletions retire affected claims in the deletion transaction; the upgrade sweep
+deletions first repoint a claim to its newest surviving current-version lineage;
+claims without one are retired in the deletion transaction. The upgrade sweep
 also catches claims orphaned by an older deployment.
 
 ## Canary and quarantine policy

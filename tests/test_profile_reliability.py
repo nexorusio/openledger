@@ -212,6 +212,15 @@ def test_neutral_title_does_not_mask_explicit_login_shell_metadata():
     assert "generic or missing-page shell" in decision["reason"]
 
 
+@pytest.mark.parametrize("description", ["Blog influencer", "Design Innovator"])
+def test_shell_phrases_do_not_collide_inside_legitimate_words(description):
+    decision = _classify(
+        evidence={"fullname": "Alice Example", "description": description}
+    )
+
+    assert decision["classification"] == "supported"
+
+
 def test_canary_plan_uses_existing_missing_and_high_entropy_handles():
     site = MaigretSite(
         "Example",

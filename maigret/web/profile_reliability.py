@@ -10,6 +10,7 @@ registry consumed by both collection and report generation.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping
@@ -115,6 +116,15 @@ GENERIC_PAGE_MARKERS = (
     "sign in",
     "something went wrong",
 )
+
+
+def _contains_standalone_marker(value: str, markers: tuple[str, ...]) -> bool:
+    """Match page-shell phrases without colliding inside legitimate words."""
+    normalized = " ".join(str(value or "").casefold().split())
+    return any(
+        re.search(rf"(?<!\w){re.escape(marker)}(?!\w)", normalized)
+        for marker in markers
+    )
 
 
 class DetectorHealthRegistryError(ValueError):
@@ -457,7 +467,7 @@ def classify_profile_detection(
         if key in PROFILE_IDENTITY_FIELDS
     ]
     looks_generic = any(
-        any(marker in value for marker in GENERIC_PAGE_MARKERS)
+        _contains_standalone_marker(value, GENERIC_PAGE_MARKERS)
         for value in generic_values
     )
     signals = identity_keys + stable_id_keys + supporting_keys

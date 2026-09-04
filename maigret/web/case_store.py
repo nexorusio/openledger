@@ -4043,7 +4043,8 @@ class CaseStore:
         now = utcnow()
         synchronized = 0
         allow_legacy_reactivation = (
-            result.get("profile_reliability_version") == 1
+            result.get("profile_reliability_version")
+            == PROFILE_RELIABILITY_VERSION
         )
         with self.engine.begin() as connection:
             job_row = (
@@ -6088,6 +6089,77 @@ class CaseStore:
             {"id": str(row["id"]), "title": str(row["title"])} for row in rows
         ]
 
+    @staticmethod
+    def _repoint_profile_claims_with_surviving_lineage(
+        connection: Connection,
+        claim_rows: Iterable[Dict[str, Any]],
+        *,
+        deleting_job_id: str,
+    ) -> list[Dict[str, Any]]:
+        """Keep claims active only when another current job still supports them."""
+        claims = list(claim_rows)
+        claim_ids = [str(claim["id"]) for claim in claims]
+        if not claim_ids:
+            return []
+        observations = connection.execute(
+            select(
+                claim_observations.c.id,
+                claim_observations.c.claim_id,
+                claim_observations.c.job_id,
+                claim_observations.c.source_engine,
+                claim_observations.c.observed_at,
+                investigation_jobs.c.result,
+            )
+            .join(
+                investigation_jobs,
+                investigation_jobs.c.id == claim_observations.c.job_id,
+            )
+            .where(
+                claim_observations.c.claim_id.in_(claim_ids),
+                claim_observations.c.job_id != deleting_job_id,
+                claim_observations.c.source_engine.in_(
+                    LEGACY_PROFILE_CLAIM_ENGINES
+                ),
+                investigation_jobs.c.status == "completed",
+            )
+            .order_by(
+                claim_observations.c.observed_at.desc(),
+                claim_observations.c.id.desc(),
+            )
+        ).mappings()
+        surviving_by_claim: Dict[str, Dict[str, Any]] = {}
+        for observation in observations:
+            claim_id = str(observation["claim_id"])
+            result = dict(observation["result"] or {})
+            if (
+                claim_id not in surviving_by_claim
+                and result.get("profile_reliability_version")
+                == PROFILE_RELIABILITY_VERSION
+            ):
+                surviving_by_claim[claim_id] = dict(observation)
+
+        retire_rows = []
+        now = utcnow()
+        for claim in claims:
+            survivor = surviving_by_claim.get(str(claim["id"]))
+            if not survivor:
+                retire_rows.append(claim)
+                continue
+            connection.execute(
+                update(persona_claims)
+                .where(
+                    persona_claims.c.id == claim["id"],
+                    persona_claims.c.source_job_id == deleting_job_id,
+                    persona_claims.c.source_engine == claim["source_engine"],
+                )
+                .values(
+                    source_job_id=survivor["job_id"],
+                    source_engine=survivor["source_engine"],
+                    updated_at=now,
+                )
+            )
+        return retire_rows
+
     def delete_job(
         self, job_id: str, *, confirmation_name: Optional[str] = None
     ) -> bool:
@@ -6140,9 +6212,16 @@ class CaseStore:
                         )
                     ).mappings()
                 )
+                retire_claim_rows = (
+                    self._repoint_profile_claims_with_surviving_lineage(
+                        connection,
+                        claim_rows,
+                        deleting_job_id=job_id,
+                    )
+                )
                 self._retire_profile_claim_rows(
                     connection,
-                    claim_rows,
+                    retire_claim_rows,
                     current_reliability_version=PROFILE_RELIABILITY_VERSION,
                     source_job_becoming_unavailable=True,
                 )
