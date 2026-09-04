@@ -1,0 +1,97 @@
+name: Maigret detector health
+
+on:
+  schedule:
+    - cron: "43 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: maigret-detector-health
+  cancel-in-progress: false
+
+jobs:
+  canary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Check out reviewed application state
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Recover consecutive-run state from the proposal branch
+        run: |
+          set -euo pipefail
+          if git fetch --no-tags origin automation/maigret-detector-health && \
+             git show FETCH_HEAD:maigret/resources/detector_health.json \
+               > /tmp/previous-detector-health.json; then
+            echo "Using the prior canary proposal as transition history."
+          else
+            cp maigret/resources/detector_health.json \
+              /tmp/previous-detector-health.json
+          fi
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install OpenLedger
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install .
+
+      - name: Run bounded detector canaries
+        run: |
+          python utils/detector_health_canary.py \
+            --top-sites 500 \
+            --samples 3 \
+            --connections 20 \
+            --timeout 20 \
+            --previous /tmp/previous-detector-health.json \
+            --output maigret/resources/detector_health.json \
+            --report detector-health-report.json
+
+      - name: Validate proposed registry
+        run: |
+          python - <<'PY'
+          from maigret.web.profile_reliability import load_detector_health_registry
+          registry = load_detector_health_registry(
+              "maigret/resources/detector_health.json"
+          )
+          print(f"Validated {len(registry['sites'])} detector-health entries")
+          PY
+
+      - name: Upload full canary diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maigret-detector-health-${{ github.run_id }}
+          path: detector-health-report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Create or update reviewed health proposal
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          branch: automation/maigret-detector-health
+          base: main
+          delete-branch: true
+          add-paths: maigret/resources/detector_health.json
+          commit-message: "Update Maigret detector health registry"
+          title: "Update Maigret detector health registry"
+          body: |
+            Proposes detector-health changes from bounded live canaries.
+
+            - Each detector checks its declared existing and missing usernames.
+            - Three high-entropy likely-missing usernames probe soft-404 behavior.
+            - One semantic failure degrades a detector; two consecutive failures quarantine it.
+            - Two consecutive successful runs are required to recover a degraded or quarantined detector.
+            - Unknown, blocked, or rate-limited probes degrade reliability but do not count as false-positive proof.
+
+            Production behavior changes only after this data-only proposal is reviewed and merged. Full per-probe diagnostics remain attached to the workflow run.

@@ -117,6 +117,14 @@ from maigret.web.persona_intelligence import (
     group_claims,
 )
 from maigret.web.persona_pdf import generate_persona_pdf, persona_pdf_filename
+from maigret.web.profile_reliability import (
+    DetectorHealthRegistryError,
+    PROFILE_RELIABILITY_VERSION,
+    classify_profile_detection,
+    detector_health_for_site,
+    empty_detector_health_registry,
+    load_detector_health_registry,
+)
 
 app = Flask(__name__)
 try:
@@ -167,6 +175,17 @@ live_jobs: Dict[str, Any] = {}
 PERSISTENT_CANCEL_POLL_SECONDS = 0.25
 
 
+def resolve_selected_site(sites, result_site_name):
+    """Resolve Maigret's mirror display name back to its canonical site key."""
+    direct = sites.get(result_site_name)
+    if direct is not None:
+        return result_site_name, direct
+    for canonical_name, site in sites.items():
+        if getattr(site, 'pretty_name', canonical_name) == result_site_name:
+            return canonical_name, site
+    return result_site_name, None
+
+
 class StreamNotify:
     """query_notify shim: pushes each per-site check into a queue as an SSE event.
 
@@ -204,26 +223,51 @@ class StreamNotify:
             self.cancel_requested = True
             raise asyncio.CancelledError()
         self.checked += 1
+        canonical_site_name, selected_site = resolve_selected_site(
+            self.sites, result.site_name
+        )
         if not is_similar:
-            entry = {'status': result, 'url_user': result.site_url_user}
-            site = self.sites.get(result.site_name)
-            if site is not None:
-                entry['site'] = site
-                entry['url_main'] = site.url_main
-            self.results[result.site_name] = entry
+            entry = {
+                'status': result,
+                'url_user': result.site_url_user,
+                'http_status': getattr(result, 'http_status', None),
+            }
+            if selected_site is not None:
+                entry['site'] = selected_site
+                entry['url_main'] = selected_site.url_main
+            self.results[canonical_site_name] = entry
         if result.status == MaigretCheckStatus.CLAIMED and not is_similar:
             ids = {
                 k: v
                 for k, v in (result.ids_data or {}).items()
                 if k != '_extractor' and isinstance(v, (str, int, float))
             }
+            decision = classify_profile_detection(
+                username=result.username or self.username,
+                site_name=canonical_site_name,
+                url=result.site_url_user,
+                evidence=result.ids_data or {},
+                check_type=getattr(selected_site, 'check_type', '') or '',
+                health_state=detector_health_for_site(
+                    get_detector_health_registry(), canonical_site_name
+                ),
+                status_context=result.context,
+                status_error=str(result.error) if result.error else '',
+                http_status=getattr(result, 'http_status', None),
+            )
             self.q.put(
                 {
-                    'type': 'found',
+                    'type': (
+                        'found'
+                        if decision['classification'] == 'supported'
+                        else decision['classification']
+                    ),
                     'username': result.username or self.username,
                     'site': result.site_name,
                     'url': result.site_url_user,
                     'ids': ids,
+                    'classification': decision['classification'],
+                    'reason': decision['reason'],
                 }
             )
         self.q.put(
@@ -258,6 +302,14 @@ class StreamNotify:
 # Configuration
 app.config["MAIGRET_DB_FILE"] = os.path.join(
     os.path.dirname(os.path.dirname(__file__)), 'resources', 'data.json'
+)
+app.config["DETECTOR_HEALTH_FILE"] = os.getenv(
+    "OPENLEDGER_DETECTOR_HEALTH_FILE",
+    os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        'resources',
+        'detector_health.json',
+    ),
 )
 app.config["COOKIES_FILE"] = "cookies.txt"
 app.config["UPLOAD_FOLDER"] = 'uploads'
@@ -367,6 +419,9 @@ EMBEDDED_GRAPH_PATH_PATTERN = re.compile(
 )
 SESSION_METADATA_FILENAME = 'openledger-session.json'
 SESSION_METADATA_SCHEMA_VERSION = 1
+LEGACY_PROFILE_DERIVED_COLLECTOR_ENGINES = frozenset(
+    {'github_public_profile', 'unfurl_url_analysis', 'wayback_cdx'}
+)
 AI_ANALYSIS_SCHEMA_VERSION = 7
 AUTH_SCHEMA_VERSION = 2
 LEGACY_AUTH_SCHEMA_VERSION = 1
@@ -1016,6 +1071,28 @@ def get_available_tags():
     return _available_tags_for_database(database_path, modified_at)
 
 
+@lru_cache(maxsize=4)
+def _detector_health_registry_for_path(registry_path, modified_at):
+    del modified_at  # File modification time is the cache invalidation key.
+    return load_detector_health_registry(registry_path)
+
+
+def get_detector_health_registry():
+    """Load the reviewed detector-health registry without breaking collection."""
+    registry_path = os.path.abspath(app.config["DETECTOR_HEALTH_FILE"])
+    try:
+        modified_at = os.path.getmtime(registry_path)
+        return _detector_health_registry_for_path(registry_path, modified_at)
+    except FileNotFoundError:
+        return empty_detector_health_registry()
+    except DetectorHealthRegistryError as error:
+        logging.error(
+            'Ignoring invalid detector-health registry: %s',
+            safe_log_value(error),
+        )
+        return empty_detector_health_registry()
+
+
 def setup_logger(log_level, name):
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
@@ -1023,14 +1100,31 @@ def setup_logger(log_level, name):
 
 
 def select_sites_for_search(
-    db, *, top_sites, all_sites, tags, excluded_tags, site_list
+    db,
+    *,
+    top_sites,
+    all_sites,
+    tags,
+    excluded_tags,
+    site_list,
+    detector_health_registry=None,
 ):
-    """Select sources while treating country codes as coverage preferences."""
+    """Select sources while excluding detectors quarantined by reviewed canaries."""
+    health_registry = detector_health_registry or get_detector_health_registry()
+    quarantined_count = sum(
+        1
+        for entry in health_registry.get('sites', {}).values()
+        if isinstance(entry, dict) and entry.get('state') == 'quarantined'
+    )
     country_tags = {
         tag.lower() for tag in tags if is_country_tag(tag) and tag != 'global'
     }
     category_tags = [tag for tag in tags if not is_country_tag(tag)]
-    ranking_limit = 999999999 if country_tags or all_sites else top_sites
+    ranking_limit = (
+        999999999
+        if country_tags or all_sites
+        else top_sites + quarantined_count
+    )
     ranked_sites = db.ranked_sites_dict(
         top=ranking_limit,
         tags=category_tags,
@@ -1050,6 +1144,11 @@ def select_sites_for_search(
             if not site_countries or allowed_coverage.intersection(site_countries):
                 filtered_sites[name] = site
         ranked_sites = filtered_sites
+    ranked_sites = {
+        name: site
+        for name, site in ranked_sites.items()
+        if detector_health_for_site(health_registry, name) != 'quarantined'
+    }
     if not all_sites:
         ranked_sites = dict(list(ranked_sites.items())[:top_sites])
     return ranked_sites
@@ -1162,16 +1261,6 @@ MAJOR_PLATFORM_NAMES = {
     'twitter',
     'youtube',
 }
-STRONG_IDENTITY_FIELDS = {
-    'bio',
-    'description',
-    'fullname',
-    'location',
-    'name',
-    'website',
-}
-
-
 def normalize_evidence_value(value, depth=0):
     """Make extracted profile evidence small, JSON-safe, and prompt-safe."""
     if depth > 2:
@@ -1195,19 +1284,6 @@ def normalize_evidence_value(value, depth=0):
     return None
 
 
-def profile_confidence(ids_data, check_type):
-    """Classify account evidence without pretending username equality is identity."""
-    keys = {str(key).lower() for key in ids_data}
-    if keys.intersection(STRONG_IDENTITY_FIELDS):
-        return 'strong'
-    useful_keys = {key for key in keys if key not in {'_extractor', 'extractor'}}
-    if len(useful_keys) >= 2:
-        return 'moderate'
-    if check_type in {'status_code', 'message'} and not useful_keys:
-        return 'weak'
-    return 'unverified'
-
-
 def result_status_details(site_data):
     status = site_data.get('status')
     if not status:
@@ -1215,6 +1291,95 @@ def result_status_details(site_data):
     state = status.status.value.lower()
     reason = status.context or (str(status.error) if status.error else '')
     return state, str(reason)[:500]
+
+
+def profile_detection_record(
+    username,
+    site_name,
+    site_data,
+    *,
+    detector_health_registry=None,
+):
+    """Build one triaged profile record from raw Maigret site output."""
+    status = site_data.get('status')
+    if not status or status.status != MaigretCheckStatus.CLAIMED:
+        return None
+    site = site_data.get('site')
+    check_type = getattr(site, 'check_type', '') or ''
+    evidence = normalize_evidence_value(status.ids_data or {}) or {}
+    registry = detector_health_registry or get_detector_health_registry()
+    health_state = detector_health_for_site(registry, site_name)
+    decision = classify_profile_detection(
+        username=username,
+        site_name=site_name,
+        url=site_data.get('url_user', ''),
+        evidence=evidence,
+        check_type=check_type,
+        health_state=health_state,
+        status_context=status.context,
+        status_error=str(status.error) if status.error else '',
+        http_status=site_data.get(
+            'http_status', getattr(status, 'http_status', None)
+        ),
+    )
+    return {
+        'site_name': site_name,
+        'url': site_data.get('url_user', ''),
+        'tags': status.tags or [],
+        'evidence': evidence,
+        # Keep the legacy key for persisted-session and Persona compatibility;
+        # it now describes account-detection evidence, never subject identity.
+        'confidence': decision['detection_confidence'],
+        'detection_confidence': decision['detection_confidence'],
+        'classification': decision['classification'],
+        'classification_reason': decision['reason'],
+        'identity_status': decision['identity_status'],
+        'detector_health': decision['health_state'],
+        'evidence_signals': decision['signals'],
+        'check_type': check_type or 'unknown',
+    }
+
+
+def general_results_for_classifications(
+    general_results,
+    allowed_classifications,
+    detector_health_registry=None,
+):
+    """Return the Maigret result shape containing only allowed result classes."""
+    registry = detector_health_registry or get_detector_health_registry()
+    allowed = set(allowed_classifications)
+    filtered = []
+    for username, id_type, results in general_results:
+        retained_sites = {}
+        for site_name, site_data in results.items():
+            profile = profile_detection_record(
+                username,
+                site_name,
+                site_data,
+                detector_health_registry=registry,
+            )
+            if profile and profile['classification'] in allowed:
+                retained_sites[site_name] = site_data
+        filtered.append((username, id_type, retained_sites))
+    return filtered
+
+
+def supported_general_results(general_results, detector_health_registry=None):
+    """Return the Maigret result shape containing supported detections only."""
+    return general_results_for_classifications(
+        general_results,
+        {'supported'},
+        detector_health_registry,
+    )
+
+
+def actionable_general_results(general_results, detector_health_registry=None):
+    """Exclude suppressed hits before optional profile corroboration collectors."""
+    return general_results_for_classifications(
+        general_results,
+        {'supported', 'candidate'},
+        detector_health_registry,
+    )
 
 
 def get_session_metadata_path(session_folder: str) -> str:
@@ -1263,12 +1428,162 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
             normalized.get('individual_reports'), list
         ):
             raise ValueError('Incomplete report session metadata')
+        reliability_version = normalized.get('profile_reliability_version')
+        if reliability_version is None:
+            reliability_version = 0
+        if reliability_version not in {0, PROFILE_RELIABILITY_VERSION}:
+            raise ValueError('Unsupported profile reliability version')
+        normalized['profile_reliability_version'] = reliability_version
+
         found_count = normalized.get('found_count', 0)
         if not isinstance(found_count, int) or found_count < 0:
             raise ValueError('Invalid profile count in report session metadata')
+        if reliability_version == 0:
+            raw_claimed_count = normalized.get('raw_claimed_count', found_count)
+            if not isinstance(raw_claimed_count, int) or raw_claimed_count < 0:
+                raise ValueError(
+                    'Invalid raw claimed count in report session metadata'
+                )
+            migrated_reports = []
+            for raw_report in normalized['individual_reports']:
+                if not isinstance(raw_report, dict):
+                    raise ValueError('Invalid individual report metadata')
+                report = dict(raw_report)
+                legacy_profiles = report.get('untriaged_profiles')
+                if legacy_profiles is None:
+                    legacy_profiles = report.get('claimed_profiles', [])
+                if not isinstance(legacy_profiles, list):
+                    raise ValueError('Invalid legacy profile metadata')
+                report['untriaged_profiles'] = [
+                    {
+                        **profile,
+                        'classification': 'untriaged',
+                        'classification_reason': (
+                            'Saved before reliability triage; rerun required.'
+                        ),
+                        'identity_status': 'unverified',
+                    }
+                    for profile in legacy_profiles
+                    if isinstance(profile, dict)
+                ]
+                report['claimed_profiles'] = []
+                report.setdefault('candidate_profiles', [])
+                report.setdefault('suppressed_profiles', [])
+                migrated_reports.append(report)
+            normalized['individual_reports'] = migrated_reports
+            normalized['found_count'] = 0
+            normalized['candidate_count'] = 0
+            normalized['suppressed_count'] = 0
+            normalized['raw_claimed_count'] = raw_claimed_count
+            normalized['untriaged_count'] = raw_claimed_count
+            raw_observations = normalized.get('collector_observations') or []
+            if not isinstance(raw_observations, list):
+                raw_observations = []
+            profile_observations = [
+                observation
+                for observation in raw_observations
+                if isinstance(observation, dict)
+                and str(observation.get('source_engine') or '').casefold()
+                in LEGACY_PROFILE_DERIVED_COLLECTOR_ENGINES
+            ]
+            independent_observations = [
+                observation
+                for observation in raw_observations
+                if isinstance(observation, dict)
+                and str(observation.get('source_engine') or '').casefold()
+                not in LEGACY_PROFILE_DERIVED_COLLECTOR_ENGINES
+            ]
+            existing_withheld = normalized.get(
+                'withheld_profile_observations', []
+            )
+            if not isinstance(existing_withheld, list):
+                existing_withheld = []
+            normalized['collector_observations'] = independent_observations
+            normalized['withheld_profile_observations'] = [
+                observation
+                for observation in [*existing_withheld, *profile_observations]
+                if isinstance(observation, dict)
+            ]
+            normalized['withheld_profile_observation_count'] = len(
+                normalized['withheld_profile_observations']
+            )
+            registration_count = sum(
+                1
+                for observation in independent_observations
+                if str(observation.get('status') or '').casefold()
+                == 'registered'
+            )
+            normalized['collector_found_count'] = registration_count
+            normalized['collector_registration_count'] = registration_count
+            normalized['github_enrichment_count'] = 0
+            normalized['archived_profile_count'] = 0
+            return normalized
+
         normalized['found_count'] = found_count
+        count_defaults = {
+            'candidate_count': 0,
+            'suppressed_count': 0,
+            'untriaged_count': 0,
+            # Versioned results normally persist the raw count explicitly;
+            # retain a safe fallback for partially written metadata.
+            'raw_claimed_count': found_count,
+        }
+        for count_key, default_count in count_defaults.items():
+            count = normalized.get(count_key, default_count)
+            if not isinstance(count, int) or count < 0:
+                raise ValueError(
+                    f'Invalid {count_key.replace("_", " ")} in report session metadata'
+                )
+            normalized[count_key] = count
     else:
         normalized['error'] = str(normalized.get('error', 'Unknown error occurred.'))
+    return normalized
+
+
+def normalize_job_summary_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Withhold pre-triage counts in list/dashboard views as well as results."""
+    normalized = dict(entry)
+    if normalized.get('status') != 'completed' or normalized.get('kind') in {
+        'affiliation',
+        'case_fusion',
+        'identity_enrichment',
+    }:
+        return normalized
+    if (
+        normalized.get('profile_reliability_version')
+        == PROFILE_RELIABILITY_VERSION
+    ):
+        return normalized
+
+    session_key = str(normalized.get('job_id') or '')
+    if not SESSION_KEY_PATTERN.fullmatch(session_key):
+        session_folder = str(normalized.get('session_folder') or '')
+        if session_folder.startswith('search_'):
+            session_key = session_folder.removeprefix('search_')
+    if SESSION_KEY_PATTERN.fullmatch(session_key):
+        try:
+            return normalize_persisted_result(session_key, normalized)
+        except (TypeError, ValueError):
+            # Some old database rows contain only summary fields. They still
+            # must fail closed instead of presenting raw CLAIMED hits as facts.
+            pass
+
+    raw_count = normalized.get(
+        'raw_claimed_count',
+        normalized.get('found_count', 0),
+    )
+    try:
+        raw_count = max(0, int(raw_count or 0))
+    except (TypeError, ValueError):
+        raw_count = 0
+    normalized.update(
+        {
+            'profile_reliability_version': 0,
+            'found_count': 0,
+            'raw_claimed_count': raw_count,
+            'untriaged_count': raw_count,
+        }
+    )
     return normalized
 
 
@@ -1319,6 +1634,14 @@ def record_job_result(session_key: str, result: Dict[str, Any]):
         if normalized.get('status') == 'completed':
             try:
                 case_store.sync_persona_claims(session_key, normalized)
+                if (
+                    normalized.get('profile_reliability_version')
+                    != PROFILE_RELIABILITY_VERSION
+                ):
+                    case_store.retire_pretriage_profile_claims(
+                        current_reliability_version=PROFILE_RELIABILITY_VERSION,
+                        job_id=session_key,
+                    )
             except Exception as error:
                 record_internal_error(
                     'Failed to synchronize persona claims',
@@ -1390,6 +1713,10 @@ def refresh_job_results_from_disk():
                 case_store.import_legacy_result(session_key, result)
                 if result.get('status') == 'completed':
                     case_store.sync_persona_claims(session_key, result)
+                    case_store.retire_pretriage_profile_claims(
+                        current_reliability_version=PROFILE_RELIABILITY_VERSION,
+                        job_id=session_key,
+                    )
             except Exception as error:
                 record_internal_error(
                     'Failed to index legacy investigation in the case store',
@@ -1416,6 +1743,18 @@ def find_result_by_session(session_id: str):
     if case_store is not None and session_id.startswith('search_'):
         stored = case_store.get_job(session_id.removeprefix('search_'))
         if stored and stored.get('status') == 'completed':
+            if stored.get('kind') in {'identity_enrichment', 'case_fusion'}:
+                job_results[stored['job_id']] = stored
+                return stored
+            try:
+                stored = normalize_persisted_result(stored['job_id'], stored)
+            except (TypeError, ValueError) as error:
+                record_internal_error(
+                    'Invalid completed investigation in case store',
+                    error,
+                    session=session_id,
+                )
+                return None
             job_results[stored['job_id']] = stored
             return stored
 
@@ -1583,6 +1922,21 @@ def delete_persisted_case(
 # also perform targeted lazy recovery so alternate report paths used in tests or
 # embedded deployments remain supported.
 refresh_job_results_from_disk()
+if case_store is not None:
+    try:
+        retired_legacy_claims = case_store.retire_pretriage_profile_claims(
+            current_reliability_version=PROFILE_RELIABILITY_VERSION,
+        )
+        if retired_legacy_claims:
+            logging.warning(
+                'Marked %s pre-triage profile claims as legacy untriaged',
+                retired_legacy_claims,
+            )
+    except Exception as error:
+        record_internal_error(
+            'Failed to mark pre-triage Persona claims as untriaged',
+            error,
+        )
 
 
 def get_investigation_plan(result_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -1637,6 +1991,14 @@ def build_ai_markdown(
     for report in result_data.get('individual_reports', []):
         lines.extend([f"## Username: {report.get('username', 'unknown')}", ''])
         profiles = report.get('claimed_profiles', [])
+        candidates = report.get('candidate_profiles', [])
+        suppressed = report.get('suppressed_profiles', [])
+        untriaged = report.get('untriaged_profiles', [])
+        if untriaged:
+            lines.append(
+                'Legacy raw CLAIMED responses withheld pending rescan: '
+                f'{len(untriaged)}'
+            )
         diagnostics = report.get('diagnostics', {})
         if diagnostics:
             lines.append(
@@ -1651,24 +2013,48 @@ def build_ai_markdown(
                 lines.append(
                     f"- {platform.get('site_name')}: {platform.get('status')}{detail}"
                 )
-        if not profiles:
-            lines.extend(['No claimed profiles were found.', ''])
-            continue
-        lines.extend(['', '### Claimed profile evidence'])
-        for profile in profiles:
-            tags = ', '.join(profile.get('tags') or []) or 'none'
-            lines.append(
-                f"- {profile.get('site_name', 'Unknown site')}: "
-                f"{profile.get('url', '')} (tags: {tags}; "
-                f"local confidence: {profile.get('confidence', 'unverified')}; "
-                f"check: {profile.get('check_type', 'unknown')})"
-            )
-            evidence = profile.get('evidence') or {}
-            if evidence:
+        if profiles:
+            lines.extend(['', '### Supported account-existence evidence'])
+            for profile in profiles:
+                tags = ', '.join(profile.get('tags') or []) or 'none'
                 lines.append(
-                    '  Extracted evidence: '
-                    + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+                    f"- {profile.get('site_name', 'Unknown site')}: "
+                    f"{profile.get('url', '')} (tags: {tags}; "
+                    f"account evidence: {profile.get('confidence', 'unverified')}; "
+                    f"identity: unverified; "
+                    f"check: {profile.get('check_type', 'unknown')})"
                 )
+                evidence = profile.get('evidence') or {}
+                if evidence:
+                    lines.append(
+                        '  Extracted evidence: '
+                        + json.dumps(evidence, ensure_ascii=False, sort_keys=True)
+                    )
+        else:
+            lines.append('No supported profile leads were found.')
+        if candidates:
+            lines.extend(
+                [
+                    '',
+                    '### Low-signal candidates (not findings)',
+                    'These detector hits are supplied only for corroboration. Do not '
+                    'treat them as account-existence or identity evidence.',
+                ]
+            )
+            for profile in candidates[:100]:
+                lines.append(
+                    f"- {profile.get('site_name', 'Unknown site')}: "
+                    f"{profile.get('url', '')} - "
+                    f"{profile.get('classification_reason', 'Needs corroboration')}"
+                )
+        if suppressed:
+            lines.extend(
+                [
+                    '',
+                    f"Suppressed unreliable detector hits: {len(suppressed)}. "
+                    'They are not evidence and are excluded from reasoning.',
+                ]
+            )
         lines.append('')
 
     observations = result_data.get('collector_observations') or []
@@ -2109,14 +2495,18 @@ def build_reports(
     os.makedirs(session_folder, exist_ok=True)
 
     graph_path = os.path.join(session_folder, "combined_graph.html")
+    detector_health_registry = get_detector_health_registry()
     maigret.report.save_graph_report(
         graph_path,
-        general_results,
+        supported_general_results(general_results, detector_health_registry),
         MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"]),
     )
 
     individual_reports = []
     found_count = 0
+    candidate_count = 0
+    suppressed_count = 0
+    raw_claimed_count = 0
     for username, id_type, results in general_results:
         safe_username = sanitize_username_for_path(username)
         report_base = os.path.join(session_folder, f"report_{safe_username}")
@@ -2136,14 +2526,20 @@ def build_reports(
         maigret.report.save_html_report(html_path, context)
 
         claimed_profiles = []
+        candidate_profiles = []
+        suppressed_profiles = []
         diagnostics = {'claimed': 0, 'available': 0, 'unknown': 0, 'illegal': 0}
         major_platforms = []
         for site_name, site_data in results.items():
             state, reason = result_status_details(site_data)
             diagnostics[state] = diagnostics.get(state, 0) + 1
-            site = site_data.get('site')
-            check_type = getattr(site, 'check_type', '') or ''
             status = site_data.get('status')
+            profile = profile_detection_record(
+                username,
+                site_name,
+                site_data,
+                detector_health_registry=detector_health_registry,
+            )
             if site_name.lower() in MAJOR_PLATFORM_NAMES:
                 major_platforms.append(
                     {
@@ -2151,22 +2547,23 @@ def build_reports(
                         'status': state,
                         'reason': reason,
                         'url': site_data.get('url_user', ''),
+                        'classification': (
+                            profile.get('classification') if profile else None
+                        ),
                     }
                 )
             if status and status.status == MaigretCheckStatus.CLAIMED:
-                evidence = normalize_evidence_value(status.ids_data or {}) or {}
-                claimed_profiles.append(
-                    {
-                        'site_name': site_name,
-                        'url': site_data.get('url_user', ''),
-                        'tags': status.tags or [],
-                        'evidence': evidence,
-                        'confidence': profile_confidence(evidence, check_type),
-                        'check_type': check_type or 'unknown',
-                    }
-                )
+                raw_claimed_count += 1
+                if profile['classification'] == 'supported':
+                    claimed_profiles.append(profile)
+                elif profile['classification'] == 'candidate':
+                    candidate_profiles.append(profile)
+                else:
+                    suppressed_profiles.append(profile)
 
         found_count += len(claimed_profiles)
+        candidate_count += len(candidate_profiles)
+        suppressed_count += len(suppressed_profiles)
         individual_reports.append(
             {
                 'username': username,
@@ -2183,6 +2580,8 @@ def build_reports(
                     f"search_{session_key}", f"report_{safe_username}.html"
                 ),
                 'claimed_profiles': claimed_profiles,
+                'candidate_profiles': candidate_profiles,
+                'suppressed_profiles': suppressed_profiles,
                 'diagnostics': diagnostics,
                 'major_platforms': major_platforms,
             }
@@ -2195,6 +2594,11 @@ def build_reports(
         'usernames': usernames,
         'individual_reports': individual_reports,
         'found_count': found_count,
+        'candidate_count': candidate_count,
+        'suppressed_count': suppressed_count,
+        'raw_claimed_count': raw_claimed_count,
+        'untriaged_count': 0,
+        'profile_reliability_version': PROFILE_RELIABILITY_VERSION,
         'collector_observations': list(collector_observations or []),
         'collector_found_count': sum(
             1
@@ -2443,7 +2847,10 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     observations = []
     job['collector_observations'] = observations
     investigation_plan = options.get('investigation_spec') or {}
-    github_targets = github_profile_targets(general_results, investigation_plan)
+    corroboration_results = actionable_general_results(general_results)
+    github_targets = github_profile_targets(
+        corroboration_results, investigation_plan
+    )
     if github_targets and not (
         job['cancelled'] or (cancellation_check and cancellation_check())
     ):
@@ -2501,8 +2908,12 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                     'found': github_observation_count,
                 }
             )
+    # URL decomposition and archive presence cannot prove that a candidate
+    # account exists.  Keep candidates eligible for a profile-specific GitHub
+    # lookup above, but send only already-supported detections to URL-only
+    # collectors so they cannot create Persona proposals from weak hits.
     profile_url_targets = claimed_profile_url_targets(
-        general_results, investigation_plan
+        supported_general_results(general_results), investigation_plan
     )
     if profile_url_targets and not (
         job['cancelled'] or (cancellation_check and cancellation_check())
@@ -4446,17 +4857,23 @@ def persona_display_identifier_type(persona):
 def investigation_builder_context(persona=None):
     """Build the shared New investigation and Persona-rerun form context."""
     refresh_job_results_from_disk()
-    entries = (
+    raw_entries = (
         case_store.list_jobs()
         if case_store is not None
         else list(job_results.values())
     )
+    entries = [normalize_job_summary_entry(entry) for entry in raw_entries]
     completed = sum(1 for entry in entries if entry.get('status') == 'completed')
     failed = sum(1 for entry in entries if entry.get('status') == 'failed')
     profiles_found = sum(
         entry.get('found_count', 0)
         for entry in entries
         if isinstance(entry.get('found_count', 0), int)
+    )
+    untriaged_profiles = sum(
+        entry.get('untriaged_count', 0)
+        for entry in entries
+        if isinstance(entry.get('untriaged_count', 0), int)
     )
     ai_assessments = 0
     for entry in entries:
@@ -4510,6 +4927,7 @@ def investigation_builder_context(persona=None):
             'completed': completed,
             'failed': failed,
             'profiles_found': profiles_found,
+            'untriaged_profiles': untriaged_profiles,
             'ai_assessments': ai_assessments,
         },
         'investigation_persona': persona,
@@ -4682,9 +5100,11 @@ def history():
     refresh_job_results_from_disk()
     entries_by_folder = {}
     for entry in (case_store.list_jobs() if case_store is not None else []):
+        entry = normalize_job_summary_entry(entry)
         key = entry.get('session_folder') or f"database:{entry.get('job_id')}"
         entries_by_folder[key] = entry
     for session_key, entry in job_results.items():
+        entry = normalize_job_summary_entry(entry)
         key = entry.get('session_folder') or f"legacy:{session_key}"
         entries_by_folder.setdefault(key, entry)
     entries = sorted(
@@ -4834,16 +5254,33 @@ def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]
                 f"{identifier_count} identifier"
                 f"{'s' if identifier_count != 1 else ''} checked"
             )
+        legacy_untriaged = (
+            entry.get("status") == "completed"
+            and entry.get("profile_reliability_version")
+            != PROFILE_RELIABILITY_VERSION
+        )
         found = (
-            entry.get("found_count")
-            if entry.get("status") == "completed"
-            else (entry.get("progress") or {}).get("found", 0)
+            entry.get("untriaged_count", entry.get("raw_claimed_count", 0))
+            if legacy_untriaged
+            else (
+                entry.get("found_count")
+                if entry.get("status") == "completed"
+                else (entry.get("progress") or {}).get("found", 0)
+            )
         )
         try:
             found = int(found or 0)
         except (TypeError, ValueError):
             found = 0
-        finding_summary = f"{found} profile{'s' if found != 1 else ''}"
+        if legacy_untriaged:
+            finding_summary = (
+                f"{found} untriaged profile{'s' if found != 1 else ''}"
+                " · rerun required"
+            )
+        else:
+            finding_summary = (
+                f"{found} supported profile{'s' if found != 1 else ''}"
+            )
 
     status = str(entry.get("status") or "")
     if status == "queued":
@@ -5678,7 +6115,10 @@ def persona_workspace(persona_id):
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
     active_claims = [
-        claim for claim in persona['claims'] if claim['review_status'] != 'rejected'
+        claim
+        for claim in persona['claims']
+        if claim['review_status'] != 'rejected'
+        and claim.get('reliability_status') != 'legacy_untriaged'
     ]
     review_claims = [
         claim for claim in persona['claims'] if claim['review_status'] != 'approved'
@@ -6366,7 +6806,17 @@ def live_results(job_id):
                 "persona_workspace", persona_id=result["persona_id"]
             )
         else:
+            result = normalize_job_summary_entry(result)
             done_redirect = url_for("results", session_id=result["session_folder"])
+
+    legacy_untriaged = bool(
+        result
+        and result.get("status") == "completed"
+        and result.get("kind")
+        not in {"affiliation", "case_fusion", "identity_enrichment"}
+        and result.get("profile_reliability_version")
+        != PROFILE_RELIABILITY_VERSION
+    )
 
     return render_template(
         "live.html",
@@ -6374,6 +6824,10 @@ def live_results(job_id):
         job_kind=(result or {}).get("kind", "live"),
         done_redirect=done_redirect,
         completed_found_count=(result or {}).get("found_count", 0),
+        completed_candidate_count=(result or {}).get("candidate_count", 0),
+        completed_suppressed_count=(result or {}).get("suppressed_count", 0),
+        completed_untriaged_count=(result or {}).get("untriaged_count", 0),
+        legacy_untriaged=legacy_untriaged,
         completed_registration_count=(result or {}).get(
             "collector_registration_count",
             (result or {}).get("collector_found_count", 0),
@@ -6512,12 +6966,25 @@ def results(session_id):
         if case_id:
             result_case = case_store.get_case(case_id)
 
+    legacy_untriaged = (
+        result_data.get('profile_reliability_version')
+        != PROFILE_RELIABILITY_VERSION
+    )
     return render_template(
         "results.html",
         usernames=result_data["usernames"],
-        graph_file=result_data["graph_file"],
+        # Preserve the old artifact for audit, but never present a graph that
+        # predates evidence triage as if it contained supported profiles only.
+        graph_file=None if legacy_untriaged else result_data["graph_file"],
         individual_reports=result_data["individual_reports"],
         found_count=result_data.get("found_count", 0),
+        candidate_count=result_data.get("candidate_count", 0),
+        suppressed_count=result_data.get("suppressed_count", 0),
+        raw_claimed_count=result_data.get(
+            "raw_claimed_count", result_data.get("found_count", 0)
+        ),
+        untriaged_count=result_data.get('untriaged_count', 0),
+        legacy_untriaged=legacy_untriaged,
         timestamp=session_id.replace("search_", ""),
         session_id=session_id,
         ai_enabled=bool(get_openai_api_key()),
@@ -6540,6 +7007,16 @@ def analyze_session(session_id):
     result_data = find_result_by_session(session_id)
     if not result_data:
         return {'error': 'Unknown or expired scan session.'}, 404
+    if (
+        result_data.get('profile_reliability_version')
+        != PROFILE_RELIABILITY_VERSION
+    ):
+        return {
+            'error': (
+                'This legacy investigation predates profile reliability triage. '
+                'Rerun it before requesting AI analysis.'
+            )
+        }, 409
 
     lock = analysis_locks.setdefault(session_id, Lock())
     if not lock.acquire(blocking=False):

@@ -6,7 +6,7 @@
     <div>
         <p class="eyebrow">Active investigation</p>
         <h1>{{ 'Combined investigation' if job_kind == 'case_fusion' else 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live discovery graph' }}</h1>
-        <p class="page-description">{{ 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Claimed profiles and extracted identifiers appear as OpenLedger checks each source.' }}</p>
+        <p class="page-description">{{ 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Profile-specific evidence appears in the graph; low-signal detector hits remain separated for review.' }}</p>
     </div>
     <div class="heading-actions">
         <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open combined case' if job_kind == 'case_fusion' else 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Open reports' }}</a>
@@ -39,11 +39,16 @@
         <div class="live-stat"><span>Approval status</span><strong>Pending review</strong></div>
         {% else %}
         <div class="live-stat"><span>Sources checked</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
-        <div class="live-stat"><span>Profiles found</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
+        <div class="live-stat"><span>Supported profiles</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
+        {% if legacy_untriaged %}
+        <div class="live-stat"><span>Legacy untriaged hits</span><strong id="stat-untriaged">{{ completed_untriaged_count }}</strong></div>
+        {% endif %}
+        <div class="live-stat"><span>Review candidates</span><strong id="stat-candidates">{{ completed_candidate_count }}</strong></div>
+        <div class="live-stat"><span>Suppressed noise</span><strong id="stat-suppressed">{{ completed_suppressed_count }}</strong></div>
         <div class="live-stat"><span>Email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
         <div class="live-stat"><span>GitHub profiles enriched</span><strong id="stat-github-enriched">{{ completed_github_enrichment_count }}</strong></div>
         <div class="live-stat"><span>Archived profile URLs</span><strong id="stat-archived-profiles">{{ completed_archived_profile_count }}</strong></div>
-        <div class="live-stat"><span>Graph status</span><strong>Streaming</strong></div>
+        <div class="live-stat"><span>Graph status</span><strong>{{ 'Rerun required' if legacy_untriaged else 'Streaming' }}</strong></div>
         {% endif %}
     </div>
     <div class="progress mb-3" style="height: 8px;">
@@ -52,8 +57,12 @@
     {% if job_kind == 'case_fusion' %}
     <div class="security-callout mb-0"><i data-lucide="shield-check"></i><span>Source cases and review decisions remain unchanged. Pending, uncertain, and rejected records are excluded from this snapshot.</span></div>
     {% else %}
+    {% if legacy_untriaged %}
+    <div class="security-callout mb-0"><i data-lucide="history"></i><span>This completed investigation predates reliability triage. Its raw hits and graph are withheld until the usernames are rerun.</span></div>
+    {% else %}
     <div id="graph"></div>
     <p class="form-text mt-2 mb-0">Double-click a site node to open the public profile in a new tab.</p>
+    {% endif %}
     {% endif %}
     </div>
 </section>
@@ -68,6 +77,10 @@
     const doneRedirect = {{ done_redirect|tojson }};
     const csrfToken = {{ csrf_token|tojson }};
     const completedFoundCount = {{ completed_found_count|tojson }};
+    const completedCandidateCount = {{ completed_candidate_count|tojson }};
+    const completedSuppressedCount = {{ completed_suppressed_count|tojson }};
+    const completedUntriagedCount = {{ completed_untriaged_count|tojson }};
+    const legacyUntriaged = {{ legacy_untriaged|tojson }};
     const completedRegistrationCount = {{ completed_registration_count|tojson }};
     const completedGithubEnrichmentCount = {{ completed_github_enrichment_count|tojson }};
     const completedArchivedProfileCount = {{ completed_archived_profile_count|tojson }};
@@ -77,6 +90,8 @@
 
     let nodes = null, edges = null, network = null;
     let foundCount = doneRedirect ? completedFoundCount : 0;
+    let candidateCount = doneRedirect ? completedCandidateCount : 0;
+    let suppressedCount = doneRedirect ? completedSuppressedCount : 0;
     let registrationCount = doneRedirect ? completedRegistrationCount : 0;
     let githubEnrichmentCount = doneRedirect ? completedGithubEnrichmentCount : 0;
     let archivedProfileCount = doneRedirect ? completedArchivedProfileCount : 0;
@@ -163,7 +178,9 @@
         if (isCaseFusion) return 'Completed — the versioned approved-evidence snapshot and exact relationship graph are ready.';
         if (isIdentityEnrichment) return 'Completed — public-record proposals are ready for analyst review.';
         if (isAffiliation) return 'Completed — ' + registryCandidateCount + ' registry candidates and ' + affiliatedPersonCount + ' people are ready for analyst review.';
-        return 'Completed — ' + foundCount + ' accounts, ' + githubEnrichmentCount
+        if (legacyUntriaged) return 'Completed — ' + completedUntriagedCount + ' legacy hits require rerun before they can be treated as supported profiles.';
+        return 'Completed — ' + foundCount + ' supported accounts, ' + candidateCount
+            + ' review candidates, ' + suppressedCount + ' suppressed detector hits, ' + githubEnrichmentCount
             + ' GitHub profiles enriched, ' + archivedProfileCount
             + ' archived profile URLs, and ' + registrationCount
             + ' email registrations found.';
@@ -207,6 +224,14 @@
             foundCount++;
             document.getElementById('stat-found').textContent = foundCount;
             addFound(ev);
+        } else if (ev.type === 'candidate') {
+            candidateCount++;
+            document.getElementById('stat-candidates').textContent = candidateCount;
+            statusEl.textContent = ev.site + ' returned a low-signal hit retained for review.';
+        } else if (ev.type === 'suppressed') {
+            suppressedCount++;
+            document.getElementById('stat-suppressed').textContent = suppressedCount;
+            statusEl.textContent = ev.site + ' returned an unreliable detector hit; it was suppressed.';
         } else if (ev.type === 'collector_started') {
             const startedMessages = {
                 'github-public-profile': 'Enriching claimed GitHub user profiles through the public API…',

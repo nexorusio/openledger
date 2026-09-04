@@ -51,9 +51,54 @@ from maigret.web.external_evidence import (
     stable_fingerprint,
     validate_locator_authority,
 )
+from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
+LEGACY_PROFILE_CLAIM_ENGINES = frozenset(
+    {
+        "github_public_profile",
+        "openledger_profile_discovery",
+        "unfurl_url_analysis",
+        "wayback_cdx",
+    }
+)
+LEGACY_UNTRIAGED_SOURCE_PREFIX = "legacy_untriaged:"
+RELIABILITY_MIGRATION_REVIEWER = "openledger-reliability-migration"
+LEGACY_EVIDENCE_MARKER = "_openledger_reliability"
+
+
+def _legacy_untriaged_source(
+    review_status: str,
+    source_engine: str,
+) -> str:
+    return (
+        f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}{review_status}:{source_engine}"
+    )[:100]
+
+
+def _legacy_untriaged_source_details(source_engine: Any) -> Optional[tuple[str, str]]:
+    value = str(source_engine or "")
+    if not value.startswith(LEGACY_UNTRIAGED_SOURCE_PREFIX):
+        return None
+    status, separator, original_engine = value.removeprefix(
+        LEGACY_UNTRIAGED_SOURCE_PREFIX
+    ).partition(":")
+    if (
+        not separator
+        or status not in {"pending", "approved", "rejected", "uncertain"}
+        or not original_engine
+    ):
+        return None
+    return status, original_engine
+
+
+def _is_retired_legacy_evidence(details: Any) -> bool:
+    if not isinstance(details, dict):
+        return False
+    marker = details.get(LEGACY_EVIDENCE_MARKER)
+    return isinstance(marker, dict) and marker.get("status") == "legacy_untriaged"
+
 
 cases = Table(
     "cases",
@@ -192,6 +237,16 @@ claim_evidence = Table(
     UniqueConstraint("claim_id", "fingerprint", name="uq_claim_evidence_fingerprint"),
 )
 Index("ix_claim_evidence_claim_id", claim_evidence.c.claim_id)
+
+
+def _active_claim_evidence_clause():
+    marker_status = claim_evidence.c.details[LEGACY_EVIDENCE_MARKER][
+        "status"
+    ].as_string()
+    return or_(
+        marker_status.is_(None),
+        marker_status != "legacy_untriaged",
+    )
 
 claim_reviews = Table(
     "claim_reviews",
@@ -2441,7 +2496,12 @@ class CaseStore:
                 list(
                     connection.execute(
                         select(persona_claims)
-                        .where(persona_claims.c.persona_id.in_(persona_ids))
+                        .where(
+                            persona_claims.c.persona_id.in_(persona_ids),
+                            ~persona_claims.c.source_engine.like(
+                                f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}%"
+                            ),
+                        )
                         .order_by(
                             persona_claims.c.persona_id,
                             persona_claims.c.field_name,
@@ -3204,24 +3264,33 @@ class CaseStore:
         confidence: Optional[int] = None,
         details: Optional[Dict[str, Any]] = None,
     ) -> str:
-        """Append idempotent provenance without overwriting claim history."""
+        """Append idempotent provenance without overwriting audit history."""
         provenance_values = (job_id, external_evidence_id, chat_message_id)
         if sum(value is not None for value in provenance_values) != 1:
             raise ExternalEvidenceValidationError(
                 "Provide exactly one provenance record"
             )
         with self.engine.begin() as connection:
-            claim_case_id = connection.scalar(
-                select(personas.c.case_id)
-                .select_from(
-                    persona_claims.join(
-                        personas, personas.c.id == persona_claims.c.persona_id
+            claim = (
+                connection.execute(
+                    select(
+                        personas.c.case_id,
+                        persona_claims.c.source_engine,
                     )
+                    .select_from(
+                        persona_claims.join(
+                            personas,
+                            personas.c.id == persona_claims.c.persona_id,
+                        )
+                    )
+                    .where(persona_claims.c.id == claim_id)
                 )
-                .where(persona_claims.c.id == claim_id)
+                .mappings()
+                .first()
             )
-            if not claim_case_id:
+            if not claim:
                 raise KeyError(claim_id)
+            claim_case_id = claim["case_id"]
             provenance_id = str(job_id or external_evidence_id or chat_message_id)
             if job_id:
                 provenance_case_id = connection.scalar(
@@ -3250,7 +3319,8 @@ class CaseStore:
                 raise ExternalEvidenceValidationError(
                     "Claim and provenance belong to different cases"
                 )
-            return self._record_claim_observation_with_connection(
+            now = utcnow()
+            observation_id = self._record_claim_observation_with_connection(
                 connection,
                 claim_id=claim_id,
                 provenance_type=provenance_type,
@@ -3263,8 +3333,53 @@ class CaseStore:
                 confidence=confidence,
                 native_status=native_status,
                 details=details or {},
-                now=utcnow(),
+                now=now,
             )
+            existing_legacy = _legacy_untriaged_source_details(
+                claim["source_engine"]
+            )
+            normalized_engine = bounded_text(
+                source_engine, "source_engine", max_chars=100
+            )
+            independent = (
+                normalized_engine not in LEGACY_PROFILE_CLAIM_ENGINES
+                and normalized_engine != RELIABILITY_MIGRATION_REVIEWER
+                and not normalized_engine.startswith(
+                    LEGACY_UNTRIAGED_SOURCE_PREFIX
+                )
+            )
+            if existing_legacy and independent:
+                values: Dict[str, Any] = {
+                    "review_status": "pending",
+                    "reviewed_at": None,
+                    "reviewed_by": None,
+                    "source_engine": normalized_engine,
+                    "source_job_id": job_id,
+                    "last_seen_at": now,
+                    "updated_at": now,
+                }
+                if confidence is not None:
+                    values["confidence"] = int(confidence)
+                reactivated = connection.execute(
+                    update(persona_claims)
+                    .where(
+                        persona_claims.c.id == claim_id,
+                        persona_claims.c.source_engine == claim["source_engine"],
+                    )
+                    .values(**values)
+                )
+                if reactivated.rowcount == 1:
+                    self._retire_claim_evidence_with_connection(
+                        connection,
+                        claim_id,
+                        now=now,
+                    )
+                    connection.execute(
+                        update(cases)
+                        .where(cases.c.id == claim_case_id)
+                        .values(updated_at=now)
+                    )
+            return observation_id
 
     def get_claim_lineage(self, claim_id: str) -> list[Dict[str, Any]]:
         with self.engine.connect() as connection:
@@ -3490,6 +3605,79 @@ class CaseStore:
         return dict(row) if row else None
 
     @staticmethod
+    def _retire_claim_evidence_with_connection(
+        connection: Connection,
+        claim_id: str,
+        *,
+        now: datetime,
+    ) -> int:
+        """Keep legacy evidence as audit history without presenting it as support."""
+        retired = 0
+        rows = list(
+            connection.execute(
+                select(
+                    claim_evidence.c.id,
+                    claim_evidence.c.details,
+                ).where(claim_evidence.c.claim_id == claim_id)
+            ).mappings()
+        )
+        for row in rows:
+            details = dict(row["details"] or {})
+            if _is_retired_legacy_evidence(details):
+                continue
+            details[LEGACY_EVIDENCE_MARKER] = {
+                "status": "legacy_untriaged",
+                "retired_at": _as_iso(now),
+                "reason": "claim_reactivated_from_new_provenance",
+            }
+            connection.execute(
+                update(claim_evidence)
+                .where(claim_evidence.c.id == row["id"])
+                .values(details=details)
+            )
+            retired += 1
+        return retired
+
+    @staticmethod
+    def _restore_claim_evidence_fingerprints_with_connection(
+        connection: Connection,
+        claim_id: str,
+        fingerprints: Iterable[str],
+    ) -> int:
+        """Restore only evidence explicitly linked to the surviving observation."""
+        normalized = {
+            str(fingerprint)
+            for fingerprint in fingerprints
+            if fingerprint is not None and str(fingerprint).strip()
+        }
+        if not normalized:
+            return 0
+        rows = list(
+            connection.execute(
+                select(
+                    claim_evidence.c.id,
+                    claim_evidence.c.details,
+                ).where(
+                    claim_evidence.c.claim_id == claim_id,
+                    claim_evidence.c.fingerprint.in_(normalized),
+                )
+            ).mappings()
+        )
+        restored = 0
+        for row in rows:
+            details = dict(row["details"] or {})
+            if not _is_retired_legacy_evidence(details):
+                continue
+            details.pop(LEGACY_EVIDENCE_MARKER, None)
+            connection.execute(
+                update(claim_evidence)
+                .where(claim_evidence.c.id == row["id"])
+                .values(details=details)
+            )
+            restored += 1
+        return restored
+
+    @staticmethod
     def _upsert_persona_candidates(
         connection: Connection,
         *,
@@ -3500,10 +3688,12 @@ class CaseStore:
         chat_message_id: Optional[str] = None,
         candidates: Iterable[Dict[str, Any]],
         now: datetime,
+        allow_legacy_reactivation: bool = False,
     ) -> int:
         """Persist validated candidates without changing a human decision."""
         synchronized = 0
         for candidate in candidates:
+            reactivate_legacy = False
             identity_match = persona_claims.c.fingerprint == candidate["fingerprint"]
             if (
                 candidate.get("source_engine") == "openai_web_research"
@@ -3528,6 +3718,26 @@ class CaseStore:
             )
             if existing:
                 claim_id = existing["id"]
+                legacy_source = _legacy_untriaged_source_details(
+                    existing["source_engine"]
+                )
+                candidate_engine = str(candidate.get("source_engine") or "")
+                reactivate_from_profile = bool(
+                    legacy_source
+                    and allow_legacy_reactivation
+                    and candidate_engine in LEGACY_PROFILE_CLAIM_ENGINES
+                )
+                reactivate_from_independent = bool(
+                    legacy_source
+                    and candidate_engine not in LEGACY_PROFILE_CLAIM_ENGINES
+                    and candidate_engine != RELIABILITY_MIGRATION_REVIEWER
+                    and not candidate_engine.startswith(
+                        LEGACY_UNTRIAGED_SOURCE_PREFIX
+                    )
+                )
+                reactivate_legacy = (
+                    reactivate_from_profile or reactivate_from_independent
+                )
                 confidence = int(existing["confidence"])
                 if (
                     candidate.get("source_engine")
@@ -3547,10 +3757,66 @@ class CaseStore:
                     "last_seen_at": now,
                     "updated_at": now,
                 }
-                if job_id is not None:
+                if legacy_source and reactivate_from_profile:
+                    restored_status, _original_engine = legacy_source
+                    updated_values.update(
+                        review_status=restored_status,
+                        source_engine=candidate["source_engine"],
+                    )
+                    if restored_status == "pending":
+                        updated_values.update(
+                            reviewed_at=None,
+                            reviewed_by=None,
+                        )
+                    else:
+                        latest_human_review = (
+                            connection.execute(
+                                select(claim_reviews)
+                                .where(
+                                    claim_reviews.c.claim_id == claim_id,
+                                    claim_reviews.c.reviewer
+                                    != RELIABILITY_MIGRATION_REVIEWER,
+                                )
+                                .order_by(
+                                    claim_reviews.c.created_at.desc(),
+                                    claim_reviews.c.id.desc(),
+                                )
+                                .limit(1)
+                            )
+                            .mappings()
+                            .first()
+                        )
+                        if latest_human_review:
+                            updated_values.update(
+                                reviewed_at=latest_human_review["created_at"],
+                                reviewed_by=latest_human_review["reviewer"],
+                            )
+                        else:
+                            # A status without a matching human review is not
+                            # safe to revive as a curated decision.
+                            updated_values.update(
+                                review_status="pending",
+                                reviewed_at=None,
+                                reviewed_by=None,
+                            )
+                elif legacy_source and reactivate_from_independent:
+                    updated_values.update(
+                        confidence=int(candidate["confidence"]),
+                        review_status="pending",
+                        reviewed_at=None,
+                        reviewed_by=None,
+                        source_engine=candidate_engine,
+                        source_job_id=job_id,
+                    )
+                if job_id is not None and (
+                    not legacy_source or reactivate_legacy
+                ):
                     updated_values["source_job_id"] = job_id
                 if (
-                    existing["review_status"] == "pending"
+                    (
+                        existing["review_status"] == "pending"
+                        or updated_values.get("review_status") == "pending"
+                    )
                     and existing["latitude"] is None
                     and existing["longitude"] is None
                     and candidate.get("latitude") is not None
@@ -3565,6 +3831,12 @@ class CaseStore:
                     .where(persona_claims.c.id == claim_id)
                     .values(**updated_values)
                 )
+                if reactivate_legacy:
+                    CaseStore._retire_claim_evidence_with_connection(
+                        connection,
+                        claim_id,
+                        now=now,
+                    )
             else:
                 claim_id = str(uuid.uuid4())
                 connection.execute(
@@ -3589,13 +3861,33 @@ class CaseStore:
                     )
                 )
             for evidence in candidate["evidence"]:
-                present = connection.scalar(
-                    select(claim_evidence.c.id).where(
-                        claim_evidence.c.claim_id == claim_id,
-                        claim_evidence.c.fingerprint == evidence["fingerprint"],
+                present = (
+                    connection.execute(
+                        select(
+                            claim_evidence.c.id,
+                            claim_evidence.c.details,
+                        ).where(
+                            claim_evidence.c.claim_id == claim_id,
+                            claim_evidence.c.fingerprint
+                            == evidence["fingerprint"],
+                        )
                     )
+                    .mappings()
+                    .first()
                 )
                 if present:
+                    if _is_retired_legacy_evidence(present["details"]):
+                        connection.execute(
+                            update(claim_evidence)
+                            .where(claim_evidence.c.id == present["id"])
+                            .values(
+                                evidence_type=evidence["evidence_type"],
+                                source_name=evidence["source_name"],
+                                source_url=evidence["source_url"] or None,
+                                details=evidence["details"],
+                                observed_at=now,
+                            )
+                        )
                     continue
                 connection.execute(
                     insert(claim_evidence).values(
@@ -3947,6 +4239,10 @@ class CaseStore:
 
         now = utcnow()
         synchronized = 0
+        allow_legacy_reactivation = (
+            result.get("profile_reliability_version")
+            == PROFILE_RELIABILITY_VERSION
+        )
         with self.engine.begin() as connection:
             job_row = (
                 connection.execute(
@@ -4004,6 +4300,7 @@ class CaseStore:
                         investigation_spec
                     ),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
             for report in result.get("individual_reports") or []:
                 username = str(report.get("username") or "").strip()
@@ -4018,6 +4315,7 @@ class CaseStore:
                     job_id=job_id,
                     candidates=extract_persona_claims(report),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
             collector_observations = [
                 observation
@@ -4033,6 +4331,7 @@ class CaseStore:
                         collector_observations
                     ),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
                 synchronized += self._upsert_persona_candidates(
                     connection,
@@ -4042,6 +4341,7 @@ class CaseStore:
                         collector_observations
                     ),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
                 synchronized += self._upsert_persona_candidates(
                     connection,
@@ -4051,6 +4351,7 @@ class CaseStore:
                         collector_observations
                     ),
                     now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
                 )
             else:
                 observations_by_username: Dict[str, list] = {}
@@ -4072,6 +4373,7 @@ class CaseStore:
                         job_id=job_id,
                         candidates=extract_github_profile_claims(observations),
                         now=now,
+                        allow_legacy_reactivation=allow_legacy_reactivation,
                     )
                     synchronized += self._upsert_persona_candidates(
                         connection,
@@ -4079,11 +4381,194 @@ class CaseStore:
                         job_id=job_id,
                         candidates=extract_profile_url_evidence_claims(observations),
                         now=now,
+                        allow_legacy_reactivation=allow_legacy_reactivation,
                     )
             connection.execute(
                 update(cases).where(cases.c.id == case_id).values(updated_at=now)
             )
         return synchronized
+
+    @staticmethod
+    def _retire_profile_claim_rows(
+        connection: Connection,
+        claim_rows: Iterable[Dict[str, Any]],
+        *,
+        current_reliability_version: int,
+        source_job_becoming_unavailable: bool = False,
+    ) -> int:
+        now = utcnow()
+        retired = 0
+        affected_personas = set()
+        for claim in claim_rows:
+            previous_status = str(claim["review_status"])
+            previous_engine = str(claim["source_engine"])
+            next_status = (
+                "rejected" if previous_status == "rejected" else "uncertain"
+            )
+            values: Dict[str, Any] = {
+                "review_status": next_status,
+                "source_engine": _legacy_untriaged_source(
+                    previous_status,
+                    previous_engine,
+                ),
+                "updated_at": now,
+            }
+            if previous_status != "rejected":
+                values.update(
+                    reviewed_at=now,
+                    reviewed_by=RELIABILITY_MIGRATION_REVIEWER,
+                )
+            source_job_id = claim["source_job_id"]
+            source_job_match = (
+                persona_claims.c.source_job_id.is_(None)
+                if source_job_id is None
+                else persona_claims.c.source_job_id == source_job_id
+            )
+            updated = connection.execute(
+                update(persona_claims)
+                .where(
+                    persona_claims.c.id == claim["id"],
+                    source_job_match,
+                    persona_claims.c.source_engine == previous_engine,
+                )
+                .values(**values)
+            )
+            if updated.rowcount != 1:
+                continue
+            source_job_orphaned = (
+                source_job_id is None or source_job_becoming_unavailable
+            )
+            if previous_status != "rejected":
+                provenance_note = (
+                    "Source job is no longer available, so its reliability "
+                    "version cannot be verified."
+                    if source_job_orphaned
+                    else "Source investigation predates profile reliability triage."
+                )
+                connection.execute(
+                    insert(claim_reviews).values(
+                        claim_id=claim["id"],
+                        decision="uncertain",
+                        reviewer=RELIABILITY_MIGRATION_REVIEWER,
+                        note=(
+                            f"{provenance_note} Previous status was "
+                            f"{previous_status}. "
+                            "Rerun required before this claim becomes active."
+                        ),
+                        created_at=now,
+                    )
+                )
+            provenance_id = (
+                str(source_job_id)
+                if source_job_id is not None
+                else connection.scalar(
+                    select(claim_observations.c.provenance_id)
+                    .where(
+                        claim_observations.c.claim_id == claim["id"],
+                        claim_observations.c.provenance_type
+                        == "investigation_job",
+                        claim_observations.c.source_engine == previous_engine,
+                    )
+                    .order_by(claim_observations.c.observed_at.desc())
+                    .limit(1)
+                )
+                or f"orphaned-claim:{claim['id']}"
+            )
+            CaseStore._record_claim_observation_with_connection(
+                connection,
+                claim_id=claim["id"],
+                provenance_type="investigation_job",
+                provenance_id=str(provenance_id),
+                job_id=(str(source_job_id) if source_job_id is not None else None),
+                external_evidence_id=None,
+                chat_message_id=None,
+                source_engine=RELIABILITY_MIGRATION_REVIEWER,
+                source_record_id=None,
+                confidence=None,
+                native_status="legacy_untriaged",
+                details={
+                    "profile_reliability_version": current_reliability_version,
+                    "previous_review_status": previous_status,
+                    "previous_source_engine": previous_engine,
+                    "rerun_required": True,
+                    "source_job_orphaned": source_job_orphaned,
+                },
+                now=now,
+            )
+            affected_personas.add(str(claim["persona_id"]))
+            retired += 1
+        if affected_personas:
+            case_ids = select(personas.c.case_id).where(
+                personas.c.id.in_(affected_personas)
+            )
+            connection.execute(
+                update(cases)
+                .where(cases.c.id.in_(case_ids))
+                .values(updated_at=now)
+            )
+        return retired
+
+    def retire_pretriage_profile_claims(
+        self,
+        *,
+        current_reliability_version: int,
+        job_id: Optional[str] = None,
+    ) -> int:
+        """Retire claims from version-0 or unverifiable profile jobs."""
+        with self.engine.begin() as connection:
+            job_statement = select(
+                investigation_jobs.c.id,
+                investigation_jobs.c.result,
+            ).where(
+                investigation_jobs.c.status == "completed",
+                investigation_jobs.c.kind.not_in(
+                    {"affiliation", "case_fusion", "identity_enrichment"}
+                ),
+            )
+            if job_id is not None:
+                job_statement = job_statement.where(
+                    investigation_jobs.c.id == job_id
+                )
+            legacy_job_ids = []
+            for job_row in connection.execute(job_statement).mappings():
+                result = dict(job_row["result"] or {})
+                version = result.get("profile_reliability_version")
+                if version is None or version == 0:
+                    legacy_job_ids.append(str(job_row["id"]))
+            source_job_conditions = [
+                persona_claims.c.source_job_id.is_(None)
+            ]
+            if legacy_job_ids:
+                source_job_conditions.append(
+                    persona_claims.c.source_job_id.in_(legacy_job_ids)
+                )
+            claim_rows = list(
+                connection.execute(
+                    select(
+                        persona_claims.c.id,
+                        persona_claims.c.persona_id,
+                        persona_claims.c.source_job_id,
+                        persona_claims.c.source_engine,
+                        persona_claims.c.review_status,
+                    ).where(
+                        persona_claims.c.source_engine.in_(
+                            LEGACY_PROFILE_CLAIM_ENGINES
+                        ),
+                        or_(*source_job_conditions),
+                    )
+                ).mappings()
+            )
+            retire_claim_rows = (
+                self._repoint_profile_claims_with_surviving_lineage(
+                    connection,
+                    claim_rows,
+                )
+            )
+            return self._retire_profile_claim_rows(
+                connection,
+                retire_claim_rows,
+                current_reliability_version=current_reliability_version,
+            )
 
     def sync_ai_persona_claims(
         self,
@@ -4281,6 +4766,7 @@ class CaseStore:
                     select(
                         persona_claims.c.persona_id,
                         persona_claims.c.field_name,
+                        persona_claims.c.source_engine,
                         personas.c.case_id,
                     )
                     .select_from(
@@ -4296,6 +4782,14 @@ class CaseStore:
             )
             if not claim:
                 return None
+            legacy_source = _legacy_untriaged_source_details(
+                claim["source_engine"]
+            )
+            if legacy_source and decision == "approved":
+                raise ValueError(
+                    "Rerun the source investigation before approving this "
+                    "reliability-unverified claim"
+                )
             if coordinates and claim["field_name"] not in {
                 "address",
                 "current_location",
@@ -4309,6 +4803,12 @@ class CaseStore:
                 "reviewed_by": reviewer,
                 "updated_at": now,
             }
+            if legacy_source:
+                _previous_status, original_engine = legacy_source
+                values["source_engine"] = _legacy_untriaged_source(
+                    decision,
+                    original_engine,
+                )
             if coordinates:
                 values.update(
                     latitude=coordinates[0],
@@ -4466,7 +4966,10 @@ class CaseStore:
             evidence_rows = list(
                 connection.execute(
                     select(claim_evidence)
-                    .where(claim_evidence.c.claim_id.in_(claim_ids))
+                    .where(
+                        claim_evidence.c.claim_id.in_(claim_ids),
+                        _active_claim_evidence_clause(),
+                    )
                     .order_by(
                         claim_evidence.c.claim_id,
                         claim_evidence.c.observed_at,
@@ -5441,7 +5944,8 @@ class CaseStore:
             if claim_ids:
                 for evidence in connection.execute(
                     select(claim_evidence).where(
-                        claim_evidence.c.claim_id.in_(claim_ids)
+                        claim_evidence.c.claim_id.in_(claim_ids),
+                        _active_claim_evidence_clause(),
                     )
                 ).mappings():
                     evidence_by_claim.setdefault(str(evidence["claim_id"]), []).append(
@@ -5549,7 +6053,10 @@ class CaseStore:
             ),
         )
         graph_claims = [
-            claim for claim in graph_claims if claim["review_status"] != "rejected"
+            claim
+            for claim in graph_claims
+            if claim["review_status"] != "rejected"
+            and claim.get("reliability_status") != "legacy_untriaged"
         ]
         displayed_claims = graph_claims[:120]
         for claim in displayed_claims:
@@ -5625,6 +6132,30 @@ class CaseStore:
 
     @staticmethod
     def _serialize_claim(claim_row, evidence_rows, review_rows) -> Dict[str, Any]:
+        legacy_untriaged = _legacy_untriaged_source_details(
+            claim_row["source_engine"]
+        )
+        serialized_evidence = [
+            {
+                "id": row["id"],
+                "evidence_type": row["evidence_type"],
+                "source_name": row["source_name"],
+                "source_url": row["source_url"],
+                "details": dict(row["details"] or {}),
+                "observed_at": _as_iso(row["observed_at"]),
+            }
+            for row in evidence_rows
+        ]
+        active_evidence = [
+            row
+            for row in serialized_evidence
+            if not _is_retired_legacy_evidence(row["details"])
+        ]
+        retired_evidence = [
+            row
+            for row in serialized_evidence
+            if _is_retired_legacy_evidence(row["details"])
+        ]
         return {
             "id": claim_row["id"],
             "field_name": claim_row["field_name"],
@@ -5633,6 +6164,9 @@ class CaseStore:
             "confidence": int(claim_row["confidence"]),
             "review_status": claim_row["review_status"],
             "source_engine": claim_row["source_engine"],
+            "reliability_status": (
+                "legacy_untriaged" if legacy_untriaged else "current"
+            ),
             "source_job_id": claim_row["source_job_id"],
             "first_seen_at": _as_iso(claim_row["first_seen_at"]),
             "last_seen_at": _as_iso(claim_row["last_seen_at"]),
@@ -5641,17 +6175,8 @@ class CaseStore:
             "normalized_value": claim_row["normalized_value"],
             "latitude": claim_row["latitude"],
             "longitude": claim_row["longitude"],
-            "evidence": [
-                {
-                    "id": row["id"],
-                    "evidence_type": row["evidence_type"],
-                    "source_name": row["source_name"],
-                    "source_url": row["source_url"],
-                    "details": dict(row["details"] or {}),
-                    "observed_at": _as_iso(row["observed_at"]),
-                }
-                for row in evidence_rows
-            ],
+            "evidence": active_evidence,
+            "retired_evidence": retired_evidence,
             "reviews": [
                 {
                     "decision": row["decision"],
@@ -5783,6 +6308,176 @@ class CaseStore:
             {"id": str(row["id"]), "title": str(row["title"])} for row in rows
         ]
 
+    @staticmethod
+    def _repoint_profile_claims_with_surviving_lineage(
+        connection: Connection,
+        claim_rows: Iterable[Dict[str, Any]],
+        *,
+        excluded_job_ids: Iterable[str] = (),
+    ) -> list[Dict[str, Any]]:
+        """Repoint claims with valid lineage and return unsupported claims."""
+        claims = list(claim_rows)
+        claim_ids = [str(claim["id"]) for claim in claims]
+        if not claim_ids:
+            return []
+        excluded_jobs = {str(job_id) for job_id in excluded_job_ids}
+        observations = list(
+            connection.execute(
+                select(
+                    claim_observations.c.id,
+                    claim_observations.c.claim_id,
+                    claim_observations.c.provenance_type,
+                    claim_observations.c.job_id,
+                    claim_observations.c.external_evidence_id,
+                    claim_observations.c.chat_message_id,
+                    claim_observations.c.source_engine,
+                    claim_observations.c.details,
+                    claim_observations.c.observed_at,
+                )
+                .where(
+                    claim_observations.c.claim_id.in_(claim_ids),
+                    claim_observations.c.source_engine
+                    != RELIABILITY_MIGRATION_REVIEWER,
+                    ~claim_observations.c.source_engine.like(
+                        f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}%"
+                    ),
+                )
+                .order_by(
+                    claim_observations.c.observed_at.desc(),
+                    claim_observations.c.id.desc(),
+                )
+            ).mappings()
+        )
+        job_ids = {
+            str(observation["job_id"])
+            for observation in observations
+            if observation["job_id"] is not None
+            and str(observation["job_id"]) not in excluded_jobs
+        }
+        job_rows = (
+            connection.execute(
+                select(
+                    investigation_jobs.c.id,
+                    investigation_jobs.c.status,
+                    investigation_jobs.c.result,
+                ).where(investigation_jobs.c.id.in_(job_ids))
+            ).mappings()
+            if job_ids
+            else []
+        )
+        jobs_by_id = {str(row["id"]): dict(row) for row in job_rows}
+        chat_message_ids = {
+            str(observation["chat_message_id"])
+            for observation in observations
+            if observation["chat_message_id"] is not None
+        }
+        surviving_chat_ids = (
+            set(
+                connection.scalars(
+                    select(case_chat_messages.c.id).where(
+                        case_chat_messages.c.id.in_(chat_message_ids)
+                    )
+                )
+            )
+            if chat_message_ids
+            else set()
+        )
+        evidence_ids = {
+            str(observation["external_evidence_id"])
+            for observation in observations
+            if observation["external_evidence_id"] is not None
+        }
+        surviving_evidence_ids = (
+            set(
+                connection.scalars(
+                    select(external_evidence_records.c.id).where(
+                        external_evidence_records.c.id.in_(evidence_ids)
+                    )
+                )
+            )
+            if evidence_ids
+            else set()
+        )
+        surviving_by_claim: Dict[str, Dict[str, Any]] = {}
+        surviving_evidence_by_claim: Dict[str, set[str]] = {}
+        for observation in observations:
+            claim_id = str(observation["claim_id"])
+            provenance_type = str(observation["provenance_type"])
+            source_engine = str(observation["source_engine"])
+            job = jobs_by_id.get(str(observation["job_id"] or ""))
+            valid = False
+            if source_engine in LEGACY_PROFILE_CLAIM_ENGINES:
+                result = dict(job["result"] or {}) if job else {}
+                valid = bool(
+                    job
+                    and job["status"] == "completed"
+                    and result.get("profile_reliability_version")
+                    == PROFILE_RELIABILITY_VERSION
+                )
+            elif provenance_type == "investigation_job":
+                valid = bool(job and job["status"] == "completed")
+            elif provenance_type == "case_chat_message":
+                valid = observation["chat_message_id"] in surviving_chat_ids
+            elif provenance_type == "external_evidence":
+                valid = (
+                    observation["external_evidence_id"]
+                    in surviving_evidence_ids
+                )
+            if valid:
+                surviving_by_claim.setdefault(claim_id, dict(observation))
+                observation_details = dict(observation["details"] or {})
+                evidence_fingerprints = observation_details.get(
+                    "evidence_fingerprints"
+                )
+                if isinstance(evidence_fingerprints, list):
+                    surviving_evidence_by_claim.setdefault(
+                        claim_id,
+                        set(),
+                    ).update(
+                        str(fingerprint)
+                        for fingerprint in evidence_fingerprints
+                        if fingerprint is not None
+                        and str(fingerprint).strip()
+                    )
+
+        retire_rows = []
+        now = utcnow()
+        for claim in claims:
+            survivor = surviving_by_claim.get(str(claim["id"]))
+            if not survivor:
+                retire_rows.append(claim)
+                continue
+            source_job_match = (
+                persona_claims.c.source_job_id.is_(None)
+                if claim["source_job_id"] is None
+                else persona_claims.c.source_job_id == claim["source_job_id"]
+            )
+            repointed = connection.execute(
+                update(persona_claims)
+                .where(
+                    persona_claims.c.id == claim["id"],
+                    source_job_match,
+                    persona_claims.c.source_engine == claim["source_engine"],
+                )
+                .values(
+                    source_job_id=survivor["job_id"],
+                    source_engine=survivor["source_engine"],
+                    updated_at=now,
+                )
+            )
+            if repointed.rowcount == 1:
+                CaseStore._retire_claim_evidence_with_connection(
+                    connection,
+                    str(claim["id"]),
+                    now=now,
+                )
+                CaseStore._restore_claim_evidence_fingerprints_with_connection(
+                    connection,
+                    str(claim["id"]),
+                    surviving_evidence_by_claim.get(str(claim["id"]), set()),
+                )
+        return retire_rows
+
     def delete_job(
         self, job_id: str, *, confirmation_name: Optional[str] = None
     ) -> bool:
@@ -5819,6 +6514,35 @@ class CaseStore:
                 .limit(1)
             )
             if sibling_job:
+                claim_rows = list(
+                    connection.execute(
+                        select(
+                            persona_claims.c.id,
+                            persona_claims.c.persona_id,
+                            persona_claims.c.source_job_id,
+                            persona_claims.c.source_engine,
+                            persona_claims.c.review_status,
+                        ).where(
+                            persona_claims.c.source_job_id == job_id,
+                            persona_claims.c.source_engine.in_(
+                                LEGACY_PROFILE_CLAIM_ENGINES
+                            ),
+                        )
+                    ).mappings()
+                )
+                retire_claim_rows = (
+                    self._repoint_profile_claims_with_surviving_lineage(
+                        connection,
+                        claim_rows,
+                        excluded_job_ids={job_id},
+                    )
+                )
+                self._retire_profile_claim_rows(
+                    connection,
+                    retire_claim_rows,
+                    current_reliability_version=PROFILE_RELIABILITY_VERSION,
+                    source_job_becoming_unavailable=True,
+                )
                 connection.execute(
                     delete(investigation_jobs).where(investigation_jobs.c.id == job_id)
                 )

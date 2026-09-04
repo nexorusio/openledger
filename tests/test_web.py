@@ -128,9 +128,10 @@ def test_only_discovery_graph_report_can_be_framed_same_origin(
         'session_folder': 'search_frameable',
         'graph_file': 'search_frameable/combined_graph.html',
         'usernames': ['alice'],
-        'individual_reports': [],
-        'found_count': 0,
-    }
+            'individual_reports': [],
+            'found_count': 0,
+            'profile_reliability_version': 1,
+        }
 
     results_response = client.get('/results/search_frameable')
     assert results_response.status_code == 200
@@ -221,6 +222,7 @@ def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
                 'status': 'completed',
                 'session_folder': 'search_assessed',
                 'found_count': 7,
+                'profile_reliability_version': 1,
             },
             'failed': {
                 'status': 'failed',
@@ -234,7 +236,7 @@ def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
 
     assert 'Saved investigations' in body
     assert '1 completed · 1 failed' in body
-    assert 'Profiles discovered' in body
+    assert 'Supported profiles' in body
     assert '>7</strong>' in body
     assert 'AI assessments' in body
     assert '>1</strong>' in body
@@ -821,6 +823,7 @@ def test_ai_analysis_is_generated_once_and_cached(
     monkeypatch.setattr(web_app, 'get_ai_evidence_proposals', fake_proposals)
     web_app.job_results['session1'] = {
         'status': 'completed',
+        'profile_reliability_version': 1,
         'session_folder': 'search_session1',
         'graph_file': 'search_session1/combined_graph.html',
         'usernames': ['soxoj'],
@@ -903,6 +906,7 @@ def test_ai_analysis_falls_back_to_case_evidence_when_research_has_no_citations(
         store.claim_next('worker:test')
         result = {
             'status': 'completed',
+            'profile_reliability_version': 1,
             'session_folder': f'search_{job_id}',
             'graph_file': f'search_{job_id}/combined_graph.html',
             'usernames': ['alice'],
@@ -990,6 +994,7 @@ def test_ai_analysis_fallback_preserves_unavailable_persona_status(
     monkeypatch.setattr(web_app, 'get_enriched_ai_analysis', fake_analysis)
     result = {
         'status': 'completed',
+        'profile_reliability_version': 1,
         'session_folder': 'search_orphan',
         'graph_file': 'search_orphan/combined_graph.html',
         'usernames': ['alice'],
@@ -1053,6 +1058,7 @@ def test_cached_ai_fallback_restores_persona_status_after_storage_recovers(
         store.claim_next('worker:test')
         result = {
             'status': 'completed',
+            'profile_reliability_version': 1,
             'session_folder': f'search_{job_id}',
             'graph_file': f'search_{job_id}/combined_graph.html',
             'usernames': ['alice'],
@@ -1104,6 +1110,7 @@ def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
     store.claim_next('worker:test')
     result = {
         'status': 'completed',
+        'profile_reliability_version': 1,
         'session_folder': f'search_{job_id}',
         'graph_file': f'search_{job_id}/combined_graph.html',
         'usernames': ['alice'],
@@ -1501,6 +1508,7 @@ def test_ai_assessment_survives_structured_proposal_failure(
     monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
     web_app.job_results['session1'] = {
         'status': 'completed',
+        'profile_reliability_version': 1,
         'session_folder': 'search_session1',
         'graph_file': 'search_session1/combined_graph.html',
         'usernames': ['alice'],
@@ -1695,7 +1703,11 @@ def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
             site_name='GitHub',
             site_url_user='https://github.com/soxoj',
             status=MaigretCheckStatus.CLAIMED,
-            ids_data={'fullname': 'Soxoj', '_extractor': 'x'},
+            ids_data={
+                'fullname': 'Soxoj',
+                'description': 'Public developer profile',
+                '_extractor': 'x',
+            },
             tags=['dev'],
         )
         notify.update(result)
@@ -1840,7 +1852,7 @@ def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
     )
 
 
-def test_live_scan_analyzes_and_archives_only_native_claimed_profile_urls(
+def test_live_scan_analyzes_and_archives_only_supported_profile_urls(
     client, web_app, monkeypatch
 ):
     unfurl_targets = []
@@ -1853,7 +1865,10 @@ def test_live_scan_analyzes_and_archives_only_native_claimed_profile_urls(
             site_name='Example Social',
             site_url_user='https://social.example/alice',
             status=MaigretCheckStatus.CLAIMED,
-            ids_data={},
+            ids_data={
+                'fullname': 'Alice Example',
+                'description': 'Researcher',
+            },
         )
         notify.update(result)
         return {
@@ -1944,6 +1959,311 @@ def test_live_scan_analyzes_and_archives_only_native_claimed_profile_urls(
     }
 
 
+def test_live_scan_does_not_enrich_suppressed_profile_hit(
+    client, web_app, monkeypatch
+):
+    collector_calls = []
+
+    async def fake_search(*args, **kwargs):
+        notify = kwargs['query_notify']
+        result = MaigretCheckResult(
+            username='alice',
+            site_name='Generic Social',
+            site_url_user='https://social.example/alice',
+            status=MaigretCheckStatus.CLAIMED,
+            ids_data={'description': 'Log in or create an account'},
+        )
+        notify.update(result)
+        return {
+            'Generic Social': {
+                'status': result,
+                'url_user': result.site_url_user,
+            }
+        }
+
+    async def unexpected_collector(_target):
+        collector_calls.append(_target)
+        raise AssertionError('suppressed hit reached a follow-up collector')
+
+    monkeypatch.setattr(maigret, 'search', fake_search)
+    monkeypatch.setattr(web_app, 'run_unfurl_url_analysis', unexpected_collector)
+    monkeypatch.setattr(web_app, 'run_wayback_capture_index', unexpected_collector)
+    monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
+    monkeypatch.setattr(
+        maigret.report, 'generate_report_context', lambda *a, **kw: {}
+    )
+
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={
+            'identifier_type': 'username',
+            'identifier_value': 'alice',
+            'processing_mode': 'independent',
+            'enable_archived_url_evidence': 'on',
+        },
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
+    job_id = start.get_json()['job_id']
+    body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
+
+    assert collector_calls == []
+    assert '"type": "suppressed"' in body
+    result = web_app.job_results[job_id]
+    assert result['found_count'] == 0
+    assert result['suppressed_count'] == 1
+    assert result['collector_observations'] == []
+
+
+def test_live_scan_does_not_send_candidate_to_url_only_collectors(
+    client, web_app, monkeypatch
+):
+    collector_calls = []
+
+    async def fake_search(*args, **kwargs):
+        notify = kwargs['query_notify']
+        result = MaigretCheckResult(
+            username='alice',
+            site_name='Status Only Social',
+            site_url_user='https://social.example/alice',
+            status=MaigretCheckStatus.CLAIMED,
+            ids_data={},
+        )
+        notify.update(result)
+        return {
+            'Status Only Social': {
+                'status': result,
+                'url_user': result.site_url_user,
+            }
+        }
+
+    async def unexpected_collector(target):
+        collector_calls.append(target)
+        raise AssertionError('candidate reached a URL-only collector')
+
+    monkeypatch.setattr(maigret, 'search', fake_search)
+    monkeypatch.setattr(web_app, 'run_unfurl_url_analysis', unexpected_collector)
+    monkeypatch.setattr(web_app, 'run_wayback_capture_index', unexpected_collector)
+    monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
+    monkeypatch.setattr(
+        maigret.report, 'generate_report_context', lambda *a, **kw: {}
+    )
+
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={
+            'identifier_type': 'username',
+            'identifier_value': 'alice',
+            'processing_mode': 'independent',
+            'enable_archived_url_evidence': 'on',
+        },
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
+    job_id = start.get_json()['job_id']
+    body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
+
+    assert collector_calls == []
+    assert '"type": "candidate"' in body
+    result = web_app.job_results[job_id]
+    assert result['found_count'] == 0
+    assert result['candidate_count'] == 1
+    assert result['collector_observations'] == []
+
+
+def test_stream_notify_resolves_mirror_to_canonical_detector(
+    web_app, monkeypatch
+):
+    event_queue = web_app.queue.Queue()
+    mirror = web_app.MaigretDatabase().load_from_path(TEST_DB).sites[0]
+    mirror.name = 'Mirror'
+    mirror.source = 'Parent'
+    mirror.check_type = 'message'
+    monkeypatch.setattr(
+        web_app,
+        'get_detector_health_registry',
+        lambda: {
+            'schema_version': 1,
+            'generated_at': None,
+            'sites': {
+                'mirror': {
+                    'site_name': 'Mirror',
+                    'state': 'degraded',
+                }
+            },
+        },
+    )
+    notify = web_app.StreamNotify(event_queue, 'alice')
+    notify.set_sites({'Mirror': mirror})
+    result = MaigretCheckResult(
+        username='alice',
+        site_name='Mirror [Parent]',
+        site_url_user='https://mirror.example/alice',
+        status=MaigretCheckStatus.CLAIMED,
+        ids_data={'fullname': 'Alice Example', 'description': 'Researcher'},
+    )
+
+    notify.update(result)
+    events = []
+    while not event_queue.empty():
+        events.append(event_queue.get_nowait())
+
+    assert 'Mirror' in notify.results
+    assert 'Mirror [Parent]' not in notify.results
+    candidate = next(event for event in events if event['type'] == 'candidate')
+    assert candidate['site'] == 'Mirror [Parent]'
+    assert 'degraded' in candidate['reason']
+
+
+def test_legacy_persisted_result_preserves_raw_claimed_count(web_app):
+    normalized = web_app.normalize_persisted_result(
+        'legacy',
+        {
+            'status': 'completed',
+            'session_folder': 'search_legacy',
+            'graph_file': 'search_legacy/combined_graph.html',
+            'usernames': ['alice'],
+            'individual_reports': [
+                {
+                    'username': 'alice',
+                    'claimed_profiles': [
+                        {
+                            'site_name': 'Legacy Social',
+                            'url': 'https://legacy.example/alice',
+                        }
+                    ],
+                }
+            ],
+            'found_count': 1,
+            'collector_observations': [
+                {
+                    'source_engine': 'unfurl_url_analysis',
+                    'source_url': 'https://legacy.example/alice',
+                    'status': 'analyzed',
+                },
+                {
+                    'source_engine': 'wayback_cdx',
+                    'source_url': 'https://legacy.example/alice',
+                    'status': 'archived',
+                },
+                {
+                    'source_engine': 'github_public_profile',
+                    'source_url': 'https://github.com/alice',
+                    'status': 'observed',
+                },
+                {
+                    'source_engine': 'user_scanner_email',
+                    'site_name': 'Gravatar',
+                    'status': 'registered',
+                },
+            ],
+        },
+    )
+
+    assert normalized['profile_reliability_version'] == 0
+    assert normalized['found_count'] == 0
+    assert normalized['raw_claimed_count'] == 1
+    assert normalized['untriaged_count'] == 1
+    individual = normalized['individual_reports'][0]
+    assert individual['claimed_profiles'] == []
+    assert individual['untriaged_profiles'][0]['classification'] == 'untriaged'
+    assert normalized['collector_observations'] == [
+        {
+            'source_engine': 'user_scanner_email',
+            'site_name': 'Gravatar',
+            'status': 'registered',
+        }
+    ]
+    assert normalized['withheld_profile_observation_count'] == 3
+    assert {
+        observation['source_engine']
+        for observation in normalized['withheld_profile_observations']
+    } == {'github_public_profile', 'unfurl_url_analysis', 'wayback_cdx'}
+    assert normalized['collector_found_count'] == 1
+    assert 'https://legacy.example/alice' not in web_app.build_ai_markdown(
+        normalized
+    )
+    renormalized = web_app.normalize_persisted_result('legacy', normalized)
+    assert renormalized['withheld_profile_observation_count'] == 3
+    assert renormalized['collector_observations'] == normalized[
+        'collector_observations'
+    ]
+
+
+def test_legacy_untriaged_session_requires_rescan_before_ai(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setattr(web_app, 'get_openai_api_key', lambda: 'test-key')
+    web_app.job_results['legacy'] = web_app.normalize_persisted_result(
+        'legacy',
+        {
+            'status': 'completed',
+            'session_folder': 'search_legacy',
+            'graph_file': 'search_legacy/combined_graph.html',
+            'usernames': ['alice'],
+            'individual_reports': [],
+            'found_count': 1,
+        },
+    )
+    with client.session_transaction() as browser_session:
+        browser_session['csrf_token'] = 'test-csrf'
+
+    results_page = client.get('/results/search_legacy').get_data(as_text=True)
+    response = client.post(
+        '/api/analysis/search_legacy',
+        headers={'X-OpenLedger-CSRF': 'test-csrf'},
+    )
+
+    assert 'Discovery evidence graph' not in results_page
+    assert 'combined_graph.html' not in results_page
+    assert response.status_code == 409
+    assert 'Rerun it' in response.get_json()['error']
+
+
+def test_case_store_fallback_normalizes_missing_reliability_version(
+    web_app, monkeypatch
+):
+    stored = {
+        'job_id': 'database-legacy',
+        'status': 'completed',
+        'session_folder': 'search_database-legacy',
+        'graph_file': 'search_database-legacy/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [
+            {
+                'username': 'alice',
+                'claimed_profiles': [
+                    {
+                        'site_name': 'Legacy Social',
+                        'url': 'https://legacy.example/alice',
+                    }
+                ],
+            }
+        ],
+        'found_count': 1,
+    }
+    monkeypatch.setattr(
+        web_app,
+        'case_store',
+        types.SimpleNamespace(get_job=lambda _job_id: stored),
+    )
+
+    result = web_app.find_result_by_session('search_database-legacy')
+
+    assert result['profile_reliability_version'] == 0
+    assert result['found_count'] == 0
+    assert result['untriaged_count'] == 1
+    assert result['individual_reports'][0]['claimed_profiles'] == []
+
+
 def test_live_scan_empty_username_rejected(client, web_app):
     client.get('/')
     resp = client.post(
@@ -2025,12 +2345,50 @@ def test_live_results_for_finished_job_skips_sse_and_shows_reports(client, web_a
         'usernames': ['soxoj'],
         'individual_reports': [],
         'found_count': 0,
+        'profile_reliability_version': 1,
     }
 
     resp = client.get('/live/finishedjob')
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
     assert 'const doneRedirect = "/results/search_finishedjob";' in body
+
+
+def test_live_results_normalizes_database_only_legacy_completion(
+    client, web_app, monkeypatch
+):
+    legacy = {
+        'job_id': 'database-live-legacy',
+        'kind': 'legacy',
+        'status': 'completed',
+        'session_folder': 'search_database-live-legacy',
+        'graph_file': 'search_database-live-legacy/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [
+            {
+                'username': 'alice',
+                'claimed_profiles': [
+                    {'site_name': 'One', 'url': 'https://example.test/one'},
+                    {'site_name': 'Two', 'url': 'https://example.test/two'},
+                ],
+            }
+        ],
+        'found_count': 2,
+    }
+    monkeypatch.setattr(
+        web_app,
+        'case_store',
+        types.SimpleNamespace(get_job=lambda _job_id: legacy),
+    )
+
+    body = client.get('/live/database-live-legacy').get_data(as_text=True)
+
+    assert 'const completedFoundCount = 0;' in body
+    assert 'const completedUntriagedCount = 2;' in body
+    assert 'const legacyUntriaged = true;' in body
+    assert 'Legacy untriaged hits' in body
+    assert 'Rerun required' in body
+    assert 'id="graph"' not in body
 
 
 def test_live_scan_done_event_offers_redirect_not_auto_navigation(
@@ -2075,18 +2433,19 @@ def test_live_scan_done_event_offers_redirect_not_auto_navigation(
 
     result = web_app.job_results[job_id]
     assert result['status'] == 'completed'
-    assert result['found_count'] == 1
+    assert result['found_count'] == 0
+    assert result['candidate_count'] == 1
     assert 'started_at' in result
 
 
-def test_live_scan_stop_mid_scan_keeps_already_found_results(
+def test_live_scan_stop_mid_scan_keeps_already_collected_results(
     client, web_app, monkeypatch
 ):
     """Regression: clicking Stop while a username's scan is still in-flight
-    used to discard every 'found' result already streamed to the live graph,
+    used to discard every result already streamed to the live view,
     because the cancelled search() task never returns its own results dict —
     general_results stayed empty, build_reports never ran, and the browser
-    got 'Completed — nothing to analyze.' despite the graph showing hits.
+    got 'Completed — nothing to analyze.' despite collection showing hits.
 
     StreamNotify now keeps a running copy of what it already streamed, and
     that's what gets reported when the task is cancelled mid-scan.
@@ -2128,8 +2487,8 @@ def test_live_scan_stop_mid_scan_keeps_already_found_results(
     ]
     types_seen = [e['type'] for e in events]
     assert 'stopped' in types_seen
-    found = [e for e in events if e['type'] == 'found']
-    assert found and found[0]['site'] == 'ValidActive'
+    candidates = [e for e in events if e['type'] == 'candidate']
+    assert candidates and candidates[0]['site'] == 'ValidActive'
 
     done_event = next(e for e in events if e['type'] == 'done')
     assert (
@@ -2138,8 +2497,9 @@ def test_live_scan_stop_mid_scan_keeps_already_found_results(
 
     result = web_app.job_results[job_id]
     assert result['status'] == 'completed'
-    assert result['found_count'] == 1
-    assert result['individual_reports'][0]['claimed_profiles'][0]['site_name'] == (
+    assert result['found_count'] == 0
+    assert result['candidate_count'] == 1
+    assert result['individual_reports'][0]['candidate_profiles'][0]['site_name'] == (
         'ValidActive'
     )
 
@@ -2212,6 +2572,7 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
         'usernames': ['soxoj', 'alice'],
         'individual_reports': [],
         'found_count': 7,
+        'profile_reliability_version': 1,
         'started_at': '2026-07-28 10:00:00',
     }
     web_app.job_results['ts_failed'] = {
@@ -2227,7 +2588,7 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
 
     assert '2026-07-28 10:00 UTC' in body
     assert 'soxoj, alice' in body
-    assert '7 profiles' in body
+    assert '7 supported profiles' in body
     assert 'completed' in body
     assert '/results/search_ts_completed' in body
 
@@ -2237,6 +2598,45 @@ def test_history_lists_completed_and_failed_runs(client, web_app):
 
     # Newest run listed first.
     assert body.index('search_ts_completed') < body.index('bob')
+
+
+def test_history_and_dashboard_withhold_database_legacy_claims(
+    client, web_app, monkeypatch
+):
+    legacy = {
+        'job_id': 'database-history-legacy',
+        'kind': 'legacy',
+        'status': 'completed',
+        'session_folder': 'search_database-history-legacy',
+        'graph_file': 'search_database-history-legacy/combined_graph.html',
+        'usernames': ['alice'],
+        'individual_reports': [
+            {
+                'username': 'alice',
+                'claimed_profiles': [
+                    {
+                        'site_name': 'Legacy Social',
+                        'url': 'https://example.test/alice',
+                    }
+                ],
+            }
+        ],
+        'found_count': 1,
+        'started_at': '2026-07-28 10:00:00',
+    }
+    monkeypatch.setattr(
+        web_app,
+        'case_store',
+        types.SimpleNamespace(list_jobs=lambda: [legacy]),
+    )
+
+    history_body = client.get('/history').get_data(as_text=True)
+    dashboard_body = client.get('/').get_data(as_text=True)
+
+    assert '1 untriaged profile · rerun required' in history_body
+    assert '1 supported profile' not in history_body
+    assert '1 legacy hit requires rerun' in dashboard_body
+    assert '<strong class="metric-value">0</strong>' in dashboard_body
 
 
 def test_history_can_permanently_delete_one_investigation(client, web_app):
@@ -2407,7 +2807,7 @@ def test_internal_session_metadata_cannot_be_downloaded(client, web_app):
 
 def test_build_reports_computes_found_count(web_app, monkeypatch):
     """Regression guard: History reads `found_count` off the dict build_reports
-    returns, so it must count claimed profiles across all usernames."""
+    returns, so it must count supported profiles across all usernames."""
     monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
@@ -2444,6 +2844,159 @@ def test_build_reports_computes_found_count(web_app, monkeypatch):
     assert 'Deddy Corbuzier' in ai_input
     assert 'Indonesian mentalist' in ai_input
     assert 'Maigret' not in ai_input
+
+
+def test_build_reports_triages_raw_claimed_results_before_counting(
+    web_app, monkeypatch
+):
+    for report_writer in (
+        'save_csv_report',
+        'save_json_report',
+        'save_pdf_report',
+        'save_html_report',
+    ):
+        monkeypatch.setattr(maigret.report, report_writer, lambda *a, **kw: None)
+    monkeypatch.setattr(
+        maigret.report, 'generate_report_context', lambda *a, **kw: {}
+    )
+    graph_inputs = []
+    monkeypatch.setattr(
+        maigret.report,
+        'save_graph_report',
+        lambda _path, results, _db: graph_inputs.append(results),
+    )
+
+    def claimed(
+        site_name,
+        ids_data,
+        *,
+        context=None,
+        check_type='message',
+        http_status=200,
+    ):
+        status = MaigretCheckResult(
+            username='alice',
+            site_name=site_name,
+            site_url_user=f'https://example.test/{site_name}/alice',
+            status=MaigretCheckStatus.CLAIMED,
+            ids_data=ids_data,
+            context=context,
+        )
+        return {
+            'status': status,
+            'url_user': status.site_url_user,
+            'site': types.SimpleNamespace(check_type=check_type),
+            'http_status': http_status,
+        }
+
+    raw_results = {
+        'Supported': claimed(
+            'Supported',
+            {'fullname': 'Alice Example', 'description': 'Researcher'},
+        ),
+        'StatusOnly': claimed('StatusOnly', {}, check_type='status_code'),
+        'GenericShell': claimed(
+            'GenericShell', {'description': 'Log in or create an account'}
+        ),
+        'BlockedTransport': claimed(
+            'BlockedTransport',
+            {'fullname': 'Alice Example', 'description': 'Researcher'},
+            http_status=403,
+        ),
+    }
+
+    report = web_app.build_reports(
+        [('alice', 'username', raw_results)], ['alice'], 'triaged'
+    )
+
+    assert report['raw_claimed_count'] == 4
+    assert report['found_count'] == 1
+    assert report['candidate_count'] == 1
+    assert report['suppressed_count'] == 2
+    individual = report['individual_reports'][0]
+    assert [item['site_name'] for item in individual['claimed_profiles']] == [
+        'Supported'
+    ]
+    assert [item['site_name'] for item in individual['candidate_profiles']] == [
+        'StatusOnly'
+    ]
+    assert [item['site_name'] for item in individual['suppressed_profiles']] == [
+        'GenericShell',
+        'BlockedTransport',
+    ]
+    assert list(graph_inputs[0][0][2]) == ['Supported']
+    ai_input = web_app.build_ai_markdown(report)
+    assert 'Low-signal candidates (not findings)' in ai_input
+    assert 'Suppressed unreliable detector hits: 2' in ai_input
+
+
+def test_site_selection_excludes_reviewed_quarantined_detector(web_app):
+    database = web_app.MaigretDatabase().load_from_path(TEST_DB)
+    baseline = web_app.select_sites_for_search(
+        database,
+        top_sites=100,
+        all_sites=True,
+        tags=[],
+        excluded_tags=[],
+        site_list=[],
+        detector_health_registry={
+            'schema_version': 1,
+            'generated_at': None,
+            'sites': {},
+        },
+    )
+    quarantined_name = next(iter(baseline))
+    filtered = web_app.select_sites_for_search(
+        database,
+        top_sites=100,
+        all_sites=True,
+        tags=[],
+        excluded_tags=[],
+        site_list=[],
+        detector_health_registry={
+            'schema_version': 1,
+            'generated_at': None,
+            'sites': {
+                quarantined_name.casefold(): {
+                    'site_name': quarantined_name,
+                    'state': 'quarantined',
+                }
+            },
+        },
+    )
+
+    assert quarantined_name not in filtered
+    assert len(filtered) == len(baseline) - 1
+
+
+def test_site_selection_backfills_quarantined_detector_before_limit(web_app):
+    sites = {
+        name: types.SimpleNamespace(tags=['social'])
+        for name in ('First', 'Second', 'Third')
+    }
+
+    class FakeDatabase:
+        def ranked_sites_dict(self, **kwargs):
+            assert kwargs['top'] == 3
+            return dict(list(sites.items())[: kwargs['top']])
+
+    selected = web_app.select_sites_for_search(
+        FakeDatabase(),
+        top_sites=2,
+        all_sites=False,
+        tags=[],
+        excluded_tags=[],
+        site_list=[],
+        detector_health_registry={
+            'schema_version': 1,
+            'generated_at': None,
+            'sites': {
+                'first': {'site_name': 'First', 'state': 'quarantined'},
+            },
+        },
+    )
+
+    assert list(selected) == ['Second', 'Third']
 
 
 def test_ai_markdown_includes_only_explicitly_approved_operator_context(web_app):

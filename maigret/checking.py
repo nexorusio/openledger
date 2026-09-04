@@ -907,7 +907,9 @@ def process_site_result(
             )
             result.ids_data = extracted_ids_data
 
-    # Save status of request
+    # Preserve transport status on both the aggregate site result and the
+    # notification object consumed by live reliability triage.
+    result.http_status = status_code
     results_info["status"] = result
 
     # Save results from request

@@ -72,7 +72,8 @@ class MaigretCheckResult:
         error=None,
         tags=[],
         keywords=None,
-        keyword_match_status=None
+        keyword_match_status=None,
+        http_status=None,
     ):
         """
         Keyword Arguments:
@@ -116,6 +117,7 @@ class MaigretCheckResult:
         self.error = error
         self.keywords = keywords or []
         self.keyword_match_status = keyword_match_status or KeywordMatchStatus.NO_KEYWORDS
+        self.http_status = http_status
 
     def json(self):
         return {
@@ -126,7 +128,8 @@ class MaigretCheckResult:
             "ids": self.ids_data or {},
             "tags": self.tags,
             "keywords": self.keywords,
-            "keyword_match_status": str(self.keyword_match_status)
+            "keyword_match_status": str(self.keyword_match_status),
+            "http_status": self.http_status,
         }
 
     def is_found(self):
