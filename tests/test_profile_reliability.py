@@ -235,6 +235,31 @@ def test_canary_plan_uses_existing_missing_and_high_entropy_handles():
     assert all(re.fullmatch(site.regex_check, probe["username"]) for probe in random_probes)
 
 
+def test_canary_plan_preserves_required_username_separators():
+    site = MaigretSite(
+        "ORCID-shaped",
+        {
+            "urlMain": "https://example.test/",
+            "url": "https://example.test/{username}",
+            "regexCheck": r"^\d{4}-\d{4}-\d{4}-\d{3}[\dX]$",
+            "usernameClaimed": "0000-0003-0145-6846",
+            "usernameUnclaimed": "9999-9999-9999-9999",
+        },
+    )
+
+    plan = build_probe_plan(site, samples=3, rng=random.Random(11))
+    random_probes = [
+        probe for probe in plan if probe["kind"] == "high_entropy_missing"
+    ]
+
+    assert len(random_probes) == 3
+    assert all(
+        re.fullmatch(site.regex_check, probe["username"])
+        for probe in random_probes
+    )
+    assert all(probe["username"].count("-") == 3 for probe in random_probes)
+
+
 def test_canary_evaluation_distinguishes_contradiction_from_unknown():
     failed = evaluate_probe_results(
         [

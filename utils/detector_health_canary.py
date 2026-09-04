@@ -52,6 +52,33 @@ def _matches_site(site: MaigretSite, username: str) -> bool:
     return not site.regex_check or re.search(site.regex_check, username) is not None
 
 
+def _randomize_username_template(template: str, rng: random.Random) -> str:
+    """Randomize a declared handle without discarding its separators or shape."""
+    characters = list(template)
+    mutable = [
+        index
+        for index, character in enumerate(characters)
+        if character.isalnum()
+    ]
+    if not mutable:
+        return template
+
+    selected = [index for index in mutable if rng.random() < 0.65]
+    if not selected:
+        selected = [rng.choice(mutable)]
+    for index in selected:
+        character = characters[index]
+        if character.isdigit():
+            alphabet = string.digits
+        elif character.isupper():
+            alphabet = string.ascii_uppercase
+        else:
+            alphabet = string.ascii_lowercase
+        replacements = alphabet.replace(character, "") or alphabet
+        characters[index] = rng.choice(replacements)
+    return "".join(characters)
+
+
 def high_entropy_usernames(
     site: MaigretSite,
     *,
@@ -64,12 +91,26 @@ def high_entropy_usernames(
         str(site.username_unclaimed or "").casefold(),
     }
     generated: list[str] = []
+    templates = [
+        value
+        for value in (
+            str(site.username_unclaimed or "").strip(),
+            str(site.username_claimed or "").strip(),
+        )
+        if value and _matches_site(site, value)
+    ]
     alphabets = (string.ascii_lowercase + string.digits, string.ascii_lowercase, string.digits)
     lengths = (12, 10, 8, 15, 6)
-    for _attempt in range(250):
+    for _attempt in range(500):
         alphabet = alphabets[_attempt % len(alphabets)]
         length = lengths[(_attempt // len(alphabets)) % len(lengths)]
-        candidate = "".join(rng.choice(alphabet) for _ in range(length))
+        if templates and _attempt % 2 == 0:
+            candidate = _randomize_username_template(
+                templates[(_attempt // 2) % len(templates)],
+                rng,
+            )
+        else:
+            candidate = "".join(rng.choice(alphabet) for _ in range(length))
         if (
             candidate.casefold() not in existing
             and candidate not in generated
