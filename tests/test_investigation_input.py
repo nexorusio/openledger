@@ -246,6 +246,8 @@ def test_ranked_aliases_are_explainable_transliterated_and_context_bounded():
         ("王小明", "王小明"),
         ("محمد علي", "محمدعلي"),
         ("José 王", "jose王"),
+        ("Søren Kierkegaard", "sørenkierkegaard"),
+        ("李John Smith", "李johnsmith"),
     ],
 )
 def test_ranked_aliases_preserve_non_latin_name_tokens(full_name, expected_alias):

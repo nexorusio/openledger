@@ -357,13 +357,13 @@
     function cleanNameTokens(value) {
         const rawTokens = value.normalize('NFKC').toLocaleLowerCase()
             .match(/[\p{L}\p{N}]+/gu) || [];
-        const tokens = [];
-        rawTokens.forEach(rawToken => {
-            const folded = rawToken.normalize('NFKD').replace(/\p{M}/gu, '');
-            const asciiTokens = folded.match(/[a-z0-9]+/g) || [];
-            tokens.push(...(asciiTokens.length ? asciiTokens : [rawToken]));
-        });
-        return tokens.slice(0, 6);
+        return rawTokens.map(rawToken => {
+            const foldedCharacters = Array.from(rawToken).map(character =>
+                character.normalize('NFKD').replace(/\p{M}/gu, ''));
+            return foldedCharacters.every(value => /^[a-z0-9]+$/.test(value))
+                ? foldedCharacters.join('')
+                : rawToken;
+        }).slice(0, 6);
     }
 
     function exactIdentifierTargets() {

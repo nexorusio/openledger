@@ -31,10 +31,15 @@ def _alias_tokens(value: Any) -> List[str]:
 
     tokens: List[str] = []
     for raw_token in raw_tokens:
-        folded = unicodedata.normalize("NFKD", raw_token)
-        folded = folded.encode("ascii", "ignore").decode("ascii").casefold()
-        ascii_tokens = re.findall(r"[a-z0-9]+", folded)
-        tokens.extend(ascii_tokens or [raw_token])
+        folded_characters: List[str] = []
+        for character in raw_token:
+            folded = unicodedata.normalize("NFKD", character)
+            folded = folded.encode("ascii", "ignore").decode("ascii").casefold()
+            if not folded or re.fullmatch(r"[a-z0-9]+", folded) is None:
+                folded_characters = []
+                break
+            folded_characters.append(folded)
+        tokens.append("".join(folded_characters) or raw_token)
         if len(tokens) >= 6:
             break
     return tokens[:6]
