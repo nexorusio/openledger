@@ -104,10 +104,11 @@ def test_username_verification_requires_explicit_browser_opt_in(
 
     assert 'checked' not in body[input_start:input_end]
 
-    template = open(
+    with open(
         os.path.join(CUR_PATH, '../maigret/web/templates/index.html'),
         encoding='utf-8',
-    ).read()
+    ) as template_file:
+        template = template_file.read()
     handler_start = template.index(
         "userScannerUsernameToggle.addEventListener('change'"
     )
@@ -115,6 +116,14 @@ def test_username_verification_requires_explicit_browser_opt_in(
     handler = template[handler_start:handler_end]
     assert 'enforceAliasSelectionLimit()' in handler
     assert 'refreshAliasCandidates()' not in handler
+    assert "const aliasSourceTypes = new Set(['full_name', 'profile_url']);" in template
+    assert "if (aliasSourceTypes.has(type.value))" in template
+    selection_handler = template.index("selected.addEventListener('change'")
+    selection_handler_end = template.index('});', selection_handler)
+    assert (
+        'enforceAliasSelectionLimit()'
+        in template[selection_handler:selection_handler_end]
+    )
 
 
 def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):

@@ -343,6 +343,7 @@
     const sourceTags = Array.from(document.querySelectorAll('#caseTagCloud .tag'));
     const includedSourceTags = document.getElementById('caseTags');
     const excludedSourceTags = document.getElementById('caseExcludedTags');
+    const aliasSourceTypes = new Set(['full_name', 'profile_url']);
 
     const behavior = {
         username: ['e.g. johndoe', 'Exact account check'],
@@ -466,7 +467,11 @@
             row.querySelector('.alias-rank').textContent = `#${index + 1}`;
             row.querySelector('.alias-score').textContent = `${candidate.score}`;
             row.querySelector('.alias-reason').textContent = candidate.reason;
-            selected.addEventListener('change', () => { updateAliasCount(); updatePlan(); });
+            selected.addEventListener('change', () => {
+                enforceAliasSelectionLimit();
+                updateAliasCount();
+                updatePlan();
+            });
             value.addEventListener('input', () => {
                 selected.value = value.value.trim();
                 row.querySelector('.alias-score').textContent = 'edited';
@@ -577,21 +582,36 @@
 
     function bindRow(row) {
         const type = row.querySelector('.identifier-type');
+        let previousType = type.value;
         type.addEventListener('change', () => {
             updateRow(row);
-            refreshAliasCandidates();
+            if (aliasSourceTypes.has(previousType) || aliasSourceTypes.has(type.value)) {
+                refreshAliasCandidates();
+            } else {
+                enforceAliasSelectionLimit();
+            }
+            previousType = type.value;
             updatePlan();
         });
         row.querySelector('.identifier-value').addEventListener('input', () => {
-            refreshAliasCandidates();
+            if (aliasSourceTypes.has(type.value)) {
+                refreshAliasCandidates();
+            } else {
+                enforceAliasSelectionLimit();
+            }
             updatePlan();
         });
         row.querySelector('.identifier-remove').addEventListener('click', () => {
+            const removedAliasSource = aliasSourceTypes.has(type.value);
             row.remove();
             list.querySelectorAll('.identifier-remove').forEach((button, index, buttons) => {
                 button.disabled = buttons.length === 1;
             });
-            refreshAliasCandidates();
+            if (removedAliasSource) {
+                refreshAliasCandidates();
+            } else {
+                enforceAliasSelectionLimit();
+            }
             updatePlan();
         });
         updateRow(row);
