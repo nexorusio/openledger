@@ -2704,8 +2704,12 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                     'found': github_observation_count,
                 }
             )
+    # URL decomposition and archive presence cannot prove that a candidate
+    # account exists.  Keep candidates eligible for a profile-specific GitHub
+    # lookup above, but send only already-supported detections to URL-only
+    # collectors so they cannot create Persona proposals from weak hits.
     profile_url_targets = claimed_profile_url_targets(
-        corroboration_results, investigation_plan
+        supported_general_results(general_results), investigation_plan
     )
     if profile_url_targets and not (
         job['cancelled'] or (cancellation_check and cancellation_check())

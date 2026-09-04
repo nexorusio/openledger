@@ -146,7 +146,7 @@ def test_two_failures_quarantine_and_two_successes_recover():
         {"Example": {"outcome": "pass", "reason": "clean"}},
         checked_at="2026-09-03T00:00:00+00:00",
     )
-    assert detector_health_for_site(registry, "Example") == "degraded"
+    assert detector_health_for_site(registry, "Example") == "quarantined"
 
     registry = evolve_detector_health_registry(
         registry,
@@ -168,6 +168,37 @@ def test_unknown_canary_degrades_without_false_positive_accumulation():
 
     assert entry["state"] == "degraded"
     assert entry["consecutive_failures"] == 0
+
+
+def test_unknown_canary_never_lifts_an_existing_quarantine():
+    registry = evolve_detector_health_registry(
+        empty_detector_health_registry(),
+        {"Example": {"outcome": "fail", "reason": "soft 404"}},
+    )
+    registry = evolve_detector_health_registry(
+        registry,
+        {"Example": {"outcome": "fail", "reason": "soft 404"}},
+    )
+    registry = evolve_detector_health_registry(
+        registry,
+        {"Example": {"outcome": "unknown", "reason": "rate limited"}},
+    )
+    entry = serialize_detector_health_registry(registry)["sites"]["Example"]
+
+    assert entry["state"] == "quarantined"
+    assert entry["consecutive_successes"] == 0
+
+
+def test_neutral_title_does_not_mask_explicit_login_shell_metadata():
+    decision = _classify(
+        evidence={
+            "name": "Instagram",
+            "description": "Log in or create an account",
+        }
+    )
+
+    assert decision["classification"] == "suppressed"
+    assert "generic or missing-page shell" in decision["reason"]
 
 
 def test_canary_plan_uses_existing_missing_and_high_entropy_handles():

@@ -264,15 +264,23 @@ def evolve_detector_health_registry(
         if outcome == "fail":
             failures = failures + 1 if prior_outcome == "fail" else 1
             successes = 0
-            state = "quarantined" if failures >= 2 else "degraded"
+            state = (
+                "quarantined"
+                if prior_state == "quarantined" or failures >= 2
+                else "degraded"
+            )
         elif outcome == "pass":
             successes = successes + 1 if prior_outcome == "pass" else 1
             failures = 0
-            recovering = prior_state in {"degraded", "quarantined"}
-            state = "degraded" if recovering and successes < 2 else "healthy"
+            if prior_state == "quarantined" and successes < 2:
+                state = "quarantined"
+            elif prior_state == "degraded" and successes < 2:
+                state = "degraded"
+            else:
+                state = "healthy"
         else:
             successes = 0
-            state = "degraded"
+            state = "quarantined" if prior_state == "quarantined" else "degraded"
 
         updated_sites[key] = {
             "site_name": name,
@@ -427,7 +435,7 @@ def classify_profile_detection(
         for key, value in useful.items()
         if key in PROFILE_IDENTITY_FIELDS
     ]
-    looks_generic = bool(generic_values) and all(
+    looks_generic = any(
         any(marker in value for marker in GENERIC_PAGE_MARKERS)
         for value in generic_values
     )

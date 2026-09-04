@@ -1844,7 +1844,7 @@ def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
     )
 
 
-def test_live_scan_analyzes_and_archives_only_native_claimed_profile_urls(
+def test_live_scan_analyzes_and_archives_only_supported_profile_urls(
     client, web_app, monkeypatch
 ):
     unfurl_targets = []
@@ -1857,7 +1857,10 @@ def test_live_scan_analyzes_and_archives_only_native_claimed_profile_urls(
             site_name='Example Social',
             site_url_user='https://social.example/alice',
             status=MaigretCheckStatus.CLAIMED,
-            ids_data={},
+            ids_data={
+                'fullname': 'Alice Example',
+                'description': 'Researcher',
+            },
         )
         notify.update(result)
         return {
@@ -2005,6 +2008,66 @@ def test_live_scan_does_not_enrich_suppressed_profile_hit(
     result = web_app.job_results[job_id]
     assert result['found_count'] == 0
     assert result['suppressed_count'] == 1
+    assert result['collector_observations'] == []
+
+
+def test_live_scan_does_not_send_candidate_to_url_only_collectors(
+    client, web_app, monkeypatch
+):
+    collector_calls = []
+
+    async def fake_search(*args, **kwargs):
+        notify = kwargs['query_notify']
+        result = MaigretCheckResult(
+            username='alice',
+            site_name='Status Only Social',
+            site_url_user='https://social.example/alice',
+            status=MaigretCheckStatus.CLAIMED,
+            ids_data={},
+        )
+        notify.update(result)
+        return {
+            'Status Only Social': {
+                'status': result,
+                'url_user': result.site_url_user,
+            }
+        }
+
+    async def unexpected_collector(target):
+        collector_calls.append(target)
+        raise AssertionError('candidate reached a URL-only collector')
+
+    monkeypatch.setattr(maigret, 'search', fake_search)
+    monkeypatch.setattr(web_app, 'run_unfurl_url_analysis', unexpected_collector)
+    monkeypatch.setattr(web_app, 'run_wayback_capture_index', unexpected_collector)
+    monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
+    monkeypatch.setattr(
+        maigret.report, 'generate_report_context', lambda *a, **kw: {}
+    )
+
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={
+            'identifier_type': 'username',
+            'identifier_value': 'alice',
+            'processing_mode': 'independent',
+            'enable_archived_url_evidence': 'on',
+        },
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
+    job_id = start.get_json()['job_id']
+    body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
+
+    assert collector_calls == []
+    assert '"type": "candidate"' in body
+    result = web_app.job_results[job_id]
+    assert result['found_count'] == 0
+    assert result['candidate_count'] == 1
     assert result['collector_observations'] == []
 
 
