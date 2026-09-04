@@ -2553,7 +2553,7 @@ def test_history_and_dashboard_withhold_database_legacy_claims(
 
     assert '1 untriaged profile · rerun required' in history_body
     assert '1 supported profile' not in history_body
-    assert '1 legacy hit require rerun' in dashboard_body
+    assert '1 legacy hit requires rerun' in dashboard_body
     assert '<strong class="metric-value">0</strong>' in dashboard_body
 
 
