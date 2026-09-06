@@ -6624,10 +6624,25 @@ async def run_user_scanner_usernames(
     tasks = [asyncio.create_task(scan_target(username)) for username in targets]
     try:
         batches = await asyncio.gather(*tasks)
-    except asyncio.CancelledError:
+    except asyncio.CancelledError as error:
+        completed_batches = []
         for task in tasks:
-            task.cancel()
+            if not task.done() or task.cancelled():
+                continue
+            try:
+                completed_batches.append(task.result())
+            except (asyncio.CancelledError, Exception):
+                continue
+        for task in tasks:
+            if not task.done():
+                task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        completed_results = [
+            result for batch in completed_batches for result in batch
+        ]
+        error.partial_observations = normalize_user_scanner_username_results(
+            completed_results
+        )
         raise
     raw_results = [result for batch in batches for result in batch]
     return normalize_user_scanner_username_results(raw_results)

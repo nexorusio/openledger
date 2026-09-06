@@ -440,6 +440,61 @@ async def test_username_runner_cancels_sibling_target_processes(monkeypatch):
     assert sibling_cancelled.is_set()
 
 
+@pytest.mark.asyncio
+async def test_username_runner_retains_completed_batches_when_cancelled(monkeypatch):
+    first_completed = asyncio.Event()
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    async def fake_subprocess(request, **_kwargs):
+        username = request["usernames"][0]
+        if username == "first":
+            first_completed.set()
+            return {
+                "results": [
+                    {
+                        "status": "Found",
+                        "username": username,
+                        "site_name": "Instagram",
+                        "url": f"https://instagram.com/{username}",
+                        "extra": {
+                            "scan_stage": "direct",
+                            "seed_username": username,
+                        },
+                    }
+                ]
+            }
+        sibling_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        "maigret.web.collector_adapters._run_user_scanner_subprocess",
+        fake_subprocess,
+    )
+    runner = asyncio.create_task(
+        run_user_scanner_usernames(
+            ["first", "pending"], platforms=["instagram"]
+        )
+    )
+    await first_completed.wait()
+    await sibling_started.wait()
+    await asyncio.sleep(0)
+    runner.cancel()
+
+    with pytest.raises(asyncio.CancelledError) as cancellation:
+        await runner
+
+    assert sibling_cancelled.is_set()
+    assert [
+        observation["subject_value"]
+        for observation in cancellation.value.partial_observations
+    ] == ["first"]
+
+
 def test_github_targets_require_opt_in_and_a_native_claimed_exact_profile():
     results = [
         _claimed_github(),

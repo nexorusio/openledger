@@ -3110,8 +3110,17 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                     'found': count_user_scanner_username_accounts(collected),
                 }
             )
-        except asyncio.CancelledError:
-            q.put({'type': 'stopped', 'collector': 'user-scanner-username'})
+        except asyncio.CancelledError as error:
+            collected = list(getattr(error, 'partial_observations', []) or [])
+            observations.extend(collected)
+            q.put(
+                {
+                    'type': 'stopped',
+                    'collector': 'user-scanner-username',
+                    'observations': len(collected),
+                    'found': count_user_scanner_username_accounts(collected),
+                }
+            )
         except Exception as error:
             public_error = record_internal_error(
                 'User Scanner username collection failed',
