@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -357,6 +358,86 @@ async def test_username_runner_receives_bounded_policy_payload(monkeypatch):
         "allow_vxtwitter": False,
     }
     assert captured["kwargs"]["timeout_seconds"] == 123
+    assert captured["kwargs"]["max_output_bytes"] == 500_000
+
+
+@pytest.mark.asyncio
+async def test_username_runner_preserves_completed_targets_when_one_times_out(
+    monkeypatch,
+):
+    calls = []
+
+    async def fake_subprocess(request, **_kwargs):
+        username = request["usernames"][0]
+        calls.append(username)
+        if username == "slow":
+            raise RuntimeError("User Scanner exceeded its collection timeout")
+        return {
+            "results": [
+                {
+                    "status": "Found",
+                    "username": username,
+                    "site_name": "Instagram",
+                    "url": f"https://instagram.com/{username}",
+                    "extra": {
+                        "scan_stage": "direct",
+                        "seed_username": username,
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        "maigret.web.collector_adapters._run_user_scanner_subprocess",
+        fake_subprocess,
+    )
+
+    observations = await run_user_scanner_usernames(
+        ["first", "slow", "last"],
+        platforms=["instagram"],
+        timeout_seconds=1,
+    )
+
+    assert calls == ["first", "slow", "last"]
+    assert [item["subject_value"] for item in observations] == [
+        "first",
+        "slow",
+        "last",
+    ]
+    assert [item["status"] for item in observations] == [
+        "found",
+        "error",
+        "found",
+    ]
+    assert observations[1]["reason"] == (
+        "Target collection timed out before completion"
+    )
+
+
+@pytest.mark.asyncio
+async def test_username_runner_cancels_sibling_target_processes(monkeypatch):
+    sibling_cancelled = asyncio.Event()
+
+    async def fake_subprocess(request, **_kwargs):
+        if request["usernames"] == ["cancel"]:
+            await asyncio.sleep(0)
+            raise asyncio.CancelledError
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        "maigret.web.collector_adapters._run_user_scanner_subprocess",
+        fake_subprocess,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_user_scanner_usernames(
+            ["cancel", "sibling"], platforms=["instagram"]
+        )
+    assert sibling_cancelled.is_set()
 
 
 def test_github_targets_require_opt_in_and_a_native_claimed_exact_profile():

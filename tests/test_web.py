@@ -91,6 +91,49 @@ def test_index_renders(client):
     assert 'Nexorus, urban planning' not in body
 
 
+def test_alias_preview_uses_authoritative_unicode_casefolding(client):
+    client.get('/')
+    with client.session_transaction() as session_data:
+        csrf_token = session_data['csrf_token']
+
+    response = client.post(
+        '/api/username-aliases',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        json={
+            'full_names': ['Groß IRMA'],
+            'nicknames': ['Straße'],
+            'contextual_numbers': ['84'],
+            'confirmed_usernames': ['known.profile'],
+            'exact_usernames': ['ＧＲＯＳＳＩＲＭＡ'],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    gross_alias = next(
+        item for item in payload['aliases'] if item['value'] == 'grossirma'
+    )
+    assert gross_alias['key'] == 'grossirma'
+    assert any(item['value'] == 'strasseirma' for item in payload['aliases'])
+    assert payload['exact_target_keys'] == ['grossirma']
+
+
+def test_alias_preview_requires_csrf_and_bounded_json(client):
+    assert client.post('/api/username-aliases', json={}).status_code == 403
+
+    client.get('/')
+    with client.session_transaction() as session_data:
+        csrf_token = session_data['csrf_token']
+    response = client.post(
+        '/api/username-aliases',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        json={'full_names': ['name'] * 25},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {'error': 'full_names contains too many values.'}
+
+
 def test_username_verification_requires_explicit_browser_opt_in(
     client, web_app, monkeypatch
 ):
@@ -116,7 +159,10 @@ def test_username_verification_requires_explicit_browser_opt_in(
     handler = template[handler_start:handler_end]
     assert 'enforceAliasSelectionLimit()' in handler
     assert 'refreshAliasCandidates()' not in handler
-    assert "const aliasSourceTypes = new Set(['full_name', 'profile_url']);" in template
+    assert (
+        "const aliasSourceTypes = new Set(['username', 'social_handle', "
+        "'profile_url', 'full_name']);" in template
+    )
     assert "refreshAliasesForIdentifierChanges(type.value)" in template
     selection_handler = template.index("selected.addEventListener('change'")
     selection_handler_end = template.index('});', selection_handler)

@@ -38,7 +38,11 @@ USER_SCANNER_USERNAME_PLATFORMS = (
     "x",
 )
 MAX_USER_SCANNER_USERNAME_TARGETS = 16
+USER_SCANNER_USERNAME_PROCESS_CONCURRENCY = 2
 MAX_COLLECTOR_OUTPUT_BYTES = 8_000_000
+MAX_USER_SCANNER_USERNAME_TARGET_OUTPUT_BYTES = (
+    MAX_COLLECTOR_OUTPUT_BYTES // MAX_USER_SCANNER_USERNAME_TARGETS
+)
 MAX_OBSERVATIONS = 600
 
 GITHUB_ENGINE = "github_public_profile"
@@ -6487,6 +6491,7 @@ async def _run_user_scanner_subprocess(
     request: Dict[str, Any],
     *,
     timeout_seconds: int = USER_SCANNER_TIMEOUT_SECONDS,
+    max_output_bytes: int = MAX_COLLECTOR_OUTPUT_BYTES,
     cancellation_check: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """Run User Scanner outside the worker process and parse its JSON envelope."""
@@ -6529,7 +6534,7 @@ async def _run_user_scanner_subprocess(
     if process.returncode != 0:
         diagnostic = stderr.decode("utf-8", errors="replace").strip()[-2000:]
         raise RuntimeError(f"User Scanner failed: {diagnostic or 'unknown error'}")
-    if len(stdout) > MAX_COLLECTOR_OUTPUT_BYTES:
+    if len(stdout) > max_output_bytes:
         raise RuntimeError("User Scanner returned an oversized result")
     try:
         envelope = json.loads(stdout)
@@ -6562,22 +6567,70 @@ async def run_user_scanner_usernames(
     timeout_seconds: int = USER_SCANNER_TIMEOUT_SECONDS,
     cancellation_check: Optional[Callable[[], bool]] = None,
 ) -> List[Dict[str, Any]]:
-    """Run bounded major-platform username verification in the isolated process."""
-    envelope = await _run_user_scanner_subprocess(
-        {
-            "mode": "username",
-            "usernames": list(usernames)[:MAX_USER_SCANNER_USERNAME_TARGETS],
-            "platforms": list(
-                USER_SCANNER_USERNAME_PLATFORMS
-                if platforms is None
-                else platforms
-            ),
-            "allow_vxtwitter": allow_vxtwitter is True,
-        },
-        timeout_seconds=timeout_seconds,
-        cancellation_check=cancellation_check,
+    """Run each bounded target atomically so one timeout cannot erase prior work."""
+    targets: List[str] = []
+    for raw_username in list(usernames)[:MAX_USER_SCANNER_USERNAME_TARGETS]:
+        username = str(raw_username or "").strip().lstrip("@")
+        if username and username.casefold() not in {
+            target.casefold() for target in targets
+        }:
+            targets.append(username)
+    requested_platforms = list(
+        USER_SCANNER_USERNAME_PLATFORMS if platforms is None else platforms
     )
-    return normalize_user_scanner_username_results(envelope.get("results"))
+    semaphore = asyncio.Semaphore(USER_SCANNER_USERNAME_PROCESS_CONCURRENCY)
+
+    async def scan_target(username: str) -> List[Dict[str, Any]]:
+        async with semaphore:
+            try:
+                envelope = await _run_user_scanner_subprocess(
+                    {
+                        "mode": "username",
+                        "usernames": [username],
+                        "platforms": requested_platforms,
+                        "allow_vxtwitter": allow_vxtwitter is True,
+                    },
+                    # The timeout is per atomic target, not one deadline shared
+                    # by all 16 sequential direct and cross-scan passes.
+                    timeout_seconds=timeout_seconds,
+                    max_output_bytes=MAX_USER_SCANNER_USERNAME_TARGET_OUTPUT_BYTES,
+                    cancellation_check=cancellation_check,
+                )
+                return list(envelope.get("results") or [])
+            except RuntimeError as error:
+                timed_out = "exceeded its collection timeout" in str(error)
+                reason = (
+                    "Target collection timed out before completion"
+                    if timed_out
+                    else "Target collection failed before completion"
+                )
+                return [
+                    {
+                        "status": "Error",
+                        "reason": reason,
+                        "username": username,
+                        "site_name": "User Scanner",
+                        "category": "Social",
+                        "url": "",
+                        "extra": {
+                            "scan_stage": "adapter",
+                            "seed_username": username,
+                            "confidence": "candidate",
+                        },
+                        "media": {},
+                    }
+                ]
+
+    tasks = [asyncio.create_task(scan_target(username)) for username in targets]
+    try:
+        batches = await asyncio.gather(*tasks)
+    except asyncio.CancelledError:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    raw_results = [result for batch in batches for result in batch]
+    return normalize_user_scanner_username_results(raw_results)
 
 
 def extract_user_scanner_claims(

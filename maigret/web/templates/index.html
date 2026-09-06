@@ -343,8 +343,15 @@
     const sourceTags = Array.from(document.querySelectorAll('#caseTagCloud .tag'));
     const includedSourceTags = document.getElementById('caseTags');
     const excludedSourceTags = document.getElementById('caseExcludedTags');
-    const aliasSourceTypes = new Set(['full_name', 'profile_url']);
+    const csrfToken = form.querySelector('input[name="csrf_token"]').value;
+    const aliasSourceTypes = new Set(['username', 'social_handle', 'profile_url', 'full_name']);
     const aliasResetTypes = new Set(['full_name']);
+    let exactTargetKeys = new Set();
+    let aliasRefreshController = null;
+    let aliasRefreshSequence = 0;
+    let aliasRefreshPending = false;
+    let aliasRefreshPromise = Promise.resolve();
+    let aliasPlanError = '';
 
     const behavior = {
         username: ['e.g. johndoe', 'Exact account check'],
@@ -355,16 +362,8 @@
         phone: ['e.g. +628123456789', 'Normalized case context only; never permuted']
     };
 
-    function cleanNameTokens(value) {
-        const rawTokens = value.normalize('NFKC').toLocaleLowerCase()
-            .match(/[\p{L}\p{N}]+/gu) || [];
-        return rawTokens.map(rawToken => {
-            const foldedCharacters = Array.from(rawToken).map(character =>
-                character.normalize('NFKD').replace(/\p{M}/gu, ''));
-            return foldedCharacters.every(value => /^[a-z0-9]+$/.test(value))
-                ? foldedCharacters.join('')
-                : rawToken;
-        }).slice(0, 6);
+    function comparisonKey(value) {
+        return value.normalize('NFKC').toLowerCase();
     }
 
     function exactIdentifierTargets() {
@@ -375,75 +374,54 @@
             const candidate = type === 'username' || type === 'social_handle'
                 ? value.replace(/^@+/, '')
                 : type === 'profile_url' ? profileHandle(value) : '';
-            if (candidate && !exactTargets.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) exactTargets.push(candidate);
+            if (candidate && !exactTargets.some(item => comparisonKey(item) === comparisonKey(candidate))) exactTargets.push(candidate);
         });
         return exactTargets;
     }
 
-    function rankedAliases() {
-        if (!generateToggle.checked) return [];
-        const names = Array.from(list.querySelectorAll('.identifier-row'))
+    function aliasPlanningPayload() {
+        const fullNames = Array.from(list.querySelectorAll('.identifier-row'))
             .filter(row => row.querySelector('.identifier-type').value === 'full_name')
             .map(row => row.querySelector('.identifier-value').value.trim()).filter(Boolean);
-        const nicknames = aliasNicknameInput.value.split(/[,\n\r]+/)
-            .map(value => cleanNameTokens(value)).filter(parts => parts.length === 1)
-            .map(parts => parts[0]).slice(0, 8);
-        const numbers = aliasContextNumberInput.value.split(/[,\s]+/)
-            .filter(value => /^[0-9]{1,6}$/.test(value)).slice(0, 6);
-        const learnedSeparators = new Set();
-        list.querySelectorAll('.identifier-row').forEach(row => {
-            if (row.querySelector('.identifier-type').value !== 'profile_url') return;
-            const handle = profileHandle(row.querySelector('.identifier-value').value.trim());
-            ['.', '_', '-'].forEach(separator => { if (handle.includes(separator)) learnedSeparators.add(separator); });
-        });
-        const candidates = new Map();
-        const add = (value, score, reason) => {
-            value = value.replace(/^[._-]+|[._-]+$/g, '');
-            if (!value || value.length > 128) return;
-            score = Math.max(0, Math.min(100, Number(score)));
-            const key = value.toLocaleLowerCase();
-            const current = candidates.get(key);
-            if (!current || score > current.score) candidates.set(key, { value, score, reason });
+        const confirmedUsernames = Array.from(list.querySelectorAll('.identifier-row'))
+            .filter(row => row.querySelector('.identifier-type').value === 'profile_url')
+            .map(row => profileHandle(row.querySelector('.identifier-value').value.trim()))
+            .filter(Boolean);
+        return {
+            full_names: fullNames,
+            nicknames: [aliasNicknameInput.value],
+            contextual_numbers: [aliasContextNumberInput.value],
+            confirmed_usernames: confirmedUsernames,
+            exact_usernames: exactIdentifierTargets()
         };
-        names.forEach(name => {
-            const tokens = cleanNameTokens(name);
-            if (!tokens.length) return;
-            if (tokens.length === 1) {
-                add(tokens[0], 100, 'Transliterated mononym');
-                numbers.forEach(number => add(tokens[0] + number, 86, `Mononym with analyst-approved contextual number ${number}`));
-                return;
-            }
-            const first = tokens[0], last = tokens[tokens.length - 1];
-            [[tokens, 100, 'Full name in natural order'], [[first, last], 96, 'First and last name'], [[last, first], 82, 'Reversed last and first name']]
-                .forEach(([parts, base, reason]) => ['', '.', '_', '-'].forEach((separator, index) => {
-                    const learnedBonus = separator && learnedSeparators.has(separator) ? 3 : 0;
-                    add(parts.join(separator), base - index + learnedBonus,
-                        reason + (learnedBonus ? '; separator learned from a confirmed profile' : ''));
-                }));
-            add(first[0] + last, 90, 'First initial plus last name');
-            add(first + last[0], 88, 'First name plus last initial');
-            add(tokens.map(token => token[0]).join(''), 78, 'Name initials');
-            add(first, 64, 'First-name mononym; collision risk');
-            add(last, 60, 'Last-name mononym; collision risk');
-            nicknames.forEach(nickname => {
-                add(nickname + last, 94, 'Analyst-supplied nickname plus last name');
-                add(nickname + '.' + last, 92, 'Nickname and last name with separator');
-                add(nickname, 70, 'Analyst-supplied nickname; collision risk');
-            });
-            numbers.forEach(number => [first + last, first[0] + last].forEach(base =>
-                add(base + number, 84, `Name pattern with analyst-approved contextual number ${number}`)));
+    }
+
+    async function requestAliasPlan(signal) {
+        const response = await fetch('/api/username-aliases', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-OpenLedger-CSRF': csrfToken
+            },
+            body: JSON.stringify(aliasPlanningPayload()),
+            signal
         });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(payload.error || 'OpenLedger could not build the alias plan.');
+        }
+        return payload;
+    }
+
+    function applyScannerSelectionBudget(aliases) {
         const scannerEnabled = userScannerUsernameToggle && userScannerUsernameToggle.checked;
-        const scannerTargetKeys = new Set(exactIdentifierTargets().map(value => value.toLocaleLowerCase()));
+        if (!scannerEnabled) return aliases;
+        const scannerTargetKeys = new Set(exactTargetKeys);
         let selectedAliasCount = 0;
-        return Array.from(candidates.values())
-            .sort((a, b) => b.score - a.score || a.value.localeCompare(b.value))
-            .slice(0, 24).map((candidate, index) => {
-                const key = candidate.value.toLocaleLowerCase();
-                const selected = scannerEnabled
-                    ? candidate.score >= 78 && !scannerTargetKeys.has(key)
-                        && scannerTargetKeys.size < 16 && selectedAliasCount < 16
-                    : index < 16 && candidate.score >= 78;
+        return aliases.map(candidate => {
+                const key = candidate.key;
+                const selected = candidate.score >= 78 && !scannerTargetKeys.has(key)
+                    && scannerTargetKeys.size < 16 && selectedAliasCount < 16;
                 if (selected) {
                     scannerTargetKeys.add(key);
                     selectedAliasCount++;
@@ -467,15 +445,14 @@
     function enforceAliasSelectionLimit() {
         const scannerEnabled = userScannerUsernameToggle
             && userScannerUsernameToggle.checked;
-        const scannerTargetKeys = new Set(scannerEnabled
-            ? exactIdentifierTargets().map(value => value.toLocaleLowerCase())
-            : []);
+        const scannerTargetKeys = new Set(scannerEnabled ? exactTargetKeys : []);
         const selectedAliasKeys = new Set();
         const selectedControls = Array.from(aliasList.querySelectorAll('.alias-selected'))
             .filter(control => control.checked);
         selectedControls.forEach(control => {
             const row = control.closest('.alias-candidate-row');
-            const key = row.querySelector('.alias-value').value.trim().toLocaleLowerCase();
+            const key = row.dataset.normalizedKey
+                || comparisonKey(row.querySelector('.alias-value').value.trim());
             const duplicateAlias = !key || selectedAliasKeys.has(key);
             const unionIsFull = scannerEnabled
                 && !scannerTargetKeys.has(key) && scannerTargetKeys.size >= 16;
@@ -505,11 +482,11 @@
 
     function mergeAnalystAliasChoices(aliases, analystChoices) {
         const generatedKeys = new Set(
-            aliases.map(candidate => candidate.value.toLocaleLowerCase()));
+            aliases.map(candidate => candidate.key));
         const choicesByGeneratedKey = new Map(
             analystChoices.map(candidate => [candidate.generatedKey, candidate]));
         const merged = aliases.map(candidate => {
-            const generatedKey = candidate.value.toLocaleLowerCase();
+            const generatedKey = candidate.key;
             const choice = choicesByGeneratedKey.get(generatedKey);
             if (!choice) return { ...candidate, generatedKey };
             return {
@@ -533,27 +510,28 @@
             }));
         const seenValues = new Set();
         return [...orphanedChoices, ...merged].filter(candidate => {
-            const key = candidate.value.toLocaleLowerCase();
+            const key = candidate.edited
+                ? comparisonKey(candidate.value)
+                : candidate.key || candidate.generatedKey || comparisonKey(candidate.value);
             if (!key || seenValues.has(key)) return false;
             seenValues.add(key);
             return true;
         }).slice(0, 24);
     }
 
-    function refreshAliasCandidates({ preserveAnalystChoices = false } = {}) {
-        const analystChoices = preserveAnalystChoices
-            ? currentAnalystAliasChoices()
-            : [];
-        let aliases = rankedAliases();
+    function renderAliasCandidates(aliases, { preserveAnalystChoices = false } = {}) {
         if (preserveAnalystChoices) {
-            aliases = mergeAnalystAliasChoices(aliases, analystChoices);
+            aliases = mergeAnalystAliasChoices(aliases, currentAnalystAliasChoices());
         }
         aliasList.replaceChildren(...aliases.map((candidate, index) => {
             const row = aliasTemplate.content.firstElementChild.cloneNode(true);
             const selected = row.querySelector('.alias-selected');
             const value = row.querySelector('.alias-value');
             row.dataset.generatedKey = candidate.generatedKey
-                || candidate.value.toLocaleLowerCase();
+                || candidate.key;
+            row.dataset.normalizedKey = candidate.edited
+                ? comparisonKey(candidate.value)
+                : candidate.key;
             row.dataset.analystChanged = candidate.analystChanged ? 'true' : 'false';
             row.dataset.aliasEdited = candidate.edited ? 'true' : 'false';
             selected.checked = candidate.selected;
@@ -572,6 +550,7 @@
                 row.dataset.analystChanged = 'true';
                 row.dataset.aliasEdited = 'true';
                 selected.value = value.value.trim();
+                row.dataset.normalizedKey = comparisonKey(value.value.trim());
                 row.querySelector('.alias-score').textContent = 'edited';
                 row.querySelector('.alias-reason').textContent = 'Analyst-edited alias candidate';
                 enforceAliasSelectionLimit();
@@ -583,6 +562,44 @@
         aliasEmpty.hidden = aliases.length > 0;
         enforceAliasSelectionLimit();
         updateAliasCount();
+    }
+
+    function refreshAliasCandidates({ preserveAnalystChoices = false } = {}) {
+        const sequence = ++aliasRefreshSequence;
+        if (aliasRefreshController) aliasRefreshController.abort();
+        if (!generateToggle.checked) {
+            exactTargetKeys = new Set(exactIdentifierTargets().map(comparisonKey));
+            aliasRefreshPending = false;
+            aliasPlanError = '';
+            aliasList.removeAttribute('aria-busy');
+            renderAliasCandidates([]);
+            aliasRefreshPromise = Promise.resolve();
+            return aliasRefreshPromise;
+        }
+
+        aliasRefreshController = new AbortController();
+        aliasRefreshPending = true;
+        aliasList.setAttribute('aria-busy', 'true');
+        const signal = aliasRefreshController.signal;
+        aliasRefreshPromise = requestAliasPlan(signal)
+            .then(payload => {
+                if (sequence !== aliasRefreshSequence) return;
+                exactTargetKeys = new Set(payload.exact_target_keys || []);
+                const aliases = applyScannerSelectionBudget(payload.aliases || []);
+                aliasPlanError = '';
+                renderAliasCandidates(aliases, { preserveAnalystChoices });
+            })
+            .catch(requestError => {
+                if (requestError.name === 'AbortError' || sequence !== aliasRefreshSequence) return;
+                aliasPlanError = requestError.message;
+            })
+            .finally(() => {
+                if (sequence !== aliasRefreshSequence) return;
+                aliasRefreshPending = false;
+                aliasList.removeAttribute('aria-busy');
+                updatePlan();
+            });
+        return aliasRefreshPromise;
     }
 
     function refreshAliasesForIdentifierChanges(...types) {
@@ -616,11 +633,11 @@
             if (type === 'username' || type === 'social_handle') candidates = [value.replace(/^@+/, '')];
             if (type === 'profile_url') candidates = [profileHandle(value)];
             candidates.filter(Boolean).forEach(candidate => {
-                if (!output.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) output.push(candidate);
+                if (!output.some(item => comparisonKey(item) === comparisonKey(candidate))) output.push(candidate);
             });
         });
         selectedAliases().forEach(candidate => {
-            if (!output.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) output.push(candidate);
+            if (!output.some(item => comparisonKey(item) === comparisonKey(candidate))) output.push(candidate);
         });
         return output;
     }
@@ -673,7 +690,12 @@
             ? ' Claimed GitHub user profiles will be enriched through the public API and queued for review.'
             : '';
         note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${usernameScannerNote}${scannerNote}${githubNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
-        error.hidden = true;
+        if (aliasPlanError) {
+            error.textContent = aliasPlanError;
+            error.hidden = false;
+        } else {
+            error.hidden = true;
+        }
     }
 
     function updateSourceTagSelects() {
@@ -756,6 +778,18 @@
         }));
     form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
     form.addEventListener('submit', event => {
+        if (aliasRefreshPending) {
+            event.preventDefault();
+            aliasRefreshPromise.then(() => form.requestSubmit());
+            return;
+        }
+        if (aliasPlanError) {
+            event.preventDefault();
+            error.textContent = aliasPlanError;
+            error.hidden = false;
+            error.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+        }
         if (!queryTargets().length) {
             event.preventDefault();
             error.textContent = 'Add a username, social handle, profile URL, or a full name with username variants enabled.';

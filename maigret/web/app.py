@@ -109,8 +109,14 @@ from maigret.web.geocoding import GeocodingError, geocode_place_center
 from maigret.web.investigation_input import (
     InvestigationInputError,
     build_investigation_plan,
+    normalize_username,
     public_ai_context,
     search_usernames,
+)
+from maigret.web.username_aliases import (
+    normalize_context_numbers,
+    normalize_nicknames,
+    rank_username_aliases,
 )
 from maigret.web.persona_intelligence import (
     build_case_chat_url_claims,
@@ -5069,6 +5075,64 @@ def api_sites():
         if site.url_main and site.url_main not in site_options:
             site_options.append(site.url_main)
     return {'sites': sorted(set(site_options))}
+
+
+@app.route('/api/username-aliases', methods=['POST'])
+def api_username_aliases():
+    """Build the browser alias preview with the authoritative Python planner."""
+    if not is_valid_csrf(request.headers.get('X-OpenLedger-CSRF', '')):
+        return {'error': 'Invalid CSRF token.'}, 403
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {'error': 'A JSON alias-planning request is required.'}, 400
+
+    def bounded_values(key, *, count, length):
+        values = payload.get(key, [])
+        if not isinstance(values, list) or len(values) > count:
+            raise ValueError(f'{key} contains too many values.')
+        normalized = []
+        for value in values:
+            if not isinstance(value, str) or len(value) > length:
+                raise ValueError(f'{key} contains an invalid value.')
+            normalized.append(value)
+        return normalized
+
+    try:
+        full_names = bounded_values('full_names', count=24, length=500)
+        nicknames = normalize_nicknames(
+            bounded_values('nicknames', count=8, length=500)
+        )
+        contextual_numbers = normalize_context_numbers(
+            bounded_values('contextual_numbers', count=6, length=100)
+        )
+        confirmed_usernames = bounded_values(
+            'confirmed_usernames', count=24, length=128
+        )
+        exact_usernames = bounded_values('exact_usernames', count=24, length=128)
+    except ValueError as error:
+        return {'error': str(error)}, 400
+
+    aliases = rank_username_aliases(
+        full_names,
+        nicknames=nicknames,
+        contextual_numbers=contextual_numbers,
+        confirmed_usernames=confirmed_usernames,
+    )
+    exact_target_keys = []
+    for username in exact_usernames:
+        try:
+            key = normalize_username(username).casefold()
+        except InvestigationInputError:
+            continue
+        if key and key not in exact_target_keys:
+            exact_target_keys.append(key)
+    return {
+        'aliases': [
+            {**candidate, 'key': str(candidate['value']).casefold()}
+            for candidate in aliases
+        ],
+        'exact_target_keys': exact_target_keys,
+    }
 
 
 @app.route('/settings', methods=['GET', 'POST'])

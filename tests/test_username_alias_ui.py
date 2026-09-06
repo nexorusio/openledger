@@ -41,3 +41,13 @@ def test_profile_url_reranking_preserves_analyst_choices():
         "refreshAliasesForIdentifierChanges(type.value)"
         in template[value_handler:value_handler_end]
     )
+
+
+def test_browser_uses_the_server_alias_planner():
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    assert "fetch('/api/username-aliases'" in template
+    assert "'X-OpenLedger-CSRF': csrfToken" in template
+    assert "function cleanNameTokens(" not in template
+    assert ".toLocaleLowerCase(" not in template
+    assert "if (aliasRefreshPending)" in template
