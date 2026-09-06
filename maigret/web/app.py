@@ -5109,8 +5109,8 @@ def api_username_aliases():
             'confirmed_usernames', count=24, length=128
         )
         exact_usernames = bounded_values('exact_usernames', count=24, length=128)
-    except ValueError as error:
-        return {'error': str(error)}, 400
+    except ValueError:
+        return {'error': 'Alias planning inputs are invalid.'}, 400
 
     aliases = rank_username_aliases(
         full_names,

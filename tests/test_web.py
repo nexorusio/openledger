@@ -131,7 +131,7 @@ def test_alias_preview_requires_csrf_and_bounded_json(client):
     )
 
     assert response.status_code == 400
-    assert response.get_json() == {'error': 'full_names contains too many values.'}
+    assert response.get_json() == {'error': 'Alias planning inputs are invalid.'}
 
 
 def test_username_verification_requires_explicit_browser_opt_in(
