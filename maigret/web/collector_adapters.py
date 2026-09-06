@@ -6566,6 +6566,7 @@ async def run_user_scanner_usernames(
     allow_vxtwitter: bool = False,
     timeout_seconds: int = USER_SCANNER_TIMEOUT_SECONDS,
     cancellation_check: Optional[Callable[[], bool]] = None,
+    observation_sink: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> List[Dict[str, Any]]:
     """Run each bounded target atomically so one timeout cannot erase prior work."""
     targets: List[str] = []
@@ -6579,6 +6580,12 @@ async def run_user_scanner_usernames(
         USER_SCANNER_USERNAME_PLATFORMS if platforms is None else platforms
     )
     semaphore = asyncio.Semaphore(USER_SCANNER_USERNAME_PROCESS_CONCURRENCY)
+
+    def complete_batch(raw_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        observations = normalize_user_scanner_username_results(raw_results)
+        if observation_sink is not None:
+            observation_sink(observations)
+        return observations
 
     async def scan_target(username: str) -> List[Dict[str, Any]]:
         async with semaphore:
@@ -6596,7 +6603,7 @@ async def run_user_scanner_usernames(
                     max_output_bytes=MAX_USER_SCANNER_USERNAME_TARGET_OUTPUT_BYTES,
                     cancellation_check=cancellation_check,
                 )
-                return list(envelope.get("results") or [])
+                return complete_batch(list(envelope.get("results") or []))
             except RuntimeError as error:
                 timed_out = "exceeded its collection timeout" in str(error)
                 reason = (
@@ -6604,48 +6611,35 @@ async def run_user_scanner_usernames(
                     if timed_out
                     else "Target collection failed before completion"
                 )
-                return [
-                    {
-                        "status": "Error",
-                        "reason": reason,
-                        "username": username,
-                        "site_name": "User Scanner",
-                        "category": "Social",
-                        "url": "",
-                        "extra": {
-                            "scan_stage": "adapter",
-                            "seed_username": username,
-                            "confidence": "candidate",
+                return complete_batch(
+                    [
+                        {
+                            "status": "Error",
+                            "reason": reason,
+                            "username": username,
+                            "site_name": "User Scanner",
+                            "category": "Social",
+                            "url": "",
+                            "extra": {
+                                "scan_stage": "adapter",
+                                "seed_username": username,
+                                "confidence": "candidate",
+                            },
+                            "media": {},
                         },
-                        "media": {},
-                    }
-                ]
+                    ]
+                )
 
     tasks = [asyncio.create_task(scan_target(username)) for username in targets]
     try:
         batches = await asyncio.gather(*tasks)
-    except asyncio.CancelledError as error:
-        completed_batches = []
-        for task in tasks:
-            if not task.done() or task.cancelled():
-                continue
-            try:
-                completed_batches.append(task.result())
-            except (asyncio.CancelledError, Exception):
-                continue
+    except asyncio.CancelledError:
         for task in tasks:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        completed_results = [
-            result for batch in completed_batches for result in batch
-        ]
-        error.partial_observations = normalize_user_scanner_username_results(
-            completed_results
-        )
         raise
-    raw_results = [result for batch in batches for result in batch]
-    return normalize_user_scanner_username_results(raw_results)
+    return [result for batch in batches for result in batch]
 
 
 def extract_user_scanner_claims(

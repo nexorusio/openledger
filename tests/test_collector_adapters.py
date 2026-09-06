@@ -475,9 +475,12 @@ async def test_username_runner_retains_completed_batches_when_cancelled(monkeypa
         "maigret.web.collector_adapters._run_user_scanner_subprocess",
         fake_subprocess,
     )
+    completed_observations = []
     runner = asyncio.create_task(
         run_user_scanner_usernames(
-            ["first", "pending"], platforms=["instagram"]
+            ["first", "pending"],
+            platforms=["instagram"],
+            observation_sink=completed_observations.extend,
         )
     )
     await first_completed.wait()
@@ -485,13 +488,13 @@ async def test_username_runner_retains_completed_batches_when_cancelled(monkeypa
     await asyncio.sleep(0)
     runner.cancel()
 
-    with pytest.raises(asyncio.CancelledError) as cancellation:
+    with pytest.raises(asyncio.CancelledError):
         await runner
 
     assert sibling_cancelled.is_set()
     assert [
         observation["subject_value"]
-        for observation in cancellation.value.partial_observations
+        for observation in completed_observations
     ] == ["first"]
 
 

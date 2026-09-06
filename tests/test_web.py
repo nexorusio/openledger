@@ -3188,7 +3188,12 @@ def test_live_scan_runs_bounded_user_scanner_username_verification(
         return {}
 
     async def fake_username_scan(
-        usernames, *, platforms, allow_vxtwitter, cancellation_check
+        usernames,
+        *,
+        platforms,
+        allow_vxtwitter,
+        cancellation_check,
+        observation_sink,
     ):
         requested.update(
             usernames=usernames,
@@ -3196,7 +3201,7 @@ def test_live_scan_runs_bounded_user_scanner_username_verification(
             allow_vxtwitter=allow_vxtwitter,
             cancelled=cancellation_check(),
         )
-        return [
+        observations = [
             {
                 'source_engine': 'user_scanner_username',
                 'subject_type': 'username',
@@ -3258,6 +3263,8 @@ def test_live_scan_runs_bounded_user_scanner_username_verification(
                 'media': {},
             },
         ]
+        observation_sink(observations)
+        return observations
 
     monkeypatch.setattr(maigret, 'search', fake_search)
     monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)

@@ -3096,12 +3096,12 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 username_verification_targets,
                 platforms=username_policy['platforms'],
                 allow_vxtwitter=username_policy['allow_vxtwitter'],
+                observation_sink=observations.extend,
                 cancellation_check=lambda: (
                     bool(job.get('cancelled'))
                     or bool(cancellation_check and cancellation_check())
                 ),
             )
-            observations.extend(collected)
             q.put(
                 {
                     'type': 'collector_completed',
@@ -3110,15 +3110,11 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                     'found': count_user_scanner_username_accounts(collected),
                 }
             )
-        except asyncio.CancelledError as error:
-            collected = list(getattr(error, 'partial_observations', []) or [])
-            observations.extend(collected)
+        except asyncio.CancelledError:
             q.put(
                 {
                     'type': 'stopped',
                     'collector': 'user-scanner-username',
-                    'observations': len(collected),
-                    'found': count_user_scanner_username_accounts(collected),
                 }
             )
         except Exception as error:
