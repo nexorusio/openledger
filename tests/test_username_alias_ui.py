@@ -21,6 +21,10 @@ def test_alias_context_refresh_preserves_analyst_choices():
     assert "row.dataset.aliasEdited = 'true'" in template
     assert "function mergeAnalystAliasChoices(" in template
     assert "removed: !row.querySelector('.alias-value').value.trim()" in template
+    assert "const removedAliasChoices = new Map();" in template
+    assert "const choicesByGeneratedKey = new Map(removedAliasChoices);" in template
+    assert "removedAliasChoices.set(choice.generatedKey, choice);" in template
+    assert "if (!preserveAnalystChoices) removedAliasChoices.clear();" in template
     assert "if (choice.removed) return null;" in template
 
 

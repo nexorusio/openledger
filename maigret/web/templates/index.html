@@ -352,6 +352,7 @@
     let aliasRefreshPending = false;
     let aliasRefreshPromise = Promise.resolve();
     let aliasPlanError = '';
+    const removedAliasChoices = new Map();
 
     const behavior = {
         username: ['e.g. johndoe', 'Exact account check'],
@@ -466,18 +467,33 @@
         updateAliasCount();
     }
 
+    function analystAliasChoice(row) {
+        return {
+            generatedKey: row.dataset.generatedKey,
+            value: row.querySelector('.alias-value').value.trim(),
+            selected: row.querySelector('.alias-selected').checked,
+            removed: !row.querySelector('.alias-value').value.trim(),
+            edited: row.dataset.aliasEdited === 'true',
+            score: row.querySelector('.alias-score').textContent,
+            reason: row.querySelector('.alias-reason').textContent
+        };
+    }
+
     function currentAnalystAliasChoices() {
-        return Array.from(aliasList.querySelectorAll('.alias-candidate-row'))
+        const renderedChoices = Array.from(
+            aliasList.querySelectorAll('.alias-candidate-row'))
             .filter(row => row.dataset.analystChanged === 'true')
-            .map(row => ({
-                generatedKey: row.dataset.generatedKey,
-                value: row.querySelector('.alias-value').value.trim(),
-                selected: row.querySelector('.alias-selected').checked,
-                removed: !row.querySelector('.alias-value').value.trim(),
-                edited: row.dataset.aliasEdited === 'true',
-                score: row.querySelector('.alias-score').textContent,
-                reason: row.querySelector('.alias-reason').textContent
-            }));
+            .map(analystAliasChoice);
+        const choicesByGeneratedKey = new Map(removedAliasChoices);
+        renderedChoices.forEach(choice => {
+            if (choice.removed) {
+                removedAliasChoices.set(choice.generatedKey, choice);
+            } else {
+                removedAliasChoices.delete(choice.generatedKey);
+            }
+            choicesByGeneratedKey.set(choice.generatedKey, choice);
+        });
+        return Array.from(choicesByGeneratedKey.values());
     }
 
     function mergeAnalystAliasChoices(aliases, analystChoices) {
@@ -556,6 +572,12 @@
                 row.dataset.normalizedKey = comparisonKey(value.value.trim());
                 row.querySelector('.alias-score').textContent = 'edited';
                 row.querySelector('.alias-reason').textContent = 'Analyst-edited alias candidate';
+                const choice = analystAliasChoice(row);
+                if (choice.removed) {
+                    removedAliasChoices.set(choice.generatedKey, choice);
+                } else {
+                    removedAliasChoices.delete(choice.generatedKey);
+                }
                 enforceAliasSelectionLimit();
                 updateAliasCount();
                 updatePlan();
@@ -570,6 +592,7 @@
     function refreshAliasCandidates({ preserveAnalystChoices = false } = {}) {
         const sequence = ++aliasRefreshSequence;
         if (aliasRefreshController) aliasRefreshController.abort();
+        if (!preserveAnalystChoices) removedAliasChoices.clear();
         if (!generateToggle.checked) {
             exactTargetKeys = new Set(exactIdentifierTargets().map(comparisonKey));
             aliasRefreshPending = false;
