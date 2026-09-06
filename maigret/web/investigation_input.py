@@ -319,13 +319,18 @@ def build_investigation_plan(
             normalized = normalize_phone(raw_value)
         identifiers.append({"type": identifier_type, "value": normalized})
 
-    try:
-        alias_nicknames = normalize_nicknames(_form_list(form, "alias_nicknames"))
-        alias_context_numbers = normalize_context_numbers(
-            _form_list(form, "alias_context_numbers")
-        )
-    except ValueError as error:
-        raise InvestigationInputError(str(error)) from error
+    alias_nicknames: List[str] = []
+    alias_context_numbers: List[str] = []
+    if generate_variants:
+        try:
+            alias_nicknames = normalize_nicknames(
+                _form_list(form, "alias_nicknames")
+            )
+            alias_context_numbers = normalize_context_numbers(
+                _form_list(form, "alias_context_numbers")
+            )
+        except ValueError as error:
+            raise InvestigationInputError(str(error)) from error
 
     generated_aliases = (
         rank_username_aliases(

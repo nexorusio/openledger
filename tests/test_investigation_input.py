@@ -360,9 +360,26 @@ def test_context_numbers_and_username_platform_policy_require_explicit_values():
             {
                 "identifier_type": ["username"],
                 "identifier_value": ["johndoe"],
+                "generate_name_variants": "on",
                 "alias_context_numbers": "00-99",
             }
         )
+
+
+def test_disabled_alias_generation_ignores_alias_context_inputs():
+    plan = build_investigation_plan(
+        {
+            "identifier_type": ["username"],
+            "identifier_value": ["johndoe"],
+            "alias_nicknames": "two words are invalid",
+            "alias_context_numbers": "00-99",
+        }
+    )
+
+    assert search_usernames(plan) == ["johndoe"]
+    assert plan["generate_name_variants"] is False
+    assert plan["alias_nicknames"] == []
+    assert plan["alias_context_numbers"] == []
 
 
 def test_alias_ranking_can_learn_a_separator_from_confirmed_profile_input():
