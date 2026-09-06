@@ -3177,6 +3177,23 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     return general_results
 
 
+def has_reportable_collector_observations(observations):
+    """Exclude synthetic adapter failures from collector-only success checks."""
+    for observation in observations or []:
+        if not isinstance(observation, dict):
+            continue
+        status = str(observation.get('status') or '').strip().casefold()
+        extra = observation.get('extra')
+        extra = extra if isinstance(extra, dict) else {}
+        scan_stage = str(
+            observation.get('scan_stage') or extra.get('scan_stage') or ''
+        ).strip().casefold()
+        if status == 'error' and scan_stage == 'adapter':
+            continue
+        return True
+    return False
+
+
 def finalize_stream_job(
     job_id,
     usernames,
@@ -3192,7 +3209,9 @@ def finalize_stream_job(
     collector_observations = list(collector_observations or [])
     done_event = {'type': 'done'}
     terminal_status = 'failed'
-    if general_results or collector_observations:
+    if general_results or has_reportable_collector_observations(
+        collector_observations
+    ):
         try:
             report_kwargs = (
                 {'collector_observations': collector_observations}
