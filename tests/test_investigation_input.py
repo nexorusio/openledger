@@ -291,6 +291,39 @@ def test_analyst_can_edit_and_deselect_ranked_aliases():
     ]
 
 
+def test_blank_unselected_alias_candidate_is_ignored():
+    plan = build_investigation_plan(
+        {
+            "identifier_type": ["full_name"],
+            "identifier_value": ["John Doe"],
+            "generate_name_variants": "on",
+            "alias_candidates_present": "1",
+            "alias_candidate": ["", "johnny.d"],
+            "selected_alias": ["johnny.d"],
+        }
+    )
+
+    assert search_usernames(plan) == ["johnny.d"]
+    assert [candidate["value"] for candidate in plan["alias_candidates"]] == [
+        "johnny.d"
+    ]
+
+
+def test_selected_alias_comparison_uses_username_normalization():
+    plan = build_investigation_plan(
+        {
+            "identifier_type": ["full_name"],
+            "identifier_value": ["Jose Doe"],
+            "generate_name_variants": "on",
+            "alias_candidates_present": "1",
+            "alias_candidate": ["jos\N{LATIN SMALL LETTER E WITH ACUTE}doe"],
+            "selected_alias": ["jose\N{COMBINING ACUTE ACCENT}doe"],
+        }
+    )
+
+    assert search_usernames(plan) == ["jos\N{LATIN SMALL LETTER E WITH ACUTE}doe"]
+
+
 def test_context_numbers_and_username_platform_policy_require_explicit_values():
     plan = build_investigation_plan(
         {

@@ -348,13 +348,15 @@ def build_investigation_plan(
         and raw_alias_candidates
     )
     if submitted_alias_plan:
-        selected_values = {
-            str(value).strip().casefold()
-            for value in _form_list(form, "selected_alias")
-            if str(value).strip()
-        }
+        selected_values = set()
+        for raw_selected in _form_list(form, "selected_alias"):
+            if not str(raw_selected).strip():
+                continue
+            selected_values.add(normalize_username(raw_selected).casefold())
         seen_aliases = set()
         for raw_candidate in raw_alias_candidates[:MAX_ALIAS_CANDIDATES]:
+            if not str(raw_candidate).strip():
+                continue
             candidate_value = normalize_username(raw_candidate)
             key = candidate_value.casefold()
             if key in seen_aliases:

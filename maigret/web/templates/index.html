@@ -473,11 +473,11 @@
                 generatedKey: row.dataset.generatedKey,
                 value: row.querySelector('.alias-value').value.trim(),
                 selected: row.querySelector('.alias-selected').checked,
+                removed: !row.querySelector('.alias-value').value.trim(),
                 edited: row.dataset.aliasEdited === 'true',
                 score: row.querySelector('.alias-score').textContent,
                 reason: row.querySelector('.alias-reason').textContent
-            }))
-            .filter(candidate => candidate.value);
+            }));
     }
 
     function mergeAnalystAliasChoices(aliases, analystChoices) {
@@ -489,6 +489,7 @@
             const generatedKey = candidate.key;
             const choice = choicesByGeneratedKey.get(generatedKey);
             if (!choice) return { ...candidate, generatedKey };
+            if (choice.removed) return null;
             return {
                 ...candidate,
                 value: choice.value,
@@ -503,13 +504,15 @@
             };
         });
         const orphanedChoices = analystChoices
-            .filter(candidate => !generatedKeys.has(candidate.generatedKey))
+            .filter(candidate => !candidate.removed
+                && !generatedKeys.has(candidate.generatedKey))
             .map(candidate => ({
                 ...candidate,
                 analystChanged: true
             }));
         const seenValues = new Set();
         return [...orphanedChoices, ...merged].filter(candidate => {
+            if (!candidate) return false;
             const key = candidate.edited
                 ? comparisonKey(candidate.value)
                 : candidate.key || candidate.generatedKey || comparisonKey(candidate.value);

@@ -20,6 +20,8 @@ def test_alias_context_refresh_preserves_analyst_choices():
     assert "row.dataset.analystChanged = 'true'" in template
     assert "row.dataset.aliasEdited = 'true'" in template
     assert "function mergeAnalystAliasChoices(" in template
+    assert "removed: !row.querySelector('.alias-value').value.trim()" in template
+    assert "if (choice.removed) return null;" in template
 
 
 def test_profile_url_reranking_preserves_analyst_choices():
