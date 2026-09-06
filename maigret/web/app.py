@@ -109,6 +109,8 @@ from maigret.web.geocoding import GeocodingError, geocode_place_center
 from maigret.web.investigation_input import (
     InvestigationInputError,
     build_investigation_plan,
+    extract_profile_usernames,
+    normalize_profile_url,
     normalize_username,
     public_ai_context,
     search_usernames,
@@ -5109,6 +5111,17 @@ def api_username_aliases():
             'confirmed_usernames', count=24, length=128
         )
         exact_usernames = bounded_values('exact_usernames', count=24, length=128)
+        profile_urls = bounded_values('profile_urls', count=24, length=2000)
+        for profile_url in profile_urls:
+            normalized_url = normalize_profile_url(profile_url)
+            resolved_usernames = extract_profile_usernames(
+                normalized_url, resolver=resolve_profile_url_identifiers
+            )
+            for username in resolved_usernames:
+                if username not in confirmed_usernames:
+                    confirmed_usernames.append(username)
+                if username not in exact_usernames:
+                    exact_usernames.append(username)
     except ValueError:
         return {'error': 'Alias planning inputs are invalid.'}, 400
 

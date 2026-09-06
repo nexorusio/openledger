@@ -134,6 +134,34 @@ def test_alias_preview_requires_csrf_and_bounded_json(client):
     assert response.get_json() == {'error': 'Alias planning inputs are invalid.'}
 
 
+def test_alias_preview_resolves_profile_urls_for_target_budget(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setattr(
+        web_app,
+        'resolve_profile_url_identifiers',
+        lambda url: {'alice': 'username'}
+        if url == 'https://alice.wordpress.com/'
+        else {},
+    )
+    client.get('/')
+    with client.session_transaction() as session_data:
+        csrf_token = session_data['csrf_token']
+
+    response = client.post(
+        '/api/username-aliases',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        json={
+            'full_names': ['Alice Example'],
+            'profile_urls': ['https://alice.wordpress.com/'],
+            'exact_usernames': ['exact-account'],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()['exact_target_keys'] == ['exact-account', 'alice']
+
+
 def test_username_verification_requires_explicit_browser_opt_in(
     client, web_app, monkeypatch
 ):

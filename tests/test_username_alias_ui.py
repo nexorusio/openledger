@@ -22,7 +22,11 @@ def test_alias_context_refresh_preserves_analyst_choices():
     assert "function mergeAnalystAliasChoices(" in template
     assert "removed: !row.querySelector('.alias-value').value.trim()" in template
     assert "const removedAliasChoices = new Map();" in template
+    assert "let plannedAliasKeysByComparison = new Map();" in template
     assert "const choicesByGeneratedKey = new Map(removedAliasChoices);" in template
+    assert "matchedAliasKeys: Array.from(row._matchedAliasKeys || [])" in template
+    assert "if (removedKeys.has(generatedKey)) return null;" in template
+    assert "matchedKeys.forEach(key => row._matchedAliasKeys.add(key));" in template
     assert "removedAliasChoices.set(choice.generatedKey, choice);" in template
     assert "if (!preserveAnalystChoices) removedAliasChoices.clear();" in template
     assert "if (choice.removed) return null;" in template
@@ -54,6 +58,7 @@ def test_browser_uses_the_server_alias_planner():
 
     assert "fetch('/api/username-aliases'" in template
     assert "'X-OpenLedger-CSRF': csrfToken" in template
+    assert "profile_urls: profileUrls" in template
     assert "function cleanNameTokens(" not in template
     assert ".toLocaleLowerCase(" not in template
     assert "if (aliasRefreshPending)" in template

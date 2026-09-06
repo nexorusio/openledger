@@ -353,6 +353,7 @@
     let aliasRefreshPromise = Promise.resolve();
     let aliasPlanError = '';
     const removedAliasChoices = new Map();
+    let plannedAliasKeysByComparison = new Map();
 
     const behavior = {
         username: ['e.g. johndoe', 'Exact account check'],
@@ -374,7 +375,7 @@
             const value = row.querySelector('.identifier-value').value.trim();
             const candidate = type === 'username' || type === 'social_handle'
                 ? value.replace(/^@+/, '')
-                : type === 'profile_url' ? profileHandle(value) : '';
+                : '';
             if (candidate && !exactTargets.some(item => comparisonKey(item) === comparisonKey(candidate))) exactTargets.push(candidate);
         });
         return exactTargets;
@@ -384,15 +385,15 @@
         const fullNames = Array.from(list.querySelectorAll('.identifier-row'))
             .filter(row => row.querySelector('.identifier-type').value === 'full_name')
             .map(row => row.querySelector('.identifier-value').value.trim()).filter(Boolean);
-        const confirmedUsernames = Array.from(list.querySelectorAll('.identifier-row'))
+        const profileUrls = Array.from(list.querySelectorAll('.identifier-row'))
             .filter(row => row.querySelector('.identifier-type').value === 'profile_url')
-            .map(row => profileHandle(row.querySelector('.identifier-value').value.trim()))
+            .map(row => row.querySelector('.identifier-value').value.trim())
             .filter(Boolean);
         return {
             full_names: fullNames,
             nicknames: [aliasNicknameInput.value],
             contextual_numbers: [aliasContextNumberInput.value],
-            confirmed_usernames: confirmedUsernames,
+            profile_urls: profileUrls,
             exact_usernames: exactIdentifierTargets()
         };
     }
@@ -474,6 +475,7 @@
             selected: row.querySelector('.alias-selected').checked,
             removed: !row.querySelector('.alias-value').value.trim(),
             edited: row.dataset.aliasEdited === 'true',
+            matchedAliasKeys: Array.from(row._matchedAliasKeys || []),
             score: row.querySelector('.alias-score').textContent,
             reason: row.querySelector('.alias-reason').textContent
         };
@@ -501,8 +503,13 @@
             aliases.map(candidate => candidate.key));
         const choicesByGeneratedKey = new Map(
             analystChoices.map(candidate => [candidate.generatedKey, candidate]));
+        const removedKeys = new Set(
+            analystChoices.filter(candidate => candidate.removed)
+                .flatMap(candidate => [candidate.generatedKey]
+                    .concat(candidate.matchedAliasKeys || [])));
         const merged = aliases.map(candidate => {
             const generatedKey = candidate.key;
+            if (removedKeys.has(generatedKey)) return null;
             const choice = choicesByGeneratedKey.get(generatedKey);
             if (!choice) return { ...candidate, generatedKey };
             if (choice.removed) return null;
@@ -516,7 +523,8 @@
                     : candidate.reason,
                 generatedKey,
                 analystChanged: true,
-                edited: choice.edited
+                edited: choice.edited,
+                matchedAliasKeys: choice.matchedAliasKeys
             };
         });
         const orphanedChoices = analystChoices
@@ -553,6 +561,8 @@
                 : candidate.key;
             row.dataset.analystChanged = candidate.analystChanged ? 'true' : 'false';
             row.dataset.aliasEdited = candidate.edited ? 'true' : 'false';
+            row._matchedAliasKeys = new Set(candidate.matchedAliasKeys
+                || [candidate.generatedKey || candidate.key]);
             selected.checked = candidate.selected;
             selected.value = candidate.value;
             value.value = candidate.value;
@@ -572,6 +582,11 @@
                 row.dataset.normalizedKey = comparisonKey(value.value.trim());
                 row.querySelector('.alias-score').textContent = 'edited';
                 row.querySelector('.alias-reason').textContent = 'Analyst-edited alias candidate';
+                const matchedKeys = plannedAliasKeysByComparison.get(
+                    comparisonKey(value.value.trim()));
+                if (matchedKeys) {
+                    matchedKeys.forEach(key => row._matchedAliasKeys.add(key));
+                }
                 const choice = analystAliasChoice(row);
                 if (choice.removed) {
                     removedAliasChoices.set(choice.generatedKey, choice);
@@ -594,6 +609,7 @@
         if (aliasRefreshController) aliasRefreshController.abort();
         if (!preserveAnalystChoices) removedAliasChoices.clear();
         if (!generateToggle.checked) {
+            plannedAliasKeysByComparison = new Map();
             exactTargetKeys = new Set(exactIdentifierTargets().map(comparisonKey));
             aliasRefreshPending = false;
             aliasPlanError = '';
@@ -611,7 +627,16 @@
             .then(payload => {
                 if (sequence !== aliasRefreshSequence) return;
                 exactTargetKeys = new Set(payload.exact_target_keys || []);
-                const aliases = applyScannerSelectionBudget(payload.aliases || []);
+                const plannedAliases = payload.aliases || [];
+                plannedAliasKeysByComparison = new Map();
+                plannedAliases.forEach(candidate => {
+                    const comparison = comparisonKey(candidate.value);
+                    const keys = plannedAliasKeysByComparison.get(comparison)
+                        || new Set();
+                    keys.add(candidate.key);
+                    plannedAliasKeysByComparison.set(comparison, keys);
+                });
+                const aliases = applyScannerSelectionBudget(plannedAliases);
                 aliasPlanError = '';
                 renderAliasCandidates(aliases, { preserveAnalystChoices });
             })
