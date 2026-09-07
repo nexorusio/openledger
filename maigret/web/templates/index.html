@@ -501,10 +501,27 @@
     function mergeAnalystAliasChoices(aliases, analystChoices) {
         const generatedKeys = new Set(
             aliases.map(candidate => candidate.key));
-        const choicesByGeneratedKey = new Map(
-            analystChoices.map(candidate => [candidate.generatedKey, candidate]));
+        const expandedChoices = analystChoices.map(candidate => {
+            const matchedAliasKeys = new Set(candidate.matchedAliasKeys || []);
+            const equalValueKeys = plannedAliasKeysByComparison.get(
+                comparisonKey(candidate.value));
+            if (equalValueKeys) {
+                equalValueKeys.forEach(key => matchedAliasKeys.add(key));
+            }
+            return {
+                ...candidate,
+                matchedAliasKeys: Array.from(matchedAliasKeys)
+            };
+        });
+        const choicesByGeneratedKey = new Map();
+        expandedChoices.forEach(candidate => {
+            choicesByGeneratedKey.set(candidate.generatedKey, candidate);
+            candidate.matchedAliasKeys.forEach(key => {
+                choicesByGeneratedKey.set(key, candidate);
+            });
+        });
         const removedKeys = new Set(
-            analystChoices.filter(candidate => candidate.removed)
+            expandedChoices.filter(candidate => candidate.removed)
                 .flatMap(candidate => [candidate.generatedKey]
                     .concat(candidate.matchedAliasKeys || [])));
         const merged = aliases.map(candidate => {
@@ -527,7 +544,7 @@
                 matchedAliasKeys: choice.matchedAliasKeys
             };
         });
-        const orphanedChoices = analystChoices
+        const orphanedChoices = expandedChoices
             .filter(candidate => !candidate.removed
                 && !generatedKeys.has(candidate.generatedKey))
             .map(candidate => ({

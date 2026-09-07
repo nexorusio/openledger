@@ -25,6 +25,9 @@ def test_alias_context_refresh_preserves_analyst_choices():
     assert "let plannedAliasKeysByComparison = new Map();" in template
     assert "const choicesByGeneratedKey = new Map(removedAliasChoices);" in template
     assert "matchedAliasKeys: Array.from(row._matchedAliasKeys || [])" in template
+    assert "const expandedChoices = analystChoices.map(candidate =>" in template
+    assert "const equalValueKeys = plannedAliasKeysByComparison.get(" in template
+    assert "choicesByGeneratedKey.set(key, candidate);" in template
     assert "if (removedKeys.has(generatedKey)) return null;" in template
     assert "matchedKeys.forEach(key => row._matchedAliasKeys.add(key));" in template
     assert "removedAliasChoices.set(choice.generatedKey, choice);" in template
