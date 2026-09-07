@@ -1987,6 +1987,76 @@ def test_case_fusion_worker_honors_cancellation_during_ai_analysis(
     assert analysis["proposals"] == []
 
 
+def test_combined_ai_does_not_publish_output_after_worker_shutdown(
+    web_app, persistent_store, monkeypatch
+):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        persistent_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = persistent_store.create_combined_investigation(
+        source_case_ids,
+        title="Interrupted AI publication test",
+        purpose="Do not publish structured output after worker shutdown.",
+        created_by="analyst",
+    )
+    fusion_job = persistent_store.claim_next("worker:fusion-shutdown")
+    web_app.run_persistent_job(persistent_store, fusion_job)
+    ai_job = persistent_store.claim_next_matching(
+        "worker:background-ai", include_kinds={"case_fusion_ai"}
+    )
+    shutdown = {"requested": False}
+
+    async def fake_research(**_kwargs):
+        return {
+            "analysis": "No defensible connection is established.",
+            "sources": [],
+            "web_search_completed": False,
+        }
+
+    async def fake_insights(**_kwargs):
+        shutdown["requested"] = True
+        return {
+            "executive_summary": "This output must not be published.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": [],
+            "next_steps": [],
+            "proposals": [],
+        }
+
+    def forbidden_publish(*_args, **_kwargs):
+        raise AssertionError("shutdown output must not be persisted")
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(web_app, "get_case_chat_response", fake_research)
+    monkeypatch.setattr(web_app, "get_combined_investigation_insights", fake_insights)
+    monkeypatch.setattr(
+        persistent_store, "complete_combined_analysis_run", forbidden_publish
+    )
+
+    web_app.run_persistent_job(
+        persistent_store,
+        ai_job,
+        shutdown_check=lambda: shutdown["requested"],
+    )
+
+    assert persistent_store.get_job(fusion_job_id)["status"] == "completed"
+    assert persistent_store.get_job(ai_job["job_id"])["status"] == "interrupted"
+    analysis = persistent_store.get_case(fusion_job["case_id"])["analysis_runs"][0]
+    assert analysis["status"] == "cancelled"
+    assert analysis["proposals"] == []
+
+
 def test_combined_ai_waits_emit_durable_phase_heartbeats(
     web_app, persistent_store, monkeypatch
 ):

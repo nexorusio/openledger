@@ -4546,8 +4546,9 @@ def run_combined_case_ai_analysis(
             context=bounded_context,
             web_sources=research.get("sources", []),
         )
-        if store.is_cancel_requested(job_id):
-            return stopped_result(interrupted=False)
+        interrupted = bool(shutdown_check and shutdown_check())
+        if interrupted or store.is_cancel_requested(job_id):
+            return stopped_result(interrupted=interrupted)
         proposal_count = store.complete_combined_analysis_run(run_id, insights)
         elapsed_seconds = int(time.monotonic() - analysis_started_at)
         store.append_event(
