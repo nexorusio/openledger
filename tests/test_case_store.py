@@ -284,6 +284,60 @@ def test_stale_worker_job_is_marked_interrupted(store):
     assert "worker stopped" in interrupted["error"]
 
 
+def test_stale_combined_ai_job_fails_analysis_but_preserves_snapshot(store):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = store.create_investigation([username], {})
+        source_job = store.claim_next(f"worker:{username}")
+        store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    snapshot_job_id = store.create_combined_investigation(
+        source_case_ids,
+        title="Interrupted background analysis",
+        purpose="Preserve the snapshot across worker recovery.",
+        created_by="analyst",
+    )
+    snapshot_job = store.claim_next("worker:snapshot")
+    snapshot_result = store.build_case_fusion_snapshot(snapshot_job_id)
+    analysis_context = snapshot_result.pop("analysis_context")
+    ai_job_id = store.publish_case_fusion_snapshot(
+        snapshot_job_id, snapshot_result, analysis_context
+    )
+    ai_job = store.claim_next_matching("worker:ai", include_kinds={"case_fusion_ai"})
+    run_id = store.start_combined_analysis_run(
+        snapshot_job_id,
+        snapshot_result["snapshot"]["sha256"],
+        model="test-model",
+        web_search_enabled=True,
+    )
+    with store.engine.begin() as connection:
+        connection.execute(
+            update(investigation_jobs)
+            .where(investigation_jobs.c.id == ai_job_id)
+            .values(heartbeat_at=utcnow() - timedelta(hours=1))
+        )
+
+    assert ai_job["job_id"] == ai_job_id
+    assert store.mark_stale_running(300) == 1
+    assert store.get_job(snapshot_job_id)["status"] == "completed"
+    assert store.get_job(snapshot_job_id)["snapshot"] == snapshot_result["snapshot"]
+    assert store.get_job(ai_job_id)["status"] == "interrupted"
+    analysis = next(
+        item
+        for item in store.get_case(snapshot_job["case_id"])["analysis_runs"]
+        if item["id"] == run_id
+    )
+    assert analysis["status"] == "failed"
+    assert "snapshot remains available" in analysis["error"]
+
+
 def test_database_url_uses_protected_password_file(tmp_path, monkeypatch):
     password_file = tmp_path / "postgres_password"
     password_file.write_text("complex:/ password\n", encoding="utf-8")

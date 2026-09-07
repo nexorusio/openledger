@@ -185,6 +185,7 @@ google_places_live_requests: Dict[str, float] = {}
 # transient. Terminal results are persisted separately beside their reports.
 live_jobs: Dict[str, Any] = {}
 PERSISTENT_CANCEL_POLL_SECONDS = 0.25
+COMBINED_AI_HEARTBEAT_SECONDS = 5.0
 
 
 def resolve_selected_site(sites, result_site_name):
@@ -4370,52 +4371,119 @@ def run_persistent_identity_enrichment_job(
     )
 
 
+class CombinedAiStopped(Exception):
+    """Control-flow signal for a durable stop or worker shutdown."""
+
+    def __init__(self, *, interrupted: bool):
+        super().__init__("Combined AI synthesis stopped")
+        self.interrupted = interrupted
+
+
+async def await_combined_ai_phase(
+    store: CaseStore,
+    job_id: str,
+    awaitable,
+    *,
+    phase: str,
+    message: str,
+    analysis_started_at: float,
+    shutdown_check=None,
+):
+    """Await one API call while heartbeating and polling durable cancellation."""
+    phase_started_at = time.monotonic()
+    store.append_event(
+        job_id,
+        {
+            "type": "phase",
+            "phase": phase,
+            "message": message,
+            "elapsed_seconds": int(phase_started_at - analysis_started_at),
+            "phase_elapsed_seconds": 0,
+        },
+    )
+    task = asyncio.create_task(awaitable)
+    last_heartbeat = phase_started_at
+    while not task.done():
+        done, _pending = await asyncio.wait(
+            {task}, timeout=PERSISTENT_CANCEL_POLL_SECONDS
+        )
+        if task in done:
+            return await task
+        interrupted = bool(shutdown_check and shutdown_check())
+        cancelled = store.is_cancel_requested(job_id)
+        if interrupted or cancelled:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise CombinedAiStopped(interrupted=interrupted)
+        now = time.monotonic()
+        if now - last_heartbeat >= COMBINED_AI_HEARTBEAT_SECONDS:
+            store.append_event(
+                job_id,
+                {
+                    "type": "heartbeat",
+                    "phase": phase,
+                    "message": message,
+                    "elapsed_seconds": int(now - analysis_started_at),
+                    "phase_elapsed_seconds": int(now - phase_started_at),
+                },
+            )
+            last_heartbeat = now
+    return await task
+
+
 def run_combined_case_ai_analysis(
     store: CaseStore,
     job: Dict[str, Any],
-    snapshot_result: Dict[str, Any],
+    *,
+    snapshot_job_id: str,
+    snapshot_sha: str,
     analysis_context: Dict[str, Any],
     shutdown_check=None,
 ) -> Dict[str, Any]:
-    """Generate cited, reviewable insights without changing source evidence."""
+    """Generate cited, reviewable insights for an already-published snapshot."""
     settings = load_settings()
     model = settings.get(
         "openai_model",
         os.getenv("OPENAI_MODEL", DEFAULT_SETTINGS["openai_model"]),
     )
     web_search_enabled = bool(settings.get("ai_web_enrichment", True))
-    snapshot_sha = str((snapshot_result.get("snapshot") or {}).get("sha256") or "")
+    job_id = str(job["job_id"])
     run_id = store.start_combined_analysis_run(
-        job["job_id"],
+        snapshot_job_id,
         snapshot_sha,
         model=model,
         web_search_enabled=web_search_enabled,
     )
+    analysis_started_at = time.monotonic()
 
-    def cancelled_result():
-        interrupted = bool(shutdown_check and shutdown_check())
-        cancelled = store.is_cancel_requested(job["job_id"])
-        if not interrupted and not cancelled:
-            return None
+    def stopped_result(*, interrupted: bool):
         reason = "AI relationship analysis stopped before its output was published."
-        store.stop_combined_analysis_run(
-            run_id, status="cancelled", error=reason
-        )
+        store.stop_combined_analysis_run(run_id, status="cancelled", error=reason)
         return {
             "run_id": run_id,
             "status": "cancelled",
+            "interrupted": interrupted,
             "model": model,
             "web_search_enabled": web_search_enabled,
             "proposal_count": 0,
         }
 
-    stopped = cancelled_result()
-    if stopped:
-        return stopped
+    interrupted = bool(shutdown_check and shutdown_check())
+    if interrupted or store.is_cancel_requested(job_id):
+        return stopped_result(interrupted=interrupted)
     api_key = get_openai_api_key()
     if not api_key:
         reason = "The protected OpenAI connection is not configured on this server."
         store.stop_combined_analysis_run(run_id, status="unavailable", error=reason)
+        store.append_event(
+            job_id,
+            {
+                "type": "phase",
+                "phase": "unavailable",
+                "message": reason,
+                "elapsed_seconds": 0,
+            },
+        )
         return {
             "run_id": run_id,
             "status": "unavailable",
@@ -4425,16 +4493,11 @@ def run_combined_case_ai_analysis(
         }
 
     bounded_context = bounded_combined_context(analysis_context)
-    store.append_event(
-        job["job_id"],
-        {
-            "type": "progress",
-            "activity": "AI relationship analysis",
-            "site": "Cited cross-case synthesis",
-        },
-    )
-    try:
-        research = asyncio.run(
+
+    async def analyze():
+        research = await await_combined_ai_phase(
+            store,
+            job_id,
             get_case_chat_response(
                 api_key=api_key,
                 case_context=bounded_context,
@@ -4452,12 +4515,15 @@ def run_combined_case_ai_analysis(
                 model=model,
                 web_search_enabled=web_search_enabled,
                 **ai_endpoint_options(),
-            )
+            ),
+            phase="research",
+            message="Researching cited cross-case evidence.",
+            analysis_started_at=analysis_started_at,
+            shutdown_check=shutdown_check,
         )
-        stopped = cancelled_result()
-        if stopped:
-            return stopped
-        raw_insights = asyncio.run(
+        raw_insights = await await_combined_ai_phase(
+            store,
+            job_id,
             get_combined_investigation_insights(
                 api_key=api_key,
                 case_context=bounded_context,
@@ -4465,17 +4531,34 @@ def run_combined_case_ai_analysis(
                 sources=research.get("sources", []),
                 model=model,
                 **ai_endpoint_options(),
-            )
+            ),
+            phase="structuring",
+            message="Structuring cited findings for human review.",
+            analysis_started_at=analysis_started_at,
+            shutdown_check=shutdown_check,
         )
-        stopped = cancelled_result()
-        if stopped:
-            return stopped
+        return research, raw_insights
+
+    try:
+        research, raw_insights = asyncio.run(analyze())
         insights = normalize_combined_insights(
             raw_insights,
             context=bounded_context,
             web_sources=research.get("sources", []),
         )
+        if store.is_cancel_requested(job_id):
+            return stopped_result(interrupted=False)
         proposal_count = store.complete_combined_analysis_run(run_id, insights)
+        elapsed_seconds = int(time.monotonic() - analysis_started_at)
+        store.append_event(
+            job_id,
+            {
+                "type": "phase",
+                "phase": "completed",
+                "message": "AI synthesis is ready for human review.",
+                "elapsed_seconds": elapsed_seconds,
+            },
+        )
         return {
             "run_id": run_id,
             "status": "completed",
@@ -4483,10 +4566,13 @@ def run_combined_case_ai_analysis(
             "web_search_enabled": web_search_enabled,
             "web_search_completed": bool(research.get("web_search_completed")),
             "proposal_count": proposal_count,
+            "elapsed_seconds": elapsed_seconds,
             "truncated_claim_count": int(
                 bounded_context.get("truncated_claim_count") or 0
             ),
         }
+    except CombinedAiStopped as stopped:
+        return stopped_result(interrupted=stopped.interrupted)
     except Exception as error:
         public_error = record_internal_error(
             "Combined AI relationship analysis failed",
@@ -4502,7 +4588,78 @@ def run_combined_case_ai_analysis(
             "model": model,
             "web_search_enabled": web_search_enabled,
             "proposal_count": 0,
+            "error": public_error,
         }
+
+
+def run_persistent_combined_ai_job(
+    store: CaseStore, job: Dict[str, Any], shutdown_check=None
+):
+    """Run the interruptible AI phase without changing its published snapshot."""
+    job_id = str(job["job_id"])
+    specification = (job.get("options") or {}).get("investigation_spec") or {}
+    snapshot_job_id = str(specification.get("snapshot_job_id") or "")
+    snapshot_sha = str(specification.get("snapshot_sha256") or "")
+    analysis_context = specification.get("analysis_context")
+    try:
+        snapshot_job = store.get_job(snapshot_job_id)
+        stored_sha = str(
+            ((snapshot_job or {}).get("snapshot") or {}).get("sha256") or ""
+        )
+        if (
+            not snapshot_job
+            or snapshot_job.get("kind") != "case_fusion"
+            or snapshot_job.get("status") != "completed"
+            or not hmac.compare_digest(stored_sha, snapshot_sha)
+            or not isinstance(analysis_context, dict)
+        ):
+            raise ValueError("The linked immutable snapshot is unavailable")
+        ai_analysis = run_combined_case_ai_analysis(
+            store,
+            job,
+            snapshot_job_id=snapshot_job_id,
+            snapshot_sha=snapshot_sha,
+            analysis_context=analysis_context,
+            shutdown_check=shutdown_check,
+        )
+        analysis_status = str(ai_analysis.get("status") or "failed")
+        if analysis_status == "cancelled":
+            job_status = (
+                "interrupted" if ai_analysis.get("interrupted") else "cancelled"
+            )
+        elif analysis_status == "failed":
+            job_status = "failed"
+        else:
+            job_status = "completed"
+        result = {
+            "status": job_status,
+            "kind": "case_fusion_ai",
+            "snapshot_job_id": snapshot_job_id,
+            "snapshot_sha256": snapshot_sha,
+            "ai_analysis": ai_analysis,
+        }
+        if ai_analysis.get("error"):
+            result["error"] = ai_analysis["error"]
+    except Exception as error:
+        public_error = record_internal_error(
+            "Combined AI background phase failed", error, case_id=job.get("case_id")
+        )
+        result = {
+            "status": "failed",
+            "kind": "case_fusion_ai",
+            "snapshot_job_id": snapshot_job_id,
+            "snapshot_sha256": snapshot_sha,
+            "error": public_error,
+        }
+    store.finish(job_id, result)
+    store.append_event(
+        job_id,
+        {
+            "type": "done",
+            "status": result["status"],
+            "redirect": f"/cases/{job['case_id']}",
+        },
+    )
 
 
 def run_persistent_case_fusion_job(
@@ -4567,31 +4724,21 @@ def run_persistent_case_fusion_job(
                         "site": "Approved evidence snapshot",
                     },
                 )
-                ai_analysis = run_combined_case_ai_analysis(
-                    store,
-                    job,
-                    snapshot_result,
-                    analysis_context,
-                    shutdown_check=shutdown_check,
+                ai_job_id = store.publish_case_fusion_snapshot(
+                    job_id, snapshot_result, analysis_context
                 )
-                interrupted = bool(shutdown_check and shutdown_check())
-                cancelled = store.is_cancel_requested(job_id)
-                if interrupted or cancelled:
+                if ai_job_id is None:
+                    interrupted = bool(shutdown_check and shutdown_check())
                     result = {
                         "status": "interrupted" if interrupted else "cancelled",
                         "kind": "case_fusion",
                         "error": (
-                            "The combined investigation stopped before AI output "
+                            "The combined investigation stopped before the snapshot "
                             "could be published."
                         ),
                     }
                 else:
-                    result = {
-                        "status": "completed",
-                        "kind": "case_fusion",
-                        **snapshot_result,
-                        "ai_analysis": ai_analysis,
-                    }
+                    return ai_job_id
     except Exception as error:
         public_error = record_internal_error(
             "Combined investigation failed", error, case_id=job.get("case_id")
@@ -4696,6 +4843,8 @@ def combined_case_chat_context(case: Dict[str, Any]):
 
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
     """Execute a claimed database job independently from any browser request."""
+    if job.get("kind") == "case_fusion_ai":
+        return run_persistent_combined_ai_job(store, job, shutdown_check=shutdown_check)
     if job.get("kind") == "affiliation":
         return run_persistent_affiliation_job(store, job, shutdown_check=shutdown_check)
     if job.get("kind") == "identity_enrichment":
@@ -5707,12 +5856,28 @@ def case_workspace(case_id):
             ),
             None,
         )
+        latest_ai_job = next(
+            (
+                job
+                for job in case.get("jobs", [])
+                if job.get("kind") == "case_fusion_ai"
+                and latest_completed_fusion_job
+                and (
+                    (job.get("options") or {})
+                    .get("investigation_spec", {})
+                    .get("snapshot_job_id")
+                    == latest_completed_fusion_job.get("job_id")
+                )
+            ),
+            None,
+        )
         return render_template(
             "combined_case.html",
             case=case,
             latest_fusion_job=latest_fusion_job,
             latest_completed_fusion_job=latest_completed_fusion_job,
             latest_analysis_run=latest_analysis_run,
+            latest_ai_job=latest_ai_job,
         )
     case["google_places_live"] = load_case_google_places_live(case)
     return render_template("case.html", case=case)
@@ -6993,6 +7158,8 @@ def live_start():
 @app.route("/live/<job_id>")
 def live_results(job_id):
     stored_job = case_store.get_job(job_id) if case_store is not None else None
+    if stored_job and stored_job.get("kind") == "case_fusion_ai":
+        return redirect(url_for("case_workspace", case_id=stored_job["case_id"]))
     result = job_results.get(job_id)
     if not result:
         loaded = load_persisted_job_result(f"search_{job_id}")

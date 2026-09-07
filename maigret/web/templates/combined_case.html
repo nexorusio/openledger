@@ -15,6 +15,8 @@
         {% if latest_completed_fusion_job %}<a href="{{ url_for('relationships_workspace', mode='shared', case_id=case.id) }}" class="btn btn-primary"><i data-lucide="share-2"></i> Explore graph</a>{% endif %}
         {% if latest_fusion_job and latest_fusion_job.status not in ('completed', 'failed', 'cancelled', 'interrupted') %}
         <a href="{{ url_for('live_results', job_id=latest_fusion_job.job_id) }}" class="btn btn-outline-secondary">View progress</a>
+        {% elif latest_ai_job and latest_ai_job.status in ('queued', 'running', 'cancel_requested') %}
+        <span class="badge-soft"><i data-lucide="sparkles"></i> Snapshot ready · AI running</span>
         {% else %}
         <form method="POST" action="{{ url_for('refresh_combined_case', case_id=case.id) }}" class="d-inline">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
@@ -84,9 +86,28 @@
             <span>{{ 'Cited public-web research' if latest_analysis_run.web_search_enabled else 'Stored evidence only' }}</span>
             {% if latest_analysis_run.completed_at %}<span>{{ latest_analysis_run.completed_at }}</span>{% endif %}
         </div>
+        {% elif latest_ai_job %}
+        <div class="combined-insight-run-meta">
+            <span class="badge-soft {{ 'warning' if latest_ai_job.status in ('failed', 'cancelled', 'interrupted') else '' }}">{{ latest_ai_job.status | replace('_', ' ') | title }}</span>
+        </div>
         {% endif %}
     </header>
-    {% if not latest_analysis_run %}
+    {% if latest_ai_job and latest_ai_job.status in ('queued', 'running', 'cancel_requested') %}
+    <div class="combined-ai-live" id="combined-ai-live" data-job-id="{{ latest_ai_job.job_id }}" data-elapsed="{{ latest_ai_job.progress.elapsed_seconds | default(0) }}">
+        <i data-lucide="loader-circle"></i>
+        <div>
+            <strong id="combined-ai-phase">{{ latest_ai_job.progress.message | default('AI synthesis is queued.') }}</strong>
+            <p>The approved-evidence snapshot is already available. This separate background phase cannot modify source evidence or publish a relationship without human review.</p>
+            <span class="combined-ai-elapsed">Elapsed: <strong id="combined-ai-elapsed">00:00</strong></span>
+        </div>
+        <button type="button" id="stop-ai-btn" class="btn btn-sm btn-outline-danger" {{ 'disabled' if latest_ai_job.status == 'cancel_requested' }}>{{ 'Stopping…' if latest_ai_job.status == 'cancel_requested' else 'Stop AI synthesis' }}</button>
+    </div>
+    {% elif not latest_analysis_run and latest_ai_job and latest_ai_job.status in ('failed', 'cancelled', 'interrupted') %}
+    <div class="combined-insight-empty warning">
+        <i data-lucide="triangle-alert"></i>
+        <div><strong>AI synthesis {{ 'was cancelled' if latest_ai_job.status == 'cancelled' else 'was interrupted' if latest_ai_job.status == 'interrupted' else 'could not be completed' }}.</strong><p>{{ latest_ai_job.error or 'The immutable snapshot remains available.' }}</p></div>
+    </div>
+    {% elif not latest_analysis_run %}
     <div class="combined-insight-empty">
         <i data-lucide="sparkles"></i>
         <div><strong>Analysis has not run yet.</strong><p>AI synthesis starts automatically after the approved-evidence snapshot completes.</p></div>
@@ -203,6 +224,73 @@
     {% endif %}
     {% endif %}
 </section>
+
+{% if latest_ai_job and latest_ai_job.status in ('queued', 'running', 'cancel_requested') %}
+<script>
+    (() => {
+        const container = document.getElementById('combined-ai-live');
+        const phase = document.getElementById('combined-ai-phase');
+        const elapsed = document.getElementById('combined-ai-elapsed');
+        const stopButton = document.getElementById('stop-ai-btn');
+        const jobId = container.dataset.jobId;
+        let reportedSeconds = Number(container.dataset.elapsed || 0);
+        let reportedAt = Date.now();
+
+        function formatElapsed(value) {
+            const seconds = Math.max(0, Math.floor(value));
+            const hours = Math.floor(seconds / 3600);
+            const minutes = Math.floor((seconds % 3600) / 60);
+            const remainder = seconds % 60;
+            return (hours ? String(hours).padStart(2, '0') + ':' : '')
+                + String(minutes).padStart(2, '0') + ':'
+                + String(remainder).padStart(2, '0');
+        }
+
+        function updateElapsed() {
+            elapsed.textContent = formatElapsed(
+                reportedSeconds + (Date.now() - reportedAt) / 1000
+            );
+        }
+        updateElapsed();
+        const elapsedTimer = window.setInterval(updateElapsed, 1000);
+        const events = new EventSource('/api/scan/' + jobId + '/stream');
+        events.onmessage = event => {
+            const payload = JSON.parse(event.data);
+            if (payload.type === 'phase' || payload.type === 'heartbeat') {
+                if (payload.message) phase.textContent = payload.message;
+                reportedSeconds = Number(payload.elapsed_seconds || 0);
+                reportedAt = Date.now();
+                updateElapsed();
+            } else if (payload.type === 'cancel_requested') {
+                phase.textContent = 'Stopping the active AI request…';
+                stopButton.disabled = true;
+                stopButton.textContent = 'Stopping…';
+            } else if (payload.type === 'done') {
+                events.close();
+                window.clearInterval(elapsedTimer);
+                window.location.reload();
+            }
+        };
+
+        stopButton.addEventListener('click', async () => {
+            stopButton.disabled = true;
+            stopButton.textContent = 'Stopping…';
+            phase.textContent = 'Stopping the active AI request…';
+            try {
+                const response = await fetch('/api/scan/' + jobId + '/stop', {
+                    method: 'POST',
+                    headers: {'X-OpenLedger-CSRF': {{ csrf_token | tojson }}},
+                });
+                if (!response.ok && response.status !== 409) throw new Error('stop failed');
+            } catch (_error) {
+                phase.textContent = 'The stop request could not be sent. Try again.';
+                stopButton.disabled = false;
+                stopButton.textContent = 'Stop AI synthesis';
+            }
+        });
+    })();
+</script>
+{% endif %}
 
 <section class="panel-card combined-case-overview">
     <header class="panel-card-header">

@@ -4684,6 +4684,21 @@ textarea.form-control.compact-textarea {
 .combined-insight-empty.warning { color: var(--ol-warning); }
 .combined-insight-empty svg { width: 20px; flex: 0 0 auto; color: var(--ol-accent); }
 .combined-insight-empty p { margin: 3px 0 10px; color: var(--ol-muted); }
+.combined-ai-live {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 14px;
+    align-items: start;
+    padding: 22px;
+}
+.combined-ai-live > svg {
+    width: 20px;
+    color: var(--ol-accent);
+    animation: spin 1.2s linear infinite;
+}
+.combined-ai-live p { margin: 4px 0 8px; color: var(--ol-muted); }
+.combined-ai-elapsed { color: var(--ol-muted); font-size: .72rem; }
+.combined-ai-elapsed strong { color: var(--ol-text); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
 .combined-insight-list-block { padding: 18px 22px; border-bottom: 1px solid var(--ol-border); }
 .combined-insight-list-block h3,
 .relationship-proposal-heading h3,
@@ -4798,4 +4813,6 @@ textarea.form-control.compact-textarea {
     .page-heading-actions { justify-content: flex-start; width: 100%; }
     .combined-case-metadata > div { grid-template-columns: 1fr; gap: 4px; }
     .case-metric-grid { grid-template-columns: 1fr; }
+    .combined-ai-live { grid-template-columns: auto minmax(0, 1fr); }
+    .combined-ai-live .btn { grid-column: 2; justify-self: start; }
 }

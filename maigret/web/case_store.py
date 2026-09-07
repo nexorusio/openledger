@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -1982,6 +1983,28 @@ class CaseStore:
         return True
 
     def claim_next(self, worker_id: str) -> Optional[Dict[str, Any]]:
+        return self.claim_next_matching(worker_id)
+
+    def claim_next_matching(
+        self,
+        worker_id: str,
+        *,
+        include_kinds: Optional[Iterable[str]] = None,
+        exclude_kinds: Optional[Iterable[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Claim the oldest queued job accepted by one worker execution lane."""
+        included = {
+            str(kind).strip()[:32]
+            for kind in (include_kinds or [])
+            if str(kind).strip()
+        }
+        excluded = {
+            str(kind).strip()[:32]
+            for kind in (exclude_kinds or [])
+            if str(kind).strip()
+        }
+        if included and excluded:
+            raise ValueError("Choose either included or excluded job kinds")
         now = utcnow()
         with self.engine.begin() as connection:
             statement = (
@@ -1990,6 +2013,10 @@ class CaseStore:
                 .order_by(investigation_jobs.c.created_at)
                 .limit(1)
             )
+            if included:
+                statement = statement.where(investigation_jobs.c.kind.in_(included))
+            elif excluded:
+                statement = statement.where(investigation_jobs.c.kind.not_in(excluded))
             if self.engine.dialect.name == "postgresql":
                 statement = statement.with_for_update(skip_locked=True)
             row = connection.execute(statement).mappings().first()
@@ -2033,6 +2060,19 @@ class CaseStore:
                 progress["checked"] = event.get("checked", progress.get("checked", 0))
                 progress["total"] = event.get("total", progress.get("total"))
                 progress["site"] = event.get("site")
+                if event.get("activity"):
+                    progress["activity"] = event.get("activity")
+            elif event_type in {"phase", "heartbeat"}:
+                if event.get("phase"):
+                    progress["phase"] = str(event["phase"])[:64]
+                if event.get("message"):
+                    progress["message"] = str(event["message"])[:500]
+                try:
+                    progress["elapsed_seconds"] = max(
+                        0, int(event.get("elapsed_seconds", 0))
+                    )
+                except (TypeError, ValueError):
+                    pass
             elif event_type == "found":
                 progress["found"] = int(progress.get("found", 0)) + 1
             progress_updates["progress"] = progress
@@ -2050,6 +2090,143 @@ class CaseStore:
                 .values(**progress_updates)
             )
         return event_id
+
+    def publish_case_fusion_snapshot(
+        self,
+        job_id: str,
+        snapshot_result: Dict[str, Any],
+        analysis_context: Dict[str, Any],
+    ) -> Optional[str]:
+        """Commit a snapshot and its follow-on AI job in one transaction.
+
+        Returning ``None`` means a concurrent stop request won before publication.
+        The source snapshot is otherwise terminal and independently usable before
+        the queued AI phase starts.
+        """
+        snapshot_payload = dict(snapshot_result or {})
+        snapshot_payload.pop("analysis_context", None)
+        snapshot = snapshot_payload.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise ValueError("A combined snapshot is required")
+        snapshot_sha = str(snapshot.get("sha256") or "").strip().casefold()
+        if not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha):
+            raise ValueError("A valid combined snapshot SHA-256 is required")
+        context_payload = dict(analysis_context or {})
+        if not hmac.compare_digest(
+            str(context_payload.get("snapshot_sha256") or "").casefold(),
+            snapshot_sha,
+        ):
+            raise ValueError("AI context does not match the combined snapshot")
+
+        now = utcnow()
+        ai_job_id = str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            statement = select(
+                investigation_jobs.c.case_id,
+                investigation_jobs.c.kind,
+                investigation_jobs.c.status,
+                investigation_jobs.c.cancel_requested,
+                investigation_jobs.c.progress,
+            ).where(investigation_jobs.c.id == job_id)
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            row = connection.execute(statement).mappings().first()
+            if not row:
+                raise KeyError(job_id)
+            if row["kind"] != "case_fusion":
+                raise ValueError("This job is not a combined-case snapshot")
+            if row["status"] == "cancel_requested" or row["cancel_requested"]:
+                return None
+            if row["status"] != "running":
+                raise ValueError("The combined-case snapshot is not running")
+
+            ai_options = {
+                "investigation_spec": {
+                    "schema_version": 1,
+                    "investigation_type": "case_fusion_ai",
+                    "snapshot_job_id": job_id,
+                    "snapshot_sha256": snapshot_sha,
+                    "analysis_context": context_payload,
+                }
+            }
+            connection.execute(
+                insert(investigation_jobs).values(
+                    id=ai_job_id,
+                    case_id=str(row["case_id"]),
+                    kind="case_fusion_ai",
+                    status="queued",
+                    usernames=[],
+                    options=ai_options,
+                    progress={
+                        "phase": "queued",
+                        "message": "AI synthesis is queued.",
+                        "elapsed_seconds": 0,
+                    },
+                    result=None,
+                    error=None,
+                    cancel_requested=False,
+                    attempts=0,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            result_payload = {
+                "status": "completed",
+                "kind": "case_fusion",
+                **snapshot_payload,
+                "ai_job_id": ai_job_id,
+            }
+            connection.execute(
+                update(investigation_jobs)
+                .where(
+                    investigation_jobs.c.id == job_id,
+                    investigation_jobs.c.status == "running",
+                )
+                .values(
+                    status="completed",
+                    result=result_payload,
+                    error=None,
+                    completed_at=now,
+                    heartbeat_at=now,
+                    updated_at=now,
+                )
+            )
+            connection.execute(
+                insert(investigation_events),
+                [
+                    {
+                        "job_id": job_id,
+                        "event": {
+                            "type": "snapshot_published",
+                            "status": "completed",
+                            "redirect": f"/cases/{row['case_id']}",
+                            "ai_job_id": ai_job_id,
+                        },
+                        "created_at": now,
+                    },
+                    {
+                        "job_id": job_id,
+                        "event": {
+                            "type": "done",
+                            "status": "completed",
+                            "redirect": f"/cases/{row['case_id']}",
+                        },
+                        "created_at": now,
+                    },
+                    {
+                        "job_id": ai_job_id,
+                        "event": {
+                            "type": "queued",
+                            "phase": "queued",
+                            "message": "AI synthesis is queued.",
+                            "elapsed_seconds": 0,
+                            "snapshot_job_id": job_id,
+                        },
+                        "created_at": now,
+                    },
+                ],
+            )
+        return ai_job_id
 
     def get_events(self, job_id: str, after_id: int = 0, limit: int = 500):
         with self.engine.connect() as connection:
@@ -6298,6 +6475,23 @@ class CaseStore:
         cutoff = utcnow() - timedelta(seconds=max(0, stale_after_seconds))
         now = utcnow()
         with self.engine.begin() as connection:
+            stale_rows = list(
+                connection.execute(
+                    select(
+                        investigation_jobs.c.id,
+                        investigation_jobs.c.kind,
+                        investigation_jobs.c.options,
+                    ).where(
+                        investigation_jobs.c.status.in_(
+                            ("running", "cancel_requested")
+                        ),
+                        or_(
+                            investigation_jobs.c.heartbeat_at.is_(None),
+                            investigation_jobs.c.heartbeat_at < cutoff,
+                        ),
+                    )
+                ).mappings()
+            )
             result = connection.execute(
                 update(investigation_jobs)
                 .where(
@@ -6314,6 +6508,37 @@ class CaseStore:
                     updated_at=now,
                 )
             )
+            snapshot_job_ids = {
+                str(row["id"])
+                for row in stale_rows
+                if str(row["kind"]) == "case_fusion"
+            }
+            for row in stale_rows:
+                if str(row["kind"]) != "case_fusion_ai":
+                    continue
+                specification = dict(row["options"] or {}).get("investigation_spec")
+                if isinstance(specification, dict):
+                    snapshot_job_id = str(
+                        specification.get("snapshot_job_id") or ""
+                    ).strip()
+                    if snapshot_job_id:
+                        snapshot_job_ids.add(snapshot_job_id)
+            if snapshot_job_ids:
+                connection.execute(
+                    update(combined_analysis_runs)
+                    .where(
+                        combined_analysis_runs.c.job_id.in_(snapshot_job_ids),
+                        combined_analysis_runs.c.status == "processing",
+                    )
+                    .values(
+                        status="failed",
+                        error=(
+                            "The worker stopped during AI synthesis. The immutable "
+                            "approved-evidence snapshot remains available."
+                        ),
+                        completed_at=now,
+                    )
+                )
         return int(result.rowcount or 0)
 
     @staticmethod
