@@ -1,5 +1,4078 @@
 {
   "schema_version": 1,
-  "generated_at": null,
-  "sites": {}
+  "generated_at": "2026-09-07T08:37:15.584333+00:00",
+  "sites": {
+    "1337x": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "1x": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "23hq": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown"
+    },
+    "3dtoday": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "500px": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "About.me": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Academia.edu": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: high_entropy_missing:available->unknown"
+    },
+    "Acomics": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Advego": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Akniga": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "AllKPop": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "AllMyLinks": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "AlternativeTo": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Amazon": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: high_entropy_missing:available->unknown"
+    },
+    "Ameblo": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Americanthinker": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Androidforums": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Ani World": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Anime-planet": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "AnimeNewsNetwork": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Antiquers": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "ArchiveOfOurOwn": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "are.na": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Ariva": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Armorgames": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Artstation": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Asciinema": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Atcoder": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Audiojungle": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Aufeminin": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "author.today": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Avforums": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "B17": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "BabyBlog.ru": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Bandcamp": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "beacons.ai": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Behance": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Bigsoccer": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Bit.ly": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "BitBucket": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Blogger": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Bluesky": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Bookcrossing": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Boosty": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Booth": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Brusheezy": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "BuyMeACoffee": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "BuzzFeed": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Calendly": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Carbonmade": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Ccm": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Cent": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "cfd-online": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "CGTrader": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Chatujme.cz": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "ChaturBate": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_missing:available->claimed, high_entropy_missing:available->claimed, high_entropy_missing:available->claimed, high_entropy_missing:available->claimed"
+    },
+    "Chess": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Chitalnya": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "clarity.fm": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Clubhouse": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "CNET": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "codeberg.org": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Codecademy": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Codecanyon": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Codechef": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "codeforces.com": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Codementor": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Codepen": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Coderwall": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Codewars": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Comedy": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Cont": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: high_entropy_missing:available->unknown"
+    },
+    "Contently": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Coroflot": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Coub": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Couchsurfing": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "CreativeMarket": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "CSDN": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "CTAN": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "DailyKos": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "DailyMotion": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Datpiff": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Dcinside": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Dealabs": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "DeepDreamGenerator": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Depop": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Designs99": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "DEV Community": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "DeviantART": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "devRant": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "DigitalOcean": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Diigo": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Discogs": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Discord": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Disqus": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "domestika.org": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "DonationsAlerts": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Donorbox": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Dou": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Douban": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Dreamstime": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Dribbble": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Drive2": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Dumpor": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Duolingo": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "EasyEDA": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "eBaumsWorld": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Ebay": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Eintracht": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Eksisozluk": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Empowher": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Erome": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Ethresear": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Exophase": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Exposure": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Facebook": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Fandom": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Fanlore": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "fediverse.party": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Ficwad": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Figma": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Filmow": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "FilmWeb": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Fiverr": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "fixya": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "FL.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Flickr": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Flickr Groups": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Flightradar24": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Flipboard": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Flyertalk": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Fodors": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Fotki": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Framapiaf": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Fredmiranda": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Freecodecamp": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "freelance.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Freelancehunt": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Freelancer.com": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Freepik": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Freesound": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Fur Affinity": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "GaiaOnline": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "GamesRadar": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Garden": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "GBAtemp.net": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "gcup.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Geeksfor Geeks": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Genius": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Geocaching": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Giantbomb": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: high_entropy_missing:available->unknown"
+    },
+    "Giphy": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Gitea": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Gitee": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "GitHub": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "GitHubGist": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "GitLab": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Globalvoices": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "gloria.tv": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Gofundme": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Gog": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Goldderby": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "goodgame.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "GoodReads": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Google Scholar": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "GooglePlayStore": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Gumroad": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Guru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Gutefrage": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Habr": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Hack MD": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Hackaday": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "HackerNoon": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "HackerOne": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Hackerrank": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Hackster": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Hardforum": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Hashnode": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "hi-news.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Hive Blog": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "homebrewtalk.com": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Hometheaterforum": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Hot UKdeals": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "HubPages": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "HuggingFace": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Huntingnet": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "IBM Video": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Icobench": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "IFTTT": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: high_entropy_missing:available->unknown"
+    },
+    "iFunny": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Illustrators": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Image Fap": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "ImageShack": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Imgflip": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "ImgInn": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Imgur": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "iNaturalist": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Infourok": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Instagram": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Instapaper": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "instaprofi.ru": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Instructables": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "InterPals": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Iphones.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "iRecommend.RU": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Issuu": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "iStock": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Itch.io": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "ItemFix": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "jAlbum.net": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Jetpunk": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "JeuxVideo": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Jigsawplanet": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Jimdo": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "joyreactor.cc": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "JSFiddle": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Keybase": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Kick": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Kickstarter": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "kofi": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Kongregate": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Kwork": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Laracast": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "last.fm": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Launchpad": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "LeetCode": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Lemmy World": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Lesswrong": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Letterboxd": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Liberapay": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "LibraryThing": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Lichess": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown"
+    },
+    "LinkedIn": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "linktr.ee": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Linuxfr": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Listal": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "LiveInternet": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Livejasmin": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "LiveJournal": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "LiveLib": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "lnk.bio": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Lobsters": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Lomography": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "LOR": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "LyricsTranslate": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Mamot": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "ManifoldMarkets": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "many.link": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "mastodon.cloud": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "mastodon.social": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "mastodon.xyz": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Max": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Medium": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "MeetMe": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "mel.fm": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "memory.lol": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Memrise": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "MercadoLivre": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Metal-archives": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Minds": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Minecraft": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Mix": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "MixCloud": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Mobypicture": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "ModDB": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Motherless": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Mouthshut": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "mssg.me": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Mstdn.social": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Muse Score": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "MyAnimeList": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Mybuilder": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Mydealz": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Mydramalist": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Myinstants": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "MyMiniFactory": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Myspace": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Mywed": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "N4g": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Nairaland Forum": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Namepros": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Namuwiki": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "NationStates Nation": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "NationStates Region": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Naver": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Neoseeker": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Newgrounds": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "nhattao.com": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "NICommunityForum": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Nintendo Life": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "NN.RU": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Noblogs": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "notabug.org": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "note": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "NPM": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "NPM-Package": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Observable": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Odysee": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OK": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OnlyFans": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Brazil": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Europe Nordic & East": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Europe West": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Japan": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Korea": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL LAN": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL LAS": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Middle East": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL North America": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Oceania": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Phillippines": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "OP.GG LoL Russia": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Singapore": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "OP.GG LoL Taiwan": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Thailand": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "OP.GG LoL Turkey": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OP.GG LoL Vietnam": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Open Game Art": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OpenCollective": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "OpenSea": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OpenSource": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "OpenStreetMap": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Oper": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "osu!": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Otzovik": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Overclockers": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Packagist": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Paltalk": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Pandia": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Paragraph": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "partnerkin.com": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Pastebin": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "PatientsLikeMe": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Patreon": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Paypal": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Pbase": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "PCGamer": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Periscope": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "phpbbguru.net": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Physicsforums": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown"
+    },
+    "Picsart": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "picturepush.com": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Picuki": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Pikabu": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "pikabu.monster": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Pinkbike": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Pinterest": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "pixelfed.social": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Pixwox": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "PlanetMinecraft": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: high_entropy_missing:available->unknown"
+    },
+    "Platzi": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Pling": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Pokecommunity": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Polarsteps": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Polymarket": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "ProductHunt": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "profi.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "PromoDJ": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "PromptBase": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Proza.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Psychologies.ru": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Publiclab": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "PushSquare": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Quora": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Rappad": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Rarible": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Redbubble": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Reddit": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Redtube": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Reibert": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "ResidentAdvisor": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "ReverbNation": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Revolut.me": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Rmmedia": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Roblox": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Rottentomatoes": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "RubyGems": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Rutracker": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Salon24.pl": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Samlib": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "sessionize.com": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Setlist": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "shor.by": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Skyblock": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Slack": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown"
+    },
+    "Slashdot": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Slides": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "SlideShare": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "smart-lab.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "smokingmeatforums.com": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Smugmug": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Smule": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Snapchat": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Soop": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "SoundCloud": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Soup": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "SourceForge": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Spark": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Spatial": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Speakerdeck": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Speedrun.com": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Spletnik": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Sporcle": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Spotify": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "StackOverflow": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Star Citizen": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Star Citizens Community": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Steam": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown"
+    },
+    "Steam (Group)": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Steamid": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Steamidfinder": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Steemit": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Stihi.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "stopgame.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Studfile": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Substack": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Sugoidesu": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Sythe": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Tagged": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Taplink": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "TechSpot": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Telegram": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Teletype": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "tfw2005.com": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Thechive": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "ThemeForest": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "TheOdysseyOnline": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "TheSimsResource": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Threads": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Tiendanube": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "tikbuddy.com": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "TikTok": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Tinder": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Tinkoff Invest": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Tistory": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Topcoder": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Topmate": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "TradingView": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Trakt": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Trashbox.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Trello": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Trinixy": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "TripAdvisor": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Tripline": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Tripster": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "TrueAchievements": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "TryHackMe": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Tumblr": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "TVTropes": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Tweakers": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Twitch": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Twitter": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Typeracer": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "uID.me (by username)": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Ultimate-Guitar": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Untappd": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Upwork": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "valinor.com.br": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Velog": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Venmo": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Vgtimes": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Vgtimes/Games": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "VideoHive": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Vimeo": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Vivino": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Vjudge": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "VK": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "VLR": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "VSCO": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "W3Schools": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Warpcast": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Warrior Forum": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Wattpad": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "webdeveloper.com": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Weblancer": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "WebNode": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Weburg": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Weebly": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Weedmaps": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Weforum": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Weibo": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Wigle": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Wikidot": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "WikimapiaSearch": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Wikipedia": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Windowsforum": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Windy": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Wishlistr": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Wix": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "WordPress": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "WordPressOrg": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Wowhead": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "write.as": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "writingforums.org": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Wykop": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "xakep.ru": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "xenforo.com": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "xHamster": {
+      "state": "degraded",
+      "consecutive_failures": 1,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "fail",
+      "reason": "Detector contradictions: declared_existing:claimed->available"
+    },
+    "Xing": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Xvideos": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "YandexZenChannel": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "YouPic": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "YouPorn": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "YouTube": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "Yummly": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_existing:claimed->unknown, declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Zhihu": {
+      "state": "degraded",
+      "consecutive_failures": 0,
+      "consecutive_successes": 0,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "unknown",
+      "reason": "unknown probes: declared_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown, high_entropy_missing:available->unknown"
+    },
+    "Zora": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "{username}.portfoliobox.net": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    },
+    "{username}.tilda.ws": {
+      "state": "healthy",
+      "consecutive_failures": 0,
+      "consecutive_successes": 1,
+      "last_checked_at": "2026-09-07T08:37:15.584333+00:00",
+      "last_outcome": "pass",
+      "reason": "All detector canaries matched expectations."
+    }
+  }
 }
