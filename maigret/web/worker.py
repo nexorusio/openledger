@@ -17,6 +17,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("openledger.worker")
 stopping = threading.Event()
+AI_JOB_KINDS = frozenset({"case_fusion_ai"})
 
 
 def request_shutdown(signum, _frame) -> None:
@@ -24,6 +25,27 @@ def request_shutdown(signum, _frame) -> None:
         "Worker received signal %s; stopping the active investigation safely", signum
     )
     stopping.set()
+
+
+def execute_job(store, job, *, shutdown_check) -> None:
+    """Run one claimed job and retain the existing public failure boundary."""
+    logger.info("Starting investigation %s (%s)", job["job_id"], job.get("kind"))
+    try:
+        run_persistent_job(store, job, shutdown_check=shutdown_check)
+    except Exception as error:
+        public_error = record_internal_error(
+            "Investigation worker crashed",
+            error,
+            session=job["job_id"],
+        )
+        store.finish(
+            job["job_id"],
+            {
+                "status": "failed",
+                "error": public_error,
+                "usernames": job["usernames"],
+            },
+        )
 
 
 def run() -> int:
@@ -48,31 +70,37 @@ def run() -> int:
             )
         logger.info("OpenLedger worker %s is ready", worker_id)
 
+        ai_thread = None
         while not stopping.is_set():
-            job = case_store.claim_next(worker_id)
+            if ai_thread is not None and not ai_thread.is_alive():
+                ai_thread.join()
+                ai_thread = None
+
+            if ai_thread is None:
+                ai_job = case_store.claim_next_matching(
+                    f"{worker_id}:ai", include_kinds=AI_JOB_KINDS
+                )
+                if ai_job:
+                    ai_thread = threading.Thread(
+                        target=execute_job,
+                        args=(case_store, ai_job),
+                        kwargs={"shutdown_check": stopping.is_set},
+                        name="openledger-combined-ai",
+                        daemon=True,
+                    )
+                    ai_thread.start()
+
+            job = case_store.claim_next_matching(worker_id, exclude_kinds=AI_JOB_KINDS)
             if not job:
                 stopping.wait(poll_seconds)
                 continue
-            logger.info("Starting investigation %s", job["job_id"])
-            try:
-                run_persistent_job(
-                    case_store,
-                    job,
-                    shutdown_check=stopping.is_set,
-                )
-            except Exception as error:
-                public_error = record_internal_error(
-                    "Investigation worker crashed",
-                    error,
-                    session=job["job_id"],
-                )
-                case_store.finish(
-                    job["job_id"],
-                    {
-                        "status": "failed",
-                        "error": public_error,
-                        "usernames": job["usernames"],
-                    },
+            execute_job(case_store, job, shutdown_check=stopping.is_set)
+
+        if ai_thread is not None:
+            ai_thread.join(timeout=30)
+            if ai_thread.is_alive():
+                logger.error(
+                    "AI synthesis did not stop within the shutdown grace period"
                 )
     finally:
         worker_lock.close()

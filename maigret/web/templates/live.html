@@ -219,11 +219,16 @@
                 : 'Scanning ' + ev.username + '…';
         } else if (ev.type === 'progress') {
             document.getElementById('stat-checked').textContent = ev.checked;
-            if (isCaseFusion) statusEl.textContent = 'Building exact cross-case relationship paths…';
+            if (isCaseFusion) statusEl.textContent = 'Finalizing the approved-evidence snapshot…';
             if (ev.total) {
                 const pct = Math.min(ev.checked, ev.total) / ev.total * 100;
                 document.getElementById('live-progress').style.width = pct + '%';
             }
+        } else if (ev.type === 'snapshot_published') {
+            statusEl.textContent = 'Snapshot ready. Opening the combined case while AI synthesis continues in the background…';
+            document.getElementById('live-progress').style.width = '100%';
+            document.getElementById('stopBtn').disabled = true;
+            if (ev.redirect) window.location.replace(ev.redirect);
         } else if (ev.type === 'found') {
             foundCount++;
             document.getElementById('stat-found').textContent = foundCount;
@@ -351,7 +356,11 @@
     document.getElementById('stopBtn').addEventListener('click', stopScan);
 
     if (doneRedirect) {
-        finish(completionText(), doneRedirect);
+        if (isCaseFusion) {
+            window.location.replace(doneRedirect);
+        } else {
+            finish(completionText(), doneRedirect);
+        }
     } else {
         const evtSource = new EventSource('/api/scan/' + jobId + '/stream');
         evtSource.onmessage = onScanEvent;

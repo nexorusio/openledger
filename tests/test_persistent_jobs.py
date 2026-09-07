@@ -1773,7 +1773,9 @@ def test_relationship_workspace_renders_shared_approved_attributes(
     assert "/static/relationships.js" in persona_page
 
 
-def test_case_fusion_worker_publishes_versioned_snapshot(web_app, persistent_store):
+def test_case_fusion_worker_publishes_versioned_snapshot(
+    client, web_app, persistent_store
+):
     source_case_ids = []
     for username in ("alice", "bob"):
         source_job_id = persistent_store.create_investigation([username], {})
@@ -1809,7 +1811,23 @@ def test_case_fusion_worker_publishes_versioned_snapshot(web_app, persistent_sto
         "redirect": f"/cases/{fusion_job['case_id']}",
     }
     combined = persistent_store.get_case(fusion_job["case_id"])
-    assert combined["analysis_runs"][0]["status"] == "unavailable"
+    assert combined["analysis_runs"] == []
+    ai_job = persistent_store.get_job(completed["ai_job_id"])
+    assert ai_job["kind"] == "case_fusion_ai"
+    assert ai_job["status"] == "queued"
+    assert ai_job["options"]["investigation_spec"]["snapshot_job_id"] == fusion_job_id
+    workspace = client.get(f"/cases/{fusion_job['case_id']}").get_data(as_text=True)
+    assert "The approved-evidence snapshot is already available" in workspace
+    assert "Stop AI synthesis" in workspace
+    assert 'id="combined-ai-elapsed"' in workspace
+
+    ai_live_response = client.get(f"/live/{ai_job['job_id']}")
+    assert ai_live_response.status_code == 302
+    assert ai_live_response.location.endswith(f"/cases/{fusion_job['case_id']}")
+
+    completed_live_page = client.get(f"/live/{fusion_job_id}").get_data(as_text=True)
+    assert "window.location.replace(doneRedirect)" in completed_live_page
+    assert "Building exact cross-case relationship paths" not in completed_live_page
 
 
 def test_case_fusion_worker_runs_cited_ai_analysis_with_existing_connection(
@@ -1876,8 +1894,16 @@ def test_case_fusion_worker_runs_cited_ai_analysis_with_existing_connection(
 
     completed = persistent_store.get_job(fusion_job_id)
     assert completed["status"] == "completed"
-    assert completed["ai_analysis"]["status"] == "completed"
-    assert completed["ai_analysis"]["web_search_completed"] is True
+    ai_job = persistent_store.claim_next_matching(
+        "worker:background-ai", include_kinds={"case_fusion_ai"}
+    )
+    assert ai_job["job_id"] == completed["ai_job_id"]
+    web_app.run_persistent_job(persistent_store, ai_job)
+
+    completed_ai = persistent_store.get_job(ai_job["job_id"])
+    assert completed_ai["status"] == "completed"
+    assert completed_ai["ai_analysis"]["status"] == "completed"
+    assert completed_ai["ai_analysis"]["web_search_completed"] is True
     assert captured["research"]["web_search_enabled"] is True
     assert captured["insights"]["model"] == "gpt-5.6-terra"
     combined = persistent_store.get_case(fusion_job["case_id"])
@@ -1919,17 +1945,8 @@ def test_case_fusion_worker_honors_cancellation_during_ai_analysis(
     fusion_job = persistent_store.claim_next("worker:fusion-cancel")
 
     async def fake_research(**_kwargs):
-        assert persistent_store.request_cancel(fusion_job_id) is True
-        return {
-            "analysis": "This output must be discarded.",
-            "sources": [
-                {
-                    "title": "Public source",
-                    "url": "https://example.test/public",
-                }
-            ],
-            "web_search_completed": True,
-        }
+        await asyncio.sleep(2)
+        raise AssertionError("the cancelled request must not complete")
 
     async def forbidden_insights(**_kwargs):
         raise AssertionError("the structured stage must not start after cancellation")
@@ -1948,11 +1965,168 @@ def test_case_fusion_worker_honors_cancellation_during_ai_analysis(
     web_app.run_persistent_job(persistent_store, fusion_job)
 
     completed = persistent_store.get_job(fusion_job_id)
-    assert completed["status"] == "cancelled"
-    assert "snapshot" not in completed
+    assert completed["status"] == "completed"
+    assert "snapshot" in completed
+    ai_job = persistent_store.claim_next_matching(
+        "worker:background-ai", include_kinds={"case_fusion_ai"}
+    )
+    monkeypatch.setattr(web_app, "PERSISTENT_CANCEL_POLL_SECONDS", 0.01)
+    request_stop = Timer(
+        0.05, persistent_store.request_cancel, args=(ai_job["job_id"],)
+    )
+    started_at = time.monotonic()
+    request_stop.start()
+    try:
+        web_app.run_persistent_job(persistent_store, ai_job)
+    finally:
+        request_stop.join()
+    assert time.monotonic() - started_at < 1.5
+    assert persistent_store.get_job(ai_job["job_id"])["status"] == "cancelled"
     analysis = persistent_store.get_case(fusion_job["case_id"])["analysis_runs"][0]
     assert analysis["status"] == "cancelled"
     assert analysis["proposals"] == []
+
+
+def test_combined_ai_does_not_publish_output_after_worker_shutdown(
+    web_app, persistent_store, monkeypatch
+):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        persistent_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = persistent_store.create_combined_investigation(
+        source_case_ids,
+        title="Interrupted AI publication test",
+        purpose="Do not publish structured output after worker shutdown.",
+        created_by="analyst",
+    )
+    fusion_job = persistent_store.claim_next("worker:fusion-shutdown")
+    web_app.run_persistent_job(persistent_store, fusion_job)
+    ai_job = persistent_store.claim_next_matching(
+        "worker:background-ai", include_kinds={"case_fusion_ai"}
+    )
+    shutdown = {"requested": False}
+
+    async def fake_research(**_kwargs):
+        return {
+            "analysis": "No defensible connection is established.",
+            "sources": [],
+            "web_search_completed": False,
+        }
+
+    async def fake_insights(**_kwargs):
+        shutdown["requested"] = True
+        return {
+            "executive_summary": "This output must not be published.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": [],
+            "next_steps": [],
+            "proposals": [],
+        }
+
+    def forbidden_publish(*_args, **_kwargs):
+        raise AssertionError("shutdown output must not be persisted")
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(web_app, "get_case_chat_response", fake_research)
+    monkeypatch.setattr(web_app, "get_combined_investigation_insights", fake_insights)
+    monkeypatch.setattr(
+        persistent_store, "complete_combined_analysis_run", forbidden_publish
+    )
+
+    web_app.run_persistent_job(
+        persistent_store,
+        ai_job,
+        shutdown_check=lambda: shutdown["requested"],
+    )
+
+    assert persistent_store.get_job(fusion_job_id)["status"] == "completed"
+    assert persistent_store.get_job(ai_job["job_id"])["status"] == "interrupted"
+    analysis = persistent_store.get_case(fusion_job["case_id"])["analysis_runs"][0]
+    assert analysis["status"] == "cancelled"
+    assert analysis["proposals"] == []
+
+
+def test_combined_ai_waits_emit_durable_phase_heartbeats(
+    web_app, persistent_store, monkeypatch
+):
+    source_case_ids = []
+    for username in ("alice", "bob"):
+        source_job_id = persistent_store.create_investigation([username], {})
+        source_job = persistent_store.claim_next(f"worker:{username}")
+        persistent_store.finish(
+            source_job_id,
+            {
+                "status": "completed",
+                "usernames": [username],
+                "individual_reports": [],
+            },
+        )
+        source_case_ids.append(source_job["case_id"])
+    fusion_job_id = persistent_store.create_combined_investigation(
+        source_case_ids,
+        title="Heartbeat AI worker test",
+        purpose="Keep durable status current during both model calls.",
+        created_by="analyst",
+    )
+    fusion_job = persistent_store.claim_next("worker:fusion-heartbeat")
+    web_app.run_persistent_job(persistent_store, fusion_job)
+    ai_job = persistent_store.claim_next_matching(
+        "worker:background-ai", include_kinds={"case_fusion_ai"}
+    )
+
+    async def fake_research(**_kwargs):
+        await asyncio.sleep(0.04)
+        return {
+            "analysis": "No defensible connection is established.",
+            "sources": [],
+            "web_search_completed": False,
+        }
+
+    async def fake_insights(**_kwargs):
+        await asyncio.sleep(0.04)
+        return {
+            "executive_summary": "No defensible connection is established.",
+            "key_findings": [],
+            "contradictions": [],
+            "information_gaps": [],
+            "next_steps": [],
+            "proposals": [],
+        }
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "existing-key")
+    monkeypatch.setattr(web_app, "get_case_chat_response", fake_research)
+    monkeypatch.setattr(web_app, "get_combined_investigation_insights", fake_insights)
+    monkeypatch.setattr(web_app, "PERSISTENT_CANCEL_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(web_app, "COMBINED_AI_HEARTBEAT_SECONDS", 0.01)
+
+    web_app.run_persistent_job(persistent_store, ai_job)
+
+    events = [item["event"] for item in persistent_store.get_events(ai_job["job_id"])]
+    assert [event["phase"] for event in events if event["type"] == "phase"] == [
+        "research",
+        "structuring",
+        "completed",
+    ]
+    heartbeats = [event for event in events if event["type"] == "heartbeat"]
+    assert {event["phase"] for event in heartbeats} == {
+        "research",
+        "structuring",
+    }
+    assert all("elapsed_seconds" in event for event in heartbeats)
+    completed_ai = persistent_store.get_job(ai_job["job_id"])
+    assert completed_ai["progress"]["phase"] == "completed"
+    assert completed_ai["heartbeat_at"] is not None
 
 
 def test_combined_case_selection_and_workspace_flow(client, web_app, persistent_store):
