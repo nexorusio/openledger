@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 import pytest
@@ -23,6 +24,7 @@ from maigret.web.collector_adapters import (
     UNFURL_ENGINE,
     UNFURL_VERSION,
     USER_SCANNER_ENGINE,
+    USER_SCANNER_USERNAME_ENGINE,
     WAYBACK_API_BASE_URL,
     WAYBACK_ENGINE,
     WIKIDATA_ENGINE,
@@ -33,6 +35,7 @@ from maigret.web.collector_adapters import (
     _resolve_wikidata_organization_classes,
     _wikidata_people_query,
     build_business_context_assessment,
+    count_user_scanner_username_accounts,
     build_organization_resolution_candidates,
     claimed_profile_url_targets,
     extract_github_profile_claims,
@@ -42,6 +45,7 @@ from maigret.web.collector_adapters import (
     extract_official_website_affiliated_people,
     extract_profile_url_evidence_claims,
     extract_user_scanner_claims,
+    extract_user_scanner_username_claims,
     extract_wikidata_affiliation_people,
     extract_wikipedia_person_claims,
     github_profile_targets,
@@ -58,6 +62,7 @@ from maigret.web.collector_adapters import (
     normalize_public_web_organization_sources,
     normalize_unfurl_url_analysis,
     normalize_user_scanner_results,
+    normalize_user_scanner_username_results,
     normalize_wayback_capture_index,
     normalize_wikidata_affiliated_people,
     normalize_wikidata_entity_candidates,
@@ -71,10 +76,13 @@ from maigret.web.collector_adapters import (
     run_cloudflare_dns_context,
     run_icij_offshore_match,
     run_official_website_public_content,
+    run_user_scanner_usernames,
     run_wayback_capture_index,
     run_wikidata_affiliation_discovery,
     run_wikipedia_person_enrichment,
     user_scanner_email_targets,
+    user_scanner_username_policy,
+    user_scanner_username_targets,
     validate_google_places_connection,
 )
 
@@ -197,6 +205,297 @@ def test_only_positive_registrations_become_pending_claim_candidates():
     assert candidates[0]["source_record_id"].startswith(f"{USER_SCANNER_ENGINE}:")
     assert candidates[0]["confidence"] == 55
     assert candidates[0]["evidence"][0]["evidence_type"] == "email_registration_probe"
+
+
+def test_username_targets_and_platform_policy_are_bounded_and_opted_in():
+    plan = {
+        "enable_user_scanner_username": True,
+        "search_targets": [{"value": f"alias{index}"} for index in range(30)],
+        "user_scanner_username_platforms": ["instagram", "x", "unknown"],
+        "allow_user_scanner_vxtwitter": False,
+    }
+
+    assert user_scanner_username_targets(plan) == [
+        f"alias{index}" for index in range(16)
+    ]
+    assert (
+        user_scanner_username_targets({**plan, "enable_user_scanner_username": False})
+        == []
+    )
+    assert user_scanner_username_policy(plan) == {
+        "platforms": ["instagram", "x"],
+        "allow_vxtwitter": False,
+    }
+
+
+def test_username_results_normalize_health_existence_and_identity_separately():
+    observations = normalize_user_scanner_username_results(
+        [
+            {
+                "status": "Found",
+                "username": "alice",
+                "site_name": "Instagram",
+                "url": "https://instagram.com/alice",
+                "extra": {"confidence": "likely", "scan_stage": "cross_scan"},
+            },
+            {
+                "status": "Error",
+                "reason": "Rate limit / Cloudflare protection block (HTTP 429)",
+                "username": "alice",
+                "site_name": "Instagram",
+            },
+            {
+                "status": "Error",
+                "reason": "No public account (a private one looks the same)",
+                "username": "alice",
+                "site_name": "Tiktok",
+            },
+            {
+                "status": "Skipped",
+                "reason": "Disabled by OpenLedger policy because the pinned X module contacts api.vxtwitter.com",
+                "username": "alice",
+                "site_name": "X (Twitter)",
+            },
+        ]
+    )
+
+    assert [item["status"] for item in observations] == [
+        "found",
+        "blocked",
+        "unknown",
+        "blocked",
+    ]
+    assert observations[0]["detector_status"] == "operational"
+    assert observations[0]["account_status"] == "exists"
+    assert observations[0]["identity_confidence"] == "likely"
+    assert observations[0]["identity_status"] == "unverified"
+    assert observations[1]["account_status"] == "unknown"
+    assert observations[3]["detector_status"] == "disabled"
+    assert observations[3]["source_url"] == ""
+    assert observations[0]["source_engine"] == USER_SCANNER_USERNAME_ENGINE
+
+
+def test_username_account_count_deduplicates_provenance_observations():
+    observations = [
+        {
+            "source_engine": USER_SCANNER_USERNAME_ENGINE,
+            "status": "found",
+            "site_name": "Instagram",
+            "subject_value": "alice_alt",
+            "seed_username": seed,
+        }
+        for seed in ("alice", "alice84")
+    ]
+    observations.append(
+        {
+            "source_engine": USER_SCANNER_USERNAME_ENGINE,
+            "status": "found",
+            "site_name": "TikTok",
+            "subject_value": "alice_alt",
+            "seed_username": "alice",
+        }
+    )
+
+    assert count_user_scanner_username_accounts(observations) == 2
+
+
+def test_only_corroborated_username_hits_become_pending_claim_candidates():
+    base = {
+        "source_engine": USER_SCANNER_USERNAME_ENGINE,
+        "subject_value": "alice_alt",
+        "seed_username": "alice",
+        "status": "found",
+        "detector_status": "operational",
+        "account_status": "exists",
+        "identity_status": "unverified",
+        "site_name": "Instagram",
+        "source_url": "https://instagram.com/alice_alt",
+        "source_record_id": "user_scanner_username:record",
+        "scan_stage": "cross_scan",
+        "native_status": "Found",
+    }
+    candidates = extract_user_scanner_username_claims(
+        [
+            {**base, "identity_confidence": "candidate"},
+            {**base, "identity_confidence": "conflicting"},
+            {**base, "identity_confidence": "likely"},
+        ]
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0]["field_name"] == "social_account"
+    assert candidates[0]["source_engine"] == USER_SCANNER_USERNAME_ENGINE
+    assert candidates[0]["native_status"] == "found"
+    details = candidates[0]["evidence"][0]["details"]
+    assert details["account_status"] == "exists"
+    assert details["identity_status"] == "unverified"
+    assert details["human_review_required"] is True
+
+
+@pytest.mark.asyncio
+async def test_username_runner_receives_bounded_policy_payload(monkeypatch):
+    captured = {}
+
+    async def fake_subprocess(request, **kwargs):
+        captured.update(request=request, kwargs=kwargs)
+        return {"results": []}
+
+    monkeypatch.setattr(
+        "maigret.web.collector_adapters._run_user_scanner_subprocess",
+        fake_subprocess,
+    )
+
+    assert await run_user_scanner_usernames(
+        ["alice"],
+        platforms=["instagram", "x"],
+        allow_vxtwitter=False,
+        timeout_seconds=123,
+    ) == []
+    assert captured["request"] == {
+        "mode": "username",
+        "usernames": ["alice"],
+        "platforms": ["instagram", "x"],
+        "allow_vxtwitter": False,
+    }
+    assert captured["kwargs"]["timeout_seconds"] == 123
+    assert captured["kwargs"]["max_output_bytes"] == 500_000
+
+
+@pytest.mark.asyncio
+async def test_username_runner_preserves_completed_targets_when_one_times_out(
+    monkeypatch,
+):
+    calls = []
+
+    async def fake_subprocess(request, **_kwargs):
+        username = request["usernames"][0]
+        calls.append(username)
+        if username == "slow":
+            raise RuntimeError("User Scanner exceeded its collection timeout")
+        return {
+            "results": [
+                {
+                    "status": "Found",
+                    "username": username,
+                    "site_name": "Instagram",
+                    "url": f"https://instagram.com/{username}",
+                    "extra": {
+                        "scan_stage": "direct",
+                        "seed_username": username,
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(
+        "maigret.web.collector_adapters._run_user_scanner_subprocess",
+        fake_subprocess,
+    )
+
+    observations = await run_user_scanner_usernames(
+        ["first", "slow", "last"],
+        platforms=["instagram"],
+        timeout_seconds=1,
+    )
+
+    assert calls == ["first", "slow", "last"]
+    assert [item["subject_value"] for item in observations] == [
+        "first",
+        "slow",
+        "last",
+    ]
+    assert [item["status"] for item in observations] == [
+        "found",
+        "error",
+        "found",
+    ]
+    assert observations[1]["reason"] == (
+        "Target collection timed out before completion"
+    )
+
+
+@pytest.mark.asyncio
+async def test_username_runner_cancels_sibling_target_processes(monkeypatch):
+    sibling_cancelled = asyncio.Event()
+
+    async def fake_subprocess(request, **_kwargs):
+        if request["usernames"] == ["cancel"]:
+            await asyncio.sleep(0)
+            raise asyncio.CancelledError
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        "maigret.web.collector_adapters._run_user_scanner_subprocess",
+        fake_subprocess,
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await run_user_scanner_usernames(
+            ["cancel", "sibling"], platforms=["instagram"]
+        )
+    assert sibling_cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_username_runner_retains_completed_batches_when_cancelled(monkeypatch):
+    first_completed = asyncio.Event()
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    async def fake_subprocess(request, **_kwargs):
+        username = request["usernames"][0]
+        if username == "first":
+            first_completed.set()
+            return {
+                "results": [
+                    {
+                        "status": "Found",
+                        "username": username,
+                        "site_name": "Instagram",
+                        "url": f"https://instagram.com/{username}",
+                        "extra": {
+                            "scan_stage": "direct",
+                            "seed_username": username,
+                        },
+                    }
+                ]
+            }
+        sibling_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    monkeypatch.setattr(
+        "maigret.web.collector_adapters._run_user_scanner_subprocess",
+        fake_subprocess,
+    )
+    completed_observations = []
+    runner = asyncio.create_task(
+        run_user_scanner_usernames(
+            ["first", "pending"],
+            platforms=["instagram"],
+            observation_sink=completed_observations.extend,
+        )
+    )
+    await first_completed.wait()
+    await sibling_started.wait()
+    await asyncio.sleep(0)
+    runner.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await runner
+
+    assert sibling_cancelled.is_set()
+    assert [
+        observation["subject_value"]
+        for observation in completed_observations
+    ] == ["first"]
 
 
 def test_github_targets_require_opt_in_and_a_native_claimed_exact_profile():

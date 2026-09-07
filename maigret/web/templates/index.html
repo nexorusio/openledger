@@ -118,14 +118,54 @@
 
                     <div class="form-check investigation-check">
                         <input class="form-check-input" type="checkbox" id="generate-name-variants" name="generate_name_variants" checked>
-                        <label class="form-check-label" for="generate-name-variants">Generate reviewable username variants from full names</label>
-                        <div class="form-text">Creates a bounded list such as <code>johndoe</code>, <code>john.doe</code>, and <code>john_doe</code>. Phone and email values are never permuted.</div>
+                        <label class="form-check-label" for="generate-name-variants">Plan ranked username aliases from full names</label>
+                        <div class="form-text">Builds a bounded, explainable set. Phone and email values are never permuted.</div>
+                    </div>
+                    <div class="row g-3 mt-1 alias-context-fields">
+                        <div class="col-md-6">
+                            <label class="form-label" for="alias-nicknames">Analyst-supplied nicknames</label>
+                            <input class="form-control" id="alias-nicknames" name="alias_nicknames" autocomplete="off" placeholder="e.g. Johnny, JD" value="{{ initial_alias_nicknames | join(', ') }}">
+                            <div class="form-text">Optional; comma-separated.</div>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label" for="alias-context-numbers">Approved contextual numbers</label>
+                            <input class="form-control" id="alias-context-numbers" name="alias_context_numbers" inputmode="numeric" autocomplete="off" placeholder="e.g. 84, 1990">
+                            <div class="form-text">Optional known numbers only. OpenLedger never sprays 00–99 combinations.</div>
+                        </div>
+                    </div>
+                    <input type="hidden" name="alias_candidates_present" value="1">
+                    <div class="alias-plan mt-3" id="alias-plan">
+                        <div class="section-heading-row">
+                            <div>
+                                <h4 class="form-label mb-1">Ranked alias candidates</h4>
+                                <p class="form-text mb-0">Edit values or deselect candidates before collection.</p>
+                            </div>
+                            <span class="badge-soft" id="alias-selected-count">0 selected</span>
+                        </div>
+                        <div class="alias-candidate-list mt-2" id="alias-candidate-list"></div>
+                        <p class="form-text mb-0" id="alias-empty">Add a full name to build alias candidates.</p>
                     </div>
                 </fieldset>
 
                 {% if user_scanner_available %}
                 <fieldset class="investigation-section">
-                    <legend class="form-label mb-2">Additional email evidence</legend>
+                    <legend class="form-label mb-2">User Scanner verification</legend>
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="enable-user-scanner-username" name="enable_user_scanner_username">
+                        <label class="form-check-label" for="enable-user-scanner-username">Verify selected usernames on major social platforms</label>
+                        <div class="form-text">Checks account existence separately from identity. Direct hits remain candidates until evidence ties the account to the investigated person.</div>
+                    </div>
+                    <input type="hidden" name="user_scanner_platforms_present" value="1">
+                    <div class="d-flex flex-wrap gap-3 mt-2" id="user-scanner-platforms">
+                        {% for platform, label in [('facebook', 'Facebook'), ('instagram', 'Instagram'), ('threads', 'Threads'), ('tiktok', 'TikTok'), ('x', 'X')] %}
+                        <label class="form-check-label"><input class="form-check-input me-1" type="checkbox" name="user_scanner_platform" value="{{ platform }}" checked> {{ label }}</label>
+                        {% endfor %}
+                    </div>
+                    <div class="form-check investigation-check mt-2">
+                        <input class="form-check-input" type="checkbox" id="allow-user-scanner-vxtwitter" name="allow_user_scanner_vxtwitter">
+                        <label class="form-check-label" for="allow-user-scanner-vxtwitter">Explicitly allow User Scanner’s third-party X lookup via api.vxtwitter.com</label>
+                        <div class="form-text">Off by default. When off, X is recorded as policy-blocked and no request reaches that service.</div>
+                    </div>
                     <div class="form-check investigation-check">
                         <input class="form-check-input" type="checkbox" id="enable-user-scanner-email" name="enable_user_scanner_email">
                         <label class="form-check-label" for="enable-user-scanner-email">Check email registrations with User Scanner</label>
@@ -260,6 +300,15 @@
                     </button>
                 </div>
             </template>
+            <template id="alias-candidate-template">
+                <label class="alias-candidate-row">
+                    <input class="form-check-input alias-selected" type="checkbox" name="selected_alias">
+                    <span class="alias-rank"></span>
+                    <input class="form-control form-control-sm alias-value" name="alias_candidate" autocomplete="off" spellcheck="false" aria-label="Username alias candidate">
+                    <span class="alias-score badge-soft"></span>
+                    <small class="alias-reason"></small>
+                </label>
+            </template>
         </div>
     </article>
 
@@ -274,8 +323,17 @@
     const template = document.getElementById('identifier-row-template');
     const addButton = document.getElementById('add-identifier');
     const generateToggle = document.getElementById('generate-name-variants');
+    const aliasNicknameInput = document.getElementById('alias-nicknames');
+    const aliasContextNumberInput = document.getElementById('alias-context-numbers');
+    const aliasList = document.getElementById('alias-candidate-list');
+    const aliasTemplate = document.getElementById('alias-candidate-template');
+    const aliasEmpty = document.getElementById('alias-empty');
+    const aliasSelectedCount = document.getElementById('alias-selected-count');
     const aiContextToggle = document.getElementById('allow-ai-context');
     const userScannerToggle = document.getElementById('enable-user-scanner-email');
+    const userScannerUsernameToggle = document.getElementById('enable-user-scanner-username');
+    const vxtwitterToggle = document.getElementById('allow-user-scanner-vxtwitter');
+    const userScannerPlatforms = Array.from(document.querySelectorAll('input[name="user_scanner_platform"]'));
     const githubEnrichmentToggle = document.getElementById('enable-github-profile-enrichment');
     const count = document.getElementById('query-plan-count');
     const summary = document.getElementById('query-plan-summary');
@@ -285,6 +343,17 @@
     const sourceTags = Array.from(document.querySelectorAll('#caseTagCloud .tag'));
     const includedSourceTags = document.getElementById('caseTags');
     const excludedSourceTags = document.getElementById('caseExcludedTags');
+    const csrfToken = form.querySelector('input[name="csrf_token"]').value;
+    const aliasSourceTypes = new Set(['username', 'social_handle', 'profile_url', 'full_name']);
+    const aliasResetTypes = new Set(['full_name']);
+    let exactTargetKeys = new Set();
+    let aliasRefreshController = null;
+    let aliasRefreshSequence = 0;
+    let aliasRefreshPending = false;
+    let aliasRefreshPromise = Promise.resolve();
+    let aliasPlanError = '';
+    const removedAliasChoices = new Map();
+    let plannedAliasKeysByComparison = new Map();
 
     const behavior = {
         username: ['e.g. johndoe', 'Exact account check'],
@@ -295,34 +364,320 @@
         phone: ['e.g. +628123456789', 'Normalized case context only; never permuted']
     };
 
-    function cleanNameTokens(value) {
-        return value.toLocaleLowerCase().trim().split(/\s+/)
-            .map(token => Array.from(token).filter(char => /[\p{L}\p{N}]/u.test(char)).join(''))
-            .filter(Boolean).slice(0, 6);
+    function comparisonKey(value) {
+        return value.normalize('NFKC').toLowerCase();
     }
 
-    function generateVariants(value) {
-        const nameTokens = cleanNameTokens(value);
-        if (!nameTokens.length) return [];
-        const groups = [nameTokens];
-        if (nameTokens.length > 1) {
-            groups.push([nameTokens[0], nameTokens[nameTokens.length - 1]]);
-            groups.push([nameTokens[nameTokens.length - 1], nameTokens[0]]);
-        }
-        const output = [];
-        groups.forEach(parts => {
-            ['', '.', '_', '-'].forEach(separator => {
-                const candidate = parts.join(separator);
-                if (candidate && !output.includes(candidate)) output.push(candidate);
-            });
-            if (parts.length > 1) {
-                [parts[0][0] + parts[parts.length - 1], parts[0] + parts[parts.length - 1][0]]
-                    .forEach(candidate => {
-                        if (candidate && !output.includes(candidate)) output.push(candidate);
-                    });
-            }
+    function exactIdentifierTargets() {
+        const exactTargets = [];
+        list.querySelectorAll('.identifier-row').forEach(row => {
+            const type = row.querySelector('.identifier-type').value;
+            const value = row.querySelector('.identifier-value').value.trim();
+            const candidate = type === 'username' || type === 'social_handle'
+                ? value.replace(/^@+/, '')
+                : '';
+            if (candidate && !exactTargets.some(item => comparisonKey(item) === comparisonKey(candidate))) exactTargets.push(candidate);
         });
-        return output.slice(0, 16);
+        return exactTargets;
+    }
+
+    function aliasPlanningPayload() {
+        const fullNames = Array.from(list.querySelectorAll('.identifier-row'))
+            .filter(row => row.querySelector('.identifier-type').value === 'full_name')
+            .map(row => row.querySelector('.identifier-value').value.trim()).filter(Boolean);
+        const profileUrls = Array.from(list.querySelectorAll('.identifier-row'))
+            .filter(row => row.querySelector('.identifier-type').value === 'profile_url')
+            .map(row => row.querySelector('.identifier-value').value.trim())
+            .filter(Boolean);
+        return {
+            full_names: fullNames,
+            nicknames: [aliasNicknameInput.value],
+            contextual_numbers: [aliasContextNumberInput.value],
+            profile_urls: profileUrls,
+            exact_usernames: exactIdentifierTargets()
+        };
+    }
+
+    async function requestAliasPlan(signal) {
+        const response = await fetch('/api/username-aliases', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'X-OpenLedger-CSRF': csrfToken
+            },
+            body: JSON.stringify(aliasPlanningPayload()),
+            signal
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(payload.error || 'OpenLedger could not build the alias plan.');
+        }
+        return payload;
+    }
+
+    function applyScannerSelectionBudget(aliases) {
+        const scannerEnabled = userScannerUsernameToggle && userScannerUsernameToggle.checked;
+        if (!scannerEnabled) return aliases;
+        const scannerTargetKeys = new Set(exactTargetKeys);
+        let selectedAliasCount = 0;
+        return aliases.map(candidate => {
+                const key = candidate.key;
+                const selected = candidate.score >= 78 && !scannerTargetKeys.has(key)
+                    && scannerTargetKeys.size < 16 && selectedAliasCount < 16;
+                if (selected) {
+                    scannerTargetKeys.add(key);
+                    selectedAliasCount++;
+                }
+                return { ...candidate, selected };
+            });
+    }
+
+    function selectedAliases() {
+        return Array.from(aliasList.querySelectorAll('.alias-candidate-row'))
+            .filter(row => row.querySelector('.alias-selected').checked)
+            .map(row => row.querySelector('.alias-value').value.trim())
+            .filter(Boolean);
+    }
+
+    function updateAliasCount() {
+        const selected = selectedAliases().length;
+        aliasSelectedCount.textContent = `${selected} selected`;
+    }
+
+    function enforceAliasSelectionLimit() {
+        const scannerEnabled = userScannerUsernameToggle
+            && userScannerUsernameToggle.checked;
+        const scannerTargetKeys = new Set(scannerEnabled ? exactTargetKeys : []);
+        const selectedAliasKeys = new Set();
+        const selectedControls = Array.from(aliasList.querySelectorAll('.alias-selected'))
+            .filter(control => control.checked);
+        selectedControls.forEach(control => {
+            const row = control.closest('.alias-candidate-row');
+            const key = row.dataset.normalizedKey
+                || comparisonKey(row.querySelector('.alias-value').value.trim());
+            const duplicateAlias = !key || selectedAliasKeys.has(key);
+            const unionIsFull = scannerEnabled
+                && !scannerTargetKeys.has(key) && scannerTargetKeys.size >= 16;
+            if (duplicateAlias || selectedAliasKeys.size >= 16 || unionIsFull) {
+                control.checked = false;
+                return;
+            }
+            selectedAliasKeys.add(key);
+            scannerTargetKeys.add(key);
+        });
+        updateAliasCount();
+    }
+
+    function analystAliasChoice(row) {
+        return {
+            generatedKey: row.dataset.generatedKey,
+            value: row.querySelector('.alias-value').value.trim(),
+            selected: row.querySelector('.alias-selected').checked,
+            removed: !row.querySelector('.alias-value').value.trim(),
+            edited: row.dataset.aliasEdited === 'true',
+            matchedAliasKeys: Array.from(row._matchedAliasKeys || []),
+            score: row.querySelector('.alias-score').textContent,
+            reason: row.querySelector('.alias-reason').textContent
+        };
+    }
+
+    function currentAnalystAliasChoices() {
+        const renderedChoices = Array.from(
+            aliasList.querySelectorAll('.alias-candidate-row'))
+            .filter(row => row.dataset.analystChanged === 'true')
+            .map(analystAliasChoice);
+        const choicesByGeneratedKey = new Map(removedAliasChoices);
+        renderedChoices.forEach(choice => {
+            if (choice.removed) {
+                removedAliasChoices.set(choice.generatedKey, choice);
+            } else {
+                removedAliasChoices.delete(choice.generatedKey);
+            }
+            choicesByGeneratedKey.set(choice.generatedKey, choice);
+        });
+        return Array.from(choicesByGeneratedKey.values());
+    }
+
+    function mergeAnalystAliasChoices(aliases, analystChoices) {
+        const generatedKeys = new Set(
+            aliases.map(candidate => candidate.key));
+        const expandedChoices = analystChoices.map(candidate => {
+            const matchedAliasKeys = new Set(candidate.matchedAliasKeys || []);
+            const equalValueKeys = plannedAliasKeysByComparison.get(
+                comparisonKey(candidate.value));
+            if (equalValueKeys) {
+                equalValueKeys.forEach(key => matchedAliasKeys.add(key));
+            }
+            return {
+                ...candidate,
+                matchedAliasKeys: Array.from(matchedAliasKeys)
+            };
+        });
+        const choicesByGeneratedKey = new Map();
+        expandedChoices.forEach(candidate => {
+            choicesByGeneratedKey.set(candidate.generatedKey, candidate);
+            candidate.matchedAliasKeys.forEach(key => {
+                choicesByGeneratedKey.set(key, candidate);
+            });
+        });
+        const removedKeys = new Set(
+            expandedChoices.filter(candidate => candidate.removed)
+                .flatMap(candidate => [candidate.generatedKey]
+                    .concat(candidate.matchedAliasKeys || [])));
+        const merged = aliases.map(candidate => {
+            const generatedKey = candidate.key;
+            if (removedKeys.has(generatedKey)) return null;
+            const choice = choicesByGeneratedKey.get(generatedKey);
+            if (!choice) return { ...candidate, generatedKey };
+            if (choice.removed) return null;
+            return {
+                ...candidate,
+                value: choice.value,
+                selected: choice.selected,
+                score: choice.edited ? 'edited' : candidate.score,
+                reason: choice.edited
+                    ? 'Analyst-edited alias candidate'
+                    : candidate.reason,
+                generatedKey,
+                analystChanged: true,
+                edited: choice.edited,
+                matchedAliasKeys: choice.matchedAliasKeys
+            };
+        });
+        const orphanedChoices = expandedChoices
+            .filter(candidate => !candidate.removed
+                && !generatedKeys.has(candidate.generatedKey))
+            .map(candidate => ({
+                ...candidate,
+                analystChanged: true
+            }));
+        const seenValues = new Set();
+        return [...orphanedChoices, ...merged].filter(candidate => {
+            if (!candidate) return false;
+            const key = candidate.edited
+                ? comparisonKey(candidate.value)
+                : candidate.key || candidate.generatedKey || comparisonKey(candidate.value);
+            if (!key || seenValues.has(key)) return false;
+            seenValues.add(key);
+            return true;
+        }).slice(0, 24);
+    }
+
+    function renderAliasCandidates(aliases, { preserveAnalystChoices = false } = {}) {
+        if (preserveAnalystChoices) {
+            aliases = mergeAnalystAliasChoices(aliases, currentAnalystAliasChoices());
+        }
+        aliasList.replaceChildren(...aliases.map((candidate, index) => {
+            const row = aliasTemplate.content.firstElementChild.cloneNode(true);
+            const selected = row.querySelector('.alias-selected');
+            const value = row.querySelector('.alias-value');
+            row.dataset.generatedKey = candidate.generatedKey
+                || candidate.key;
+            row.dataset.normalizedKey = candidate.edited
+                ? comparisonKey(candidate.value)
+                : candidate.key;
+            row.dataset.analystChanged = candidate.analystChanged ? 'true' : 'false';
+            row.dataset.aliasEdited = candidate.edited ? 'true' : 'false';
+            row._matchedAliasKeys = new Set(candidate.matchedAliasKeys
+                || [candidate.generatedKey || candidate.key]);
+            selected.checked = candidate.selected;
+            selected.value = candidate.value;
+            value.value = candidate.value;
+            row.querySelector('.alias-rank').textContent = `#${index + 1}`;
+            row.querySelector('.alias-score').textContent = `${candidate.score}`;
+            row.querySelector('.alias-reason').textContent = candidate.reason;
+            selected.addEventListener('change', () => {
+                row.dataset.analystChanged = 'true';
+                enforceAliasSelectionLimit();
+                updateAliasCount();
+                updatePlan();
+            });
+            value.addEventListener('input', () => {
+                row.dataset.analystChanged = 'true';
+                row.dataset.aliasEdited = 'true';
+                selected.value = value.value.trim();
+                row.dataset.normalizedKey = comparisonKey(value.value.trim());
+                row.querySelector('.alias-score').textContent = 'edited';
+                row.querySelector('.alias-reason').textContent = 'Analyst-edited alias candidate';
+                const matchedKeys = plannedAliasKeysByComparison.get(
+                    comparisonKey(value.value.trim()));
+                if (matchedKeys) {
+                    matchedKeys.forEach(key => row._matchedAliasKeys.add(key));
+                }
+                const choice = analystAliasChoice(row);
+                if (choice.removed) {
+                    removedAliasChoices.set(choice.generatedKey, choice);
+                } else {
+                    removedAliasChoices.delete(choice.generatedKey);
+                }
+                enforceAliasSelectionLimit();
+                updateAliasCount();
+                updatePlan();
+            });
+            return row;
+        }));
+        aliasEmpty.hidden = aliases.length > 0;
+        enforceAliasSelectionLimit();
+        updateAliasCount();
+    }
+
+    function refreshAliasCandidates({ preserveAnalystChoices = false } = {}) {
+        const sequence = ++aliasRefreshSequence;
+        if (aliasRefreshController) aliasRefreshController.abort();
+        if (!preserveAnalystChoices) removedAliasChoices.clear();
+        if (!generateToggle.checked) {
+            plannedAliasKeysByComparison = new Map();
+            exactTargetKeys = new Set(exactIdentifierTargets().map(comparisonKey));
+            aliasRefreshPending = false;
+            aliasPlanError = '';
+            aliasList.removeAttribute('aria-busy');
+            renderAliasCandidates([]);
+            aliasRefreshPromise = Promise.resolve();
+            return aliasRefreshPromise;
+        }
+
+        aliasRefreshController = new AbortController();
+        aliasRefreshPending = true;
+        aliasList.setAttribute('aria-busy', 'true');
+        const signal = aliasRefreshController.signal;
+        aliasRefreshPromise = requestAliasPlan(signal)
+            .then(payload => {
+                if (sequence !== aliasRefreshSequence) return;
+                exactTargetKeys = new Set(payload.exact_target_keys || []);
+                const plannedAliases = payload.aliases || [];
+                plannedAliasKeysByComparison = new Map();
+                plannedAliases.forEach(candidate => {
+                    const comparison = comparisonKey(candidate.value);
+                    const keys = plannedAliasKeysByComparison.get(comparison)
+                        || new Set();
+                    keys.add(candidate.key);
+                    plannedAliasKeysByComparison.set(comparison, keys);
+                });
+                const aliases = applyScannerSelectionBudget(plannedAliases);
+                aliasPlanError = '';
+                renderAliasCandidates(aliases, { preserveAnalystChoices });
+            })
+            .catch(requestError => {
+                if (requestError.name === 'AbortError' || sequence !== aliasRefreshSequence) return;
+                aliasPlanError = requestError.message;
+            })
+            .finally(() => {
+                if (sequence !== aliasRefreshSequence) return;
+                aliasRefreshPending = false;
+                aliasList.removeAttribute('aria-busy');
+                updatePlan();
+            });
+        return aliasRefreshPromise;
+    }
+
+    function refreshAliasesForIdentifierChanges(...types) {
+        if (types.some(type => aliasResetTypes.has(type))) {
+            refreshAliasCandidates();
+        } else if (types.some(type => aliasSourceTypes.has(type))) {
+            refreshAliasCandidates({ preserveAnalystChoices: true });
+        } else {
+            enforceAliasSelectionLimit();
+        }
     }
 
     function profileHandle(value) {
@@ -345,10 +700,12 @@
             let candidates = [];
             if (type === 'username' || type === 'social_handle') candidates = [value.replace(/^@+/, '')];
             if (type === 'profile_url') candidates = [profileHandle(value)];
-            if (type === 'full_name' && generateToggle.checked) candidates = generateVariants(value);
             candidates.filter(Boolean).forEach(candidate => {
-                if (!output.some(item => item.toLocaleLowerCase() === candidate.toLocaleLowerCase())) output.push(candidate);
+                if (!output.some(item => comparisonKey(item) === comparisonKey(candidate))) output.push(candidate);
             });
+        });
+        selectedAliases().forEach(candidate => {
+            if (!output.some(item => comparisonKey(item) === comparisonKey(candidate))) output.push(candidate);
         });
         return output;
     }
@@ -373,6 +730,14 @@
             userScannerToggle.disabled = !grouped || emails !== 1;
             if (userScannerToggle.disabled) userScannerToggle.checked = false;
         }
+        if (userScannerUsernameToggle) {
+            userScannerPlatforms.forEach(control => {
+                control.disabled = !userScannerUsernameToggle.checked;
+            });
+            const xSelected = userScannerPlatforms.some(control => control.value === 'x' && control.checked);
+            vxtwitterToggle.disabled = !userScannerUsernameToggle.checked || !xSelected;
+            if (vxtwitterToggle.disabled) vxtwitterToggle.checked = false;
+        }
         count.textContent = `${planned.length} account ${planned.length === 1 ? 'check' : 'checks'}`;
         summary.textContent = planned.length
             ? `${planned.length} exact account candidate${planned.length === 1 ? '' : 's'} will be checked independently${contextual ? `; ${contextual} context value${contextual === 1 ? '' : 's'} will remain attached to the case` : ''}.`
@@ -386,11 +751,19 @@
         const scannerNote = userScannerToggle && userScannerToggle.checked
             ? ' Silent User Scanner email registrations will enter the same pending evidence review.'
             : '';
+        const usernameScannerNote = userScannerUsernameToggle && userScannerUsernameToggle.checked
+            ? ' Selected aliases will also receive bounded major-platform account checks; identity remains unverified.'
+            : '';
         const githubNote = githubEnrichmentToggle && githubEnrichmentToggle.checked
             ? ' Claimed GitHub user profiles will be enriched through the public API and queued for review.'
             : '';
-        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${scannerNote}${githubNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
-        error.hidden = true;
+        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${usernameScannerNote}${scannerNote}${githubNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
+        if (aliasPlanError) {
+            error.textContent = aliasPlanError;
+            error.hidden = false;
+        } else {
+            error.hidden = true;
+        }
     }
 
     function updateSourceTagSelects() {
@@ -410,16 +783,25 @@
 
     function bindRow(row) {
         const type = row.querySelector('.identifier-type');
+        let previousType = type.value;
         type.addEventListener('change', () => {
             updateRow(row);
+            refreshAliasesForIdentifierChanges(previousType, type.value);
+            previousType = type.value;
             updatePlan();
         });
-        row.querySelector('.identifier-value').addEventListener('input', updatePlan);
+        row.querySelector('.identifier-value').addEventListener('input', () => {
+            refreshAliasesForIdentifierChanges(type.value);
+            updatePlan();
+        });
         row.querySelector('.identifier-remove').addEventListener('click', () => {
+            const removedAliasSource = aliasSourceTypes.has(type.value);
             row.remove();
             list.querySelectorAll('.identifier-remove').forEach((button, index, buttons) => {
                 button.disabled = buttons.length === 1;
             });
+            refreshAliasesForIdentifierChanges(
+                removedAliasSource ? type.value : null);
             updatePlan();
         });
         updateRow(row);
@@ -450,10 +832,32 @@
             updateSourceTagSelects();
         });
     });
-    [generateToggle, aiContextToggle, userScannerToggle, githubEnrichmentToggle].filter(Boolean)
+    [aiContextToggle, userScannerToggle, vxtwitterToggle, githubEnrichmentToggle, ...userScannerPlatforms].filter(Boolean)
         .forEach(control => control.addEventListener('change', updatePlan));
+    if (userScannerUsernameToggle) userScannerUsernameToggle.addEventListener('change', () => {
+        enforceAliasSelectionLimit();
+        updatePlan();
+    });
+    generateToggle.addEventListener('change', () => { refreshAliasCandidates(); updatePlan(); });
+    [aliasNicknameInput, aliasContextNumberInput].forEach(control =>
+        control.addEventListener('input', () => {
+            refreshAliasCandidates({ preserveAnalystChoices: true });
+            updatePlan();
+        }));
     form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
     form.addEventListener('submit', event => {
+        if (aliasRefreshPending) {
+            event.preventDefault();
+            aliasRefreshPromise.then(() => form.requestSubmit());
+            return;
+        }
+        if (aliasPlanError) {
+            event.preventDefault();
+            error.textContent = aliasPlanError;
+            error.hidden = false;
+            error.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            return;
+        }
         if (!queryTargets().length) {
             event.preventDefault();
             error.textContent = 'Add a username, social handle, profile URL, or a full name with username variants enabled.';
@@ -461,6 +865,7 @@
             error.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
     });
+    refreshAliasCandidates();
     updatePlan();
 })();
 </script>

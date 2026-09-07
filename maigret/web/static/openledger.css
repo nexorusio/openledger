@@ -1002,6 +1002,38 @@ textarea.form-control {
     cursor: not-allowed;
 }
 
+.alias-plan {
+    padding: 14px;
+    border: 1px solid var(--ol-border);
+    border-radius: 5px;
+    background: var(--ol-surface-muted);
+}
+
+.alias-candidate-list {
+    display: grid;
+    gap: 8px;
+}
+
+.alias-candidate-row {
+    display: grid;
+    grid-template-columns: 24px 32px minmax(180px, 0.7fr) 64px minmax(220px, 1fr);
+    align-items: center;
+    gap: 9px;
+    margin: 0;
+    color: var(--ol-text);
+}
+
+.alias-rank,
+.alias-reason {
+    color: var(--ol-muted);
+    font-size: 0.68rem;
+}
+
+.alias-score {
+    justify-content: center;
+    min-width: 54px;
+}
+
 .investigation-check {
     margin-top: 15px;
     padding-left: 1.7rem;
@@ -2152,6 +2184,14 @@ textarea.form-control.compact-textarea {
         grid-template-columns: minmax(150px, 0.35fr) minmax(240px, 1fr) 40px;
     }
 
+    .alias-candidate-row {
+        grid-template-columns: 24px 32px minmax(220px, 1fr) 64px;
+    }
+
+    .alias-reason {
+        grid-column: 3 / -1;
+    }
+
     .identifier-behavior {
         grid-column: 2;
     }
@@ -2223,8 +2263,17 @@ textarea.form-control.compact-textarea {
     }
 
     .identifier-row,
-    .research-context-grid {
+    .research-context-grid,
+    .alias-candidate-row {
         grid-template-columns: 1fr;
+    }
+
+    .alias-candidate-row .form-check-input {
+        justify-self: start;
+    }
+
+    .alias-reason {
+        grid-column: auto;
     }
 
     .identifier-behavior,

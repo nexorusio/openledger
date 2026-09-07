@@ -3,10 +3,11 @@
 ## Decision
 
 OpenLedger remains the investigation orchestrator and the only system of record.
-Maigret remains the primary username collector. User Scanner is introduced only
-for explicitly enabled, silent email-registration checks. OpenGraph Intel (OGI)
-does not replace OpenLedger's evidence or relationship model; it may be added
-later as a disposable, read-only visualization projection.
+Maigret remains the primary long-tail username collector. The existing pinned
+User Scanner fork provides explicitly enabled silent email-registration checks
+and bounded major-platform username verification. OpenGraph Intel (OGI) does
+not replace OpenLedger's evidence or relationship model; it may be added later
+as a disposable, read-only visualization projection.
 
 This preserves the current journey: start one investigation, watch one job,
 review pending Persona evidence, approve or reject claims, and analyze the same
@@ -17,7 +18,8 @@ case. It does not add a second login, project picker, database, or review queue.
 | Responsibility | Owner |
 |---|---|
 | Case, Persona, and investigation lifecycle | OpenLedger PostgreSQL |
-| Username collection | Maigret adapter |
+| Broad username collection | Maigret adapter |
+| Bounded major-platform username verification | User Scanner subprocess adapter |
 | Opt-in email-registration collection | User Scanner subprocess adapter |
 | Opt-in claimed-URL decomposition | Isolated offline Unfurl subprocess adapter |
 | Opt-in exact capture metadata | Wayback CDX adapter |
@@ -35,13 +37,12 @@ claim, evidence, and observation-lineage records.
 ## Why User Scanner is additive only
 
 User Scanner adds useful email registration coverage and richer native metadata.
-Its username sweep overlaps Maigret, while recursive cross-scan can turn a common
-handle or user-authored link into many weak candidates. OpenLedger already has a
-bounded full-name variant planner and reviewable profile evidence, so replacing
-those paths would add cost and change confidence semantics without a clear user
-benefit.
+Its broad username sweep overlaps Maigret, while recursive cross-scan can turn a
+common handle or user-authored link into many weak candidates. OpenLedger keeps
+Maigret as the broad collector and uses User Scanner only for an analyst-selected,
+bounded verification pass.
 
-The initial integration therefore:
+The email-registration path therefore:
 
 - is off by default and available only in **One subject** mode;
 - requires an email identifier and explicit enablement;
@@ -54,9 +55,23 @@ The initial integration therefore:
 - creates pending `account_registration` claims only for positive registrations;
 - assigns confidence 55 because the probe supports registration, not Persona
   ownership;
-- sends the email value to AI only when the separate AI-context consent is on;
-- leaves User Scanner cross-scan, arbitrary patterns, Hudson Rock, and its MCP
-  server out of the OpenLedger runtime.
+- sends the email value to AI only when the separate AI-context consent is on.
+
+The username-verification path:
+
+- uses ranked aliases selected or edited in the existing investigation builder;
+- caps execution at 16 usernames per investigation;
+- checks only Facebook, Instagram, Threads, TikTok, and X username modules;
+- keeps User Scanner's `api.vxtwitter.com` X path disabled unless the analyst
+  explicitly approves that third-party request;
+- normalizes detector health, account existence, and identity confidence as
+  separate fields;
+- permits one targeted cross-scan round with the broad sweep budget fixed at
+  zero and email pivots disabled;
+- treats found accounts as unverified identity candidates unless stronger,
+  independently reviewed evidence supports attribution;
+- leaves arbitrary User Scanner patterns, Hudson Rock, and its MCP server out of
+  the OpenLedger runtime.
 
 ## Why OGI is not a safe replacement today
 
@@ -117,8 +132,8 @@ The current durable lifecycle is:
 2. `maigret.web.worker.run` claims one durable job.
 3. `run_persistent_job` owns the event loop, cancellation, and terminal state.
 4. `_stream_search` orchestrates collector adapters: `maigret_search` for each
-   username, then the enabled GitHub, offline Unfurl, exact Wayback CDX, and User
-   Scanner adapters.
+   username, then the enabled GitHub, offline Unfurl, exact Wayback CDX, and
+   bounded User Scanner email/username adapters.
 5. `finalize_stream_job` builds one result artifact and persists it.
 6. `CaseStore.sync_persona_claims` normalizes all collector evidence into the
    same canonical tables and records every source-labelled observation against
@@ -152,8 +167,8 @@ causes later syncs to replay old commits.
 
 - Add selected User Scanner email categories only after false-positive and
   notification telemetry is measured per module.
-- Consider verified-link-only cross-pivots only after OpenLedger has an explicit
-  pivot observation type, budgets, and analyst confirmation before the next hop.
+- Consider more than one cross-pivot round only after measured evidence supports
+  a larger budget and an analyst confirms each next hop.
 - Add an OGI projection only after its importer preserves edge provenance and
   exposes record-level failures.
 - Keep Maigret as username fallback until a measured, labeled comparison shows

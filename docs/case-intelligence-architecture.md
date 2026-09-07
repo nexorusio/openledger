@@ -143,15 +143,26 @@ a new account claim, and never changes an existing analyst decision. This keeps
 account continuity, identity attribution, and changing platform metadata as
 three distinct propositions.
 
-The initial User Scanner integration is deliberately narrower than the tool's
-full capability. It runs email-registration checks only after explicit case
-opt-in, only in one-subject mode, and always with notification-producing and
-adult modules disabled. It executes in a subprocess because User Scanner
-patches shared HTTP client classes when imported. Positive registrations become
-pending `account_registration` claims; all bounded native outcomes remain on
-the investigation result for diagnostics and AI analysis. User Scanner's
-username sweep and recursive cross-scan are deferred because they overlap
-Maigret and can turn handle collisions into unsupported identity links.
+The User Scanner integration is deliberately narrower than the tool's full
+capability. Email-registration checks require explicit case opt-in, run only in
+one-subject mode, and keep notification-producing and adult modules disabled.
+Positive registrations become pending `account_registration` claims; all
+bounded native outcomes remain on the investigation result for diagnostics and
+AI analysis.
+
+For usernames, OpenLedger verifies at most 16 analyst-selected or edited aliases
+against Facebook, Instagram, Threads, TikTok, and X. It invokes only those
+targeted modules, fixes cross-scan sweep breadth at zero and depth at one, and
+disables email pivots. The X module's `api.vxtwitter.com` path is omitted unless
+the analyst explicitly approves that third-party request. Detector operation,
+account existence, and Persona attribution remain separate fields. A found
+account is an unverified identity candidate, not a supported Persona fact;
+candidate and conflicting observations cannot create Persona claims.
+
+Both paths execute in a subprocess because User Scanner patches shared HTTP
+client classes when imported. Its arbitrary pattern sweep and recursive broad
+cross-scan remain outside the OpenLedger runtime because they can turn handle
+collisions into unsupported identity links.
 
 OpenGraph Intel (OGI) may consume a read-only graph projection of approved
 OpenLedger claims and their evidence. Its project, entity, and edge tables are

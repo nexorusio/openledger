@@ -45,6 +45,7 @@
         {% endif %}
         <div class="live-stat"><span>Review candidates</span><strong id="stat-candidates">{{ completed_candidate_count }}</strong></div>
         <div class="live-stat"><span>Suppressed noise</span><strong id="stat-suppressed">{{ completed_suppressed_count }}</strong></div>
+        <div class="live-stat"><span>Username accounts found</span><strong id="stat-username-verified">{{ completed_username_verification_count }}</strong></div>
         <div class="live-stat"><span>Email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
         <div class="live-stat"><span>GitHub profiles enriched</span><strong id="stat-github-enriched">{{ completed_github_enrichment_count }}</strong></div>
         <div class="live-stat"><span>Archived profile URLs</span><strong id="stat-archived-profiles">{{ completed_archived_profile_count }}</strong></div>
@@ -82,6 +83,7 @@
     const completedUntriagedCount = {{ completed_untriaged_count|tojson }};
     const legacyUntriaged = {{ legacy_untriaged|tojson }};
     const completedRegistrationCount = {{ completed_registration_count|tojson }};
+    const completedUsernameVerificationCount = {{ completed_username_verification_count|tojson }};
     const completedGithubEnrichmentCount = {{ completed_github_enrichment_count|tojson }};
     const completedArchivedProfileCount = {{ completed_archived_profile_count|tojson }};
     const completedAffiliatedPersonCount = {{ completed_affiliated_person_count|tojson }};
@@ -93,6 +95,7 @@
     let candidateCount = doneRedirect ? completedCandidateCount : 0;
     let suppressedCount = doneRedirect ? completedSuppressedCount : 0;
     let registrationCount = doneRedirect ? completedRegistrationCount : 0;
+    let usernameVerificationCount = doneRedirect ? completedUsernameVerificationCount : 0;
     let githubEnrichmentCount = doneRedirect ? completedGithubEnrichmentCount : 0;
     let archivedProfileCount = doneRedirect ? completedArchivedProfileCount : 0;
     let affiliatedPersonCount = doneRedirect ? completedAffiliatedPersonCount : 0;
@@ -183,7 +186,8 @@
             + ' review candidates, ' + suppressedCount + ' suppressed detector hits, ' + githubEnrichmentCount
             + ' GitHub profiles enriched, ' + archivedProfileCount
             + ' archived profile URLs, and ' + registrationCount
-            + ' email registrations found.';
+            + ' email registrations found; User Scanner independently found ' + usernameVerificationCount
+            + ' username accounts whose owner remains unverified.';
     }
 
     async function stopScan() {
@@ -238,6 +242,7 @@
                 'unfurl-url-analysis': 'Decomposing claimed profile URLs offline with Unfurl…',
                 'wayback-cdx': 'Checking exact claimed profile URLs in the Wayback capture index…',
                 'user-scanner': 'Checking email registrations with User Scanner (silent modules only)…',
+                'user-scanner-username': 'Verifying selected usernames on bounded major-platform modules…',
                 'wikidata-affiliation': 'Resolving the organization and explicit Wikidata affiliation statements…',
                 'gleif-registry': 'Searching the GLEIF index for jurisdiction-matched legal entities…',
                 'fr-company-registry': 'Searching the French National Enterprise Directory…',
@@ -259,6 +264,9 @@
             } else if (ev.collector === 'user-scanner') {
                 registrationCount += Number(ev.found || 0);
                 document.getElementById('stat-registrations').textContent = registrationCount;
+            } else if (ev.collector === 'user-scanner-username') {
+                usernameVerificationCount += Number(ev.found || 0);
+                document.getElementById('stat-username-verified').textContent = usernameVerificationCount;
             } else if (ev.collector === 'wikidata-affiliation') {
                 affiliatedPersonCount = Number(ev.people_found || ev.found || 0);
                 const count = document.getElementById('stat-affiliated-people');
@@ -277,6 +285,7 @@
                 'unfurl-url-analysis': 'Offline URL analysis collected. Checking archive metadata…',
                 'wayback-cdx': 'Archive evidence collected. Continuing the investigation…',
                 'user-scanner': 'Email evidence collected. Finalizing the investigation…',
+                'user-scanner-username': 'Username verification collected. Account existence and identity remain separate.',
                 'wikidata-affiliation': 'Affiliation evidence collected. Every proposal remains pending review.',
                 'gleif-registry': 'GLEIF legal-entity candidates collected. Every candidate remains unverified.',
                 'fr-company-registry': 'French registry evidence collected. Every people proposal remains pending review.',
@@ -292,6 +301,7 @@
                 'unfurl-url-analysis': 'One profile URL could not be decomposed; continuing with archive checks…',
                 'wayback-cdx': 'One archive lookup was unavailable; continuing with saved findings…',
                 'user-scanner': 'Email evidence was unavailable; finalizing profile findings…',
+                'user-scanner-username': 'Username verification was unavailable; primary findings remain intact.',
                 'wikidata-affiliation': 'Wikidata was unavailable; the case remains intact.',
                 'gleif-registry': 'GLEIF was unavailable; other affiliation sources remain usable.',
                 'fr-company-registry': 'The French registry was unavailable; other affiliation sources remain usable.',

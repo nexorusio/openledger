@@ -91,6 +91,115 @@ def test_index_renders(client):
     assert 'Nexorus, urban planning' not in body
 
 
+def test_alias_preview_uses_authoritative_unicode_casefolding(client):
+    client.get('/')
+    with client.session_transaction() as session_data:
+        csrf_token = session_data['csrf_token']
+
+    response = client.post(
+        '/api/username-aliases',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        json={
+            'full_names': ['Groß IRMA'],
+            'nicknames': ['Straße'],
+            'contextual_numbers': ['84'],
+            'confirmed_usernames': ['known.profile'],
+            'exact_usernames': ['ＧＲＯＳＳＩＲＭＡ'],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    gross_alias = next(
+        item for item in payload['aliases'] if item['value'] == 'grossirma'
+    )
+    assert gross_alias['key'] == 'grossirma'
+    assert any(item['value'] == 'strasseirma' for item in payload['aliases'])
+    assert payload['exact_target_keys'] == ['grossirma']
+
+
+def test_alias_preview_requires_csrf_and_bounded_json(client):
+    assert client.post('/api/username-aliases', json={}).status_code == 403
+
+    client.get('/')
+    with client.session_transaction() as session_data:
+        csrf_token = session_data['csrf_token']
+    response = client.post(
+        '/api/username-aliases',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        json={'full_names': ['name'] * 25},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {'error': 'Alias planning inputs are invalid.'}
+
+
+def test_alias_preview_resolves_profile_urls_for_target_budget(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setattr(
+        web_app,
+        'resolve_profile_url_identifiers',
+        lambda url: {'alice': 'username'}
+        if url == 'https://alice.wordpress.com/'
+        else {},
+    )
+    client.get('/')
+    with client.session_transaction() as session_data:
+        csrf_token = session_data['csrf_token']
+
+    response = client.post(
+        '/api/username-aliases',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        json={
+            'full_names': ['Alice Example'],
+            'profile_urls': ['https://alice.wordpress.com/'],
+            'exact_usernames': ['exact-account'],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()['exact_target_keys'] == ['exact-account', 'alice']
+
+
+def test_username_verification_requires_explicit_browser_opt_in(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
+
+    body = client.get('/').get_data(as_text=True)
+    marker = 'id="enable-user-scanner-username"'
+    marker_position = body.index(marker)
+    input_start = body.rindex('<input', 0, marker_position)
+    input_end = body.index('>', marker_position)
+
+    assert 'checked' not in body[input_start:input_end]
+
+    with open(
+        os.path.join(CUR_PATH, '../maigret/web/templates/index.html'),
+        encoding='utf-8',
+    ) as template_file:
+        template = template_file.read()
+    handler_start = template.index(
+        "userScannerUsernameToggle.addEventListener('change'"
+    )
+    handler_end = template.index('});', handler_start)
+    handler = template[handler_start:handler_end]
+    assert 'enforceAliasSelectionLimit()' in handler
+    assert 'refreshAliasCandidates()' not in handler
+    assert (
+        "const aliasSourceTypes = new Set(['username', 'social_handle', "
+        "'profile_url', 'full_name']);" in template
+    )
+    assert "refreshAliasesForIdentifierChanges(type.value)" in template
+    selection_handler = template.index("selected.addEventListener('change'")
+    selection_handler_end = template.index('});', selection_handler)
+    assert (
+        'enforceAliasSelectionLimit()'
+        in template[selection_handler:selection_handler_end]
+    )
+
+
 def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
     response = client.get('/')
 
@@ -3068,6 +3177,183 @@ def test_ai_markdown_uses_user_scanner_evidence_without_leaking_withheld_email(w
     assert 'source_url' not in withheld
     assert 'alice@example.test' in approved
     assert 'lookup_email' in approved
+
+
+def test_live_scan_runs_bounded_user_scanner_username_verification(
+    client, web_app, monkeypatch
+):
+    requested = {}
+
+    async def fake_search(*args, **kwargs):
+        return {}
+
+    async def fake_username_scan(
+        usernames,
+        *,
+        platforms,
+        allow_vxtwitter,
+        cancellation_check,
+        observation_sink,
+    ):
+        requested.update(
+            usernames=usernames,
+            platforms=platforms,
+            allow_vxtwitter=allow_vxtwitter,
+            cancelled=cancellation_check(),
+        )
+        observations = [
+            {
+                'source_engine': 'user_scanner_username',
+                'subject_type': 'username',
+                'subject_value': 'alice',
+                'seed_username': 'alice_alt',
+                'status': 'found',
+                'native_status': 'Found',
+                'detector_status': 'operational',
+                'account_status': 'exists',
+                'identity_confidence': 'likely',
+                'identity_status': 'unverified',
+                'site_name': 'Instagram',
+                'category': 'Social',
+                'source_url': 'https://instagram.com/alice',
+                'source_record_id': 'user_scanner_username:alice-instagram-cross',
+                'scan_stage': 'cross_scan',
+                'reason': '',
+                'extra': {},
+                'media': {},
+            },
+            {
+                'source_engine': 'user_scanner_username',
+                'subject_type': 'username',
+                'subject_value': 'alice',
+                'seed_username': 'alice',
+                'status': 'found',
+                'native_status': 'Found',
+                'detector_status': 'operational',
+                'account_status': 'exists',
+                'identity_confidence': 'candidate',
+                'identity_status': 'unverified',
+                'site_name': 'Instagram',
+                'category': 'Social',
+                'source_url': 'https://instagram.com/alice',
+                'source_record_id': 'user_scanner_username:alice-instagram',
+                'scan_stage': 'direct',
+                'reason': '',
+                'extra': {},
+                'media': {},
+            },
+            {
+                'source_engine': 'user_scanner_username',
+                'subject_type': 'username',
+                'subject_value': 'alice',
+                'seed_username': 'alice',
+                'status': 'blocked',
+                'native_status': 'Skipped',
+                'detector_status': 'blocked',
+                'account_status': 'unknown',
+                'identity_confidence': 'candidate',
+                'identity_status': 'unverified',
+                'site_name': 'X (Twitter)',
+                'category': 'Social',
+                'source_url': 'https://x.com/alice',
+                'source_record_id': 'user_scanner_username:alice-x',
+                'scan_stage': 'policy',
+                'reason': 'api.vxtwitter.com disabled by policy',
+                'extra': {},
+                'media': {},
+            },
+        ]
+        observation_sink(observations)
+        return observations
+
+    monkeypatch.setattr(maigret, 'search', fake_search)
+    monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
+    monkeypatch.setattr(web_app, 'run_user_scanner_usernames', fake_username_scan)
+    monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
+    monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
+    monkeypatch.setattr(
+        maigret.report, 'generate_report_context', lambda *a, **kw: {}
+    )
+
+    client.get('/')
+    start = client.post(
+        '/api/scan',
+        data={
+            'identifier_type': 'username',
+            'identifier_value': 'alice',
+            'processing_mode': 'independent',
+            'enable_user_scanner_username': 'on',
+            'user_scanner_platforms_present': '1',
+            'user_scanner_platform': ['instagram', 'x'],
+        },
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    )
+    assert start.status_code == 200
+    job_id = start.get_json()['job_id']
+    body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
+    events = [
+        json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
+    ]
+
+    assert requested == {
+        'usernames': ['alice'],
+        'platforms': ['instagram', 'x'],
+        'allow_vxtwitter': False,
+        'cancelled': False,
+    }
+    collector_events = [
+        event
+        for event in events
+        if event.get('collector') == 'user-scanner-username'
+    ]
+    assert [event['type'] for event in collector_events] == [
+        'collector_started',
+        'collector_completed',
+    ]
+    result = web_app.job_results[job_id]
+    assert result['username_verification_found_count'] == 1
+    assert result['username_verification_unknown_count'] == 1
+    assert result['found_count'] == 0
+
+
+def test_ai_markdown_excludes_uncorroborated_username_scanner_hits(web_app):
+    base = {
+        'source_engine': 'user_scanner_username',
+        'subject_type': 'username',
+        'subject_value': 'alice',
+        'status': 'found',
+        'site_name': 'Instagram',
+        'category': 'Social',
+        'detector_status': 'operational',
+        'account_status': 'exists',
+        'identity_status': 'unverified',
+    }
+    result = {
+        'individual_reports': [],
+        'collector_observations': [
+            {**base, 'identity_confidence': 'candidate'},
+            {
+                **base,
+                'subject_value': 'alice_alt',
+                'identity_confidence': 'likely',
+            },
+        ],
+        'options': {
+            'investigation_spec': {
+                'allow_ai_context': True,
+                'identifiers': [{'type': 'username', 'value': 'alice'}],
+            }
+        },
+    }
+
+    markdown = web_app.build_ai_markdown(result)
+
+    assert 'alice_alt' in markdown
+    assert '"subject_value": "alice"' not in markdown
+    assert '"identity_confidence": "likely"' in markdown
 
 
 @pytest.mark.parametrize(

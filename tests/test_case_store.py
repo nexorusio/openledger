@@ -717,6 +717,70 @@ def test_user_scanner_observations_share_the_canonical_claim_and_evidence_store(
     assert lineage[0]["source_record_id"].startswith("user_scanner_email:")
 
 
+def test_username_verification_binds_by_seed_and_excludes_candidate_hits(store):
+    job_id = store.create_investigation(
+        ["alice"],
+        {
+            "investigation_spec": {
+                "processing_mode": "independent",
+                "enable_user_scanner_username": True,
+            }
+        },
+    )
+    store.claim_next("worker:test")
+    base = {
+        "source_engine": "user_scanner_username",
+        "subject_type": "username",
+        "seed_username": "alice",
+        "status": "found",
+        "native_status": "Found",
+        "detector_status": "operational",
+        "account_status": "exists",
+        "identity_status": "unverified",
+        "category": "social",
+        "scan_stage": "cross_scan",
+        "reason": "",
+        "extra": {},
+        "media": {},
+    }
+    result = {
+        "status": "completed",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "found_count": 0,
+        "individual_reports": [],
+        "collector_observations": [
+            {
+                **base,
+                "subject_value": "unrelated",
+                "site_name": "Facebook",
+                "source_url": "https://facebook.com/unrelated",
+                "source_record_id": "user_scanner_username:candidate",
+                "identity_confidence": "candidate",
+            },
+            {
+                **base,
+                "subject_value": "alice_alt",
+                "site_name": "Instagram",
+                "source_url": "https://instagram.com/alice_alt",
+                "source_record_id": "user_scanner_username:likely",
+                "identity_confidence": "likely",
+            },
+        ],
+    }
+    store.finish(job_id, result)
+
+    assert store.sync_persona_claims(job_id, result) == 1
+    case = store.get_case(store.get_job(job_id)["case_id"])
+    persona = store.get_persona(case["personas"][0]["id"])
+    assert len(persona["claims"]) == 1
+    claim = persona["claims"][0]
+    assert claim["display_value"] == "Instagram: @alice_alt"
+    assert claim["review_status"] == "pending"
+    assert claim["evidence"][0]["details"]["identity_status"] == "unverified"
+
+
 def test_github_enrichment_binds_only_to_its_persona_and_stays_pending(store):
     job_id = store.create_investigation(
         ["alice", "bob"],
