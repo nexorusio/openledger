@@ -23,6 +23,39 @@ services:
     networks:
       - openledger
 
+  searxng:
+    profiles: ["self-hosted-search"]
+    # Pin the upstream revision; upgrades require a reviewed code change.
+    image: docker.io/searxng/searxng:2026.9.8-3fdc6d753
+    restart: unless-stopped
+    user: "977:977"
+    environment:
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?SEARXNG_SECRET is required}
+      GRANIAN_WORKERS: "1"
+      GRANIAN_BLOCKING_THREADS: "2"
+    volumes:
+      - ./searxng-settings.yml:/etc/searxng/settings.yml:ro
+      - searxng_data:/var/cache/searxng
+    healthcheck:
+      test:
+        - CMD
+        - /usr/local/searxng/.venv/bin/python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    mem_limit: 384m
+    cpus: "0.50"
+    pids_limit: 128
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - openledger
+
   migrate:
     build:
       context: ..
@@ -191,3 +224,4 @@ volumes:
   caddy_data:
   caddy_config:
   postgres_data:
+  searxng_data:

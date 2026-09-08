@@ -120,11 +120,13 @@ install -d -m 0700 "${REPO_ROOT}/runtime/backups"
 echo "Generating protected credentials..."
 bash "${DEPLOY_DIR}/configure-auth.sh" "${AUTH_FILE}"
 FLASK_SECRET_KEY="$(openssl rand -hex 32)"
+SEARXNG_SECRET="$(openssl rand -hex 32)"
 
 umask 077
 {
     printf "DOMAIN='%s'\n" "${DOMAIN}"
     printf "FLASK_SECRET_KEY='%s'\n" "${FLASK_SECRET_KEY}"
+    printf "SEARXNG_SECRET='%s'\n" "${SEARXNG_SECRET}"
     printf "OPENAI_MODEL='%s'\n" "${OPENAI_MODEL}"
     printf "OPENAI_API_BASE_URL='https://api.openai.com/v1'\n"
     printf "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED='false'\n"
@@ -133,7 +135,7 @@ umask 077
     printf "OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS='5'\n"
 } > "${ENV_FILE}"
 chmod 0600 "${ENV_FILE}"
-unset FLASK_SECRET_KEY
+unset FLASK_SECRET_KEY SEARXNG_SECRET
 
 echo "Validating the Compose configuration..."
 docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" config --quiet

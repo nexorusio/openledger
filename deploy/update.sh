@@ -40,6 +40,28 @@ ensure_database_password() {
     chmod 0600 "${password_file}"
 }
 
+ensure_searxng_secret() {
+    local secret
+    local environment_backup
+    if grep -Eq '^[[:space:]]*SEARXNG_SECRET[[:space:]]*=' "${ENV_FILE}"; then
+        return
+    fi
+    install -d -m 0700 "${BACKUP_DIR}"
+    environment_backup="${BACKUP_DIR}/deploy.env.pre-searxng.$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -a "${ENV_FILE}" "${environment_backup}"
+    chmod 0600 "${environment_backup}"
+    secret="$(openssl rand -hex 32)"
+    if [[ -z "${secret}" ]]; then
+        echo "SearXNG local secret generation failed."
+        exit 1
+    fi
+    umask 077
+    printf "\nSEARXNG_SECRET='%s'\n" "${secret}" >> "${ENV_FILE}"
+    chmod 0600 "${ENV_FILE}"
+    unset secret
+    echo "Environment backup written to ${environment_backup}."
+}
+
 if [[ ! -f "${ENV_FILE}" ]]; then
     echo "Missing ${ENV_FILE}. Run deploy/install.sh first."
     exit 1
@@ -60,6 +82,19 @@ if ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1;
     apt-get install -y openssl python3
 fi
 
+ensure_searxng_secret
+COMPOSE_PROFILE_ARGS=()
+if grep -Eq "^[[:space:]]*OPENLEDGER_PROFILE_SEARCH_PROVIDER[[:space:]]*=[[:space:]]*['\"]?searxng['\"]?[[:space:]]*$" "${ENV_FILE}"; then
+    COMPOSE_PROFILE_ARGS=(--profile self-hosted-search)
+fi
+
+compose() {
+    docker compose "${COMPOSE_PROFILE_ARGS[@]}" \
+        --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+}
+
+compose config --quiet
+
 if [[ ! -s "${AUTH_FILE}" ]]; then
     echo "This update replaces the browser credential popup with an OpenLedger login page."
     echo "Configure the application login before the proxy authentication is removed."
@@ -76,10 +111,10 @@ chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" \
     "${REPO_ROOT}/runtime/web_settings.json"
 
 echo "Starting the private case database..."
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d db
+compose up -d db
 DATABASE_READY=false
 for _ in $(seq 1 30); do
-    if docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T db pg_isready -U openledger -d openledger >/dev/null 2>&1; then
+    if compose exec -T db pg_isready -U openledger -d openledger >/dev/null 2>&1; then
         DATABASE_READY=true
         break
     fi
@@ -92,17 +127,16 @@ fi
 
 BACKUP_FILE="${BACKUP_DIR}/openledger-$(date -u +%Y%m%dT%H%M%SZ).dump"
 umask 077
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T db \
+compose exec -T db \
     pg_dump --format=custom -U openledger -d openledger > "${BACKUP_FILE}"
 chmod 0600 "${BACKUP_FILE}"
-if [[ ! -s "${BACKUP_FILE}" ]] || ! docker compose \
-    --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T db \
+if [[ ! -s "${BACKUP_FILE}" ]] || ! compose exec -T db \
     pg_restore --list < "${BACKUP_FILE}" >/dev/null; then
     echo "Database backup verification failed. No migration was attempted."
     exit 1
 fi
 echo "Database backup written to ${BACKUP_FILE}."
 
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" build --pull app
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
+compose build --pull app
+compose up -d
+compose ps

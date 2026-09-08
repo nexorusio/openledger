@@ -246,6 +246,7 @@ poetry run python .github/scripts/check_osint_sources.py --live
 # Deployment configuration
 DOMAIN=openledger.example.test \
 FLASK_SECRET_KEY=development-only-secret \
+SEARXNG_SECRET=development-only-searxng-secret \
 docker compose -f deploy/compose.yaml config --quiet
 ```
 

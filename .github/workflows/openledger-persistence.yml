@@ -60,6 +60,7 @@ jobs:
         env:
           DOMAIN: openledger.example.test
           FLASK_SECRET_KEY: integration-only-secret
+          SEARXNG_SECRET: integration-only-searxng-secret
         run: docker compose -f deploy/compose.yaml config --quiet
 
       - name: Build the production web and worker image

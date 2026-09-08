@@ -26,10 +26,16 @@ from maigret.web.profile_search_contract import (
 )
 
 PROFILE_SEARCH_DISABLED_PROVIDER = "disabled"
+PROFILE_SEARCH_SEARXNG_PROVIDER = "searxng"
 PROFILE_SEARCH_PROVIDERS = frozenset(
-    {PROFILE_SEARCH_DISABLED_PROVIDER, "brave"}
+    {
+        PROFILE_SEARCH_DISABLED_PROVIDER,
+        PROFILE_SEARCH_SEARXNG_PROVIDER,
+        "brave",
+    }
 )
 BRAVE_SEARCH_API_URL = "https://api.search.brave.com/res/v1/web/search"
+SEARXNG_SEARCH_URL = "http://searxng:8080/search"
 DEFAULT_PROFILE_SEARCH_KEY_FILE = "/app/runtime/secrets/brave_search_api_key"
 DEFAULT_PROFILE_SEARCH_TIMEOUT_SECONDS = 10
 DEFAULT_PROFILE_SEARCH_MAX_RESULTS = 5
@@ -150,6 +156,10 @@ def read_profile_search_api_key(config: ProfileSearchConfig) -> str:
     """Read an owner-only key at request time, outside the config object."""
     if not config.enabled:
         raise ProfileSearchConfigurationError("Profile search is disabled")
+    if config.provider != "brave":
+        raise ProfileSearchConfigurationError(
+            "Configured profile-search provider does not use an API key"
+        )
     path = Path(config.api_key_file)
     try:
         file_stat = path.stat()
@@ -285,6 +295,44 @@ def _brave_evidence(
     return tuple(evidence)
 
 
+def _searxng_evidence(payload: Any, *, limit: int) -> Tuple[ProfileSearchEvidence, ...]:
+    if not isinstance(payload, dict):
+        raise _ProviderFailure(
+            "invalid_response",
+            "Search provider returned an invalid response.",
+            retryable=False,
+        )
+    raw_results = payload.get("results", [])
+    if not isinstance(raw_results, list):
+        raise _ProviderFailure(
+            "invalid_response",
+            "Search provider returned an invalid response.",
+            retryable=False,
+        )
+    evidence = []
+    seen_urls = set()
+    for rank, raw_result in enumerate(raw_results[:100], start=1):
+        if len(evidence) >= limit:
+            break
+        if not isinstance(raw_result, dict):
+            continue
+        url = str(raw_result.get("url") or "").strip()
+        if url.casefold() in seen_urls:
+            continue
+        try:
+            item = ProfileSearchEvidence(
+                result_rank=rank,
+                source_url=url,
+                title=str(raw_result.get("title") or ""),
+                snippet=str(raw_result.get("content") or ""),
+            )
+        except ProfileSearchContractError:
+            continue
+        seen_urls.add(url.casefold())
+        evidence.append(item)
+    return tuple(evidence)
+
+
 class ProfileSearchClient:
     """Search without logging queries, results, or secrets."""
 
@@ -302,12 +350,14 @@ class ProfileSearchClient:
     async def search(self, query: ProfileSearchQuery) -> ProfileSearchRun:
         if not self.config.enabled:
             raise ProfileSearchConfigurationError("Profile search is disabled")
-        if self.config.provider != "brave":
+        try:
+            if self.config.provider == "brave":
+                return await self._search_brave(query)
+            if self.config.provider == PROFILE_SEARCH_SEARXNG_PROVIDER:
+                return await self._search_searxng(query)
             raise ProfileSearchConfigurationError(
                 "Configured profile-search provider is unavailable"
             )
-        try:
-            return await self._search_brave(query)
         except _ProviderFailure as exc:
             occurred_at = self._clock()
             logger.warning(
@@ -433,4 +483,71 @@ class ProfileSearchClient:
             query=query,
             provenance=provenance,
             evidence=_brave_evidence(payload, limit=result_limit),
+        )
+
+    async def _search_searxng(self, query: ProfileSearchQuery) -> ProfileSearchRun:
+        result_limit = min(query.max_results, self.config.max_results)
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "User-Agent": "OpenLedger-Profile-Discovery/1.0",
+        }
+        params = {
+            "q": query.query_text,
+            "format": "json",
+            "safesearch": "2",
+            "language": "all",
+            "categories": "general",
+        }
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
+        async with self._session_factory(timeout=timeout, headers=headers) as session:
+            async with session.get(
+                SEARXNG_SEARCH_URL,
+                params=params,
+                allow_redirects=False,
+            ) as response:
+                status = int(response.status)
+                if status == 429:
+                    raise _ProviderFailure(
+                        "rate_limited",
+                        "Search provider rate limit was reached.",
+                        retryable=True,
+                        http_status=status,
+                    )
+                if status >= 500:
+                    raise _ProviderFailure(
+                        "provider_unavailable",
+                        "Search provider is temporarily unavailable.",
+                        retryable=True,
+                        http_status=status,
+                    )
+                if status != 200:
+                    raise _ProviderFailure(
+                        "provider_error",
+                        "Search provider returned an unexpected response.",
+                        retryable=False,
+                        http_status=status,
+                    )
+                body = await _bounded_response_body(response)
+                request_id = _header_value(response.headers, "X-Request-Id")
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _ProviderFailure(
+                "invalid_response",
+                "Search provider returned invalid JSON.",
+                retryable=False,
+                http_status=200,
+            ) from exc
+        retrieved_at = self._clock()
+        provenance = ProfileSearchProvenance.for_query(
+            query,
+            provider=self.config.provider,
+            provider_request_id=request_id,
+            retrieved_at=retrieved_at,
+        )
+        return ProfileSearchRun(
+            query=query,
+            provenance=provenance,
+            evidence=_searxng_evidence(payload, limit=result_limit),
         )

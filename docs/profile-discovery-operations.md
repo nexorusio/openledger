@@ -91,9 +91,13 @@ worker solely to bypass a cooldown is not recommended.
 
 Native search runs before Maigret and User Scanner only when both the
 default-off search-first flag and the server-owned search provider are enabled.
-The supported provider is Brave Search. A disabled, incomplete, or failed
-search stage emits a bounded operational notice and safely continues to the
-legacy collectors; it does not retry provider requests.
+The supported no-subscription deployment uses a private SearXNG container on
+the existing Docker network. It has no host port and aggregates the standard
+Brave Web and DuckDuckGo engines without a paid API account. The legacy direct
+Brave API adapter remains optional for operators who separately approve its
+billing relationship. A disabled, incomplete, throttled, or failed search stage
+emits a bounded operational notice and safely continues to the legacy
+collectors; it does not retry provider requests.
 
 The planner uses at most five approved or analyst-supplied username, handle,
 profile-URL, alias, or full-name seeds. It never pivots from email addresses or
@@ -116,21 +120,26 @@ uncertain, or rejected:
   history and do not create or change a Persona claim.
 - Repeating a proposal cannot clear an existing Persona decision.
 
-The API key is read at request time from an owner-only regular file. It is never
-placed in Compose environment values, job options, database records, events,
-logs, HTML, or browser JavaScript. Search queries, returned public evidence,
-candidate scores, decisions, and provider lineage are retained in the case
-audit. Enabling the provider therefore authorizes those bounded queries to be
-sent to Brave Search under the operator's provider agreement and retention
-policy.
+The self-hosted provider needs no external credential. SearXNG is a
+metasearch proxy, not a local Web index: enabling it authorizes bounded queries
+to be sent from the Droplet to its configured upstream search engines. Those
+engines may throttle or change their Web interfaces, which is why OpenLedger's
+timeouts, circuit breaker, and legacy fallback remain mandatory. Search
+queries, returned public evidence, candidate scores, decisions, and provider
+lineage are retained in the case audit.
+
+If the optional direct Brave API adapter is deliberately selected, its API key
+is read at request time from an owner-only regular file. It is never placed in
+Compose environment values, job options, database records, events, logs, HTML,
+or browser JavaScript.
 
 ### Search-first configuration
 
 | Environment variable | Supported value and default |
 |---|---|
 | `OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED` | Defaults to `false`. Only `1`, `true`, `yes`, or `on` enables the outbound capability; empty or malformed values remain off. |
-| `OPENLEDGER_PROFILE_SEARCH_PROVIDER` | `disabled` by default; set to `brave` after the credential is installed. Other values fail closed. |
-| `OPENLEDGER_PROFILE_SEARCH_API_KEY_FILE` | Fixed by the supported Compose deployment at `/app/runtime/secrets/brave_search_api_key`. |
+| `OPENLEDGER_PROFILE_SEARCH_PROVIDER` | `disabled` by default. `searxng` selects the private no-subscription container. `brave` is an optional paid external API integration. Other values fail closed. |
+| `OPENLEDGER_PROFILE_SEARCH_API_KEY_FILE` | Used only by the optional direct Brave adapter and fixed at `/app/runtime/secrets/brave_search_api_key`. SearXNG never reads it. |
 | `OPENLEDGER_PROFILE_SEARCH_TIMEOUT_SECONDS` | Integer from 1 to 30; defaults to `10`. |
 | `OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS` | Integer from 1 to 10 per query; defaults to `5`. |
 
@@ -225,7 +234,8 @@ observations, or force an interrupted job to resume.
 
 Deploy the P2 image and migrations with search still disabled before granting
 new outbound access. Wait for active investigations to finish before recreating
-the worker.
+the worker. The supported path below creates no external API account or
+per-request billing relationship.
 
 1. Confirm `deploy/.env` contains the fail-closed values, then apply the normal
    update:
@@ -249,40 +259,36 @@ the worker.
    curl -fsS https://openledger.nexorus.io/healthz
    ```
 
-2. Create the credential file without placing the key in shell history or
-   `deploy/.env`:
+2. Inspect the current disabled state:
 
    ```bash
    cd /opt/openledger
-   sudo install -m 0600 -o 10001 -g 10001 /dev/null runtime/secrets/brave_search_api_key
-   sudo bash -c 'read -rsp "Brave Search API key: " key; printf "\n"; printf "%s\n" "$key" > runtime/secrets/brave_search_api_key; unset key'
-   sudo chown 10001:10001 runtime/secrets/brave_search_api_key
-   sudo chmod 0600 runtime/secrets/brave_search_api_key
+   sudo bash deploy/self-hosted-search.sh status
    ```
 
-3. Set the provider to `brave` while leaving the search-first flag `false`.
-   Validate, recreate both runtimes, and verify that each can read the protected
-   key without printing it:
+3. Prepare the private provider. The script refuses hosts with less than 768
+   MiB available memory or 1 GiB free disk, saves the protected environment,
+   pulls the pinned image, starts only the private SearXNG profile, sends one
+   non-personal `example.com` probe, and recreates app and worker with discovery
+   still disabled:
 
    ```bash
    cd /opt/openledger
-   sudo nano deploy/.env
-   sudo docker compose --env-file deploy/.env -f deploy/compose.yaml config --quiet
-   sudo docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --no-deps --force-recreate app worker
-   sudo docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T app python -c "from maigret.web.profile_search_backend import load_profile_search_config, read_profile_search_api_key; c=load_profile_search_config(); read_profile_search_api_key(c); print('app profile-search configuration valid')"
-   sudo docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T worker python -c "from maigret.web.profile_search_backend import load_profile_search_config, read_profile_search_api_key; c=load_profile_search_config(); read_profile_search_api_key(c); print('worker profile-search configuration valid')"
+   sudo bash deploy/self-hosted-search.sh prepare
    ```
 
-4. Change only `OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED` to `true`, then
-   validate and recreate the app and worker together:
+   Type `CONTINUE` only after confirming that no investigation is running.
+   SearXNG remains internal, runs as UID/GID 977, and is limited to 384 MiB
+   memory, half a CPU, and 128 processes.
+
+4. Review the preparation output. It must show provider `searxng`, identical
+   app/worker configuration, a healthy private container, a healthy OpenLedger
+   application, and `OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED=false`. Then
+   enable the capability:
 
    ```bash
    cd /opt/openledger
-   sudo nano deploy/.env
-   sudo docker compose --env-file deploy/.env -f deploy/compose.yaml config --quiet
-   sudo docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --no-deps --force-recreate app worker
-   sudo docker compose --env-file deploy/.env -f deploy/compose.yaml ps
-   curl -fsS https://openledger.nexorus.io/healthz
+   sudo bash deploy/self-hosted-search.sh enable
    ```
 
 5. Run one authorized Focused smoke investigation. Confirm that native search
@@ -292,13 +298,18 @@ the worker.
    display identical `OPENLEDGER_` search/discovery settings using the parity
    commands above.
 
-To roll back the capability, set
-`OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED=false`, validate Compose, and recreate
-the app and worker together. Existing audits and analyst decisions remain
-available, while new investigations continue through the legacy collectors.
-Setting `OPENLEDGER_PROFILE_SEARCH_PROVIDER=disabled` as a second step also
-prevents provider use if the feature flag is later changed accidentally. Do not
-delete the protected key or audit data as part of an operational rollback.
+To roll back the capability after active investigations finish:
+
+```bash
+cd /opt/openledger
+sudo bash deploy/self-hosted-search.sh disable
+```
+
+This sets the flag and provider to their fail-closed values, recreates app and
+worker together, and stops the private SearXNG container. Existing audits and
+analyst decisions remain available while new investigations continue through
+the legacy collectors. It does not delete audit data or the local SearXNG
+volume.
 
 ## Verification
 
