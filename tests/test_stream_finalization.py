@@ -28,10 +28,15 @@ def test_collector_observations_are_reported_without_maigret_results(
         str(Path(__file__).with_name("db.json")),
     )
     monkeypatch.setattr(maigret.report, "save_graph_report", lambda *a, **kw: None)
+
+    def record_result(job_id, result):
+        recorded.update(job_id=job_id, result=result)
+        return result
+
     monkeypatch.setattr(
         web_app,
         "record_job_result",
-        lambda job_id, result: recorded.update(job_id=job_id, result=result),
+        record_result,
     )
     event_sink = queue.Queue()
 
@@ -69,10 +74,15 @@ def test_adapter_error_only_observations_do_not_complete_job(monkeypatch):
         }
     ]
     recorded = {}
+
+    def record_result(job_id, result):
+        recorded.update(job_id=job_id, result=result)
+        return result
+
     monkeypatch.setattr(
         web_app,
         "record_job_result",
-        lambda job_id, result: recorded.update(job_id=job_id, result=result),
+        record_result,
     )
     event_sink = queue.Queue()
 
