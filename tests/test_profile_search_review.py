@@ -273,25 +273,43 @@ async def test_x_proposal_reuses_existing_legacy_twitter_account(store):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("web_url", "canonical_web_url"),
+    (
+        "legacy_url",
+        "legacy_platform",
+        "web_url",
+        "canonical_web_url",
+    ),
     [
         (
+            "https://twitter.com/alice_example",
+            "Twitter",
             "https://x.com/alice_example",
             "https://x.com/alice_example",
         ),
         (
+            "https://twitter.com/alice_example",
+            "Twitter",
             "https://mobile.twitter.com/alice_example/with_replies",
+            "https://x.com/alice_example",
+        ),
+        (
+            "https://mobile.twitter.com/alice_example",
+            "mobile.twitter.com",
+            "https://x.com/alice_example",
             "https://x.com/alice_example",
         ),
     ],
 )
 async def test_web_research_x_alias_reuses_existing_twitter_account(
-    store, web_url, canonical_web_url
+    store,
+    legacy_url,
+    legacy_platform,
+    web_url,
+    canonical_web_url,
 ):
     seeded = await _seed_discovery(store, platform="x")
-    legacy_url = "https://twitter.com/alice_example"
     legacy_value = {
-        "platform": "Twitter",
+        "platform": legacy_platform,
         "url": legacy_url,
         "username": "alice_example",
     }

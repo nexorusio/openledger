@@ -59,6 +59,11 @@ from maigret.web.profile_discovery_policy import (
     govern_profile_discovery_options,
 )
 from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
+from maigret.web.profile_search_facebook import FACEBOOK_PROFILE_HOSTS
+from maigret.web.profile_search_instagram import INSTAGRAM_PROFILE_HOSTS
+from maigret.web.profile_search_threads import THREADS_PROFILE_HOSTS
+from maigret.web.profile_search_tiktok import TIKTOK_PROFILE_HOSTS
+from maigret.web.profile_search_x import X_PROFILE_HOSTS
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
@@ -799,11 +804,11 @@ MAX_PROFILE_SEARCH_UI_CANDIDATES = 100
 MAX_PROFILE_SEARCH_UI_REVIEWS = 500
 PROFILE_SEARCH_PENDING_CLAIM_CONFIDENCE = 50
 PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES = {
-    "facebook": ("facebook", "facebook.com"),
-    "instagram": ("instagram", "instagram.com"),
-    "threads": ("threads", "threads.com", "threads.net"),
-    "tiktok": ("tiktok", "tiktok.com"),
-    "x": ("x", "twitter", "x.com", "twitter.com"),
+    "facebook": tuple(sorted({"facebook", *FACEBOOK_PROFILE_HOSTS})),
+    "instagram": tuple(sorted({"instagram", *INSTAGRAM_PROFILE_HOSTS})),
+    "threads": tuple(sorted({"threads", *THREADS_PROFILE_HOSTS})),
+    "tiktok": tuple(sorted({"tiktok", *TIKTOK_PROFILE_HOSTS})),
+    "x": tuple(sorted({"x", "twitter", *X_PROFILE_HOSTS})),
 }
 PROFILE_SEARCH_CANDIDATE_ID_PATTERN = re.compile(
     r"^profile-search:[0-9a-f]{64}$"
