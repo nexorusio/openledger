@@ -74,8 +74,8 @@ jobs:
 
       - name: Validate production configuration
         run: |
-          bash -n deploy/install.sh deploy/update.sh deploy/configure-auth.sh deploy/reset-password.sh
-          DOMAIN=example.invalid FLASK_SECRET_KEY=test-secret docker compose -f deploy/compose.yaml config --quiet
+          bash -n deploy/install.sh deploy/update.sh deploy/configure-auth.sh deploy/reset-password.sh deploy/self-hosted-search.sh
+          DOMAIN=example.invalid FLASK_SECRET_KEY=test-secret SEARXNG_SECRET=test-searxng-secret docker compose -f deploy/compose.yaml config --quiet
 
       - name: Build production application image
         run: docker build --target web --tag openledger:upstream-check .

@@ -9,6 +9,7 @@ import pytest
 
 from maigret.web.profile_search_backend import (
     BRAVE_SEARCH_API_URL,
+    SEARXNG_SEARCH_URL,
     ProfileSearchClient,
     ProfileSearchConfigurationError,
     load_profile_search_config,
@@ -112,6 +113,23 @@ def test_key_loader_requires_an_owner_only_regular_file(tmp_path):
         read_profile_search_api_key(config)
 
 
+def test_self_hosted_provider_never_reads_a_paid_provider_key(tmp_path):
+    missing_key = tmp_path / "missing-brave-key"
+    config = load_profile_search_config(
+        {
+            "OPENLEDGER_PROFILE_SEARCH_PROVIDER": "searxng",
+            "OPENLEDGER_PROFILE_SEARCH_API_KEY_FILE": str(missing_key),
+        }
+    )
+
+    assert config.enabled is True
+    assert config.provider == "searxng"
+    with pytest.raises(
+        ProfileSearchConfigurationError, match="does not use an API key"
+    ):
+        read_profile_search_api_key(config)
+
+
 @pytest.mark.asyncio
 async def test_brave_client_returns_bounded_provider_neutral_evidence(
     tmp_path,
@@ -183,6 +201,98 @@ async def test_brave_client_returns_bounded_provider_neutral_evidence(
     )
     serialized = json.dumps(result.as_dict())
     assert "server-only-test-key" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_searxng_client_uses_only_the_private_fixed_endpoint():
+    config = load_profile_search_config(
+        {
+            "OPENLEDGER_PROFILE_SEARCH_PROVIDER": "searxng",
+            "OPENLEDGER_PROFILE_SEARCH_TIMEOUT_SECONDS": "8",
+            "OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS": "2",
+        }
+    )
+    capture = {}
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "url": "https://www.instagram.com/alice_example/",
+                    "title": "Alice Example",
+                    "content": "Public Instagram profile.",
+                },
+                {
+                    "url": "http://searxng:8080/private",
+                    "title": "Internal result",
+                    "content": "Must be discarded.",
+                },
+                {
+                    "url": "https://www.instagram.com/alice_work/",
+                    "title": "Alice Work",
+                    "content": "Another public candidate.",
+                },
+            ]
+        }
+    ).encode("utf-8")
+    response = _Response(200, payload, {"X-Request-Id": "local-42"})
+
+    def session_factory(**kwargs):
+        capture["session"] = kwargs
+        return _Session(response, capture)
+
+    result = await ProfileSearchClient(
+        config,
+        session_factory=session_factory,
+        clock=lambda: datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc),
+    ).search(_query(max_results=5))
+
+    assert result.error is None
+    assert [item.source_url for item in result.evidence] == [
+        "https://www.instagram.com/alice_example/",
+        "https://www.instagram.com/alice_work/",
+    ]
+    assert result.provenance.provider == "searxng"
+    assert result.provenance.provider_request_id == "local-42"
+    assert capture["url"] == SEARXNG_SEARCH_URL
+    assert capture["request"] == {
+        "params": {
+            "q": 'site:instagram.com "alice_example"',
+            "format": "json",
+            "safesearch": "2",
+            "language": "all",
+            "categories": "general",
+        },
+        "allow_redirects": False,
+    }
+    assert capture["session"]["headers"] == {
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip",
+        "User-Agent": "OpenLedger-Profile-Discovery/1.0",
+    }
+
+
+@pytest.mark.asyncio
+async def test_searxng_configuration_error_is_bounded():
+    config = load_profile_search_config(
+        {"OPENLEDGER_PROFILE_SEARCH_PROVIDER": "searxng"}
+    )
+    capture = {}
+    response = _Response(403, b"format disabled")
+
+    def session_factory(**kwargs):
+        return _Session(response, capture)
+
+    result = await ProfileSearchClient(
+        config,
+        session_factory=session_factory,
+        clock=lambda: datetime(2026, 9, 8, 9, 0, tzinfo=timezone.utc),
+    ).search(_query())
+
+    assert result.provenance is None
+    assert result.evidence == ()
+    assert result.error.code == "provider_error"
+    assert result.error.http_status == 403
+    assert result.error.retryable is False
 
 
 @pytest.mark.asyncio

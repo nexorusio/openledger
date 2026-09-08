@@ -28,6 +28,13 @@ is not the upstream Maigret project.
 
 ## Additional dependencies
 
+The optional self-hosted profile-search deployment runs the upstream
+[SearXNG](https://github.com/searxng/searxng) container, licensed under the GNU
+Affero General Public License v3.0 or later. OpenLedger does not modify or
+redistribute that image; Docker retrieves the separately versioned upstream
+artifact when an operator explicitly prepares the private search profile. The
+image source and license remain available from the SearXNG project.
+
 OpenLedger also uses separately licensed Python packages and bundled browser
 assets. Their licenses remain applicable, and every release requires a review
 of their package metadata and adjacent license files. In particular, the

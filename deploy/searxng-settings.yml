@@ -1,0 +1,32 @@
+# Private, API-only SearXNG configuration for OpenLedger.
+# The container is reachable only on the Compose network and has no host port.
+use_default_settings:
+  engines:
+    keep_only:
+      - brave
+      - duckduckgo
+
+general:
+  debug: false
+  instance_name: OpenLedger Private Search
+  enable_metrics: false
+
+search:
+  safe_search: 2
+  autocomplete: ""
+  formats:
+    - json
+
+server:
+  # SearXNG recognizes this exact placeholder and replaces it from
+  # the protected SEARXNG_SECRET environment setting.
+  secret_key: ultrasecretkey
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+outgoing:
+  request_timeout: 5.0
+  max_request_timeout: 8.0
+  retries: 0
+  enable_http2: true

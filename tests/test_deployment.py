@@ -69,6 +69,38 @@ def test_profile_search_deployment_is_fail_closed_with_runtime_parity():
     assert "../runtime/secrets:/app/runtime/secrets:ro" in worker
 
 
+def test_self_hosted_search_is_private_optional_and_resource_bounded():
+    service = _compose_service("searxng")
+    settings = (REPOSITORY_ROOT / "deploy" / "searxng-settings.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert 'profiles: ["self-hosted-search"]' in service
+    assert "image: docker.io/searxng/searxng:2026.9.8-3fdc6d753" in service
+    assert ":latest" not in service
+    assert "ports:" not in service
+    assert 'user: "977:977"' in service
+    assert "SEARXNG_SECRET: ${SEARXNG_SECRET:?" in service
+    assert "mem_limit: 384m" in service
+    assert 'cpus: "0.50"' in service
+    assert "pids_limit: 128" in service
+    assert "cap_drop:\n      - ALL" in service
+    assert "no-new-privileges:true" in service
+    assert "./searxng-settings.yml:/etc/searxng/settings.yml:ro" in service
+    assert "- openledger" in service
+
+    assert "keep_only:" in settings
+    assert "- brave" in settings
+    assert "- duckduckgo" in settings
+    assert "- json" in settings
+    assert "limiter: false" in settings
+    assert "public_instance: false" in settings
+    assert "image_proxy: false" in settings
+    assert "retries: 0" in settings
+    assert "secret_key: ultrasecretkey" in settings
+    assert "overridden-by-SEARXNG_SECRET" not in settings
+
+
 def test_install_and_example_keep_profile_search_disabled_by_default():
     install_script = (REPOSITORY_ROOT / "deploy" / "install.sh").read_text(
         encoding="utf-8"
@@ -84,8 +116,77 @@ def test_install_and_example_keep_profile_search_disabled_by_default():
         assert "OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS" in document
     assert "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED=false" in example
     assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER=disabled" in example
+    assert "SEARXNG_SECRET=REPLACE_WITH_A_DIFFERENT" in example
+    assert 'SEARXNG_SECRET="$(openssl rand -hex 32)"' in install_script
     assert "brave_search_api_key" not in install_script
     assert "OPENLEDGER_PROFILE_SEARCH_API_KEY=" not in example
+
+
+def test_updater_starts_self_hosted_search_only_for_searxng_provider():
+    update_script = (REPOSITORY_ROOT / "deploy" / "update.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert "ensure_searxng_secret" in update_script
+    assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER" in update_script
+    assert "COMPOSE_PROFILE_ARGS=(--profile self-hosted-search)" in update_script
+    assert 'docker compose "${COMPOSE_PROFILE_ARGS[@]}"' in update_script
+
+
+def test_self_hosted_search_operator_flow_is_guarded_and_reversible():
+    script_path = REPOSITORY_ROOT / "deploy" / "self-hosted-search.sh"
+    script = script_path.read_text(encoding="utf-8")
+
+    assert os.access(script_path, os.X_OK)
+    assert "MINIMUM_AVAILABLE_MEMORY_KIB=786432" in script
+    assert "MINIMUM_AVAILABLE_DISK_KIB=1048576" in script
+    assert "Type CONTINUE to proceed" in script
+    assert "site:example.com" in script
+    assert "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED false" in script
+    assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER searxng" in script
+    assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER disabled" in script
+    assert "verify_searxng_secret" in script
+    assert "hmac.compare_digest" in script
+    assert "os.environ['SEARXNG_SECRET']" in script
+    assert "trap fail_closed_shutdown ERR" in script
+    assert "stop_and_verify_services app worker searxng" in script
+    assert 'for service in "$@"' in script
+    assert "OPENLEDGER_COMPOSE_PROJECT=openledger" in script
+    assert '--project-name "${OPENLEDGER_COMPOSE_PROJECT}"' in script
+    assert "label=com.docker.compose.project=${OPENLEDGER_COMPOSE_PROJECT}" in script
+    assert "label=com.docker.compose.service=${service}" in script
+    assert "running_service_containers" in script
+    assert "CRITICAL: ${service} still has a running container" in script
+    assert "compose stop app worker searxng || true" not in script
+    assert "recreate_runtimes disabled False" in script
+    assert "brave_search_api_key" not in script
+
+    enable_block = script.split("    enable)", 1)[1].split("        ;;", 1)[0]
+    assert enable_block.index("trap fail_closed_shutdown ERR") < enable_block.index(
+        "set_env_value OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED true"
+    )
+    fail_closed_block = script.split("fail_closed_shutdown()", 1)[1].split(
+        "show_status()", 1
+    )[0]
+    assert "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED false" in fail_closed_block
+    assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER disabled" in fail_closed_block
+    assert "recreate_runtimes disabled False" in fail_closed_block
+
+
+def test_compose_validation_supplies_the_local_searxng_secret():
+    documents = [
+        (REPOSITORY_ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8")
+        for name in (
+            "openledger-persistence.yml",
+            "upstream-integrity.yml",
+            "upstream-sync.yml",
+        )
+    ]
+    readme = (REPOSITORY_ROOT / "README.md").read_text(encoding="utf-8")
+
+    for document in documents:
+        assert "SEARXNG_SECRET" in document
+    assert "SEARXNG_SECRET=development-only-searxng-secret" in readme
 
 
 def test_caddy_uses_application_login_instead_of_browser_basic_auth():
