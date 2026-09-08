@@ -269,6 +269,74 @@ async def test_x_proposal_reuses_existing_legacy_twitter_account(store):
 
 
 @pytest.mark.asyncio
+async def test_web_research_x_alias_reuses_existing_twitter_account(store):
+    seeded = await _seed_discovery(store, platform="x")
+    legacy_url = "https://twitter.com/alice_example"
+    legacy_value = {
+        "platform": "Twitter",
+        "url": legacy_url,
+        "username": "alice_example",
+    }
+    web_url = "https://x.com/alice_example"
+    web_value = {
+        "platform": "x.com",
+        "url": web_url,
+        "username": "alice_example",
+    }
+    with store.engine.begin() as connection:
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": legacy_value,
+                    "display_value": legacy_url,
+                    "normalized_value": json.dumps(
+                        legacy_value, sort_keys=True
+                    ),
+                    "confidence": 80,
+                    "fingerprint": claim_fingerprint(
+                        "social_account", legacy_value
+                    ),
+                    "source_engine": "maigret",
+                    "source_record_id": "Twitter:alice_example",
+                    "native_status": "claimed",
+                    "evidence": [],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": web_value,
+                    "display_value": web_url,
+                    "normalized_value": json.dumps(web_value, sort_keys=True),
+                    "confidence": 50,
+                    "fingerprint": claim_fingerprint(
+                        "social_account", web_value
+                    ),
+                    "source_engine": "openai_web_research",
+                    "source_record_id": "proposal:x.com/alice_example",
+                    "native_status": "candidate_proposed",
+                    "evidence": [],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+
+    claims = store.get_persona(seeded["persona_id"])["claims"]
+    assert len(claims) == 1
+    assert claims[0]["display_value"] == web_url
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["rejected", "uncertain"])
 async def test_reject_or_uncertain_records_decision_without_claim(
     store, decision

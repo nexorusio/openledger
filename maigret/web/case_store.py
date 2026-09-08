@@ -874,7 +874,14 @@ def _persona_candidate_identity_match(candidate: Dict[str, Any]):
         return identity_match
     platform = str(value.get("platform") or "").strip().casefold()
     username = str(value.get("username") or "").strip().lstrip("@").casefold()
-    aliases = PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES.get(platform)
+    aliases = next(
+        (
+            candidate_aliases
+            for candidate_aliases in PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES.values()
+            if platform in candidate_aliases
+        ),
+        None,
+    )
     if not aliases or not username:
         return identity_match
     return or_(
