@@ -153,6 +153,17 @@ def test_self_hosted_search_operator_flow_is_guarded_and_reversible():
     assert "recreate_runtimes disabled False" in script
     assert "brave_search_api_key" not in script
 
+    enable_block = script.split("    enable)", 1)[1].split("        ;;", 1)[0]
+    assert enable_block.index("trap fail_closed_shutdown ERR") < enable_block.index(
+        "set_env_value OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED true"
+    )
+    fail_closed_block = script.split("fail_closed_shutdown()", 1)[1].split(
+        "show_status()", 1
+    )[0]
+    assert "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED false" in fail_closed_block
+    assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER disabled" in fail_closed_block
+    assert "recreate_runtimes disabled False" in fail_closed_block
+
 
 def test_compose_validation_supplies_the_local_searxng_secret():
     documents = [

@@ -141,19 +141,27 @@ probe_search() {
 recreate_runtimes() {
     local expected_provider="$1"
     local expected_enabled="$2"
-    compose config --quiet
-    compose up -d --no-deps --force-recreate app worker
+    compose config --quiet || return $?
+    compose up -d --no-deps --force-recreate app worker || return $?
     local service
     for service in app worker; do
         compose exec -T "${service}" python -c \
-            "from maigret.web.profile_discovery_policy import profile_discovery_flag_enabled; from maigret.web.profile_search_backend import load_profile_search_config; c=load_profile_search_config(); assert c.provider == '${expected_provider}'; assert profile_discovery_flag_enabled('search_first_enabled') is ${expected_enabled}; print('${service} profile-search settings verified')"
+            "from maigret.web.profile_discovery_policy import profile_discovery_flag_enabled; from maigret.web.profile_search_backend import load_profile_search_config; c=load_profile_search_config(); assert c.provider == '${expected_provider}'; assert profile_discovery_flag_enabled('search_first_enabled') is ${expected_enabled}; print('${service} profile-search settings verified')" \
+            || return $?
     done
 }
 
 fail_closed_shutdown() {
     local exit_status=$?
     trap - ERR
-    echo "Rollback did not complete; stopping app, worker, and private search to prevent stale enabled runtimes."
+    echo "Search transition failed; restoring the fail-closed configuration."
+    set_env_value OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED false || true
+    set_env_value OPENLEDGER_PROFILE_SEARCH_PROVIDER disabled || true
+    if recreate_runtimes disabled False && compose stop searxng; then
+        echo "Fail-closed app and worker settings were restored and private search was stopped."
+        exit "${exit_status}"
+    fi
+    echo "Fail-closed recovery failed; stopping app, worker, and private search."
     compose stop app worker searxng || true
     exit "${exit_status}"
 }
@@ -199,9 +207,11 @@ case "${ACTION}" in
         verify_searxng_secret
         probe_search
         backup_environment
+        trap fail_closed_shutdown ERR
         set_env_value OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED true
         recreate_runtimes searxng True
         show_status
+        trap - ERR
         echo "Private search-first discovery is enabled."
         ;;
     disable)
