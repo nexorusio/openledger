@@ -151,18 +151,65 @@ recreate_runtimes() {
     done
 }
 
+running_service_containers() {
+    local service="$1"
+    docker ps --quiet \
+        --filter "label=com.docker.compose.project=openledger" \
+        --filter "label=com.docker.compose.service=${service}"
+}
+
+stop_and_verify_services() {
+    local service
+    local container_id
+    local container_ids
+    local verified=true
+    for service in "$@"; do
+        if ! compose stop "${service}"; then
+            echo "Compose could not stop ${service}; trying its labeled containers directly."
+        fi
+        if ! container_ids="$(running_service_containers "${service}")"; then
+            echo "Could not inspect running ${service} containers."
+            verified=false
+            continue
+        fi
+        while IFS= read -r container_id; do
+            [[ -z "${container_id}" ]] && continue
+            if [[ ! "${container_id}" =~ ^[0-9a-f]{12,64}$ ]]; then
+                echo "Refusing an invalid ${service} container identifier."
+                verified=false
+                continue
+            fi
+            docker stop "${container_id}" || true
+        done <<< "${container_ids}"
+    done
+    for service in "$@"; do
+        if ! container_ids="$(running_service_containers "${service}")"; then
+            echo "Could not verify ${service} stopped."
+            verified=false
+        elif [[ -n "${container_ids}" ]]; then
+            echo "CRITICAL: ${service} still has a running container."
+            verified=false
+        else
+            echo "Verified ${service} has no running container."
+        fi
+    done
+    [[ "${verified}" == "true" ]]
+}
+
 fail_closed_shutdown() {
     local exit_status=$?
     trap - ERR
     echo "Search transition failed; restoring the fail-closed configuration."
     set_env_value OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED false || true
     set_env_value OPENLEDGER_PROFILE_SEARCH_PROVIDER disabled || true
-    if recreate_runtimes disabled False && compose stop searxng; then
+    if recreate_runtimes disabled False && stop_and_verify_services searxng; then
         echo "Fail-closed app and worker settings were restored and private search was stopped."
         exit "${exit_status}"
     fi
     echo "Fail-closed recovery failed; stopping app, worker, and private search."
-    compose stop app worker searxng || true
+    if ! stop_and_verify_services app worker searxng; then
+        echo "CRITICAL: automatic shutdown could not be verified; immediate operator intervention is required."
+    fi
     exit "${exit_status}"
 }
 
@@ -221,7 +268,7 @@ case "${ACTION}" in
         set_env_value OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED false
         set_env_value OPENLEDGER_PROFILE_SEARCH_PROVIDER disabled
         recreate_runtimes disabled False
-        compose stop searxng
+        stop_and_verify_services searxng
         trap - ERR
         show_status
         echo "Private search is disabled and its container is stopped."

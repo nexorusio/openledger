@@ -149,7 +149,13 @@ def test_self_hosted_search_operator_flow_is_guarded_and_reversible():
     assert "hmac.compare_digest" in script
     assert "os.environ['SEARXNG_SECRET']" in script
     assert "trap fail_closed_shutdown ERR" in script
-    assert "compose stop app worker searxng" in script
+    assert "stop_and_verify_services app worker searxng" in script
+    assert 'for service in "$@"' in script
+    assert "label=com.docker.compose.project=openledger" in script
+    assert "label=com.docker.compose.service=${service}" in script
+    assert "running_service_containers" in script
+    assert "CRITICAL: ${service} still has a running container" in script
+    assert "compose stop app worker searxng || true" not in script
     assert "recreate_runtimes disabled False" in script
     assert "brave_search_api_key" not in script
 
