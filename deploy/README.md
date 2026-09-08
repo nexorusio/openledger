@@ -76,10 +76,11 @@ Apply normal updates after changes have been merged to main:
     bash deploy/update.sh
 
 Profile discovery has server-owned Focused/Exhaustive budgets, durable
-cancellation and worker leases, provider circuit breakers, and default-on
-operational flags. The same flag values must reach both the app and worker.
-For the exact variables, behavior, validation, flag-only restart, and rollback
-commands, use the
+cancellation and worker leases, provider circuit breakers, seven default-on P1
+operational flags, and a separate default-off native search-first capability.
+The same flag and provider settings must reach both the app and worker. For the
+exact variables, protected Brave Search key setup, staged enablement,
+validation, restart, and rollback commands, use the
 [profile discovery operations runbook](../docs/profile-discovery-operations.md).
 
 The first update from the original Basic Authentication deployment prompts for

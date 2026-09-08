@@ -3,9 +3,19 @@
 from pathlib import Path
 import json
 import os
+import re
 import subprocess
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+
+def _compose_service(name):
+    compose = (REPOSITORY_ROOT / "deploy" / "compose.yaml").read_text(
+        encoding="utf-8"
+    )
+    body = compose.split(f"  {name}:\n", 1)[1]
+    next_service = re.search(r"(?m)^  [a-z0-9_-]+:\n", body)
+    return body if next_service is None else body[: next_service.start()]
 
 
 def test_web_image_uses_single_process_gunicorn_server():
@@ -32,6 +42,50 @@ def test_container_build_context_excludes_runtime_secrets():
     assert ".env" in ignored
     assert ".venv/" in ignored
     assert "*.log" in ignored
+
+
+def test_profile_search_deployment_is_fail_closed_with_runtime_parity():
+    expected = (
+        "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED: "
+        '"${OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED:-false}"',
+        "OPENLEDGER_PROFILE_SEARCH_PROVIDER: "
+        '"${OPENLEDGER_PROFILE_SEARCH_PROVIDER:-disabled}"',
+        "OPENLEDGER_PROFILE_SEARCH_API_KEY_FILE: "
+        "/app/runtime/secrets/brave_search_api_key",
+        "OPENLEDGER_PROFILE_SEARCH_TIMEOUT_SECONDS: "
+        '"${OPENLEDGER_PROFILE_SEARCH_TIMEOUT_SECONDS:-10}"',
+        "OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS: "
+        '"${OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS:-5}"',
+    )
+    app = _compose_service("app")
+    worker = _compose_service("worker")
+
+    for setting in expected:
+        assert setting in app
+        assert setting in worker
+    assert "OPENLEDGER_PROFILE_SEARCH_API_KEY:" not in app
+    assert "OPENLEDGER_PROFILE_SEARCH_API_KEY:" not in worker
+    assert "../runtime/secrets:/app/runtime/secrets" in app
+    assert "../runtime/secrets:/app/runtime/secrets:ro" in worker
+
+
+def test_install_and_example_keep_profile_search_disabled_by_default():
+    install_script = (REPOSITORY_ROOT / "deploy" / "install.sh").read_text(
+        encoding="utf-8"
+    )
+    example = (REPOSITORY_ROOT / "deploy" / ".env.example").read_text(
+        encoding="utf-8"
+    )
+
+    for document in (install_script, example):
+        assert "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED" in document
+        assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER" in document
+        assert "OPENLEDGER_PROFILE_SEARCH_TIMEOUT_SECONDS" in document
+        assert "OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS" in document
+    assert "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED=false" in example
+    assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER=disabled" in example
+    assert "brave_search_api_key" not in install_script
+    assert "OPENLEDGER_PROFILE_SEARCH_API_KEY=" not in example
 
 
 def test_caddy_uses_application_login_instead_of_browser_basic_auth():

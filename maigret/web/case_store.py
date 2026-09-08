@@ -59,6 +59,11 @@ from maigret.web.profile_discovery_policy import (
     govern_profile_discovery_options,
 )
 from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
+from maigret.web.profile_search_facebook import parse_facebook_profile_url
+from maigret.web.profile_search_instagram import parse_instagram_profile_url
+from maigret.web.profile_search_threads import parse_threads_profile_url
+from maigret.web.profile_search_tiktok import parse_tiktok_profile_url
+from maigret.web.profile_search_x import parse_x_profile_url
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
@@ -458,6 +463,100 @@ Index(
     investigation_events.c.id,
 )
 
+profile_search_audits = Table(
+    "profile_search_audits",
+    metadata,
+    Column("id", String(36), primary_key=True),
+    Column(
+        "job_id",
+        String(36),
+        ForeignKey("investigation_jobs.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("status", String(16), nullable=False),
+    Column("stopped", Boolean, nullable=False, server_default="false"),
+    Column("orchestration_version", Integer, nullable=False),
+    Column("planned_query_count", Integer, nullable=False),
+    Column("executed_query_count", Integer, nullable=False),
+    Column("error_count", Integer, nullable=False),
+    Column("candidate_count", Integer, nullable=False),
+    Column("document_sha256", String(64), nullable=False),
+    Column("document", json_document, nullable=False),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "status IN ('completed', 'partial', 'failed', 'stopped')",
+        name="ck_profile_search_audits_status",
+    ),
+    CheckConstraint(
+        "planned_query_count >= 0 AND executed_query_count >= 0 "
+        "AND executed_query_count <= planned_query_count",
+        name="ck_profile_search_audits_query_counts",
+    ),
+    CheckConstraint(
+        "error_count >= 0 AND error_count <= executed_query_count",
+        name="ck_profile_search_audits_error_count",
+    ),
+    CheckConstraint(
+        "candidate_count >= 0 "
+        "AND candidate_count <= planned_query_count * 10",
+        name="ck_profile_search_audits_candidate_count",
+    ),
+    CheckConstraint(
+        "orchestration_version > 0",
+        name="ck_profile_search_audits_orchestration_version",
+    ),
+    UniqueConstraint(
+        "job_id",
+        "document_sha256",
+        name="uq_profile_search_audits_job_document",
+    ),
+)
+Index(
+    "ix_profile_search_audits_job_created",
+    profile_search_audits.c.job_id,
+    profile_search_audits.c.created_at,
+)
+
+profile_search_candidate_reviews = Table(
+    "profile_search_candidate_reviews",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column(
+        "audit_id",
+        String(36),
+        ForeignKey("profile_search_audits.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column("candidate_id", String(100), nullable=False),
+    Column(
+        "persona_id",
+        String(36),
+        ForeignKey("personas.id", ondelete="CASCADE"),
+        nullable=False,
+    ),
+    Column(
+        "claim_id",
+        String(36),
+        ForeignKey("persona_claims.id", ondelete="SET NULL"),
+        nullable=True,
+    ),
+    Column("decision", String(16), nullable=False),
+    Column("reviewer", String(200), nullable=False),
+    Column("note", Text, nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+    CheckConstraint(
+        "decision IN ('proposed', 'rejected', 'uncertain')",
+        name="ck_profile_search_candidate_reviews_decision",
+    ),
+)
+Index(
+    "ix_profile_search_candidate_reviews_lookup",
+    profile_search_candidate_reviews.c.audit_id,
+    profile_search_candidate_reviews.c.candidate_id,
+    profile_search_candidate_reviews.c.persona_id,
+    profile_search_candidate_reviews.c.created_at,
+)
+
 case_chat_messages = Table(
     "case_chat_messages",
     metadata,
@@ -699,6 +798,21 @@ MAX_COMBINED_EVIDENCE_REFERENCES = 50_000
 MAX_COMBINED_RELATIONSHIP_EDGES = 20_000
 MAX_COMBINED_AI_CLAIMS = 500
 MAX_COMBINED_AI_PROPOSALS = 100
+MAX_PROFILE_SEARCH_AUDIT_BYTES = 12_000_000
+MAX_PROFILE_SEARCH_AUDITS_PER_JOB = 10
+MAX_PROFILE_SEARCH_UI_CANDIDATES = 100
+MAX_PROFILE_SEARCH_UI_REVIEWS = 500
+PROFILE_SEARCH_PENDING_CLAIM_CONFIDENCE = 50
+PROFILE_SEARCH_PLATFORM_PARSERS = {
+    "facebook": parse_facebook_profile_url,
+    "instagram": parse_instagram_profile_url,
+    "threads": parse_threads_profile_url,
+    "tiktok": parse_tiktok_profile_url,
+    "x": parse_x_profile_url,
+}
+PROFILE_SEARCH_CANDIDATE_ID_PATTERN = re.compile(
+    r"^profile-search:[0-9a-f]{64}$"
+)
 RELATIONSHIP_FIELDS = {
     "email",
     "phone",
@@ -740,6 +854,103 @@ def _bounded_round_robin_case_records(
             break
         position += 1
     return selected
+
+
+def _persona_candidate_identity_match(candidate: Dict[str, Any]):
+    """Build the exact cross-source identity predicate for one claim."""
+    identity_match = (
+        persona_claims.c.fingerprint == candidate["fingerprint"]
+    )
+    if (
+        candidate.get("source_engine")
+        not in {"openai_web_research", "native_profile_search_review"}
+        or candidate.get("field_name") != "social_account"
+    ):
+        return identity_match
+    identity_match = or_(
+        identity_match,
+        (
+            (persona_claims.c.field_name == "social_account")
+            & (persona_claims.c.display_value == candidate["display_value"])
+        ),
+    )
+    return identity_match
+
+
+def _profile_search_candidate_alias_identity(candidate: Dict[str, Any]):
+    """Derive a supported account identity only from its validated URL."""
+    if (
+        candidate.get("source_engine")
+        not in {"openai_web_research", "native_profile_search_review"}
+        or candidate.get("field_name") != "social_account"
+    ):
+        return None
+    value = candidate.get("value")
+    candidate_url = (
+        value.get("url") if isinstance(value, dict) else None
+    ) or candidate.get("display_value")
+    if not candidate_url:
+        return None
+    for parser in PROFILE_SEARCH_PLATFORM_PARSERS.values():
+        profile_reference = parser(str(candidate_url))
+        if profile_reference is None:
+            continue
+        return profile_reference.handle.casefold(), parser
+    return None
+
+
+def _persona_candidate_claim_with_connection(
+    connection: Connection,
+    persona_id: str,
+    candidate: Dict[str, Any],
+):
+    """Find an exact or URL-verified alias match for one candidate."""
+    exact = (
+        connection.execute(
+            select(persona_claims)
+            .where(
+                persona_claims.c.persona_id == persona_id,
+                _persona_candidate_identity_match(candidate),
+            )
+            .order_by(
+                persona_claims.c.created_at.asc(),
+                persona_claims.c.id.asc(),
+            )
+        )
+        .mappings()
+        .first()
+    )
+    if exact is not None:
+        return exact
+    alias_identity = _profile_search_candidate_alias_identity(candidate)
+    if alias_identity is None:
+        return None
+    candidate_handle, parser = alias_identity
+    possible_matches = connection.execute(
+        select(persona_claims)
+        .where(
+            persona_claims.c.persona_id == persona_id,
+            persona_claims.c.field_name == "social_account",
+        )
+        .order_by(
+            persona_claims.c.created_at.asc(),
+            persona_claims.c.id.asc(),
+        )
+    ).mappings()
+    for possible_match in possible_matches:
+        stored_value = possible_match["value"]
+        stored_url = (
+            stored_value.get("url")
+            if isinstance(stored_value, dict)
+            else None
+        ) or possible_match["display_value"]
+        profile_reference = parser(str(stored_url or ""))
+        if (
+            profile_reference is not None
+            and profile_reference.handle.casefold() == candidate_handle
+        ):
+            return possible_match
+    return None
 
 
 class ActiveInvestigationError(ValueError):
@@ -796,6 +1007,188 @@ def _as_iso(value: Optional[datetime]) -> Optional[str]:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat()
+
+
+def _profile_search_document_sha256(document: Dict[str, Any]) -> str:
+    encoded = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _profile_search_audit_document(result: Any) -> tuple[Dict[str, Any], str]:
+    """Validate and fingerprint one bounded, review-safe search result."""
+    from maigret.web.profile_search_orchestrator import (
+        PROFILE_SEARCH_TERMINAL_ERROR_CODES,
+        ProfileSearchDiscoveryResult,
+    )
+    from maigret.web.profile_search_backend import ProfileSearchRun
+    from maigret.web.profile_search_contract import (
+        MAX_PROFILE_SEARCH_RESULTS,
+        ProfileSearchQuery,
+    )
+    from maigret.web.profile_search_planner import MAX_PROFILE_SEARCH_QUERIES
+    from maigret.web.profile_search_ranking import (
+        RankedProfileSearchCandidate,
+    )
+
+    if not isinstance(result, ProfileSearchDiscoveryResult):
+        raise ValueError("A profile-search discovery result is required")
+    if not all(
+        isinstance(items, tuple)
+        for items in (result.queries, result.runs, result.candidates)
+    ):
+        raise ValueError("Profile-search audit collections must be immutable")
+    if not all(isinstance(query, ProfileSearchQuery) for query in result.queries):
+        raise ValueError("Profile-search audit contains an invalid query")
+    if not all(isinstance(run, ProfileSearchRun) for run in result.runs):
+        raise ValueError("Profile-search audit contains an invalid run")
+    if not all(
+        isinstance(candidate, RankedProfileSearchCandidate)
+        for candidate in result.candidates
+    ):
+        raise ValueError("Profile-search audit contains an invalid candidate")
+    document = result.as_dict()
+    if result.status not in {"completed", "partial", "failed", "stopped"}:
+        raise ValueError("Invalid profile-search audit status")
+    if result.stopped != (result.status == "stopped"):
+        raise ValueError("Profile-search stop status is inconsistent")
+    if not 0 <= result.planned_query_count <= MAX_PROFILE_SEARCH_QUERIES:
+        raise ValueError("Profile-search audit exceeds the query limit")
+    if not 0 <= result.executed_query_count <= result.planned_query_count:
+        raise ValueError("Profile-search audit query counts are inconsistent")
+    if not 0 <= result.error_count <= result.executed_query_count:
+        raise ValueError("Profile-search audit error count is inconsistent")
+    planned_by_id = {query.query_id: query for query in result.queries}
+    if len(planned_by_id) != result.planned_query_count:
+        raise ValueError("Profile-search audit contains duplicate queries")
+    if any(
+        planned_by_id.get(run.query.query_id) != run.query
+        for run in result.runs
+    ):
+        raise ValueError("Profile-search audit run is not in its query plan")
+    if len(result.candidates) > (
+        result.planned_query_count * MAX_PROFILE_SEARCH_RESULTS
+    ):
+        raise ValueError("Profile-search audit exceeds the candidate limit")
+    if result.status == "completed" and (
+        result.error_count or result.skipped_query_count
+    ):
+        raise ValueError("Completed profile-search audit is inconsistent")
+    terminal_failure = bool(
+        result.runs
+        and result.runs[-1].error is not None
+        and result.runs[-1].error.code
+        in PROFILE_SEARCH_TERMINAL_ERROR_CODES
+    )
+    if result.status == "partial" and not (
+        0 < result.error_count < result.executed_query_count
+        and (
+            result.skipped_query_count == 0
+            or terminal_failure
+        )
+    ):
+        raise ValueError("Partial profile-search audit is inconsistent")
+    if result.status == "failed":
+        if not (
+            result.executed_query_count > 0
+            and result.error_count == result.executed_query_count
+            and (
+                result.skipped_query_count == 0
+                or terminal_failure
+            )
+        ):
+            raise ValueError("Failed profile-search audit is inconsistent")
+    if result.status == "stopped" and result.skipped_query_count <= 0:
+        raise ValueError("Stopped profile-search audit is inconsistent")
+    for candidate in result.candidates:
+        serialized = candidate.as_dict()
+        if (
+            serialized.get("account_status") != "candidate"
+            or serialized.get("identity_status") != "unverified"
+            or serialized.get("review_status") != "pending"
+            or serialized.get("score_scope")
+            != "discovery_review_priority"
+        ):
+            raise ValueError("Profile-search candidate is not review safe")
+    encoded = json.dumps(
+        document,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if len(encoded) > MAX_PROFILE_SEARCH_AUDIT_BYTES:
+        raise ValueError("Profile-search audit document is too large")
+    return document, hashlib.sha256(encoded).hexdigest()
+
+
+def _serialize_profile_search_audit(row: Any) -> Dict[str, Any]:
+    return {
+        "id": str(row["id"]),
+        "job_id": str(row["job_id"]),
+        "status": str(row["status"]),
+        "stopped": bool(row["stopped"]),
+        "orchestration_version": int(row["orchestration_version"]),
+        "planned_query_count": int(row["planned_query_count"]),
+        "executed_query_count": int(row["executed_query_count"]),
+        "error_count": int(row["error_count"]),
+        "candidate_count": int(row["candidate_count"]),
+        "document_sha256": str(row["document_sha256"]),
+        "document": dict(row["document"]),
+        "created_at": _as_iso(row["created_at"]),
+    }
+
+
+def _profile_search_candidate_from_document(
+    document: Any, candidate_id: str
+) -> Dict[str, Any]:
+    """Resolve one immutable unverified candidate from a stored audit."""
+    if not isinstance(document, dict):
+        raise ValueError("Profile-search audit document is invalid")
+    matches = [
+        candidate
+        for candidate in list(document.get("candidates") or [])
+        if isinstance(candidate, dict)
+        and candidate.get("candidate_id") == candidate_id
+    ]
+    if len(matches) != 1:
+        raise KeyError(candidate_id)
+    candidate = dict(matches[0])
+    if (
+        candidate.get("account_status") != "candidate"
+        or candidate.get("identity_status") != "unverified"
+        or candidate.get("review_status") != "pending"
+        or candidate.get("score_scope") != "discovery_review_priority"
+    ):
+        raise ValueError("Profile-search candidate is not review safe")
+    platform = str(candidate.get("platform") or "").strip().casefold()
+    handle = str(candidate.get("handle") or "").strip().casefold()
+    profile_url = str(candidate.get("profile_url") or "").strip()
+    try:
+        parsed = urlsplit(profile_url)
+        port = parsed.port
+    except ValueError as error:
+        raise ValueError("Profile-search candidate URL is invalid") from error
+    if (
+        platform not in {"facebook", "instagram", "threads", "tiktok", "x"}
+        or not handle
+        or len(handle) > 128
+        or parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+    ):
+        raise ValueError("Profile-search candidate identity is invalid")
+    expected_id = "profile-search:" + hashlib.sha256(
+        f"{platform}\0{handle}".encode("utf-8")
+    ).hexdigest()
+    if not hmac.compare_digest(candidate_id, expected_id):
+        raise ValueError("Profile-search candidate identity is inconsistent")
+    return candidate
 
 
 def _bounded_chat_sources(value: Any) -> list[Dict[str, str]]:
@@ -2415,6 +2808,464 @@ class CaseStore:
                 for row in rows
             ]
 
+    def record_profile_search_result(
+        self,
+        job_id: str,
+        result: Any,
+        *,
+        worker_id: Optional[str] = None,
+    ) -> Optional[str]:
+        """Append an idempotent audit snapshot without publishing a claim."""
+        document, document_sha256 = _profile_search_audit_document(result)
+        now = utcnow()
+        audit_id = str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            statement = select(
+                investigation_jobs.c.kind,
+                investigation_jobs.c.status,
+                investigation_jobs.c.worker_id,
+                investigation_jobs.c.heartbeat_at,
+            ).where(investigation_jobs.c.id == job_id)
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            job = connection.execute(statement).mappings().first()
+            if job is None:
+                raise KeyError(job_id)
+            if job["kind"] not in PROFILE_DISCOVERY_JOB_KINDS:
+                raise ValueError(
+                    "Profile-search audits require a profile-discovery job"
+                )
+            if job["status"] not in ACTIVE_STATUSES:
+                return None
+            if (job["worker_id"] is not None or worker_id is not None) and (
+                job["worker_id"] != worker_id
+                or _heartbeat_expired(job["heartbeat_at"], now=now)
+            ):
+                return None
+            if job["status"] == "cancel_requested" and not result.stopped:
+                return None
+            existing = connection.scalar(
+                select(profile_search_audits.c.id).where(
+                    profile_search_audits.c.job_id == job_id,
+                    profile_search_audits.c.document_sha256
+                    == document_sha256,
+                )
+            )
+            if existing is not None:
+                return str(existing)
+            audit_count = int(
+                connection.scalar(
+                    select(func.count())
+                    .select_from(profile_search_audits)
+                    .where(profile_search_audits.c.job_id == job_id)
+                )
+                or 0
+            )
+            if audit_count >= MAX_PROFILE_SEARCH_AUDITS_PER_JOB:
+                raise ValueError(
+                    "Profile-search audit history reached its storage limit"
+                )
+            connection.execute(
+                insert(profile_search_audits).values(
+                    id=audit_id,
+                    job_id=job_id,
+                    status=result.status,
+                    stopped=result.stopped,
+                    orchestration_version=result.orchestration_version,
+                    planned_query_count=result.planned_query_count,
+                    executed_query_count=result.executed_query_count,
+                    error_count=result.error_count,
+                    candidate_count=len(result.candidates),
+                    document_sha256=document_sha256,
+                    document=document,
+                    created_at=now,
+                )
+            )
+            connection.execute(
+                insert(investigation_events).values(
+                    job_id=job_id,
+                    event={
+                        "type": "profile_search_audit",
+                        "audit_id": audit_id,
+                        "status": result.status,
+                        "planned_query_count": result.planned_query_count,
+                        "executed_query_count": result.executed_query_count,
+                        "error_count": result.error_count,
+                        "candidate_count": len(result.candidates),
+                        "document_sha256": document_sha256,
+                    },
+                    created_at=now,
+                )
+            )
+            updates = {"updated_at": now}
+            if worker_id is not None:
+                updates["heartbeat_at"] = now
+            connection.execute(
+                update(investigation_jobs)
+                .where(investigation_jobs.c.id == job_id)
+                .values(**updates)
+            )
+        return audit_id
+
+    def list_profile_search_audits(
+        self, job_id: str, *, limit: int = MAX_PROFILE_SEARCH_AUDITS_PER_JOB
+    ) -> list[Dict[str, Any]]:
+        """Return newest-first immutable search snapshots for one job."""
+        bounded_limit = min(
+            max(1, int(limit)), MAX_PROFILE_SEARCH_AUDITS_PER_JOB
+        )
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(profile_search_audits)
+                .where(profile_search_audits.c.job_id == job_id)
+                .order_by(
+                    profile_search_audits.c.created_at.desc(),
+                    profile_search_audits.c.id.desc(),
+                )
+                .limit(bounded_limit)
+            ).mappings()
+            return [_serialize_profile_search_audit(row) for row in rows]
+
+    def get_profile_search_audit(
+        self, job_id: str, audit_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Read one job-scoped immutable search snapshot."""
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(profile_search_audits).where(
+                        profile_search_audits.c.job_id == job_id,
+                        profile_search_audits.c.id == audit_id,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        return _serialize_profile_search_audit(row) if row else None
+
+    def get_case_profile_search_discovery(
+        self, case_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Return the latest bounded candidate set with current review overlays."""
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(profile_search_audits)
+                    .join(
+                        investigation_jobs,
+                        investigation_jobs.c.id
+                        == profile_search_audits.c.job_id,
+                    )
+                    .where(investigation_jobs.c.case_id == case_id)
+                    .order_by(
+                        profile_search_audits.c.created_at.desc(),
+                        profile_search_audits.c.id.desc(),
+                    )
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if row is None:
+                return None
+            audit = _serialize_profile_search_audit(row)
+            if not hmac.compare_digest(
+                _profile_search_document_sha256(audit["document"]),
+                audit["document_sha256"],
+            ):
+                raise ValueError("Profile-search audit integrity check failed")
+            raw_candidates = list(
+                audit["document"].get("candidates") or []
+            )
+            candidates = [
+                dict(candidate)
+                for candidate in raw_candidates[:MAX_PROFILE_SEARCH_UI_CANDIDATES]
+                if isinstance(candidate, dict)
+            ]
+            candidate_ids = [
+                str(candidate.get("candidate_id") or "")
+                for candidate in candidates
+                if str(candidate.get("candidate_id") or "")
+            ]
+            review_rows = (
+                list(
+                    connection.execute(
+                        select(
+                            profile_search_candidate_reviews,
+                            personas.c.display_name.label("persona_name"),
+                            persona_claims.c.review_status.label(
+                                "claim_review_status"
+                            ),
+                        )
+                        .select_from(profile_search_candidate_reviews)
+                        .join(
+                            profile_search_audits,
+                            profile_search_audits.c.id
+                            == profile_search_candidate_reviews.c.audit_id,
+                        )
+                        .join(
+                            investigation_jobs,
+                            investigation_jobs.c.id
+                            == profile_search_audits.c.job_id,
+                        )
+                        .join(
+                            personas,
+                            personas.c.id
+                            == profile_search_candidate_reviews.c.persona_id,
+                        )
+                        .outerjoin(
+                            persona_claims,
+                            persona_claims.c.id
+                            == profile_search_candidate_reviews.c.claim_id,
+                        )
+                        .where(
+                            investigation_jobs.c.case_id == case_id,
+                            profile_search_candidate_reviews.c.candidate_id.in_(
+                                candidate_ids
+                            ),
+                        )
+                        .order_by(
+                            profile_search_candidate_reviews.c.created_at.desc(),
+                            profile_search_candidate_reviews.c.id.desc(),
+                        )
+                        .limit(MAX_PROFILE_SEARCH_UI_REVIEWS)
+                    ).mappings()
+                )
+                if candidate_ids
+                else []
+            )
+
+        latest_reviews: Dict[tuple[str, str], Dict[str, Any]] = {}
+        for review in review_rows:
+            key = (str(review["candidate_id"]), str(review["persona_id"]))
+            if key in latest_reviews:
+                continue
+            latest_reviews[key] = {
+                "id": int(review["id"]),
+                "audit_id": str(review["audit_id"]),
+                "candidate_id": str(review["candidate_id"]),
+                "persona_id": str(review["persona_id"]),
+                "persona_name": str(review["persona_name"]),
+                "claim_id": (
+                    str(review["claim_id"]) if review["claim_id"] else None
+                ),
+                "claim_review_status": (
+                    str(review["claim_review_status"])
+                    if review["claim_review_status"]
+                    else None
+                ),
+                "decision": str(review["decision"]),
+                "reviewer": str(review["reviewer"]),
+                "note": str(review["note"] or ""),
+                "created_at": _as_iso(review["created_at"]),
+            }
+        for candidate in candidates:
+            candidate_id = str(candidate.get("candidate_id") or "")
+            candidate["reviews"] = [
+                review
+                for (review_candidate_id, _persona_id), review
+                in latest_reviews.items()
+                if review_candidate_id == candidate_id
+            ]
+            candidate["anchor_id"] = (
+                "profile-candidate-" + candidate_id.rsplit(":", 1)[-1]
+            )
+        return {
+            "audit_id": audit["id"],
+            "job_id": audit["job_id"],
+            "status": audit["status"],
+            "created_at": audit["created_at"],
+            "document_sha256": audit["document_sha256"],
+            "candidate_count": audit["candidate_count"],
+            "displayed_candidate_count": len(candidates),
+            "truncated_candidate_count": max(
+                0, audit["candidate_count"] - len(candidates)
+            ),
+            "planned_query_count": audit["planned_query_count"],
+            "executed_query_count": audit["executed_query_count"],
+            "error_count": audit["error_count"],
+            "candidates": candidates,
+        }
+
+    def review_profile_search_candidate(
+        self,
+        case_id: str,
+        audit_id: str,
+        candidate_id: str,
+        persona_id: str,
+        decision: str,
+        reviewer: str,
+        note: str = "",
+    ) -> Dict[str, Any]:
+        """Record a candidate decision; proposals enter Persona review pending."""
+        candidate_id = str(candidate_id or "").strip().casefold()
+        if not PROFILE_SEARCH_CANDIDATE_ID_PATTERN.fullmatch(candidate_id):
+            raise ValueError("Invalid profile-search candidate identifier")
+        decision = str(decision or "").strip().casefold()
+        if decision not in {"proposed", "rejected", "uncertain"}:
+            raise ValueError("Choose propose, reject, or uncertain")
+        reviewer = " ".join(str(reviewer or "").split())[:200]
+        if not reviewer:
+            raise ValueError("A reviewer is required")
+        note = str(note or "").strip()[:2000] or None
+        now = utcnow()
+        with self.engine.begin() as connection:
+            statement = (
+                select(
+                    profile_search_audits.c.id,
+                    profile_search_audits.c.job_id,
+                    profile_search_audits.c.document,
+                    profile_search_audits.c.document_sha256,
+                )
+                .join(
+                    investigation_jobs,
+                    investigation_jobs.c.id == profile_search_audits.c.job_id,
+                )
+                .where(
+                    profile_search_audits.c.id == audit_id,
+                    investigation_jobs.c.case_id == case_id,
+                )
+            )
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            audit = connection.execute(statement).mappings().first()
+            if audit is None:
+                raise KeyError(audit_id)
+            persona = (
+                connection.execute(
+                    select(personas.c.id, personas.c.display_name).where(
+                        personas.c.id == persona_id,
+                        personas.c.case_id == case_id,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if persona is None:
+                raise ValueError("The selected Persona does not belong to this case")
+            document = dict(audit["document"] or {})
+            if not hmac.compare_digest(
+                _profile_search_document_sha256(document),
+                str(audit["document_sha256"]),
+            ):
+                raise ValueError("Profile-search audit integrity check failed")
+            candidate = _profile_search_candidate_from_document(
+                document, candidate_id
+            )
+            claim_id = None
+            claim_review_status = None
+            if decision == "proposed":
+                from maigret.web.persona_intelligence import (
+                    claim_fingerprint,
+                    evidence_fingerprint,
+                )
+
+                platform = str(candidate["platform"])
+                profile_url = str(candidate["profile_url"])
+                value = {
+                    "platform": platform,
+                    "url": profile_url,
+                    "username": str(candidate["handle"]),
+                }
+                fingerprint = claim_fingerprint("social_account", value)
+                evidence = {
+                    "evidence_type": "native_profile_search_candidate",
+                    "source_name": (
+                        f"Native profile search · {platform.title()}"
+                    )[:300],
+                    "source_url": profile_url,
+                    "details": {
+                        "audit_id": str(audit["id"]),
+                        "audit_sha256": str(audit["document_sha256"]),
+                        "candidate_id": candidate_id,
+                        "score_scope": "discovery_review_priority",
+                        "discovery_score": int(
+                            candidate.get("discovery_score") or 0
+                        ),
+                        "review_priority": str(
+                            candidate.get("review_priority") or "low"
+                        ),
+                        "candidate_identity_unverified": True,
+                        "human_review_required": True,
+                        "proposed_by": reviewer,
+                    },
+                }
+                evidence["fingerprint"] = evidence_fingerprint(evidence)
+                self._upsert_persona_candidates(
+                    connection,
+                    persona_id=str(persona["id"]),
+                    job_id=str(audit["job_id"]),
+                    candidates=[
+                        {
+                            "field_name": "social_account",
+                            "value": value,
+                            "display_value": profile_url,
+                            "normalized_value": json.dumps(
+                                value,
+                                sort_keys=True,
+                                ensure_ascii=False,
+                            )[:4000],
+                            "confidence": (
+                                PROFILE_SEARCH_PENDING_CLAIM_CONFIDENCE
+                            ),
+                            "fingerprint": fingerprint,
+                            "source_engine": "native_profile_search_review",
+                            "source_record_id": candidate_id,
+                            "native_status": "candidate_proposed",
+                            "evidence": [evidence],
+                            "observation_details": {
+                                "audit_id": str(audit["id"]),
+                                "candidate_identity_unverified": True,
+                                "human_review_required": True,
+                            },
+                        }
+                    ],
+                    now=now,
+                )
+                claim = _persona_candidate_claim_with_connection(
+                    connection,
+                    persona_id,
+                    {
+                        "field_name": "social_account",
+                        "value": value,
+                        "display_value": profile_url,
+                        "fingerprint": fingerprint,
+                        "source_engine": "native_profile_search_review",
+                    },
+                )
+                if claim is None:
+                    raise RuntimeError("Persona review proposal was not retained")
+                claim_id = str(claim["id"])
+                claim_review_status = str(claim["review_status"])
+            review_id = connection.execute(
+                insert(profile_search_candidate_reviews).values(
+                    audit_id=str(audit["id"]),
+                    candidate_id=candidate_id,
+                    persona_id=str(persona["id"]),
+                    claim_id=claim_id,
+                    decision=decision,
+                    reviewer=reviewer,
+                    note=note,
+                    created_at=now,
+                )
+            ).inserted_primary_key[0]
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(updated_at=now)
+            )
+        return {
+            "id": int(review_id),
+            "audit_id": str(audit_id),
+            "candidate_id": candidate_id,
+            "persona_id": str(persona_id),
+            "persona_name": str(persona["display_name"]),
+            "claim_id": claim_id,
+            "claim_review_status": claim_review_status,
+            "decision": decision,
+            "reviewer": reviewer,
+            "note": note or "",
+            "created_at": _as_iso(now),
+        }
+
     def get_job(self, job_id: str) -> Optional[Dict[str, Any]]:
         with self.engine.connect() as connection:
             row = (
@@ -3889,6 +4740,34 @@ class CaseStore:
         with self.engine.connect() as connection:
             return self._get_persona_with_connection(connection, persona_id)
 
+    def list_approved_persona_social_accounts(
+        self, persona_id: str, *, limit: int = 8
+    ) -> list[Dict[str, Any]]:
+        """Load a bounded set of approved social claims for discovery seeds."""
+        bounded_limit = min(max(1, int(limit)), 50)
+        with self.engine.connect() as connection:
+            rows = list(
+                connection.execute(
+                    select(
+                        persona_claims.c.field_name,
+                        persona_claims.c.value,
+                        persona_claims.c.review_status,
+                    )
+                    .where(
+                        persona_claims.c.persona_id == persona_id,
+                        persona_claims.c.field_name == "social_account",
+                        persona_claims.c.review_status == "approved",
+                    )
+                    .order_by(
+                        persona_claims.c.confidence.desc(),
+                        persona_claims.c.created_at,
+                        persona_claims.c.id,
+                    )
+                    .limit(bounded_limit)
+                ).mappings()
+            )
+        return [dict(row) for row in rows]
+
     def get_persona_export_snapshot(
         self, persona_id: str
     ) -> tuple[Optional[Dict[str, Any]], datetime]:
@@ -4038,27 +4917,10 @@ class CaseStore:
         synchronized = 0
         for candidate in candidates:
             reactivate_legacy = False
-            identity_match = persona_claims.c.fingerprint == candidate["fingerprint"]
-            if (
-                candidate.get("source_engine") == "openai_web_research"
-                and candidate.get("field_name") == "social_account"
-            ):
-                identity_match = or_(
-                    identity_match,
-                    (
-                        (persona_claims.c.field_name == "social_account")
-                        & (persona_claims.c.display_value == candidate["display_value"])
-                    ),
-                )
-            existing = (
-                connection.execute(
-                    select(persona_claims).where(
-                        persona_claims.c.persona_id == persona_id,
-                        identity_match,
-                    )
-                )
-                .mappings()
-                .first()
+            existing = _persona_candidate_claim_with_connection(
+                connection,
+                persona_id,
+                candidate,
             )
             if existing:
                 claim_id = existing["id"]

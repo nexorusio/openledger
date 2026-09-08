@@ -127,6 +127,10 @@ umask 077
     printf "FLASK_SECRET_KEY='%s'\n" "${FLASK_SECRET_KEY}"
     printf "OPENAI_MODEL='%s'\n" "${OPENAI_MODEL}"
     printf "OPENAI_API_BASE_URL='https://api.openai.com/v1'\n"
+    printf "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED='false'\n"
+    printf "OPENLEDGER_PROFILE_SEARCH_PROVIDER='disabled'\n"
+    printf "OPENLEDGER_PROFILE_SEARCH_TIMEOUT_SECONDS='10'\n"
+    printf "OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS='5'\n"
 } > "${ENV_FILE}"
 chmod 0600 "${ENV_FILE}"
 unset FLASK_SECRET_KEY

@@ -11,6 +11,24 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
+from maigret.web.profile_search_facebook import (
+    FACEBOOK_PROFILE_HOSTS,
+    parse_facebook_profile_url,
+)
+from maigret.web.profile_search_instagram import (
+    INSTAGRAM_PROFILE_HOSTS,
+    parse_instagram_profile_url,
+)
+from maigret.web.profile_search_threads import (
+    THREADS_PROFILE_HOSTS,
+    parse_threads_profile_url,
+)
+from maigret.web.profile_search_tiktok import (
+    TIKTOK_PROFILE_HOSTS,
+    parse_tiktok_profile_url,
+)
+from maigret.web.profile_search_x import X_PROFILE_HOSTS, parse_x_profile_url
+
 FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
     {
         "key": "identity",
@@ -71,6 +89,28 @@ FIELD_DISPLAY_LABELS = {
     for group in FIELD_GROUPS
     for field_name, label in group["fields"]
 }
+
+_SUPPORTED_SOCIAL_PROFILE_PARSERS = (
+    (FACEBOOK_PROFILE_HOSTS, parse_facebook_profile_url, "facebook"),
+    (INSTAGRAM_PROFILE_HOSTS, parse_instagram_profile_url, "instagram"),
+    (THREADS_PROFILE_HOSTS, parse_threads_profile_url, "threads"),
+    (TIKTOK_PROFILE_HOSTS, parse_tiktok_profile_url, "tiktok"),
+    (X_PROFILE_HOSTS, parse_x_profile_url, "x"),
+)
+
+
+def _supported_social_profile_reference(
+    value: str,
+) -> tuple[str, Optional[str], Any]:
+    hostname = (urlparse(value).hostname or "").casefold().rstrip(".")
+    for (
+        profile_hosts,
+        profile_parser,
+        canonical_platform,
+    ) in _SUPPORTED_SOCIAL_PROFILE_PARSERS:
+        if hostname in profile_hosts:
+            return hostname, canonical_platform, profile_parser(value)
+    return hostname, None, None
 
 
 def field_display_label(field_name: Any) -> str:
@@ -430,10 +470,17 @@ def build_case_chat_url_claims(
         field_name = "social_account" if is_social_account else "website"
         stored_value: Any = public_url
         if is_social_account:
+            _, canonical_platform, profile_reference = (
+                _supported_social_profile_reference(public_url)
+            )
             stored_value = {
-                "platform": normalized_host[:300],
+                "platform": canonical_platform or normalized_host[:300],
                 "url": public_url,
-                "username": str(target_persona).strip()[:500],
+                "username": (
+                    profile_reference.handle
+                    if profile_reference is not None
+                    else str(target_persona).strip()[:500]
+                ),
             }
         fingerprint = claim_fingerprint(field_name, stored_value)
         evidence: Dict[str, Any] = {
@@ -934,11 +981,24 @@ def extract_ai_persona_claims(
 
         stored_value: Any = value
         if field_name == "social_account":
-            hostname = urlparse(value).hostname or "Public account"
+            hostname, canonical_platform, profile_reference = (
+                _supported_social_profile_reference(value)
+            )
+            account_username = username
+            if canonical_platform:
+                if profile_reference is None:
+                    reject("invalid_social_profile_url")
+                    continue
+                value = profile_reference.canonical_url
+                account_username = profile_reference.handle
             stored_value = {
-                "platform": hostname.removeprefix("www.")[:300],
+                "platform": canonical_platform
+                or (
+                    hostname.removeprefix("www.")[:300]
+                    or "Public account"
+                ),
                 "url": value,
-                "username": username,
+                "username": account_username,
             }
         fingerprint = claim_fingerprint(field_name, stored_value)
         deduplication_key = (username.casefold(), fingerprint, source_url)

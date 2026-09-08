@@ -91,6 +91,7 @@ governed adapters through the existing worker and evidence model.
 
 | Source | OpenLedger use | Boundary |
 |---|---|---|
+| Native major-platform search | Search first for public Facebook, Instagram, Threads, TikTok, and X profile candidates using bounded, platform-scoped queries. | Disabled by default; a protected server-side search credential is required. Results are scored leads, never identity conclusions, and proposing one creates only a pending Persona claim. |
 | Maigret and Socid Extractor | Public account discovery and normalized profile evidence. | Account matches and extracted values remain reviewable evidence. |
 | User Scanner | Optional email-registration observations plus bounded major-platform username verification. | Email checks require one-subject opt-in; username checks use selected aliases, capped depth/breadth, and explicit approval for X's `api.vxtwitter.com` path. |
 | GitHub public API | Enrich exact claimed GitHub user profiles. | Fixed origin, no credential, bounded profiles and response size. |
@@ -112,8 +113,8 @@ provider exception and is not represented as a free governed source.
 
 Profile discovery offers a 10-minute Focused mode and a 30-minute Exhaustive
 mode. Queue time is excluded from both server-owned budgets. Cancellation,
-worker heartbeat recovery, partial outcomes, feature flags, and per-provider
-circuit breakers are documented in the
+worker heartbeat recovery, search-first candidate review, partial outcomes,
+feature flags, and per-provider circuit breakers are documented in the
 [profile discovery operations runbook](docs/profile-discovery-operations.md).
 
 ## AI assistance

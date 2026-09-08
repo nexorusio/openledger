@@ -51,6 +51,26 @@ def test_case_chat_builds_unverified_url_claim_with_exact_provenance():
     assert claim["evidence"][0]["details"]["independently_corroborated"] is False
 
 
+def test_case_chat_social_url_stores_parsed_handle_not_persona_name():
+    url = "https://mobile.twitter.com/bob_example"
+    claim = build_case_chat_url_claims(
+        [url],
+        target_persona="alice_example",
+        user_message_id="user-message",
+        assistant_message_id="assistant-message",
+        provided_by="field.analyst",
+    )[0]
+
+    assert claim["value"] == {
+        "platform": "x",
+        "url": url,
+        "username": "bob_example",
+    }
+    assert claim["evidence"][0]["details"]["target_persona"] == (
+        "alice_example"
+    )
+
+
 def test_extraction_ignores_unsupported_sensitive_inferences_and_unsafe_urls():
     report = {
         "username": "alice",
