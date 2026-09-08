@@ -1,7 +1,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select, update
@@ -43,11 +43,21 @@ def test_job_lifecycle_is_transactional_and_auditable(store):
     assert queued["status"] == "queued"
     assert queued["usernames"] == ["alice", "bob"]
     assert queued["progress"] == {"checked": 0, "total": None, "found": 0}
+    assert queued["options"]["execution_mode"] == "focused"
+    assert queued["options"]["profile_discovery_policy"]["mode"] == "focused"
+    assert queued["budget_seconds"] == 600
+    assert queued["budget_policy_version"] == "profile-discovery-v1"
+    assert queued["deadline_at"] is None
 
     claimed = store.claim_next("worker:test")
     assert claimed["job_id"] == job_id
     assert claimed["status"] == "running"
     assert claimed["attempts"] == 1
+    assert claimed["deadline_at"] is not None
+    assert (
+        datetime.fromisoformat(claimed["deadline_at"])
+        - datetime.fromisoformat(claimed["started_at"])
+    ).total_seconds() == 600
 
     store.append_event(job_id, {"type": "start", "username": "alice", "total": 10})
     store.append_event(job_id, {"type": "progress", "checked": 4, "total": 10})
@@ -250,8 +260,13 @@ def test_cancel_request_is_persistent_and_idempotent(store):
     store.claim_next("worker:test")
     assert store.request_cancel(job_id) is True
     assert store.is_cancel_requested(job_id) is True
-    assert store.get_job(job_id)["status"] == "cancel_requested"
-    assert store.request_cancel(job_id) is False
+    cancelled = store.get_job(job_id)
+    assert cancelled["status"] == "cancel_requested"
+    assert cancelled["cancel_requested_at"] is not None
+    assert store.request_cancel(job_id) is True
+    assert [
+        item["event"]["type"] for item in store.get_events(job_id)
+    ].count("cancel_requested") == 1
 
 
 def test_queued_job_is_cancelled_immediately(store):
@@ -259,8 +274,24 @@ def test_queued_job_is_cancelled_immediately(store):
     assert store.request_cancel(job_id) is True
     cancelled = store.get_job(job_id)
     assert cancelled["status"] == "cancelled"
+    assert cancelled["cancel_requested_at"] is not None
     assert cancelled["completed_at"] is not None
+    assert store.request_cancel(job_id) is True
     assert store.claim_next("worker:test") is None
+
+
+def test_queued_scan_is_refused_without_retry_after_server_flag_changes(
+    store, monkeypatch
+):
+    job_id = store.create_investigation(["alice"], {"execution_mode": "focused"})
+    monkeypatch.setenv("OPENLEDGER_FOCUSED_DISCOVERY_ENABLED", "false")
+
+    assert store.claim_next("worker:test") is None
+    refused = store.get_job(job_id)
+    assert refused["status"] == "failed"
+    assert refused["attempts"] == 0
+    assert "Focused" in refused["error"]
+    assert store.claim_next("worker:other") is None
 
 
 def test_store_provides_worker_lock_handle(store):
@@ -282,6 +313,79 @@ def test_stale_worker_job_is_marked_interrupted(store):
     interrupted = store.get_job(job_id)
     assert interrupted["status"] == "interrupted"
     assert "worker stopped" in interrupted["error"]
+
+
+def test_worker_heartbeat_requires_current_owner_and_unexpired_lease(store):
+    job_id = store.create_investigation(["alice"], {})
+    claimed = store.claim_next("worker:owner")
+    assert claimed["worker_id"] == "worker:owner"
+
+    assert store.heartbeat(job_id, "worker:other") is False
+    assert store.heartbeat(job_id, "worker:owner") is True
+
+    with store.engine.begin() as connection:
+        connection.execute(
+            update(investigation_jobs)
+            .where(investigation_jobs.c.id == job_id)
+            .values(heartbeat_at=utcnow() - timedelta(seconds=31))
+        )
+    assert store.heartbeat(job_id, "worker:owner") is False
+
+
+def test_expired_worker_cannot_publish_or_retry_stale_job(store):
+    job_id = store.create_investigation(["alice"], {})
+    store.claim_next("worker:expired")
+    with store.engine.begin() as connection:
+        connection.execute(
+            update(investigation_jobs)
+            .where(investigation_jobs.c.id == job_id)
+            .values(heartbeat_at=utcnow() - timedelta(seconds=31))
+        )
+
+    assert store.mark_stale_running(30) == 1
+    assert store.append_event(
+        job_id,
+        {"type": "found", "site": "Late evidence"},
+        runtime_guard=True,
+        worker_id="worker:expired",
+    ) == 0
+    assert store.finish(
+        job_id,
+        {"status": "completed", "usernames": ["alice"]},
+        worker_id="worker:expired",
+    ) is False
+
+    interrupted = store.get_job(job_id)
+    assert interrupted["status"] == "interrupted"
+    assert interrupted["attempts"] == 1
+    with store.engine.connect() as connection:
+        stored_worker_id = connection.scalar(
+            select(investigation_jobs.c.worker_id).where(
+                investigation_jobs.c.id == job_id
+            )
+        )
+    assert stored_worker_id is None
+    assert store.claim_next("worker:new") is None
+    assert not any(
+        item["event"].get("site") == "Late evidence"
+        for item in store.get_events(job_id)
+    )
+
+
+def test_terminal_job_result_is_immutable(store):
+    job_id = store.create_investigation(["alice"], {})
+    claimed = store.claim_next("worker:owner")
+    assert store.finish(
+        job_id,
+        {"status": "completed", "marker": "first"},
+        worker_id=claimed["worker_id"],
+    ) is True
+    assert store.finish(
+        job_id,
+        {"status": "failed", "marker": "late"},
+        worker_id=claimed["worker_id"],
+    ) is False
+    assert store.get_job(job_id)["marker"] == "first"
 
 
 def test_stale_combined_ai_job_fails_analysis_but_preserves_snapshot(store):

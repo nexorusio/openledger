@@ -3,6 +3,7 @@ import json
 
 import pytest
 
+from maigret.web import collector_adapters as collector_module
 from maigret.result import MaigretCheckResult, MaigretCheckStatus
 from maigret.web.collector_adapters import (
     CLOUDFLARE_DNS_ENGINE,
@@ -85,6 +86,42 @@ from maigret.web.collector_adapters import (
     user_scanner_username_targets,
     validate_google_places_connection,
 )
+
+
+@pytest.mark.asyncio
+async def test_subprocess_cleanup_escalates_and_stays_bounded(monkeypatch):
+    class StubbornProcess:
+        returncode = None
+        terminated = False
+        killed = False
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+        async def wait(self):
+            if not self.killed:
+                await asyncio.sleep(10)
+            return -9
+
+    async def communicate_forever():
+        await asyncio.sleep(10)
+
+    process = StubbornProcess()
+    communicate_task = asyncio.create_task(communicate_forever())
+    monkeypatch.setattr(collector_module, "SUBPROCESS_CLEANUP_SECONDS", 0.05)
+    monkeypatch.setattr(collector_module, "SUBPROCESS_TERMINATE_SECONDS", 0.02)
+    loop = asyncio.get_running_loop()
+    started_at = loop.time()
+
+    await collector_module._stop_subprocess(process, communicate_task)
+
+    assert loop.time() - started_at < 0.2
+    assert process.terminated is True
+    assert process.killed is True
+    assert communicate_task.cancelled()
 
 
 def _claimed_github(username="alice", url="https://github.com/alice"):
@@ -3544,6 +3581,82 @@ def test_confirmed_name_findings_become_pending_claim_inputs_with_warnings():
         claim["evidence"][0]["details"]["automatic_approval_allowed"] is False
         for claim in wikipedia_claims + offshore_claims
     )
+
+
+def test_provider_failure_classification_preserves_partial_and_absence_results():
+    assert collector_module._transient_provider_result(
+        {"status": "rate_limited"}
+    ) is True
+    assert collector_module._transient_provider_result(
+        {"status": "unavailable"}
+    ) is True
+    assert collector_module._transient_provider_result(
+        {"status": "not_found"}
+    ) is False
+    assert collector_module._transient_provider_result(
+        {"status": "partial", "findings": [{"id": "retained"}]}
+    ) is False
+    assert collector_module._transient_provider_result(
+        [
+            {
+                "status": "error",
+                "extra": {"scan_stage": "adapter"},
+            }
+        ]
+    ) is True
+
+
+@pytest.mark.asyncio
+async def test_governed_provider_opens_after_diagnostics_and_does_not_retry():
+    calls = 0
+
+    @collector_module.governed_provider("test-provider")
+    async def unavailable():
+        nonlocal calls
+        calls += 1
+        return {"status": "rate_limited"}
+
+    for _ in range(3):
+        assert (await unavailable())["status"] == "rate_limited"
+    with pytest.raises(collector_module.ProviderCircuitOpen):
+        await unavailable()
+    assert calls == 3
+
+
+@pytest.mark.asyncio
+async def test_server_flag_can_bypass_breaker_without_retrying(monkeypatch):
+    monkeypatch.setenv("OPENLEDGER_PROVIDER_CIRCUIT_BREAKERS_ENABLED", "false")
+    calls = 0
+
+    @collector_module.governed_provider("test-provider")
+    async def unavailable():
+        nonlocal calls
+        calls += 1
+        return {"status": "unavailable"}
+
+    for _ in range(4):
+        assert (await unavailable())["status"] == "unavailable"
+    assert calls == 4
+    assert (
+        collector_module.provider_circuits.snapshot("test-provider")["status"]
+        == "closed"
+    )
+
+
+@pytest.mark.asyncio
+async def test_server_provider_flag_fails_closed_before_adapter_call(monkeypatch):
+    monkeypatch.setenv("OPENLEDGER_USER_SCANNER_DISCOVERY_ENABLED", "false")
+    calls = 0
+
+    @collector_module.governed_provider(collector_module.USER_SCANNER_PROVIDER)
+    async def user_scanner_operation():
+        nonlocal calls
+        calls += 1
+        return []
+
+    with pytest.raises(collector_module.ProfileDiscoveryPolicyError):
+        await user_scanner_operation()
+    assert calls == 0
 
 
 @pytest.mark.asyncio

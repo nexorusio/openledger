@@ -4,11 +4,12 @@
 {% block breadcrumb %}Investigation results{% endblock %}
 
 {% block content %}
+{% set partial_status = runtime_state.collection_status %}
 <section class="page-heading">
     <div>
-        <p class="eyebrow">Completed investigation</p>
+        <p class="eyebrow">{{ 'Partial investigation' if partial_status else 'Completed investigation' }}</p>
         <h1>Investigation results</h1>
-        <p class="page-description">Review supported profile leads, low-signal candidates, suppressed detector noise, reports, and optional AI assessment.</p>
+        <p class="page-description">{{ 'Review the evidence retained before collection ended. Coverage is incomplete.' if partial_status else 'Review supported profile leads, low-signal candidates, suppressed detector noise, reports, and optional AI assessment.' }}</p>
     </div>
     <div class="heading-actions">
         {% if result_case %}
@@ -18,7 +19,28 @@
     </div>
 </section>
 
+{% if partial_status %}
+<div class="security-callout mb-4">
+    <i data-lucide="triangle-alert"></i>
+    <span>
+        <strong>
+            {{ 'Runtime budget reached.' if partial_status == 'budget_exhausted' else 'Collection was stopped.' if partial_status == 'cancelled' else 'Worker execution was interrupted.' }}
+        </strong>
+        {{ runtime_state.collection_message or 'Evidence collected before the stop was retained.' }}
+        This is a partial evidence set, not a completed coverage claim or an identity approval.
+    </span>
+</div>
+{% endif %}
+
 <section class="metric-grid" aria-label="Investigation summary">
+    <article class="metric-card">
+        <span class="metric-icon"><i data-lucide="timer"></i></span>
+        <div class="metric-copy">
+            <span class="metric-label">Coverage plan</span>
+            <strong class="metric-value">{{ runtime_state.mode_label if runtime_state.budget_recorded else 'Legacy run' }}</strong>
+            <small class="metric-detail">{{ (runtime_state.budget_seconds // 60) ~ '-minute runtime budget · queue time excluded' if runtime_state.budget_recorded else 'No governed runtime budget was recorded for this historical result' }}</small>
+        </div>
+    </article>
     <article class="metric-card">
         <span class="metric-icon"><i data-lucide="users"></i></span>
         <div class="metric-copy">

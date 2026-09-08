@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from threading import Timer
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy import delete
 
 from maigret.web.case_store import CaseStore, investigation_jobs
 from maigret.web.persona_intelligence import extract_case_chat_persona_claims
+from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web import app as web_app_module
 
 
@@ -73,6 +75,121 @@ def test_live_job_is_queued_without_browser_owned_thread(
     assert "Open live progress" in history
 
 
+def test_legacy_search_route_uses_the_same_governed_persistent_queue(
+    client, persistent_store, monkeypatch
+):
+    def forbidden_thread(*_args, **_kwargs):
+        raise AssertionError("legacy search must not start a web-process thread")
+
+    monkeypatch.setattr(web_app_module, "Thread", forbidden_thread)
+    response = client.post(
+        "/search",
+        data={"usernames": "alice", "mode": "full"},
+    )
+
+    assert response.status_code == 302
+    job_id = response.location.rsplit("/", 1)[-1]
+    stored = persistent_store.get_job(job_id)
+    assert response.location.endswith(f"/live/{job_id}")
+    assert stored["status"] == "queued"
+    assert stored["options"]["execution_mode"] == "exhaustive"
+    assert stored["options"]["all_sites"] is True
+    assert stored["options"]["profile_discovery_policy"]["mode"] == "exhaustive"
+
+
+def test_api_scan_refuses_server_disabled_mode(
+    client, persistent_store, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED", "false")
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "policy-csrf"
+    response = client.post(
+        "/api/scan",
+        headers={"X-OpenLedger-CSRF": "policy-csrf"},
+        data={"usernames": "alice", "mode": "full"},
+    )
+
+    assert response.status_code == 503
+    assert "Exhaustive" in response.get_json()["error"]
+
+
+def test_runtime_endpoint_distinguishes_queue_time_from_running_budget(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(
+        ["alice"], {"execution_mode": "focused"}
+    )
+
+    queued = client.get(f"/api/scan/{job_id}/runtime").get_json()
+    assert queued == {
+        "status": "queued",
+        "mode": "focused",
+        "mode_label": "Focused",
+        "budget_recorded": True,
+        "budget_seconds": 600,
+        "deadline_at": None,
+        "heartbeat_at": None,
+        "cancel_requested_at": None,
+        "collection_status": None,
+        "collection_message": "",
+        "error": "",
+    }
+
+    persistent_store.claim_next("worker:runtime")
+    running = client.get(f"/api/scan/{job_id}/runtime").get_json()
+    assert running["status"] == "running"
+    assert running["deadline_at"] is not None
+    assert running["heartbeat_at"] is not None
+    assert running["budget_seconds"] == 600
+
+
+def test_terminal_stream_maps_budget_limited_report_to_partial(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(
+        ["alice"], {"execution_mode": "exhaustive"}
+    )
+    persistent_store.claim_next("worker:budget-view")
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": ["alice"],
+            "individual_reports": [],
+            "graph_file": f"search_{job_id}/graph.html",
+            "found_count": 1,
+            "profile_reliability_version": 1,
+            "collection_status": "budget_exhausted",
+            "collection_message": "Partial evidence retained.",
+        },
+    )
+
+    stream = client.get(f"/api/scan/{job_id}/stream").get_data(as_text=True)
+    assert '"status": "partial"' in stream
+    assert '"reason": "budget_exhausted"' in stream
+    assert f'"/results/search_{job_id}"' in stream
+
+
+def test_provider_circuit_event_is_explicit_and_non_decisional(web_app):
+    event = web_app.provider_circuit_event(
+        ProviderCircuitOpen("github", 42),
+        "github-public-profile",
+    )
+
+    assert event == {
+        "type": "provider_circuit_open",
+        "collector": "github-public-profile",
+        "provider": "github",
+        "retry_after_seconds": 42,
+        "message": (
+            "github-public-profile was skipped because its provider circuit is "
+            "open. Try again after about 42 seconds. Saved evidence remains "
+            "available and no identity decision was made automatically."
+        ),
+    }
+
+
 def test_stream_reconnect_replays_events_without_deleting_job(client, persistent_store):
     job_id = persistent_store.create_investigation(["alice"], {})
     persistent_store.claim_next("worker:test")
@@ -124,7 +241,21 @@ def test_stop_route_sets_durable_cancel_request(client, persistent_store):
         headers={"X-OpenLedger-CSRF": "stop-csrf"},
     )
     assert response.status_code == 200
+    assert response.get_json()["status"] == "cancel_requested"
+    assert response.get_json()["cancel_requested"] is True
+    assert response.get_json()["cancel_requested_at"] is not None
+    assert response.get_json()["terminal"] is False
     assert persistent_store.get_job(job_id)["status"] == "cancel_requested"
+
+    repeated = client.post(
+        f"/api/scan/{job_id}/stop",
+        headers={"X-OpenLedger-CSRF": "stop-csrf"},
+    )
+    assert repeated.status_code == 200
+    assert repeated.get_json()["status"] == "cancel_requested"
+    assert [
+        item["event"]["type"] for item in persistent_store.get_events(job_id)
+    ].count("cancel_requested") == 1
 
 
 def test_stop_route_rejects_missing_csrf(client, persistent_store):
@@ -163,6 +294,73 @@ def test_persistent_worker_actively_interrupts_inflight_search_after_stop(
     assert cancelled["status"] == "cancelled"
     assert cancelled["completed_at"] is not None
     assert persistent_store.get_events(job_id)[-1]["event"]["type"] == "done"
+
+
+def test_runtime_sink_rejects_late_evidence_after_stop_and_terminal_state(
+    web_app, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    sink = web_app.PersistentEventSink(persistent_store, job_id)
+
+    assert persistent_store.request_cancel(job_id) is True
+    sink.put({"type": "found", "site": "Late profile"})
+    sink.put({"type": "stopped", "collector": "maigret"})
+    persistent_store.finish(
+        job_id,
+        {"status": "cancelled", "usernames": ["alice"]},
+    )
+    sink.put({"type": "progress", "checked": 999, "total": 999})
+    sink.put({"type": "done", "status": "cancelled"})
+    sink.put({"type": "done", "status": "cancelled"})
+
+    events = [item["event"]["type"] for item in persistent_store.get_events(job_id)]
+    assert "found" not in events
+    assert "progress" not in events
+    assert events[-2:] == ["stopped", "done"]
+    assert events.count("done") == 1
+    assert persistent_store.get_job(job_id)["progress"]["found"] == 0
+
+
+def test_persistent_stop_has_a_bounded_terminal_deadline(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    cancellations = 0
+
+    async def stubborn_stream(runtime_job, *_args, **_kwargs):
+        nonlocal cancellations
+        runtime_job["general_results"] = []
+        while True:
+            try:
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                cancellations += 1
+                if cancellations >= 2:
+                    raise
+
+    monkeypatch.setattr(web_app, "_stream_search", stubborn_stream)
+    monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
+    monkeypatch.setattr(web_app, "PERSISTENT_CANCEL_POLL_SECONDS", 0.005)
+    monkeypatch.setattr(web_app, "PERSISTENT_CANCEL_COMPLETION_SECONDS", 0.05)
+    request_stop = Timer(0.01, persistent_store.request_cancel, args=(job_id,))
+
+    started_at = time.monotonic()
+    request_stop.start()
+    try:
+        web_app.run_persistent_job(persistent_store, job)
+    finally:
+        request_stop.join()
+
+    assert time.monotonic() - started_at < 0.5
+    assert cancellations >= 2
+    assert persistent_store.get_job(job_id)["status"] == "cancelled"
+    events = [item["event"] for item in persistent_store.get_events(job_id)]
+    assert any(
+        event.get("reason") == "cancellation_deadline_exceeded"
+        for event in events
+    )
 
 
 def test_queued_job_does_not_store_proxy_credentials(
@@ -224,6 +422,76 @@ def test_worker_execution_persists_terminal_result(
     assert any(
         item["event"]["type"] == "done" for item in persistent_store.get_events(job_id)
     )
+
+
+def test_worker_budget_expiry_without_findings_is_not_a_generic_failure(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    job["deadline_at"] = (
+        datetime.now(timezone.utc) + timedelta(milliseconds=30)
+    ).isoformat()
+
+    async def slow_stream(runtime_job, *_args, **_kwargs):
+        await asyncio.sleep(1)
+        return []
+
+    monkeypatch.setattr(web_app, "_stream_search", slow_stream)
+    monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    result = persistent_store.get_job(job_id)
+    assert result["status"] == "budget_exhausted"
+    assert result["collection_status"] == "budget_exhausted"
+    assert result["execution_budget"]["mode"] == "focused"
+    assert [
+        item["event"]["type"] for item in persistent_store.get_events(job_id)[-2:]
+    ] == ["budget_exhausted", "done"]
+
+
+def test_worker_budget_expiry_preserves_partial_findings(
+    web_app, persistent_store, monkeypatch
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    job["deadline_at"] = (
+        datetime.now(timezone.utc) + timedelta(milliseconds=30)
+    ).isoformat()
+
+    async def slow_stream(runtime_job, *_args, **_kwargs):
+        runtime_job["general_results"] = [
+            ("alice", "username", {"Example": object()})
+        ]
+        await asyncio.sleep(1)
+        return runtime_job["general_results"]
+
+    monkeypatch.setattr(web_app, "_stream_search", slow_stream)
+    monkeypatch.setattr(
+        web_app,
+        "build_reports",
+        lambda _results, usernames, session_key: {
+            "status": "completed",
+            "session_folder": f"search_{session_key}",
+            "usernames": usernames,
+            "individual_reports": [],
+            "graph_file": f"search_{session_key}/graph.html",
+            "found_count": 1,
+            "profile_reliability_version": 1,
+        },
+    )
+    monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
+
+    web_app.run_persistent_job(persistent_store, job)
+
+    result = persistent_store.get_job(job_id)
+    assert result["status"] == "completed"
+    assert result["collection_status"] == "budget_exhausted"
+    assert result["found_count"] == 1
+    done = persistent_store.get_events(job_id)[-1]["event"]
+    assert done["status"] == "partial"
+    assert done["reason"] == "budget_exhausted"
 
 
 def test_worker_shutdown_saves_partial_findings_as_interrupted_collection(
@@ -1457,6 +1725,12 @@ def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
     assert refresh_job["kind"] == "refresh"
     assert refresh_job["case_id"] == source_job["case_id"]
     assert refresh_job["options"]["all_sites"] is True
+    assert refresh_job["budget_seconds"] == 1800
+    assert refresh_job["deadline_at"] is None
+    assert (
+        refresh_job["options"]["profile_discovery_policy"]["mode"]
+        == "exhaustive"
+    )
     assert refresh_job["options"]["tags"] == ["social"]
     assert specification["target_persona_id"] == persona_id
     assert specification["subject_label"] == subject
@@ -1466,6 +1740,11 @@ def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
     assert specification["enable_archived_url_evidence"] is True
     assert "ferdinata" in refresh_job["usernames"]
     assert "f@example.test" not in refresh_job["usernames"]
+
+    claimed_refresh = persistent_store.claim_next("worker:persona-refresh")
+    assert claimed_refresh["job_id"] == refresh_job_id
+    assert claimed_refresh["deadline_at"] is not None
+    assert claimed_refresh["options"]["execution_budget"]["mode"] == "exhaustive"
 
 
 def test_persona_rerun_preserves_exact_username_origin(client, persistent_store):

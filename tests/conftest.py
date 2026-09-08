@@ -9,6 +9,7 @@ from maigret.sites import MaigretDatabase
 from maigret.maigret import setup_arguments_parser
 from maigret.settings import Settings
 from aiohttp import web
+from maigret.web.provider_circuit_breaker import provider_circuits
 
 
 LOCAL_SERVER_PORT = 8080
@@ -80,6 +81,13 @@ def reports_autoclean():
     remove_test_reports()
     yield
     remove_test_reports()
+
+
+@pytest.fixture(autouse=True)
+def provider_circuits_autoreset():
+    provider_circuits.reset()
+    yield
+    provider_circuits.reset()
 
 
 @pytest.fixture(scope='session')

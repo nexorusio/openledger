@@ -49,6 +49,8 @@
                         <span class="badge-soft warning" title="{{ result.collection_message }}">Partial · stopped</span>
                         {% elif result.status == 'completed' and result.collection_status == 'interrupted' %}
                         <span class="badge-soft warning" title="{{ result.collection_message }}">Partial · interrupted</span>
+                        {% elif result.status == 'completed' and result.collection_status == 'budget_exhausted' %}
+                        <span class="badge-soft warning" title="{{ result.collection_message }}">Partial · budget reached</span>
                         {% elif result.status == 'completed' %}
                         <span class="badge-soft success">Completed</span>
                         {% elif result.status == 'queued' %}
@@ -60,7 +62,9 @@
                         {% elif result.status == 'cancelled' %}
                         <span class="badge-soft warning">Cancelled</span>
                         {% elif result.status == 'interrupted' %}
-                        <span class="badge-soft warning" title="{{ result.error }}">Interrupted</span>
+                        <span class="badge-soft warning" title="{{ result.error }}">Interrupted · no auto-retry</span>
+                        {% elif result.status == 'budget_exhausted' %}
+                        <span class="badge-soft warning" title="{{ result.error }}">Budget reached · no findings</span>
                         {% else %}
                         <span class="badge-soft warning" title="{{ result.error }}">Failed</span>
                         {% endif %}
@@ -81,7 +85,7 @@
                         {% elif result.status in ('queued', 'running', 'cancel_requested') %}
                         <a href="{{ url_for('live_results', job_id=result.job_id) }}" class="btn btn-sm btn-outline-secondary">Open live progress</a>
                         {% endif %}
-                        {% if result.status in ('completed', 'failed', 'cancelled', 'interrupted') %}
+                        {% if result.status in ('completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted') %}
                         <form method="POST"
                               action="{{ url_for('delete_history_entry', session_folder=result.session_folder) }}"
                               class="d-inline{% if result.case_title %} case-delete-form{% endif %}"
