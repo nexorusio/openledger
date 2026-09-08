@@ -1,7 +1,11 @@
+import io
 from datetime import datetime, timezone
+
+from PIL import Image
 
 from maigret.web import persona_pdf as persona_pdf_module
 from maigret.web.persona_pdf import (
+    build_investigation_report_view,
     build_persona_export_snapshot,
     generate_persona_pdf,
     persona_pdf_filename,
@@ -77,6 +81,127 @@ def _persona():
     }
 
 
+def _approved_claim(
+    claim_id,
+    field_name,
+    value,
+    confidence,
+    *,
+    source_url="https://example.test/public-record",
+    display_value=None,
+    latitude=None,
+    longitude=None,
+):
+    return {
+        "id": claim_id,
+        "field_name": field_name,
+        "value": value,
+        "display_value": display_value if display_value is not None else value,
+        "confidence": confidence,
+        "review_status": "approved",
+        "reviewed_by": "analyst",
+        "reviewed_at": "2026-09-02T11:00:00+00:00",
+        "first_seen_at": "2026-09-01T09:00:00+00:00",
+        "last_seen_at": "2026-09-02T10:00:00+00:00",
+        "latitude": latitude,
+        "longitude": longitude,
+        "reviews": [],
+        "evidence": [
+            {
+                "source_name": "Approved public record",
+                "source_url": source_url,
+                "evidence_type": "cited_public_web",
+                "observed_at": "2026-09-02T10:30:00+00:00",
+            }
+        ],
+    }
+
+
+def _rich_persona():
+    shared_affiliation_source = "https://example.test/curriculum-vitae"
+    persona = {
+        "id": "persona-rich",
+        "case_id": "case-rich",
+        "case_title": "Public integrity inquiry",
+        "display_name": "Alice Example",
+        "claims": [
+            _approved_claim(
+                "name",
+                "full_name",
+                "Alice Example",
+                96,
+                source_url="https://example.test/alice",
+            ),
+            _approved_claim(
+                "photo",
+                "photograph",
+                "https://media.example.test/alice.jpg",
+                91,
+                source_url="https://example.test/alice",
+            ),
+            _approved_claim(
+                "summary",
+                "summary",
+                "Jakarta-based technology executive with a public corporate profile.",
+                84,
+            ),
+            _approved_claim(
+                "location",
+                "current_location",
+                "Jakarta, Indonesia",
+                88,
+                latitude=-6.2088,
+                longitude=106.8456,
+            ),
+            _approved_claim(
+                "position",
+                "occupation",
+                "Chief Technology Officer",
+                86,
+                source_url=shared_affiliation_source,
+            ),
+            _approved_claim(
+                "company",
+                "company",
+                "Example Teknologi",
+                82,
+                source_url=shared_affiliation_source,
+            ),
+            _approved_claim("email", "email", "alice@example.test", 78),
+            _approved_claim(
+                "social",
+                "social_account",
+                {
+                    "platform": "linkedin.com",
+                    "username": "alice-example",
+                    "url": "https://linkedin.com/in/alice-example",
+                },
+                89,
+                display_value="Alice Example on LinkedIn",
+            ),
+            _approved_claim(
+                "asset",
+                "company_ownership",
+                "Declared shareholder in Example Holdings",
+                73,
+            ),
+            _approved_claim(
+                "risk",
+                "offshore_database_match",
+                "Name match requiring analyst disambiguation",
+                61,
+            ),
+        ],
+    }
+    return persona
+
+
+def _png_bytes(size, color):
+    output = io.BytesIO()
+    Image.new("RGB", size, color).save(output, format="PNG")
+    return output.getvalue()
+
+
 def test_persona_export_snapshot_contains_only_approved_records_and_provenance():
     generated_at = datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc)
     snapshot = build_persona_export_snapshot(
@@ -97,6 +222,167 @@ def test_persona_export_snapshot_contains_only_approved_records_and_provenance()
         "https://example.test/alice?source=public"
     )
     assert exported_claims[0]["approval_note"] == ("Compared with the cited page.")
+
+
+def test_investigation_view_is_human_centred_and_scores_every_fact():
+    snapshot = build_persona_export_snapshot(
+        _rich_persona(),
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+        generated_by="analyst",
+    )
+
+    report = build_investigation_report_view(snapshot)
+
+    assert report["name"] == "Alice Example"
+    assert report["name_confidence"] == 96
+    assert report["photograph"]["confidence"] == 91
+    assert report["locations"][0]["value"] == "Jakarta, Indonesia"
+    assert report["affiliations"][0]["value"] == "Chief Technology Officer"
+    assert report["affiliations"][0]["secondary"] == "Example Teknologi"
+    assert report["affiliations"][0]["confidence"] == 86
+    assert report["affiliations"][0]["secondary_confidence"] == 82
+    assert report["contacts"][0]["value"] == "alice@example.test"
+    assert report["digital_presence"][0]["value"] == "LinkedIn - @alice-example"
+    assert report["assets"][0]["confidence"] == 73
+    assert report["risk_indicators"][0]["confidence"] == 61
+    for section in (
+        "alternate_names",
+        "locations",
+        "addresses",
+        "affiliations",
+        "contacts",
+        "digital_presence",
+        "assets",
+        "risk_indicators",
+    ):
+        assert all(isinstance(item["confidence"], int) for item in report[section])
+
+
+def test_affiliation_pairing_accepts_the_same_url_observed_at_different_times():
+    persona = _rich_persona()
+    company = next(
+        claim for claim in persona["claims"] if claim["field_name"] == "company"
+    )
+    company["evidence"][0]["observed_at"] = "2026-09-02T10:31:00+00:00"
+    snapshot = build_persona_export_snapshot(
+        persona,
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+        generated_by="analyst",
+    )
+
+    report = build_investigation_report_view(snapshot)
+
+    assert len(report["affiliations"]) == 1
+    assert report["affiliations"][0]["secondary"] == "Example Teknologi"
+
+
+def test_pending_photo_and_location_never_trigger_media_requests(monkeypatch):
+    persona = _persona()
+    pending_photo = _approved_claim(
+        "pending-photo",
+        "photograph",
+        "https://media.example.test/pending.jpg",
+        99,
+        latitude=None,
+        longitude=None,
+    )
+    pending_photo["review_status"] = "pending"
+    pending_location = _approved_claim(
+        "pending-location",
+        "current_location",
+        "Pending City",
+        99,
+        latitude=1.0,
+        longitude=2.0,
+    )
+    pending_location["review_status"] = "pending"
+    persona["claims"].extend([pending_photo, pending_location])
+    monkeypatch.setattr(
+        persona_pdf_module,
+        "load_approved_portrait",
+        lambda url: (_ for _ in ()).throw(AssertionError("pending photo fetched")),
+    )
+    monkeypatch.setattr(
+        persona_pdf_module,
+        "render_location_map",
+        lambda latitude, longitude: (_ for _ in ()).throw(
+            AssertionError("pending location fetched")
+        ),
+    )
+
+    pdf_bytes = generate_persona_pdf(
+        persona,
+        generated_by="analyst",
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert pdf_bytes.startswith(b"%PDF-")
+
+
+def test_approved_media_failures_never_block_the_report(monkeypatch):
+    monkeypatch.setattr(
+        persona_pdf_module,
+        "load_approved_portrait",
+        lambda url: (_ for _ in ()).throw(OSError("photo unavailable")),
+    )
+    monkeypatch.setattr(
+        persona_pdf_module,
+        "render_location_map",
+        lambda latitude, longitude: (_ for _ in ()).throw(OSError("map unavailable")),
+    )
+
+    pdf_bytes = generate_persona_pdf(
+        _rich_persona(),
+        generated_by="analyst",
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert b"%%EOF" in pdf_bytes[-1024:]
+
+
+def test_long_approved_name_does_not_break_the_hero_layout():
+    persona = _persona()
+    long_name = "Alice Example " * 120
+    persona["claims"].append(
+        _approved_claim("long-name", "full_name", long_name, 95)
+    )
+
+    pdf_bytes = generate_persona_pdf(
+        persona,
+        generated_by="analyst",
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert b"%%EOF" in pdf_bytes[-1024:]
+
+
+def test_investigation_pdf_embeds_approved_photo_and_map(monkeypatch):
+    photo_calls = []
+    map_calls = []
+
+    def approved_photo(url):
+        photo_calls.append(url)
+        return _png_bytes((240, 320), "#315D7D")
+
+    def approved_map(latitude, longitude):
+        map_calls.append((latitude, longitude))
+        return _png_bytes((920, 360), "#DCE8E8")
+
+    monkeypatch.setattr(persona_pdf_module, "load_approved_portrait", approved_photo)
+    monkeypatch.setattr(persona_pdf_module, "render_location_map", approved_map)
+
+    pdf_bytes = generate_persona_pdf(
+        _rich_persona(),
+        generated_by="analyst",
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert photo_calls == ["https://media.example.test/alice.jpg"]
+    assert map_calls == [(-6.2088, 106.8456)]
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert pdf_bytes.count(b"/Subtype /Image") >= 2
 
 
 def test_persona_export_preserves_meaningful_symbols_and_script_join_controls():
@@ -123,7 +409,7 @@ def test_persona_pdf_is_self_contained_and_uses_safe_filename():
     assert b"%%EOF" in pdf_bytes[-1024:]
     assert len(pdf_bytes) > 5000
     assert persona_pdf_filename(_persona(), generated_at=generated_at) == (
-        "openledger-persona-alice-example-20260902T120000Z.pdf"
+        "openledger-investigation-report-alice-example-20260902T120000Z.pdf"
     )
 
 
