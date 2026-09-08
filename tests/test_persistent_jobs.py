@@ -739,7 +739,7 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "Alice Example" in persona_page
     assert "90% confidence" in persona_page
     assert f'/personas/{persona_id}/export.pdf' in persona_page
-    assert "Export persona PDF" in persona_page
+    assert "Export investigation report" in persona_page
     assert "No evidence extracted." in persona_page
     assert "AI proposes; the analyst decides" in persona_page
     assert "Review queue" in persona_page
@@ -1400,7 +1400,10 @@ def test_persona_pdf_route_exports_only_curated_records(client, persistent_store
     assert response.mimetype == "application/pdf"
     assert response.data.startswith(b"%PDF-")
     assert "attachment" in response.headers["Content-Disposition"]
-    assert "openledger-persona-alice-" in response.headers["Content-Disposition"]
+    assert (
+        "openledger-investigation-report-alice-"
+        in response.headers["Content-Disposition"]
+    )
     assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
 
 

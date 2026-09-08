@@ -527,6 +527,28 @@ sensitive deployments should set `OPENLEDGER_GEOCODER_URL` and
 `OPENLEDGER_MAP_TILE_URL` to approved internal services because geocoding and
 map tile requests reveal query or viewed-area information to their providers.
 
+The downloadable investigation report uses a narrower approved-only projection.
+Its city map is rendered only when an approved location already has coordinates;
+report generation never geocodes an unapproved or text-only location. It uses a
+fixed OpenStreetMap tile endpoint, bounded requests, visible attribution, and a
+minimum seven-day cache. If tile retrieval fails, the approved location remains
+in the report and the map is replaced with an explicit unavailable state.
+
+The report similarly embeds only an approved photograph URL. Retrieval rejects
+non-public destinations and mixed DNS answers, pins the validated address,
+revalidates bounded redirects, limits the response size and media type, and
+verifies the decoded image. A failed photo fetch produces an initials
+placeholder. These media requests are external disclosures made when an analyst
+exports the report, so isolated deployments should block outbound traffic and
+accept the fallback presentation.
+
+The readable profile and evidence appendix are generated from one repeatable,
+read-only Persona snapshot. Every displayed fact carries its stored certainty
+score and source references. Position and organization records are combined
+only when an approved source is shared; each retains its own certainty score and
+source references inside the combined CV-style block. Risk records are
+explicitly presented as review indicators rather than findings of wrongdoing.
+
 ## Deferred scope and revisit triggers
 
 - Add a formal connector SDK when a second source adapter is ready.

@@ -158,6 +158,32 @@ set `OPENLEDGER_GEOCODER_URL` and `OPENLEDGER_MAP_TILE_URL` in `deploy/.env` to
 approved internal endpoints for an isolated or sensitive deployment. Set
 `OPENLEDGER_GEOCODER_TIMEOUT_SECONDS` to change the default 10-second timeout.
 
+### Investigation-report media and cost boundary
+
+The Persona export is a self-contained investigation PDF: it embeds the first
+approved public photograph that passes validation, renders an approved city or
+region map center, and places the complete approved provenance register in the
+appendix. Missing or unreachable media never blocks the export; the report uses
+an explicit placeholder instead. A certainty badge accompanies each displayed
+fact. That score is evidence confidence, not a probability of identity, guilt,
+ownership, or legal responsibility.
+
+This export does not use Brave Search, a paid map API, a card, or a new API key.
+When an analyst requests the PDF, the app may make bounded outbound requests to
+the approved photograph host and to the fixed OpenStreetMap tile service. Those
+providers can see the request and may throttle or refuse it, and the deployment
+still bears its ordinary host bandwidth and compute usage. Map tiles are cached
+for at least seven days in `runtime/reports/.map-tile-cache`; the export uses a
+recognizable user agent and visible OpenStreetMap attribution. Prevent outbound
+access in an isolated deployment to force the safe no-photo/no-map fallback.
+
+Photograph retrieval accepts only bounded public HTTP(S) image responses,
+rejects private or mixed public/private DNS answers, pins the validated address,
+revalidates every redirect, and verifies the decoded image before embedding it.
+The source URL remains available in the provenance appendix; the report profile
+shows the actual embedded photograph rather than substituting the URL as the
+photograph.
+
 ## Security model
 
 This setup keeps port 5000 private and supports two application roles in the

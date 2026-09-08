@@ -7353,8 +7353,8 @@ def export_persona_pdf(persona_id):
             generated_at=generated_at,
         )
     except Exception as error:
-        record_internal_error('Failed to export the curated Persona PDF', error)
-        flash('The Persona PDF could not be generated.', 'danger')
+        record_internal_error('Failed to export the investigation report', error)
+        flash('The investigation report could not be generated.', 'danger')
         return redirect(url_for('persona_workspace', persona_id=persona_id))
     response = send_file(
         io.BytesIO(pdf_bytes),
