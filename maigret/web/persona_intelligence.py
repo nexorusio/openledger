@@ -470,10 +470,17 @@ def build_case_chat_url_claims(
         field_name = "social_account" if is_social_account else "website"
         stored_value: Any = public_url
         if is_social_account:
+            _, canonical_platform, profile_reference = (
+                _supported_social_profile_reference(public_url)
+            )
             stored_value = {
-                "platform": normalized_host[:300],
+                "platform": canonical_platform or normalized_host[:300],
                 "url": public_url,
-                "username": str(target_persona).strip()[:500],
+                "username": (
+                    profile_reference.handle
+                    if profile_reference is not None
+                    else str(target_persona).strip()[:500]
+                ),
             }
         fingerprint = claim_fingerprint(field_name, stored_value)
         evidence: Dict[str, Any] = {

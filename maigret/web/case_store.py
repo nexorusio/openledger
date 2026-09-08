@@ -59,11 +59,23 @@ from maigret.web.profile_discovery_policy import (
     govern_profile_discovery_options,
 )
 from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
-from maigret.web.profile_search_facebook import FACEBOOK_PROFILE_HOSTS
-from maigret.web.profile_search_instagram import INSTAGRAM_PROFILE_HOSTS
-from maigret.web.profile_search_threads import THREADS_PROFILE_HOSTS
-from maigret.web.profile_search_tiktok import TIKTOK_PROFILE_HOSTS
-from maigret.web.profile_search_x import X_PROFILE_HOSTS
+from maigret.web.profile_search_facebook import (
+    FACEBOOK_PROFILE_HOSTS,
+    parse_facebook_profile_url,
+)
+from maigret.web.profile_search_instagram import (
+    INSTAGRAM_PROFILE_HOSTS,
+    parse_instagram_profile_url,
+)
+from maigret.web.profile_search_threads import (
+    THREADS_PROFILE_HOSTS,
+    parse_threads_profile_url,
+)
+from maigret.web.profile_search_tiktok import (
+    TIKTOK_PROFILE_HOSTS,
+    parse_tiktok_profile_url,
+)
+from maigret.web.profile_search_x import X_PROFILE_HOSTS, parse_x_profile_url
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
@@ -810,6 +822,13 @@ PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES = {
     "tiktok": tuple(sorted({"tiktok", *TIKTOK_PROFILE_HOSTS})),
     "x": tuple(sorted({"x", "twitter", *X_PROFILE_HOSTS})),
 }
+PROFILE_SEARCH_PLATFORM_PARSERS = {
+    "facebook": parse_facebook_profile_url,
+    "instagram": parse_instagram_profile_url,
+    "threads": parse_threads_profile_url,
+    "tiktok": parse_tiktok_profile_url,
+    "x": parse_x_profile_url,
+}
 PROFILE_SEARCH_CANDIDATE_ID_PATTERN = re.compile(
     r"^profile-search:[0-9a-f]{64}$"
 )
@@ -857,7 +876,7 @@ def _bounded_round_robin_case_records(
 
 
 def _persona_candidate_identity_match(candidate: Dict[str, Any]):
-    """Build the cross-source identity predicate for one validated claim."""
+    """Build the exact cross-source identity predicate for one claim."""
     identity_match = (
         persona_claims.c.fingerprint == candidate["fingerprint"]
     )
@@ -874,37 +893,90 @@ def _persona_candidate_identity_match(candidate: Dict[str, Any]):
             & (persona_claims.c.display_value == candidate["display_value"])
         ),
     )
+    return identity_match
+
+
+def _profile_search_candidate_alias_identity(candidate: Dict[str, Any]):
+    """Derive a supported account identity only from its validated URL."""
+    if (
+        candidate.get("source_engine")
+        not in {"openai_web_research", "native_profile_search_review"}
+        or candidate.get("field_name") != "social_account"
+    ):
+        return None
     value = candidate.get("value")
-    if not isinstance(value, dict):
-        return identity_match
-    platform = str(value.get("platform") or "").strip().casefold()
-    username = str(value.get("username") or "").strip().lstrip("@").casefold()
-    aliases = next(
-        (
-            candidate_aliases
-            for candidate_aliases in PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES.values()
-            if platform in candidate_aliases
-        ),
-        None,
-    )
-    if not aliases or not username:
-        return identity_match
-    return or_(
-        identity_match,
-        (
-            (persona_claims.c.field_name == "social_account")
-            & (
-                func.lower(
-                    persona_claims.c.value["platform"].as_string()
-                ).in_(aliases)
+    candidate_url = (
+        value.get("url") if isinstance(value, dict) else None
+    ) or candidate.get("display_value")
+    if not candidate_url:
+        return None
+    for platform, parser in PROFILE_SEARCH_PLATFORM_PARSERS.items():
+        profile_reference = parser(str(candidate_url))
+        if profile_reference is None:
+            continue
+        return (
+            PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES[platform],
+            profile_reference.handle.casefold(),
+            parser,
+        )
+    return None
+
+
+def _persona_candidate_claim_with_connection(
+    connection: Connection,
+    persona_id: str,
+    candidate: Dict[str, Any],
+):
+    """Find an exact or URL-verified alias match for one candidate."""
+    exact = (
+        connection.execute(
+            select(persona_claims)
+            .where(
+                persona_claims.c.persona_id == persona_id,
+                _persona_candidate_identity_match(candidate),
             )
-            & (
-                func.lower(
-                    persona_claims.c.value["username"].as_string()
-                ) == username
+            .order_by(
+                persona_claims.c.created_at.asc(),
+                persona_claims.c.id.asc(),
             )
-        ),
+        )
+        .mappings()
+        .first()
     )
+    if exact is not None:
+        return exact
+    alias_identity = _profile_search_candidate_alias_identity(candidate)
+    if alias_identity is None:
+        return None
+    aliases, candidate_handle, parser = alias_identity
+    possible_matches = connection.execute(
+        select(persona_claims)
+        .where(
+            persona_claims.c.persona_id == persona_id,
+            persona_claims.c.field_name == "social_account",
+            func.lower(
+                persona_claims.c.value["platform"].as_string()
+            ).in_(aliases),
+        )
+        .order_by(
+            persona_claims.c.created_at.asc(),
+            persona_claims.c.id.asc(),
+        )
+    ).mappings()
+    for possible_match in possible_matches:
+        stored_value = possible_match["value"]
+        stored_url = (
+            stored_value.get("url")
+            if isinstance(stored_value, dict)
+            else None
+        ) or possible_match["display_value"]
+        profile_reference = parser(str(stored_url or ""))
+        if (
+            profile_reference is not None
+            and profile_reference.handle.casefold() == candidate_handle
+        ):
+            return possible_match
+    return None
 
 
 class ActiveInvestigationError(ValueError):
@@ -3176,28 +3248,16 @@ class CaseStore:
                     ],
                     now=now,
                 )
-                claim = (
-                    connection.execute(
-                        select(
-                            persona_claims.c.id,
-                            persona_claims.c.review_status,
-                        ).where(
-                            persona_claims.c.persona_id == persona_id,
-                            _persona_candidate_identity_match(
-                                {
-                                    "field_name": "social_account",
-                                    "value": value,
-                                    "display_value": profile_url,
-                                    "fingerprint": fingerprint,
-                                    "source_engine": (
-                                        "native_profile_search_review"
-                                    ),
-                                }
-                            ),
-                        )
-                    )
-                    .mappings()
-                    .first()
+                claim = _persona_candidate_claim_with_connection(
+                    connection,
+                    persona_id,
+                    {
+                        "field_name": "social_account",
+                        "value": value,
+                        "display_value": profile_url,
+                        "fingerprint": fingerprint,
+                        "source_engine": "native_profile_search_review",
+                    },
                 )
                 if claim is None:
                     raise RuntimeError("Persona review proposal was not retained")
@@ -4883,16 +4943,10 @@ class CaseStore:
         synchronized = 0
         for candidate in candidates:
             reactivate_legacy = False
-            identity_match = _persona_candidate_identity_match(candidate)
-            existing = (
-                connection.execute(
-                    select(persona_claims).where(
-                        persona_claims.c.persona_id == persona_id,
-                        identity_match,
-                    )
-                )
-                .mappings()
-                .first()
+            existing = _persona_candidate_claim_with_connection(
+                connection,
+                persona_id,
+                candidate,
             )
             if existing:
                 claim_id = existing["id"]
