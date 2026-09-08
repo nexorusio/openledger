@@ -172,6 +172,76 @@ async def test_search_phase_precedes_maigret_and_emits_only_bounded_counts(
 
 
 @pytest.mark.asyncio
+async def test_search_phase_prioritizes_approved_persona_evidence(
+    monkeypatch,
+):
+    observed_queries = []
+
+    class _CapturingClient(_RawClient):
+        def __init__(self, _config_value):
+            super().__init__(_success)
+
+        async def search(self, query):
+            observed_queries.append(query)
+            return await super().search(query)
+
+    monkeypatch.setattr(web_app, "load_profile_search_config", _config)
+    monkeypatch.setattr(web_app, "ProfileSearchClient", _CapturingClient)
+    runtime_job = {
+        "queue": queue.Queue(),
+        "cancelled": False,
+        "profile_search_existing_evidence": (
+            {
+                "field_name": "social_account",
+                "review_status": "approved",
+                "value": {"username": "confirmed_persona_handle"},
+            },
+        ),
+    }
+    options = govern_profile_discovery_options(
+        {"investigation_spec": _plan()},
+        environ={"OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": "true"},
+    )
+
+    await web_app.run_native_profile_search_phase(runtime_job, options)
+
+    assert observed_queries[0].seed_kind == "confirmed_username"
+    assert observed_queries[0].seed_value == "confirmed_persona_handle"
+
+
+def test_persona_refresh_loads_only_approved_social_claims():
+    claims = [
+        {
+            "field_name": "social_account",
+            "review_status": "approved",
+            "value": {"username": "confirmed_handle"},
+        },
+        {
+            "field_name": "social_account",
+            "review_status": "pending",
+            "value": {"username": "pending_handle"},
+        },
+        {
+            "field_name": "location",
+            "review_status": "approved",
+            "value": "Jakarta",
+        },
+    ]
+
+    class _Store:
+        def get_persona(self, persona_id):
+            assert persona_id == "persona-1"
+            return {"claims": claims}
+
+    result = web_app._profile_search_existing_evidence(
+        _Store(),
+        {"investigation_spec": {"target_persona_id": "persona-1"}},
+    )
+
+    assert result == (claims[0],)
+
+
+@pytest.mark.asyncio
 async def test_disabled_or_misconfigured_search_degrades_to_existing_collector(
     monkeypatch,
 ):

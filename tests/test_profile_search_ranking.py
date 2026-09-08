@@ -131,6 +131,19 @@ def test_profile_url_seed_extracts_handle_without_live_url_resolution():
     assert result.ranking_signals[0].code == "exact_profile_url_match"
 
 
+def test_profile_url_seed_accepts_handle_already_extracted_from_input():
+    run = _run(
+        query_id="profile-query:extracted-url",
+        seed_kind="profile_url",
+        seed_value="alice_example",
+        seed_score=100,
+    )
+
+    result = _rank(run)[0]
+
+    assert result.ranking_signals[0].code == "exact_profile_url_match"
+
+
 def test_profile_url_seed_rejects_unrecognized_hosts():
     run = _run(
         query_id="profile-query:url",

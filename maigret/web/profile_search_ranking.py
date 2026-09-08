@@ -113,7 +113,12 @@ def _profile_url_seed(value: str) -> str:
 
 def _seed_identifier(query: ProfileSearchQuery) -> str:
     if query.seed_kind == "profile_url":
-        return _profile_url_seed(query.seed_value)
+        # Investigation input keeps the canonical URL in source_value and the
+        # already-extracted handle in value. The provider-neutral query
+        # contract retains value, so support both safe representations.
+        return _profile_url_seed(query.seed_value) or _identifier(
+            query.seed_value
+        )
     return _identifier(query.seed_value)
 
 

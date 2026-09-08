@@ -3117,7 +3117,19 @@ class CaseStore:
                             persona_claims.c.review_status,
                         ).where(
                             persona_claims.c.persona_id == persona_id,
-                            persona_claims.c.fingerprint == fingerprint,
+                            or_(
+                                persona_claims.c.fingerprint == fingerprint,
+                                (
+                                    (
+                                        persona_claims.c.field_name
+                                        == "social_account"
+                                    )
+                                    & (
+                                        persona_claims.c.display_value
+                                        == profile_url
+                                    )
+                                ),
+                            ),
                         )
                     )
                     .mappings()

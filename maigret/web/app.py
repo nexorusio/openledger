@@ -2943,6 +2943,26 @@ def _profile_search_policy_flags(options):
     return flags if isinstance(flags, dict) else {}
 
 
+def _profile_search_existing_evidence(store, options):
+    """Load only approved social claims for a server-owned Persona refresh."""
+    specification = options.get('investigation_spec')
+    if not isinstance(specification, dict):
+        return ()
+    persona_id = str(specification.get('target_persona_id') or '').strip()
+    if not persona_id:
+        return ()
+    persona = store.get_persona(persona_id)
+    if not persona:
+        return ()
+    return tuple(
+        claim
+        for claim in list(persona.get('claims') or [])[:500]
+        if isinstance(claim, dict)
+        and claim.get('field_name') == 'social_account'
+        and claim.get('review_status') == 'approved'
+    )
+
+
 async def run_native_profile_search_phase(
     job, options, cancellation_check=None
 ):
@@ -2974,6 +2994,9 @@ async def run_native_profile_search_phase(
         search_task = asyncio.ensure_future(
             ProfileSearchOrchestrator(client).discover(
                 options.get('investigation_spec') or {},
+                existing_evidence=job.get(
+                    'profile_search_existing_evidence', ()
+                ),
                 max_results=config.max_results,
                 cancellation_check=lambda: (
                     bool(job.get('cancelled'))
@@ -5281,6 +5304,9 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         "cancelled": False,
         "loop": None,
         "task": None,
+        "profile_search_existing_evidence": (
+            _profile_search_existing_evidence(store, options)
+        ),
         "profile_search_result_sink": lambda result: (
             store.record_profile_search_result(
                 job_id, result, worker_id=worker_id

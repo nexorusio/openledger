@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: LicenseRef-Nexorus-Proprietary
 
 import json
+from datetime import datetime, timezone
 
 import pytest
 from sqlalchemy import func, select, update
@@ -20,6 +21,7 @@ from maigret.web.profile_search_contract import (
     ProfileSearchProvenance,
 )
 from maigret.web.profile_search_orchestrator import ProfileSearchOrchestrator
+from maigret.web.persona_intelligence import claim_fingerprint
 
 
 class _Client:
@@ -160,6 +162,55 @@ async def test_repeat_proposal_never_overwrites_persona_review_decision(store):
     claim = store.get_persona(seeded["persona_id"])["claims"][0]
     assert claim["review_status"] == "approved"
     assert claim["reviewed_by"] == "senior-analyst"
+
+
+@pytest.mark.asyncio
+async def test_proposal_reuses_equivalent_existing_social_account(store):
+    seeded = await _seed_discovery(store)
+    profile_url = "https://www.instagram.com/alice_example/"
+    existing_value = {
+        "site_name": "Instagram",
+        "url": profile_url,
+    }
+    with store.engine.begin() as connection:
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": existing_value,
+                    "display_value": profile_url,
+                    "normalized_value": json.dumps(
+                        existing_value, sort_keys=True
+                    ),
+                    "confidence": 80,
+                    "fingerprint": claim_fingerprint(
+                        "social_account", existing_value
+                    ),
+                    "source_engine": "maigret",
+                    "source_record_id": "Instagram:alice_example",
+                    "native_status": "claimed",
+                    "evidence": [],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+    existing_claim = store.get_persona(seeded["persona_id"])["claims"][0]
+
+    review = store.review_profile_search_candidate(
+        seeded["case_id"],
+        seeded["audit_id"],
+        seeded["candidate_id"],
+        seeded["persona_id"],
+        "proposed",
+        "analyst",
+    )
+
+    assert review["claim_id"] == existing_claim["id"]
+    assert review["claim_review_status"] == "pending"
+    assert len(store.get_persona(seeded["persona_id"])["claims"]) == 1
 
 
 @pytest.mark.asyncio
