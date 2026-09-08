@@ -44,8 +44,11 @@ def _plan():
 
 
 class _Client:
-    def __init__(self, *, fail_platform=None, rank=1):
+    def __init__(
+        self, *, fail_platform=None, fail_code="rate_limited", rank=1
+    ):
         self.fail_platform = fail_platform
+        self.fail_code = fail_code
         self.rank = rank
 
     async def search(self, query):
@@ -57,11 +60,13 @@ class _Client:
                 error=ProfileSearchError(
                     query_id=query.query_id,
                     provider="brave",
-                    code="rate_limited",
-                    message="Search provider rate limit was reached.",
-                    retryable=True,
+                    code=self.fail_code,
+                    message="Search provider request failed.",
+                    retryable=self.fail_code == "rate_limited",
                     occurred_at="2026-09-08T13:00:00Z",
-                    http_status=429,
+                    http_status=(
+                        429 if self.fail_code == "rate_limited" else 401
+                    ),
                 ),
             )
         provenance = ProfileSearchProvenance.for_query(
@@ -88,10 +93,17 @@ class _Client:
         )
 
 
-async def _result(*, fail_platform=None, rank=1):
+async def _result(
+    *, fail_platform=None, fail_code="rate_limited", rank=1,
+    platforms=("instagram", "x"),
+):
     return await ProfileSearchOrchestrator(
-        _Client(fail_platform=fail_platform, rank=rank)
-    ).discover(_plan(), platforms=("instagram", "x"))
+        _Client(
+            fail_platform=fail_platform,
+            fail_code=fail_code,
+            rank=rank,
+        )
+    ).discover(_plan(), platforms=platforms)
 
 
 def _claimed_job(store, worker_id="worker:profile-search"):
@@ -197,6 +209,31 @@ async def test_fail_fast_provider_error_persists_skipped_plan(store):
     assert store.get_profile_search_audit(job_id, audit_id)[
         "executed_query_count"
     ] == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_partial_error_persists_success_and_skipped_plan(store):
+    job_id, worker_id = _claimed_job(store)
+    result = await _result(
+        fail_platform="x",
+        fail_code="credential_rejected",
+        platforms=("instagram", "x", "facebook"),
+    )
+
+    assert result.status == "partial"
+    assert result.executed_query_count == 2
+    assert result.skipped_query_count == 1
+    assert len(result.candidates) == 1
+    audit_id = store.record_profile_search_result(
+        job_id, result, worker_id=worker_id
+    )
+
+    audit = store.get_profile_search_audit(job_id, audit_id)
+    assert audit["status"] == "partial"
+    assert audit["candidate_count"] == 1
+    assert audit["document"]["runs"][-1]["error"]["code"] == (
+        "credential_rejected"
+    )
 
 
 @pytest.mark.asyncio

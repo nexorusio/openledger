@@ -119,6 +119,7 @@ from maigret.web.profile_search_backend import (
     load_profile_search_config,
 )
 from maigret.web.profile_search_orchestrator import ProfileSearchOrchestrator
+from maigret.web.profile_search_planner import MAX_EXISTING_PROFILE_SEEDS
 from maigret.web.profile_search_runtime import GovernedProfileSearchClient
 from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web.investigation_input import (
@@ -2951,16 +2952,18 @@ def _profile_search_existing_evidence(store, options):
     persona_id = str(specification.get('target_persona_id') or '').strip()
     if not persona_id:
         return ()
-    persona = store.get_persona(persona_id)
-    if not persona:
-        return ()
-    return tuple(
+    claims = store.list_approved_persona_social_accounts(
+        persona_id,
+        limit=MAX_EXISTING_PROFILE_SEEDS,
+    )
+    approved = [
         claim
-        for claim in list(persona.get('claims') or [])[:500]
+        for claim in claims
         if isinstance(claim, dict)
         and claim.get('field_name') == 'social_account'
         and claim.get('review_status') == 'approved'
-    )
+    ]
+    return tuple(approved[:MAX_EXISTING_PROFILE_SEEDS])
 
 
 async def run_native_profile_search_phase(

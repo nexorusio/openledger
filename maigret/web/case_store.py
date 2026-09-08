@@ -969,18 +969,21 @@ def _profile_search_audit_document(result: Any) -> tuple[Dict[str, Any], str]:
         result.error_count or result.skipped_query_count
     ):
         raise ValueError("Completed profile-search audit is inconsistent")
+    terminal_failure = bool(
+        result.runs
+        and result.runs[-1].error is not None
+        and result.runs[-1].error.code
+        in PROFILE_SEARCH_TERMINAL_ERROR_CODES
+    )
     if result.status == "partial" and not (
         0 < result.error_count < result.executed_query_count
-        and result.skipped_query_count == 0
+        and (
+            result.skipped_query_count == 0
+            or terminal_failure
+        )
     ):
         raise ValueError("Partial profile-search audit is inconsistent")
     if result.status == "failed":
-        terminal_failure = bool(
-            result.runs
-            and result.runs[-1].error is not None
-            and result.runs[-1].error.code
-            in PROFILE_SEARCH_TERMINAL_ERROR_CODES
-        )
         if not (
             result.executed_query_count > 0
             and result.error_count == result.executed_query_count
@@ -4641,6 +4644,34 @@ class CaseStore:
         """Load a persona, its evidence-backed claims, and review history."""
         with self.engine.connect() as connection:
             return self._get_persona_with_connection(connection, persona_id)
+
+    def list_approved_persona_social_accounts(
+        self, persona_id: str, *, limit: int = 8
+    ) -> list[Dict[str, Any]]:
+        """Load a bounded set of approved social claims for discovery seeds."""
+        bounded_limit = min(max(1, int(limit)), 50)
+        with self.engine.connect() as connection:
+            rows = list(
+                connection.execute(
+                    select(
+                        persona_claims.c.field_name,
+                        persona_claims.c.value,
+                        persona_claims.c.review_status,
+                    )
+                    .where(
+                        persona_claims.c.persona_id == persona_id,
+                        persona_claims.c.field_name == "social_account",
+                        persona_claims.c.review_status == "approved",
+                    )
+                    .order_by(
+                        persona_claims.c.confidence.desc(),
+                        persona_claims.c.created_at,
+                        persona_claims.c.id,
+                    )
+                    .limit(bounded_limit)
+                ).mappings()
+            )
+        return [dict(row) for row in rows]
 
     def get_persona_export_snapshot(
         self, persona_id: str

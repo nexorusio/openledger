@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from maigret.web import app as web_app
-from maigret.web.case_store import CaseStore
+from maigret.web.case_store import CaseStore, persona_claims, utcnow
 from maigret.web.profile_discovery_policy import (
     govern_profile_discovery_options,
 )
@@ -229,9 +229,10 @@ def test_persona_refresh_loads_only_approved_social_claims():
     ]
 
     class _Store:
-        def get_persona(self, persona_id):
+        def list_approved_persona_social_accounts(self, persona_id, *, limit):
             assert persona_id == "persona-1"
-            return {"claims": claims}
+            assert limit == 8
+            return claims
 
     result = web_app._profile_search_existing_evidence(
         _Store(),
@@ -239,6 +240,78 @@ def test_persona_refresh_loads_only_approved_social_claims():
     )
 
     assert result == (claims[0],)
+
+
+def test_persona_social_seed_query_filters_before_applying_bound(tmp_path):
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'profile-search-seeds.db'}",
+        create_schema=True,
+    )
+    try:
+        job_id = store.create_investigation(["alice"], {})
+        persona_id = store.get_case(store.get_job(job_id)["case_id"])[
+            "personas"
+        ][0]["id"]
+        now = utcnow()
+        rows = []
+        for index in range(500):
+            rows.append(
+                {
+                    "id": f"non-social-{index}",
+                    "persona_id": persona_id,
+                    "field_name": "platform_identifier",
+                    "value": {"identifier": f"identifier-{index}"},
+                    "display_value": f"identifier-{index}",
+                    "normalized_value": f"identifier-{index}",
+                    "confidence": 100,
+                    "review_status": "approved",
+                    "source_engine": "test",
+                    "source_job_id": None,
+                    "fingerprint": f"{index:064x}",
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                    "reviewed_at": now,
+                    "reviewed_by": "analyst",
+                }
+            )
+        for index in range(10):
+            rows.append(
+                {
+                    "id": f"social-{index}",
+                    "persona_id": persona_id,
+                    "field_name": "social_account",
+                    "value": {"username": f"approved-{index}"},
+                    "display_value": f"approved-{index}",
+                    "normalized_value": f"approved-{index}",
+                    "confidence": 90 - index,
+                    "review_status": "approved",
+                    "source_engine": "test",
+                    "source_job_id": None,
+                    "fingerprint": f"{500 + index:064x}",
+                    "first_seen_at": now,
+                    "last_seen_at": now,
+                    "created_at": now,
+                    "updated_at": now,
+                    "reviewed_at": now,
+                    "reviewed_by": "analyst",
+                }
+            )
+        with store.engine.begin() as connection:
+            connection.execute(persona_claims.insert(), rows)
+
+        result = web_app._profile_search_existing_evidence(
+            store,
+            {"investigation_spec": {"target_persona_id": persona_id}},
+        )
+
+        assert len(result) == 8
+        assert [claim["value"]["username"] for claim in result] == [
+            f"approved-{index}" for index in range(8)
+        ]
+    finally:
+        store.dispose()
 
 
 @pytest.mark.asyncio
