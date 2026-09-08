@@ -110,6 +110,12 @@ documented in [Governed OSINT source maintenance](docs/osint-source-maintenance.
 Google Places is a separately documented, administrator-enabled credentialed
 provider exception and is not represented as a free governed source.
 
+Profile discovery offers a 10-minute Focused mode and a 30-minute Exhaustive
+mode. Queue time is excluded from both server-owned budgets. Cancellation,
+worker heartbeat recovery, partial outcomes, feature flags, and per-provider
+circuit breakers are documented in the
+[profile discovery operations runbook](docs/profile-discovery-operations.md).
+
 ## AI assistance
 
 OpenLedger reuses one server-side OpenAI connection configured by an

@@ -14,6 +14,7 @@ import socket
 import sys
 import unicodedata
 from datetime import datetime, timezone
+from functools import wraps
 from typing import Any, Callable, Dict, Iterable, List, Optional
 from urllib.parse import parse_qsl, quote, unquote, urljoin, urlparse, urlunparse
 
@@ -26,6 +27,95 @@ from maigret.web.persona_intelligence import (
     claim_fingerprint,
     evidence_fingerprint,
 )
+from maigret.web.provider_circuit_breaker import ProviderCircuitOpen, provider_circuits
+from maigret.web.profile_discovery_policy import (
+    ProfileDiscoveryPolicyError,
+    profile_discovery_flag_enabled,
+)
+
+MAIGRET_PROVIDER = "maigret"
+USER_SCANNER_PROVIDER = "user-scanner"
+GOOGLE_PLACES_PROVIDER = "google-places"
+WIKIDATA_PROVIDER = "wikidata"
+GLEIF_PROVIDER = "gleif"
+FR_BUSINESS_REGISTRY_PROVIDER = "fr-business-registry"
+CLOUDFLARE_DNS_PROVIDER = "cloudflare-dns"
+WIKIPEDIA_PROVIDER = "wikipedia"
+ICIJ_PROVIDER = "icij-offshore-leaks"
+UNFURL_PROVIDER = "unfurl"
+WAYBACK_PROVIDER = "wayback"
+GITHUB_PROVIDER = "github"
+
+_TRANSIENT_PROVIDER_STATUSES = frozenset(
+    {"error", "failed", "rate_limited", "timed_out", "unavailable"}
+)
+
+
+def _transient_provider_error(error: Exception) -> bool:
+    """Classify transport/adapter failures without counting invalid input."""
+    if isinstance(error, ProviderCircuitOpen):
+        return False
+    return isinstance(
+        error,
+        (RuntimeError, aiohttp.ClientError, asyncio.TimeoutError, TimeoutError, OSError),
+    )
+
+
+def _transient_provider_result(result: Any) -> bool:
+    """Count explicit provider diagnostics, but never absence or partial evidence."""
+    if isinstance(result, dict):
+        return str(result.get("status") or "").strip().casefold() in (
+            _TRANSIENT_PROVIDER_STATUSES
+        )
+    if not isinstance(result, list) or not result:
+        return False
+    statuses = []
+    for item in result:
+        if not isinstance(item, dict):
+            return False
+        status = str(item.get("status") or "").strip().casefold()
+        extra = item.get("extra") if isinstance(item.get("extra"), dict) else {}
+        if status == "error" and extra.get("scan_stage") != "adapter":
+            return False
+        statuses.append(status)
+    return bool(statuses) and all(
+        status in _TRANSIENT_PROVIDER_STATUSES for status in statuses
+    )
+
+
+def governed_provider(provider: str):
+    """Apply the shared no-retry circuit policy to one async provider boundary."""
+
+    def decorate(function):
+        @wraps(function)
+        async def guarded(*args, **kwargs):
+            enablement_flag = (
+                "maigret_enabled"
+                if provider == MAIGRET_PROVIDER
+                else (
+                    "user_scanner_enabled"
+                    if provider == USER_SCANNER_PROVIDER
+                    else "enrichment_providers_enabled"
+                )
+            )
+            if not profile_discovery_flag_enabled(enablement_flag):
+                raise ProfileDiscoveryPolicyError(
+                    f"Provider {provider} is disabled by server policy."
+                )
+            if not profile_discovery_flag_enabled(
+                "provider_circuit_breakers_enabled"
+            ):
+                return await function(*args, **kwargs)
+            return await provider_circuits.call(
+                provider,
+                lambda: function(*args, **kwargs),
+                transient_error=_transient_provider_error,
+                transient_result=_transient_provider_result,
+            )
+
+        return guarded
+
+    return decorate
 
 USER_SCANNER_ENGINE = "user_scanner_email"
 USER_SCANNER_USERNAME_ENGINE = "user_scanner_username"
@@ -44,6 +134,8 @@ MAX_USER_SCANNER_USERNAME_TARGET_OUTPUT_BYTES = (
     MAX_COLLECTOR_OUTPUT_BYTES // MAX_USER_SCANNER_USERNAME_TARGETS
 )
 MAX_OBSERVATIONS = 600
+SUBPROCESS_CLEANUP_SECONDS = 5.0
+SUBPROCESS_TERMINATE_SECONDS = 4.0
 
 GITHUB_ENGINE = "github_public_profile"
 GITHUB_API_VERSION = "2026-03-10"
@@ -272,19 +364,56 @@ def user_scanner_available() -> bool:
 async def _stop_subprocess(
     process: asyncio.subprocess.Process, communicate_task: asyncio.Task
 ) -> None:
+    """Stop and reap an adapter process within a fixed five-second window."""
+    loop = asyncio.get_running_loop()
+    cleanup_deadline = loop.time() + SUBPROCESS_CLEANUP_SECONDS
     communicate_task.cancel()
-    await asyncio.gather(communicate_task, return_exceptions=True)
     if process.returncode is not None:
+        remaining = max(0.0, cleanup_deadline - loop.time())
+        if remaining:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(communicate_task, return_exceptions=True),
+                    timeout=remaining,
+                )
+            except asyncio.TimeoutError:
+                pass
         return
     try:
         process.terminate()
     except ProcessLookupError:
-        return
-    try:
-        await asyncio.wait_for(process.wait(), timeout=5)
-    except asyncio.TimeoutError:
-        process.kill()
-        await process.wait()
+        pass
+    else:
+        try:
+            await asyncio.wait_for(
+                process.wait(),
+                timeout=min(
+                    SUBPROCESS_TERMINATE_SECONDS,
+                    max(0.0, cleanup_deadline - loop.time()),
+                ),
+            )
+        except asyncio.TimeoutError:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            remaining = max(0.0, cleanup_deadline - loop.time())
+            if remaining:
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=remaining)
+                except asyncio.TimeoutError:
+                    # SIGKILL has already been delivered. Do not let a broken child
+                    # watcher keep the investigation in cancel_requested forever.
+                    pass
+    remaining = max(0.0, cleanup_deadline - loop.time())
+    if remaining:
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(communicate_task, return_exceptions=True),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError:
+            pass
 
 
 def user_scanner_email_targets(plan: Any) -> List[str]:
@@ -2410,6 +2539,7 @@ def normalize_google_places_search_candidates(
     return candidates
 
 
+@governed_provider(GOOGLE_PLACES_PROVIDER)
 async def run_google_places_business_search(
     organization_name: str,
     api_key: str,
@@ -2578,6 +2708,7 @@ def _normalize_google_place_live_detail(
     }
 
 
+@governed_provider(GOOGLE_PLACES_PROVIDER)
 async def run_google_places_live_details(
     organization_name: str,
     place_ids: Any,
@@ -2790,6 +2921,7 @@ def _wikidata_context_confirmation_reason(
     return ""
 
 
+@governed_provider(WIKIDATA_PROVIDER)
 async def run_wikidata_affiliation_discovery(
     affiliation_name: str,
     *,
@@ -3173,6 +3305,7 @@ def _registry_observation(
     }
 
 
+@governed_provider(GLEIF_PROVIDER)
 async def run_gleif_legal_entity_search(
     affiliation_name: str,
     jurisdiction: Any,
@@ -3245,6 +3378,7 @@ async def run_gleif_legal_entity_search(
     )
 
 
+@governed_provider(FR_BUSINESS_REGISTRY_PROVIDER)
 async def run_fr_business_registry_search(
     affiliation_name: str,
     jurisdiction: Any,
@@ -3401,6 +3535,7 @@ def normalize_cloudflare_dns_context(
     }
 
 
+@governed_provider(CLOUDFLARE_DNS_PROVIDER)
 async def run_cloudflare_dns_context(
     website: Any,
     *,
@@ -4905,6 +5040,7 @@ def _wikipedia_diagnostic(
     }
 
 
+@governed_provider(WIKIPEDIA_PROVIDER)
 async def run_wikipedia_person_enrichment(
     confirmed_name: str,
     *,
@@ -5070,6 +5206,7 @@ def normalize_icij_offshore_matches(
     return output
 
 
+@governed_provider(ICIJ_PROVIDER)
 async def run_icij_offshore_match(
     confirmed_name: str,
     *,
@@ -5525,6 +5662,7 @@ def normalize_unfurl_url_analysis(
     }
 
 
+@governed_provider(UNFURL_PROVIDER)
 async def run_unfurl_url_analysis(
     target: Dict[str, str],
     *,
@@ -5730,6 +5868,7 @@ def normalize_wayback_capture_index(
     }
 
 
+@governed_provider(WAYBACK_PROVIDER)
 async def run_wayback_capture_index(
     target: Dict[str, str],
     *,
@@ -6037,6 +6176,7 @@ def normalize_github_public_profile(
     }
 
 
+@governed_provider(GITHUB_PROVIDER)
 async def run_github_public_profile(
     target: Dict[str, str],
     *,
@@ -6545,6 +6685,7 @@ async def _run_user_scanner_subprocess(
     return envelope
 
 
+@governed_provider(USER_SCANNER_PROVIDER)
 async def run_user_scanner_email(
     target_email: str,
     *,
@@ -6559,6 +6700,7 @@ async def run_user_scanner_email(
     return normalize_user_scanner_results(target_email, envelope.get("results"))
 
 
+@governed_provider(USER_SCANNER_PROVIDER)
 async def run_user_scanner_usernames(
     usernames: List[str],
     *,

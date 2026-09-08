@@ -75,6 +75,13 @@ Apply normal updates after changes have been merged to main:
     cd /opt/openledger
     bash deploy/update.sh
 
+Profile discovery has server-owned Focused/Exhaustive budgets, durable
+cancellation and worker leases, provider circuit breakers, and default-on
+operational flags. The same flag values must reach both the app and worker.
+For the exact variables, behavior, validation, flag-only restart, and rollback
+commands, use the
+[profile discovery operations runbook](../docs/profile-discovery-operations.md).
+
 The first update from the original Basic Authentication deployment prompts for
 an application username and password before removing the proxy login. Existing
 reports, settings, and protected provider keys are preserved.

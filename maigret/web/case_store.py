@@ -52,6 +52,12 @@ from maigret.web.external_evidence import (
     stable_fingerprint,
     validate_locator_authority,
 )
+from maigret.web.execution_budget import execution_budget_spec_from_options
+from maigret.web.profile_discovery_policy import (
+    PROFILE_DISCOVERY_JOB_KINDS,
+    ProfileDiscoveryPolicyError,
+    govern_profile_discovery_options,
+)
 from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
 
 metadata = MetaData()
@@ -288,8 +294,12 @@ investigation_jobs = Table(
     Column("result", json_document, nullable=True),
     Column("error", Text, nullable=True),
     Column("cancel_requested", Boolean, nullable=False, server_default="false"),
+    Column("cancel_requested_at", DateTime(timezone=True), nullable=True),
     Column("attempts", Integer, nullable=False, server_default="0"),
     Column("worker_id", String(200), nullable=True),
+    Column("budget_seconds", Integer, nullable=True),
+    Column("budget_policy_version", String(64), nullable=True),
+    Column("deadline_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("started_at", DateTime(timezone=True), nullable=True),
     Column("heartbeat_at", DateTime(timezone=True), nullable=True),
@@ -297,10 +307,14 @@ investigation_jobs = Table(
     Column("updated_at", DateTime(timezone=True), nullable=False),
     CheckConstraint(
         "status IN ('queued', 'running', 'cancel_requested', 'completed', "
-        "'failed', 'cancelled', 'interrupted')",
+        "'failed', 'cancelled', 'interrupted', 'budget_exhausted')",
         name="ck_investigation_jobs_status",
     ),
     CheckConstraint("attempts >= 0", name="ck_investigation_jobs_attempts"),
+    CheckConstraint(
+        "budget_seconds IS NULL OR budget_seconds > 0",
+        name="ck_investigation_jobs_budget_seconds",
+    ),
 )
 Index(
     "ix_investigation_jobs_status_created",
@@ -668,9 +682,17 @@ Index(
 Index("ix_claim_observations_chat_message", claim_observations.c.chat_message_id)
 
 
-TERMINAL_STATUSES = {"completed", "failed", "cancelled", "interrupted"}
+TERMINAL_STATUSES = {
+    "completed",
+    "failed",
+    "cancelled",
+    "interrupted",
+    "budget_exhausted",
+}
 ACTIVE_STATUSES = {"queued", "running", "cancel_requested"}
 WORKER_LOCK_KEY = 5714024849188199506
+WORKER_HEARTBEAT_SECONDS = 5
+WORKER_STALE_AFTER_SECONDS = 30
 MAX_COMBINED_SOURCE_CASES = 10
 MAX_COMBINED_APPROVED_CLAIMS = 10_000
 MAX_COMBINED_EVIDENCE_REFERENCES = 50_000
@@ -738,6 +760,14 @@ class StaleCombinedSnapshotError(ValueError):
 
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _heartbeat_expired(value: Optional[datetime], *, now: datetime) -> bool:
+    if value is None:
+        return True
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value < now - timedelta(seconds=WORKER_STALE_AFTER_SECONDS)
 
 
 def database_url_from_environment() -> str:
@@ -895,6 +925,20 @@ class CaseStore:
         now = utcnow()
         case_id = str(uuid.uuid4())
         job_id = str(uuid.uuid4())
+        stored_options = (
+            govern_profile_discovery_options(options)
+            if kind in PROFILE_DISCOVERY_JOB_KINDS
+            else dict(options)
+        )
+        budget = (
+            execution_budget_spec_from_options(stored_options)
+            if kind in PROFILE_DISCOVERY_JOB_KINDS
+            else None
+        )
+        if budget is not None:
+            stored_options["execution_mode"] = budget["mode"]
+            stored_options["all_sites"] = budget["mode"] == "exhaustive"
+            stored_options["execution_budget"] = dict(budget)
         title = (subject_label if grouped and subject_label else ", ".join(normalized))[
             :500
         ]
@@ -927,12 +971,19 @@ class CaseStore:
                     kind=kind,
                     status="queued",
                     usernames=normalized,
-                    options=dict(options),
+                    options=stored_options,
                     progress={"checked": 0, "total": None, "found": 0},
                     result=None,
                     error=None,
                     cancel_requested=False,
                     attempts=0,
+                    budget_seconds=(
+                        int(budget["total_seconds"]) if budget is not None else None
+                    ),
+                    budget_policy_version=(
+                        str(budget["policy_version"]) if budget is not None else None
+                    ),
+                    deadline_at=None,
                     created_at=now,
                     updated_at=now,
                 )
@@ -1874,6 +1925,8 @@ class CaseStore:
                     target_persona_id=persona_id,
                 )
                 queued_options["investigation_spec"] = specification
+            queued_options = govern_profile_discovery_options(queued_options)
+            budget = execution_budget_spec_from_options(queued_options)
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,
@@ -1887,6 +1940,9 @@ class CaseStore:
                     error=None,
                     cancel_requested=False,
                     attempts=0,
+                    budget_seconds=int(budget["total_seconds"]),
+                    budget_policy_version=str(budget["policy_version"]),
+                    deadline_at=None,
                     created_at=now,
                     updated_at=now,
                 )
@@ -2022,6 +2078,44 @@ class CaseStore:
             row = connection.execute(statement).mappings().first()
             if not row:
                 return None
+            started_at = row["started_at"] or now
+            budget_seconds = row["budget_seconds"]
+            budget_policy_version = row["budget_policy_version"]
+            deadline_at = row["deadline_at"]
+            budget_mode = None
+            claimed_options = dict(row["options"] or {})
+            if str(row["kind"]) in PROFILE_DISCOVERY_JOB_KINDS:
+                try:
+                    claimed_options = govern_profile_discovery_options(
+                        claimed_options
+                    )
+                except ProfileDiscoveryPolicyError as error:
+                    public_error = str(error)[:1000]
+                    connection.execute(
+                        update(investigation_jobs)
+                        .where(
+                            investigation_jobs.c.id == row["id"],
+                            investigation_jobs.c.status == "queued",
+                        )
+                        .values(
+                            status="failed",
+                            result={
+                                "status": "failed",
+                                "error": public_error,
+                                "usernames": list(row["usernames"] or []),
+                                "session_folder": f"search_{row['id']}",
+                            },
+                            error=public_error,
+                            completed_at=now,
+                            updated_at=now,
+                        )
+                    )
+                    return None
+                budget = execution_budget_spec_from_options(claimed_options)
+                budget_mode = str(budget["mode"])
+                budget_seconds = int(budget["total_seconds"])
+                budget_policy_version = str(budget["policy_version"])
+                deadline_at = started_at + timedelta(seconds=budget_seconds)
             connection.execute(
                 update(investigation_jobs)
                 .where(
@@ -2032,27 +2126,82 @@ class CaseStore:
                     status="running",
                     worker_id=worker_id,
                     attempts=investigation_jobs.c.attempts + 1,
-                    started_at=row["started_at"] or now,
+                    started_at=started_at,
                     heartbeat_at=now,
+                    options=claimed_options,
+                    budget_seconds=budget_seconds,
+                    budget_policy_version=budget_policy_version,
+                    deadline_at=deadline_at,
                     updated_at=now,
                 )
             )
-        self.append_event(row["id"], {"type": "running"})
-        return self.get_job(row["id"])
+        running_event: Dict[str, Any] = {"type": "running"}
+        if budget_seconds is not None:
+            running_event["execution_budget"] = {
+                "policy_version": budget_policy_version,
+                "mode": budget_mode,
+                "total_seconds": budget_seconds,
+                "deadline_at": _as_iso(deadline_at),
+            }
+        self.append_event(row["id"], running_event)
+        claimed = self.get_job(row["id"])
+        if claimed is not None:
+            # The worker lease token is returned only to the claiming process;
+            # ordinary job reads and public API responses do not expose it.
+            claimed["worker_id"] = worker_id
+        return claimed
 
-    def append_event(self, job_id: str, event: Dict[str, Any]) -> int:
+    def append_event(
+        self,
+        job_id: str,
+        event: Dict[str, Any],
+        *,
+        runtime_guard: bool = False,
+        worker_id: Optional[str] = None,
+    ) -> int:
         now = utcnow()
         progress_updates: Dict[str, Any] = {}
         with self.engine.begin() as connection:
-            current = connection.execute(
-                select(investigation_jobs.c.progress).where(
-                    investigation_jobs.c.id == job_id
-                )
-            ).scalar_one_or_none()
-            if current is None:
+            statement = select(
+                investigation_jobs.c.status,
+                investigation_jobs.c.progress,
+                investigation_jobs.c.worker_id,
+                investigation_jobs.c.heartbeat_at,
+            ).where(investigation_jobs.c.id == job_id)
+            if runtime_guard and self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            row = connection.execute(statement).mappings().first()
+            if row is None:
                 raise KeyError(job_id)
-            progress = dict(current or {})
             event_type = event.get("type")
+            if runtime_guard:
+                status = str(row["status"])
+                if worker_id is not None and row["worker_id"] != worker_id:
+                    return 0
+                if worker_id is not None and _heartbeat_expired(
+                    row["heartbeat_at"], now=now
+                ):
+                    return 0
+                if status in TERMINAL_STATUSES and event_type != "done":
+                    return 0
+                if status in TERMINAL_STATUSES and event_type == "done":
+                    latest_event = connection.execute(
+                        select(investigation_events.c.event)
+                        .where(investigation_events.c.job_id == job_id)
+                        .order_by(investigation_events.c.id.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+                    if (
+                        isinstance(latest_event, dict)
+                        and latest_event.get("type") == "done"
+                    ):
+                        return 0
+                if status == "cancel_requested" and event_type not in {
+                    "stopped",
+                    "done",
+                }:
+                    return 0
+            progress = dict(row["progress"] or {})
             if event_type == "start":
                 progress["total"] = event.get("total")
                 progress["username"] = event.get("username")
@@ -2076,7 +2225,10 @@ class CaseStore:
             elif event_type == "found":
                 progress["found"] = int(progress.get("found", 0)) + 1
             progress_updates["progress"] = progress
-            progress_updates["heartbeat_at"] = now
+            # Queueing and other control-plane events are not worker activity.
+            # Only an owner-guarded runtime event may renew the worker lease.
+            if runtime_guard:
+                progress_updates["heartbeat_at"] = now
             progress_updates["updated_at"] = now
             result = connection.execute(
                 insert(investigation_events)
@@ -2096,6 +2248,8 @@ class CaseStore:
         job_id: str,
         snapshot_result: Dict[str, Any],
         analysis_context: Dict[str, Any],
+        *,
+        worker_id: Optional[str] = None,
     ) -> Optional[str]:
         """Commit a snapshot and its follow-on AI job in one transaction.
 
@@ -2127,6 +2281,8 @@ class CaseStore:
                 investigation_jobs.c.status,
                 investigation_jobs.c.cancel_requested,
                 investigation_jobs.c.progress,
+                investigation_jobs.c.worker_id,
+                investigation_jobs.c.heartbeat_at,
             ).where(investigation_jobs.c.id == job_id)
             if self.engine.dialect.name == "postgresql":
                 statement = statement.with_for_update()
@@ -2135,6 +2291,12 @@ class CaseStore:
                 raise KeyError(job_id)
             if row["kind"] != "case_fusion":
                 raise ValueError("This job is not a combined-case snapshot")
+            if worker_id is not None and row["worker_id"] != worker_id:
+                return None
+            if worker_id is not None and _heartbeat_expired(
+                row["heartbeat_at"], now=now
+            ):
+                return None
             if row["status"] == "cancel_requested" or row["cancel_requested"]:
                 return None
             if row["status"] != "running":
@@ -2181,6 +2343,11 @@ class CaseStore:
                 .where(
                     investigation_jobs.c.id == job_id,
                     investigation_jobs.c.status == "running",
+                    *(
+                        (investigation_jobs.c.worker_id == worker_id,)
+                        if worker_id is not None
+                        else ()
+                    ),
                 )
                 .values(
                     status="completed",
@@ -6400,11 +6567,20 @@ class CaseStore:
             statement = select(
                 investigation_jobs.c.status,
                 investigation_jobs.c.usernames,
+                investigation_jobs.c.cancel_requested,
+                investigation_jobs.c.cancel_requested_at,
             ).where(investigation_jobs.c.id == job_id)
             if self.engine.dialect.name == "postgresql":
                 statement = statement.with_for_update()
             row = connection.execute(statement).mappings().first()
-            if not row or row["status"] not in {"queued", "running"}:
+            if not row:
+                return False
+            if row["status"] == "cancel_requested" or (
+                bool(row["cancel_requested"])
+                and row["status"] in TERMINAL_STATUSES
+            ):
+                return True
+            if row["status"] not in {"queued", "running"}:
                 return False
             if row["status"] == "queued":
                 cancellation = {
@@ -6423,6 +6599,7 @@ class CaseStore:
                         result=cancellation,
                         error=cancellation["error"],
                         cancel_requested=True,
+                        cancel_requested_at=now,
                         completed_at=now,
                         heartbeat_at=now,
                         updated_at=now,
@@ -6436,6 +6613,7 @@ class CaseStore:
                     .values(
                         status="cancel_requested",
                         cancel_requested=True,
+                        cancel_requested_at=now,
                         updated_at=now,
                     )
                 )
@@ -6452,15 +6630,53 @@ class CaseStore:
             ).scalar_one_or_none()
         return bool(value)
 
-    def finish(self, job_id: str, result: Dict[str, Any]) -> None:
+    def heartbeat(self, job_id: str, worker_id: str) -> bool:
+        """Renew an active job lease only for the worker that claimed it."""
+        now = utcnow()
+        cutoff = now - timedelta(seconds=WORKER_STALE_AFTER_SECONDS)
+        with self.engine.begin() as connection:
+            result = connection.execute(
+                update(investigation_jobs)
+                .where(
+                    investigation_jobs.c.id == job_id,
+                    investigation_jobs.c.worker_id == worker_id,
+                    investigation_jobs.c.status.in_(("running", "cancel_requested")),
+                    investigation_jobs.c.heartbeat_at.is_not(None),
+                    investigation_jobs.c.heartbeat_at >= cutoff,
+                )
+                .values(heartbeat_at=now, updated_at=now)
+            )
+        return bool(result.rowcount)
+
+    def finish(
+        self,
+        job_id: str,
+        result: Dict[str, Any],
+        *,
+        worker_id: Optional[str] = None,
+    ) -> bool:
+        """Publish a terminal result once, optionally enforcing worker ownership."""
         status = str(result.get("status", "failed"))
         if status not in TERMINAL_STATUSES:
             status = "failed"
         now = utcnow()
         with self.engine.begin() as connection:
-            connection.execute(
+            conditions = [
+                investigation_jobs.c.id == job_id,
+                investigation_jobs.c.status.in_(("running", "cancel_requested")),
+            ]
+            if worker_id is not None:
+                conditions.extend(
+                    (
+                        investigation_jobs.c.worker_id == worker_id,
+                        investigation_jobs.c.heartbeat_at.is_not(None),
+                        investigation_jobs.c.heartbeat_at
+                        >= now - timedelta(seconds=WORKER_STALE_AFTER_SECONDS),
+                    )
+                )
+            updated = connection.execute(
                 update(investigation_jobs)
-                .where(investigation_jobs.c.id == job_id)
+                .where(*conditions)
                 .values(
                     status=status,
                     result=dict(result),
@@ -6470,8 +6686,11 @@ class CaseStore:
                     updated_at=now,
                 )
             )
+        return bool(updated.rowcount)
 
-    def mark_stale_running(self, stale_after_seconds: int = 300) -> int:
+    def mark_stale_running(
+        self, stale_after_seconds: int = WORKER_STALE_AFTER_SECONDS
+    ) -> int:
         cutoff = utcnow() - timedelta(seconds=max(0, stale_after_seconds))
         now = utcnow()
         with self.engine.begin() as connection:
@@ -6504,6 +6723,7 @@ class CaseStore:
                 .values(
                     status="interrupted",
                     error="The worker stopped before this investigation completed.",
+                    worker_id=None,
                     completed_at=now,
                     updated_at=now,
                 )
@@ -6866,7 +7086,15 @@ class CaseStore:
             "options": dict(row["options"] or {}),
             "progress": dict(row["progress"] or {}),
             "cancel_requested": bool(row["cancel_requested"]),
+            "cancel_requested_at": _as_iso(row.get("cancel_requested_at")),
             "attempts": int(row["attempts"] or 0),
+            "budget_seconds": (
+                int(row["budget_seconds"])
+                if row.get("budget_seconds") is not None
+                else None
+            ),
+            "budget_policy_version": row.get("budget_policy_version"),
+            "deadline_at": _as_iso(row.get("deadline_at")),
             "started_at": _as_iso(row["started_at"] or row["created_at"]),
             "created_at": _as_iso(row["created_at"]),
             "heartbeat_at": _as_iso(row["heartbeat_at"]),
@@ -6878,6 +7106,13 @@ class CaseStore:
         payload["job_id"] = row["id"]
         payload["case_id"] = row["case_id"]
         payload["status"] = row["status"]
+        payload["budget_seconds"] = (
+            int(row["budget_seconds"])
+            if row.get("budget_seconds") is not None
+            else None
+        )
+        payload["budget_policy_version"] = row.get("budget_policy_version")
+        payload["deadline_at"] = _as_iso(row.get("deadline_at"))
         payload["usernames"] = list(row["usernames"] or result.get("usernames") or [])
         payload["progress"] = dict(row["progress"] or {})
         payload["session_folder"] = result.get("session_folder", f"search_{row['id']}")

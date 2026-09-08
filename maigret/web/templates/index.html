@@ -228,7 +228,7 @@
                     <select multiple class="hidden-select" id="caseExcludedTags" name="excluded_tags" aria-hidden="true">
                         {% for tag in available_tags %}<option value="{{ tag.value }}">{{ tag.label }}</option>{% endfor %}
                     </select>
-                    <p class="form-text mt-2">Leave all filters clear to use every eligible source in the selected Fast or Full coverage mode.</p>
+                    <p class="form-text mt-2">Leave all filters clear to use every eligible source in the selected Focused or Exhaustive coverage mode.</p>
                 </fieldset>
 
                 <fieldset class="investigation-section">
@@ -257,21 +257,21 @@
                     <legend class="form-label mb-2">Source coverage</legend>
                     <div class="mode-selector">
                         <div class="mode-option">
-                            <input type="radio" name="mode" id="mode-fast" value="fast" checked>
-                            <label for="mode-fast">
-                                <strong>Fast check</strong>
-                                <small>Scan the top {{ web_settings.top_sites }} ranked sites</small>
+                            <input type="radio" name="mode" id="mode-focused" value="focused" checked>
+                            <label for="mode-focused">
+                                <strong>Focused</strong>
+                                <small>Up to 10 minutes across the top {{ web_settings.top_sites }} ranked eligible sites</small>
                             </label>
                         </div>
                         <div class="mode-option">
-                            <input type="radio" name="mode" id="mode-full" value="full">
-                            <label for="mode-full">
-                                <strong>Full check</strong>
-                                <small>Scan every enabled site matching this case's filters; takes considerably longer</small>
+                            <input type="radio" name="mode" id="mode-exhaustive" value="exhaustive">
+                            <label for="mode-exhaustive">
+                                <strong>Exhaustive</strong>
+                                <small>Up to 30 minutes across every eligible enabled site matching this case's filters</small>
                             </label>
                         </div>
                     </div>
-                    <p class="form-text mt-2">Full check uses every enabled source in the bundled OpenLedger database. Disabled sources listed in <code>sites.md</code> are documented but are not contacted.</p>
+                    <p class="form-text mt-2">The runtime budget starts only when a worker claims the investigation; queue time does not count. If the budget ends first, OpenLedger retains partial evidence and labels the outcome for analyst review. Exhaustive uses every eligible enabled source in the bundled database.</p>
                 </fieldset>
 
                 <div class="alert alert-danger investigation-form-error" id="investigation-form-error" role="alert" hidden></div>

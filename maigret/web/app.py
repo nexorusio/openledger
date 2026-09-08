@@ -65,6 +65,7 @@ from maigret.web.collector_adapters import (
     FR_BUSINESS_REGISTRY_ENGINE,
     GLEIF_ENGINE,
     GOOGLE_PLACES_ENGINE,
+    MAIGRET_PROVIDER,
     OFFICIAL_WEBSITE_ENGINE,
     PUBLIC_WEB_ORGANIZATION_RESEARCH_ENGINE,
     WIKIDATA_ENGINE,
@@ -76,6 +77,7 @@ from maigret.web.collector_adapters import (
     extract_registry_affiliated_people,
     extract_wikidata_affiliation_people,
     github_profile_targets,
+    governed_provider,
     normalize_legal_jurisdiction,
     normalize_official_website_url,
     normalize_public_web_organization_findings,
@@ -106,6 +108,12 @@ from maigret.web.combined_intelligence import (
     overlay_relationship_proposals,
 )
 from maigret.web.geocoding import GeocodingError, geocode_place_center
+from maigret.web.execution_budget import ExecutionBudget
+from maigret.web.profile_discovery_policy import (
+    ProfileDiscoveryPolicyError,
+    govern_profile_discovery_options,
+)
+from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web.investigation_input import (
     InvestigationInputError,
     build_investigation_plan,
@@ -185,6 +193,8 @@ google_places_live_requests: Dict[str, float] = {}
 # transient. Terminal results are persisted separately beside their reports.
 live_jobs: Dict[str, Any] = {}
 PERSISTENT_CANCEL_POLL_SECONDS = 0.25
+PERSISTENT_CANCEL_COMPLETION_SECONDS = 15.0
+PERSISTENT_BUDGET_CLEANUP_SECONDS = 5.0
 COMBINED_AI_HEARTBEAT_SECONDS = 5.0
 
 
@@ -1167,6 +1177,7 @@ def select_sites_for_search(
     return ranked_sites
 
 
+@governed_provider(MAIGRET_PROVIDER)
 async def maigret_search(username, options, query_notify=None):
     logger = setup_logger(logging.WARNING, 'maigret')
     try:
@@ -1419,7 +1430,13 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
         raise ValueError('Invalid report session metadata')
 
     status = result.get('status')
-    if status not in {'completed', 'failed', 'cancelled', 'interrupted'}:
+    if status not in {
+        'completed',
+        'failed',
+        'cancelled',
+        'interrupted',
+        'budget_exhausted',
+    }:
         raise ValueError('Only terminal investigation results can be persisted')
 
     expected_folder = f'search_{session_key}'
@@ -1604,6 +1621,74 @@ def normalize_job_summary_entry(entry: Dict[str, Any]) -> Dict[str, Any]:
     return normalized
 
 
+def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Build a bounded, display-only view of a profile discovery runtime."""
+    source = entry if isinstance(entry, dict) else {}
+    options = source.get('options') if isinstance(source.get('options'), dict) else {}
+    budget = (
+        source.get('execution_budget')
+        if isinstance(source.get('execution_budget'), dict)
+        else {}
+    )
+    budget_recorded = bool(
+        source.get('budget_seconds') is not None
+        or budget.get('total_seconds') is not None
+        or isinstance(options.get('execution_budget'), dict)
+    )
+    if not budget and isinstance(options.get('execution_budget'), dict):
+        budget = options['execution_budget']
+    mode = str(
+        options.get('execution_mode') or budget.get('mode') or ''
+    ).strip().casefold()
+    mode = {'fast': 'focused', 'full': 'exhaustive'}.get(mode, mode)
+    if mode not in {'focused', 'exhaustive'}:
+        mode = 'exhaustive' if options.get('all_sites') else 'focused'
+    budget_seconds = source.get('budget_seconds') or budget.get('total_seconds')
+    try:
+        budget_seconds = int(budget_seconds)
+    except (TypeError, ValueError):
+        budget_seconds = 1800 if mode == 'exhaustive' else 600
+    if budget_seconds not in {600, 1800}:
+        budget_seconds = 1800 if mode == 'exhaustive' else 600
+    collection_status = str(source.get('collection_status') or '').strip()
+    return {
+        'status': str(source.get('status') or 'queued'),
+        'mode': mode,
+        'mode_label': 'Exhaustive' if mode == 'exhaustive' else 'Focused',
+        'budget_recorded': budget_recorded,
+        'budget_seconds': budget_seconds,
+        'deadline_at': source.get('deadline_at') or budget.get('deadline_at'),
+        'heartbeat_at': source.get('heartbeat_at'),
+        'cancel_requested_at': source.get('cancel_requested_at'),
+        'collection_status': collection_status or None,
+        'collection_message': str(source.get('collection_message') or '')[:1000],
+        'error': str(source.get('error') or '')[:1000],
+    }
+
+
+def provider_circuit_event(error: Exception, collector: str) -> Optional[Dict[str, Any]]:
+    """Return an explicit operator-facing event when provider work is skipped."""
+    if not isinstance(error, ProviderCircuitOpen):
+        return None
+    retry_after = max(0, int(error.retry_after_seconds))
+    retry_guidance = (
+        f'Try again after about {retry_after} seconds.'
+        if retry_after
+        else 'Another probe is already in progress; try again shortly.'
+    )
+    return {
+        'type': 'provider_circuit_open',
+        'collector': collector,
+        'provider': error.provider,
+        'retry_after_seconds': retry_after,
+        'message': (
+            f'{collector} was skipped because its provider circuit is open. '
+            f'{retry_guidance} Saved evidence remains '
+            'available and no identity decision was made automatically.'
+        ),
+    }
+
+
 def persist_job_result(session_key: str, result: Dict[str, Any]):
     """Atomically persist terminal job metadata alongside its report files."""
     normalized = normalize_persisted_result(session_key, result)
@@ -1641,13 +1726,19 @@ def persist_job_result(session_key: str, result: Dict[str, Any]):
     return normalized
 
 
-def record_job_result(session_key: str, result: Dict[str, Any]):
+def record_job_result(
+    session_key: str,
+    result: Dict[str, Any],
+    *,
+    worker_id: Optional[str] = None,
+):
     """Publish a terminal result in memory and durably when storage is available."""
     normalized = normalize_persisted_result(session_key, result)
     if case_store is not None and case_store.get_job(session_key):
         # PostgreSQL is authoritative for worker-owned jobs. Do not publish a
         # terminal SSE event if the database transition itself did not commit.
-        case_store.finish(session_key, normalized)
+        if not case_store.finish(session_key, normalized, worker_id=worker_id):
+            return None
         if normalized.get('status') == 'completed':
             try:
                 case_store.sync_persona_claims(session_key, normalized)
@@ -2799,7 +2890,7 @@ def parse_search_options(form, investigation_plan=None):
         'top_sites': settings['top_sites'],
         'timeout': settings['timeout'],
         'use_cookies': 'use_cookies' in form,
-        'all_sites': form.get('mode') == 'full',
+        'all_sites': form.get('mode') in {'full', 'exhaustive'},
         'disable_recursive_search': settings['disable_recursive_search'],
         'disable_extracting': settings['disable_extracting'],
         'with_domains': settings['with_domains'],
@@ -2813,7 +2904,7 @@ def parse_search_options(form, investigation_plan=None):
     }
     if investigation_plan:
         options['investigation_spec'] = investigation_plan
-    return options
+    return govern_profile_discovery_options(options, form.get('mode'))
 
 
 PERSISTENT_SECRET_OPTION_KEYS = ('proxy', 'tor_proxy', 'i2p_proxy')
@@ -2883,6 +2974,10 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
         except Exception as error:
             if notify.results:
                 general_results.append((username.strip(), 'username', notify.results))
+            circuit_event = provider_circuit_event(error, 'maigret')
+            if circuit_event:
+                q.put(circuit_event)
+                break
             public_error = record_internal_error(
                 'Username collection failed', error, username=username
             )
@@ -2931,6 +3026,13 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 github_collection_stopped = True
                 break
             except Exception as error:
+                circuit_event = provider_circuit_event(
+                    error, 'github-public-profile'
+                )
+                if circuit_event:
+                    q.put(circuit_event)
+                    github_collection_stopped = True
+                    break
                 public_error = record_internal_error(
                     'GitHub public-profile enrichment failed',
                     error,
@@ -2993,6 +3095,13 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 unfurl_collection_stopped = True
                 break
             except Exception as error:
+                circuit_event = provider_circuit_event(
+                    error, 'unfurl-url-analysis'
+                )
+                if circuit_event:
+                    q.put(circuit_event)
+                    unfurl_collection_stopped = True
+                    break
                 public_error = record_internal_error(
                     'Offline Unfurl URL analysis failed',
                     error,
@@ -3050,6 +3159,11 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                     wayback_collection_stopped = True
                     break
                 except Exception as error:
+                    circuit_event = provider_circuit_event(error, 'wayback-cdx')
+                    if circuit_event:
+                        q.put(circuit_event)
+                        wayback_collection_stopped = True
+                        break
                     public_error = record_internal_error(
                         'Wayback CDX archival metadata collection failed',
                         error,
@@ -3119,18 +3233,24 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 }
             )
         except Exception as error:
-            public_error = record_internal_error(
-                'User Scanner username collection failed',
-                error,
-                target_type='username',
+            circuit_event = provider_circuit_event(
+                error, 'user-scanner-username'
             )
-            q.put(
-                {
-                    'type': 'collector_error',
-                    'collector': 'user-scanner-username',
-                    'message': public_error,
-                }
-            )
+            if circuit_event:
+                q.put(circuit_event)
+            else:
+                public_error = record_internal_error(
+                    'User Scanner username collection failed',
+                    error,
+                    target_type='username',
+                )
+                q.put(
+                    {
+                        'type': 'collector_error',
+                        'collector': 'user-scanner-username',
+                        'message': public_error,
+                    }
+                )
 
     for email in user_scanner_email_targets(investigation_plan):
         if job['cancelled'] or (cancellation_check and cancellation_check()):
@@ -3167,6 +3287,10 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
             q.put({'type': 'stopped', 'collector': 'user-scanner'})
             break
         except Exception as error:
+            circuit_event = provider_circuit_event(error, 'user-scanner')
+            if circuit_event:
+                q.put(circuit_event)
+                break
             public_error = record_internal_error(
                 'User Scanner email collection failed',
                 error,
@@ -3210,11 +3334,36 @@ def finalize_stream_job(
     collector_observations=None,
     cancelled=False,
     interrupted=False,
+    budget_exhausted=False,
+    execution_budget=None,
+    worker_id=None,
 ):
     """Persist one terminal scan result and publish its final progress event."""
     collector_observations = list(collector_observations or [])
     done_event = {'type': 'done'}
     terminal_status = 'failed'
+    partial_status = None
+    partial_message = None
+    if interrupted:
+        partial_status = 'interrupted'
+        partial_message = 'The worker stopped before collection completed.'
+    elif cancelled:
+        partial_status = 'cancelled'
+        partial_message = 'The operator stopped collection before it completed.'
+    elif budget_exhausted:
+        partial_status = 'budget_exhausted'
+        partial_message = (
+            'The execution budget ended collection; all evidence gathered before '
+            'the deadline was retained.'
+        )
+
+    def persist_terminal_result(result):
+        # Keep the legacy/in-memory call shape compatible with simple test and
+        # extension doubles. Durable workers still supply their lease token.
+        if worker_id is None:
+            return record_job_result(job_id, result)
+        return record_job_result(job_id, result, worker_id=worker_id)
+
     if general_results or has_reportable_collector_observations(
         collector_observations
     ):
@@ -3228,73 +3377,97 @@ def finalize_stream_job(
                 general_results, usernames, job_id, **report_kwargs
             )
             result['started_at'] = started_at
-            if cancelled or interrupted:
-                result['collection_status'] = (
-                    'interrupted' if interrupted else 'cancelled'
-                )
-                result['collection_message'] = (
-                    'The worker stopped before collection completed.'
-                    if interrupted
-                    else 'The operator stopped collection before it completed.'
-                )
-            record_job_result(job_id, result)
+            if execution_budget:
+                result['execution_budget'] = dict(execution_budget)
+            if partial_status:
+                result['collection_status'] = partial_status
+                result['collection_message'] = partial_message
+            if persist_terminal_result(result) is None:
+                return False
             terminal_status = 'completed'
-            if cancelled or interrupted:
+            if partial_status:
                 done_event['status'] = 'partial'
+                done_event['reason'] = partial_status
             done_event['redirect'] = f"/results/search_{job_id}"
         except Exception as error:
             public_error = record_internal_error(
                 'Investigation report generation failed', error, session=job_id
             )
-            record_job_result(
-                job_id,
+            if persist_terminal_result(
                 {
                     'status': 'failed',
                     'error': public_error,
                     'usernames': usernames,
                     'started_at': started_at,
-                },
-            )
-    elif cancelled or interrupted:
-        terminal_status = 'interrupted' if interrupted else 'cancelled'
-        record_job_result(
-            job_id,
-            {
-                'status': terminal_status,
-                'error': (
+                }
+            ) is None:
+                return False
+    elif partial_status:
+        terminal_status = partial_status
+        terminal_result = {
+            'status': terminal_status,
+            'error': (
+                'The investigation reached its execution deadline before finding '
+                'a profile.'
+                if partial_status == 'budget_exhausted'
+                else (
                     'The worker stopped before the investigation produced findings.'
-                    if interrupted
+                    if partial_status == 'interrupted'
                     else 'The investigation was cancelled before finding a profile.'
-                ),
-                'usernames': usernames,
-                'started_at': started_at,
-            },
-        )
+                )
+            ),
+            'usernames': usernames,
+            'started_at': started_at,
+            'collection_status': partial_status,
+            'collection_message': partial_message,
+        }
+        if execution_budget:
+            terminal_result['execution_budget'] = dict(execution_budget)
+        if persist_terminal_result(terminal_result) is None:
+            return False
     else:
-        record_job_result(
-            job_id,
+        if persist_terminal_result(
             {
                 'status': 'failed',
                 'error': 'The investigation produced no reportable results.',
                 'usernames': usernames,
                 'started_at': started_at,
-            },
-        )
+            }
+        ) is None:
+            return False
     done_event.setdefault('status', terminal_status)
     event_sink.put(done_event)
+    return True
 
 
 def run_stream_job(job_id, usernames, options):
-    started_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    started_datetime = datetime.now(timezone.utc)
+    started_at = started_datetime.strftime('%Y-%m-%d %H:%M:%S')
+    execution_budget = ExecutionBudget.from_options(
+        options, started_at=started_datetime
+    )
     job = live_jobs[job_id]
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     job['loop'] = loop
     general_results = []
+    budget_exhausted = False
     try:
         general_results = loop.run_until_complete(
-            _stream_search(job, usernames, options)
+            asyncio.wait_for(
+                _stream_search(
+                    job,
+                    usernames,
+                    options,
+                    cancellation_check=execution_budget.is_exhausted,
+                ),
+                timeout=execution_budget.remaining_seconds(),
+            )
         )
+        budget_exhausted = execution_budget.is_exhausted()
+    except asyncio.TimeoutError:
+        budget_exhausted = True
+        general_results = list(job.get('general_results') or [])
     except Exception as error:
         public_error = record_internal_error(
             'Live investigation failed', error, session=job_id
@@ -3302,6 +3475,14 @@ def run_stream_job(job_id, usernames, options):
         job['queue'].put({'type': 'error', 'message': public_error})
     finally:
         loop.close()
+
+    if budget_exhausted:
+        job['queue'].put(
+            {
+                'type': 'budget_exhausted',
+                'execution_budget': execution_budget.as_dict(),
+            }
+        )
 
     # Same report files + results page as the classic /search flow, so the
     # live graph is a progress view, not a replacement for the report.
@@ -3313,18 +3494,32 @@ def run_stream_job(job_id, usernames, options):
         job['queue'],
         collector_observations=job.get('collector_observations'),
         cancelled=bool(job.get('cancelled')),
+        budget_exhausted=budget_exhausted and not bool(job.get('cancelled')),
+        execution_budget=execution_budget.as_dict(),
     )
 
 
 class PersistentEventSink:
     """Queue-compatible sink that commits progress before returning to a collector."""
 
-    def __init__(self, store: CaseStore, job_id: str):
+    def __init__(
+        self,
+        store: CaseStore,
+        job_id: str,
+        *,
+        worker_id: Optional[str] = None,
+    ):
         self.store = store
         self.job_id = job_id
+        self.worker_id = worker_id
 
     def put(self, event):
-        self.store.append_event(self.job_id, event)
+        return self.store.append_event(
+            self.job_id,
+            event,
+            runtime_guard=True,
+            worker_id=self.worker_id,
+        )
 
 
 async def watch_persistent_job_stop(
@@ -3341,8 +3536,48 @@ async def watch_persistent_job_stop(
         if cancel_requested or shutdown_requested:
             runtime_job['cancelled'] = cancel_requested and not shutdown_requested
             stream_task.cancel()
-            return
+            return 'interrupted' if shutdown_requested else 'cancelled'
         await asyncio.sleep(PERSISTENT_CANCEL_POLL_SECONDS)
+
+
+async def await_persistent_stream(
+    stream_task,
+    stop_watcher,
+    runtime_job: Dict[str, Any],
+    execution_budget: ExecutionBudget,
+):
+    """Enforce the execution deadline and bounded stop acknowledgement."""
+    done, _pending = await asyncio.wait(
+        {stream_task, stop_watcher},
+        timeout=execution_budget.remaining_seconds(),
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    if stream_task in done:
+        return await stream_task
+    if stop_watcher in done:
+        runtime_job['stop_reason'] = await stop_watcher
+        done, _pending = await asyncio.wait(
+            {stream_task},
+            timeout=PERSISTENT_CANCEL_COMPLETION_SECONDS,
+        )
+        if stream_task in done:
+            return await stream_task
+        runtime_job['cancellation_deadline_exceeded'] = True
+        stream_task.cancel()
+        return list(runtime_job.get('general_results') or [])
+
+    runtime_job['budget_exhausted'] = True
+    stream_task.cancel()
+    done, _pending = await asyncio.wait(
+        {stream_task},
+        timeout=PERSISTENT_BUDGET_CLEANUP_SECONDS,
+    )
+    if stream_task in done:
+        try:
+            return await stream_task
+        except asyncio.CancelledError:
+            pass
+    return list(runtime_job.get('general_results') or [])
 
 
 def run_persistent_affiliation_job(
@@ -3373,7 +3608,8 @@ def run_persistent_affiliation_job(
         )
     else:
         explicit_website = normalize_official_website_url(explicit_website)
-    sink = PersistentEventSink(store, job_id)
+    worker_id = job.get('worker_id')
+    sink = PersistentEventSink(store, job_id, worker_id=worker_id)
     source_specs = [
         (
             'wikidata-affiliation',
@@ -3728,6 +3964,7 @@ def run_persistent_affiliation_job(
                 'usernames': [],
                 'discovery_status': status,
             },
+            worker_id=worker_id,
         )
         sink.put({'type': 'done', 'status': status})
         return
@@ -3916,6 +4153,8 @@ def run_persistent_affiliation_job(
         if isinstance(website_result, dict)
         else []
     )
+    if worker_id is not None and not store.heartbeat(job_id, worker_id):
+        return None
     if wikidata_people or registry_people or website_people:
         synchronized = store.sync_affiliation_discovery(
             job_id,
@@ -4089,7 +4328,6 @@ def run_persistent_affiliation_job(
         'source_record_id': observation.get('source_record_id'),
         'source_errors': source_errors,
     }
-    store.finish(job_id, result)
     for source_name, _coroutine in source_specs:
         source_observation = source_observations[source_name]
         source_status = source_observation.get('status')
@@ -4220,6 +4458,8 @@ def run_persistent_affiliation_job(
                 'message': str(google_places_result.get('reason') or '')[:1000],
             }
         )
+    if not store.finish(job_id, result, worker_id=worker_id):
+        return None
     sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
 
 
@@ -4233,7 +4473,8 @@ def run_persistent_identity_enrichment_job(
     selected_page_id = (
         str(specification.get('selected_wikipedia_page_id') or '').strip() or None
     )
-    sink = PersistentEventSink(store, job_id)
+    worker_id = job.get('worker_id')
+    sink = PersistentEventSink(store, job_id, worker_id=worker_id)
     sink.put(
         {
             'type': 'collector_started',
@@ -4284,6 +4525,7 @@ def run_persistent_identity_enrichment_job(
                 'usernames': [],
                 'persona_id': persona_id,
             },
+            worker_id=worker_id,
         )
         sink.put({'type': 'done', 'status': status})
         return
@@ -4320,6 +4562,8 @@ def run_persistent_identity_enrichment_job(
             )
         else:
             icij_observation = source_results[1]
+    if worker_id is not None and not store.heartbeat(job_id, worker_id):
+        return None
     synchronized = store.sync_identity_enrichment(
         job_id, wikipedia_observation, icij_observation
     )
@@ -4340,7 +4584,6 @@ def run_persistent_identity_enrichment_job(
         'offshore_alert_count': synchronized['offshore_alerts'],
         'source_errors': [str(message)[:1000] for message in source_errors[:2]],
     }
-    store.finish(job_id, result)
     if offshore_matches:
         sink.put(
             {
@@ -4362,6 +4605,8 @@ def run_persistent_identity_enrichment_job(
             'found': len(offshore_matches),
         }
     )
+    if not store.finish(job_id, result, worker_id=worker_id):
+        return None
     sink.put(
         {
             'type': 'done',
@@ -4388,6 +4633,7 @@ async def await_combined_ai_phase(
     message: str,
     analysis_started_at: float,
     shutdown_check=None,
+    worker_id: Optional[str] = None,
 ):
     """Await one API call while heartbeating and polling durable cancellation."""
     phase_started_at = time.monotonic()
@@ -4400,6 +4646,8 @@ async def await_combined_ai_phase(
             "elapsed_seconds": int(phase_started_at - analysis_started_at),
             "phase_elapsed_seconds": 0,
         },
+        runtime_guard=True,
+        worker_id=worker_id,
     )
     task = asyncio.create_task(awaitable)
     last_heartbeat = phase_started_at
@@ -4426,6 +4674,8 @@ async def await_combined_ai_phase(
                     "elapsed_seconds": int(now - analysis_started_at),
                     "phase_elapsed_seconds": int(now - phase_started_at),
                 },
+                runtime_guard=True,
+                worker_id=worker_id,
             )
             last_heartbeat = now
     return await task
@@ -4448,6 +4698,7 @@ def run_combined_case_ai_analysis(
     )
     web_search_enabled = bool(settings.get("ai_web_enrichment", True))
     job_id = str(job["job_id"])
+    worker_id = job.get("worker_id")
     run_id = store.start_combined_analysis_run(
         snapshot_job_id,
         snapshot_sha,
@@ -4483,6 +4734,8 @@ def run_combined_case_ai_analysis(
                 "message": reason,
                 "elapsed_seconds": 0,
             },
+            runtime_guard=True,
+            worker_id=worker_id,
         )
         return {
             "run_id": run_id,
@@ -4520,6 +4773,7 @@ def run_combined_case_ai_analysis(
             message="Researching cited cross-case evidence.",
             analysis_started_at=analysis_started_at,
             shutdown_check=shutdown_check,
+            worker_id=worker_id,
         )
         raw_insights = await await_combined_ai_phase(
             store,
@@ -4536,6 +4790,7 @@ def run_combined_case_ai_analysis(
             message="Structuring cited findings for human review.",
             analysis_started_at=analysis_started_at,
             shutdown_check=shutdown_check,
+            worker_id=worker_id,
         )
         return research, raw_insights
 
@@ -4549,6 +4804,15 @@ def run_combined_case_ai_analysis(
         interrupted = bool(shutdown_check and shutdown_check())
         if interrupted or store.is_cancel_requested(job_id):
             return stopped_result(interrupted=interrupted)
+        if worker_id is not None and not store.heartbeat(job_id, worker_id):
+            return {
+                "run_id": run_id,
+                "status": "cancelled",
+                "interrupted": True,
+                "model": model,
+                "web_search_enabled": web_search_enabled,
+                "proposal_count": 0,
+            }
         proposal_count = store.complete_combined_analysis_run(run_id, insights)
         elapsed_seconds = int(time.monotonic() - analysis_started_at)
         store.append_event(
@@ -4559,6 +4823,8 @@ def run_combined_case_ai_analysis(
                 "message": "AI synthesis is ready for human review.",
                 "elapsed_seconds": elapsed_seconds,
             },
+            runtime_guard=True,
+            worker_id=worker_id,
         )
         return {
             "run_id": run_id,
@@ -4598,6 +4864,7 @@ def run_persistent_combined_ai_job(
 ):
     """Run the interruptible AI phase without changing its published snapshot."""
     job_id = str(job["job_id"])
+    worker_id = job.get("worker_id")
     specification = (job.get("options") or {}).get("investigation_spec") or {}
     snapshot_job_id = str(specification.get("snapshot_job_id") or "")
     snapshot_sha = str(specification.get("snapshot_sha256") or "")
@@ -4652,7 +4919,8 @@ def run_persistent_combined_ai_job(
             "snapshot_sha256": snapshot_sha,
             "error": public_error,
         }
-    store.finish(job_id, result)
+    if not store.finish(job_id, result, worker_id=worker_id):
+        return None
     store.append_event(
         job_id,
         {
@@ -4660,6 +4928,8 @@ def run_persistent_combined_ai_job(
             "status": result["status"],
             "redirect": f"/cases/{job['case_id']}",
         },
+        runtime_guard=True,
+        worker_id=worker_id,
     )
 
 
@@ -4668,6 +4938,7 @@ def run_persistent_case_fusion_job(
 ):
     """Build one immutable approved-evidence snapshot for selected cases."""
     job_id = job["job_id"]
+    worker_id = job.get("worker_id")
     source_case_ids = list(
         ((job.get("options") or {}).get("investigation_spec") or {}).get(
             "source_case_ids"
@@ -4681,6 +4952,8 @@ def run_persistent_case_fusion_job(
             "total": len(source_case_ids),
             "activity": "Capturing approved source evidence",
         },
+        runtime_guard=True,
+        worker_id=worker_id,
     )
     try:
         if store.is_cancel_requested(job_id) or bool(
@@ -4724,9 +4997,14 @@ def run_persistent_case_fusion_job(
                         "total": len(source_case_ids),
                         "site": "Approved evidence snapshot",
                     },
+                    runtime_guard=True,
+                    worker_id=worker_id,
                 )
                 ai_job_id = store.publish_case_fusion_snapshot(
-                    job_id, snapshot_result, analysis_context
+                    job_id,
+                    snapshot_result,
+                    analysis_context,
+                    worker_id=worker_id,
                 )
                 if ai_job_id is None:
                     interrupted = bool(shutdown_check and shutdown_check())
@@ -4749,7 +5027,8 @@ def run_persistent_case_fusion_job(
             "kind": "case_fusion",
             "error": public_error,
         }
-    store.finish(job_id, result)
+    if not store.finish(job_id, result, worker_id=worker_id):
+        return None
     store.append_event(
         job_id,
         {
@@ -4759,6 +5038,8 @@ def run_persistent_case_fusion_job(
                 f"/cases/{job['case_id']}" if result["status"] == "completed" else None
             ),
         },
+        runtime_guard=True,
+        worker_id=worker_id,
     )
 
 
@@ -4857,8 +5138,12 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
     job_id = job["job_id"]
     usernames = job["usernames"]
     options = hydrate_persistent_options(job["options"])
-    started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    sink = PersistentEventSink(store, job_id)
+    execution_budget = ExecutionBudget.from_job(job)
+    started_at = job.get("started_at") or datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    worker_id = job.get("worker_id")
+    sink = PersistentEventSink(store, job_id, worker_id=worker_id)
     runtime_job = {
         "queue": sink,
         "cancelled": False,
@@ -4871,6 +5156,7 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
     general_results = []
     stream_task = None
     stop_watcher = None
+    budget_exhausted = False
     try:
         stream_task = loop.create_task(
             _stream_search(
@@ -4880,6 +5166,7 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
                 cancellation_check=lambda: (
                     store.is_cancel_requested(job_id)
                     or bool(shutdown_check and shutdown_check())
+                    or execution_budget.is_exhausted()
                 ),
             )
         )
@@ -4892,7 +5179,18 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
                 shutdown_check=shutdown_check,
             )
         )
-        general_results = loop.run_until_complete(stream_task)
+        general_results = loop.run_until_complete(
+            await_persistent_stream(
+                stream_task,
+                stop_watcher,
+                runtime_job,
+                execution_budget,
+            )
+        )
+        budget_exhausted = bool(runtime_job.get("budget_exhausted"))
+    except asyncio.TimeoutError:
+        budget_exhausted = True
+        general_results = list(runtime_job.get("general_results") or [])
     except asyncio.CancelledError:
         general_results = list(runtime_job.get("general_results") or [])
     except Exception as error:
@@ -4907,8 +5205,31 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
             loop.run_until_complete(
                 asyncio.gather(stop_watcher, return_exceptions=True)
             )
+        if stream_task is not None and not stream_task.done():
+            stream_task.cancel()
+            loop.run_until_complete(
+                asyncio.wait({stream_task}, timeout=0.1)
+            )
         loop.close()
     shutdown_requested = bool(shutdown_check and shutdown_check())
+    cancel_requested = store.is_cancel_requested(job_id)
+    if runtime_job.get("cancellation_deadline_exceeded"):
+        sink.put(
+            {
+                "type": "stopped",
+                "reason": "cancellation_deadline_exceeded",
+            }
+        )
+    budget_exhausted = (
+        budget_exhausted or execution_budget.is_exhausted()
+    ) and not shutdown_requested and not cancel_requested
+    if budget_exhausted:
+        sink.put(
+            {
+                "type": "budget_exhausted",
+                "execution_budget": execution_budget.as_dict(),
+            }
+        )
     finalize_stream_job(
         job_id,
         usernames,
@@ -4916,12 +5237,19 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         started_at,
         sink,
         collector_observations=runtime_job.get("collector_observations"),
-        cancelled=store.is_cancel_requested(job_id) and not shutdown_requested,
+        cancelled=cancel_requested and not shutdown_requested,
         interrupted=shutdown_requested,
+        budget_exhausted=budget_exhausted,
+        execution_budget=execution_budget.as_dict(),
+        worker_id=worker_id,
     )
 
 
 def start_live_job(usernames, options):
+    options = govern_profile_discovery_options(
+        options,
+        options.get('execution_mode') if isinstance(options, dict) else None,
+    )
     if case_store is not None:
         return case_store.create_investigation(
             usernames,
@@ -4934,6 +5262,8 @@ def start_live_job(usernames, options):
         'cancelled': False,
         'loop': None,
         'task': None,
+        'options': dict(options),
+        'status': 'running',
     }
     Thread(target=run_stream_job, args=(job_id, usernames, options)).start()
     return job_id
@@ -4949,11 +5279,12 @@ def scan_start():
         return {'error': 'Invalid CSRF token.'}, 403
     try:
         usernames, investigation_plan = parse_investigation_submission(request.form)
+        options = parse_search_options(request.form, investigation_plan)
+        job_id = start_live_job(usernames, options)
     except InvestigationInputError as error:
         return {'error': str(error)}, 400
-
-    options = parse_search_options(request.form, investigation_plan)
-    job_id = start_live_job(usernames, options)
+    except ProfileDiscoveryPolicyError as error:
+        return {'error': str(error)}, 503
     return {'job_id': job_id}
 
 
@@ -4988,12 +5319,23 @@ def scan_stream(job_id):
                     break
                 if current["status"] in TERMINAL_STATUSES and not events:
                     if not saw_done:
+                        collection_status = str(
+                            current.get('collection_status') or ''
+                        ).strip()
+                        displayed_status = (
+                            'partial'
+                            if current['status'] == 'completed'
+                            and collection_status
+                            in {'budget_exhausted', 'cancelled', 'interrupted'}
+                            else current['status']
+                        )
                         yield (
                             "data: "
                             + json.dumps(
                                 {
                                     "type": "done",
-                                    "status": current["status"],
+                                    "status": displayed_status,
+                                    "reason": collection_status or None,
                                     "redirect": (
                                         f"/cases/{current['case_id']}"
                                         if current.get("kind")
@@ -5049,16 +5391,48 @@ def scan_stream(job_id):
     return Response(gen(), mimetype="text/event-stream")
 
 
+@app.route('/api/scan/<job_id>/runtime')
+def scan_runtime(job_id):
+    """Expose only the operational fields needed by the live status display."""
+    current = case_store.get_job(job_id) if case_store is not None else None
+    if current is None:
+        current = job_results.get(job_id)
+    if current is None:
+        in_memory = live_jobs.get(job_id)
+        if in_memory is not None:
+            current = {
+                'status': (
+                    'cancel_requested' if in_memory.get('cancelled') else 'running'
+                ),
+                'options': in_memory.get('options') or {},
+            }
+    if current is None:
+        return {'error': 'unknown job'}, 404
+    return profile_discovery_runtime_view(current)
+
+
 @app.route('/api/scan/<job_id>/stop', methods=['POST'])
 def scan_stop(job_id):
     if case_store is not None:
-        if not case_store.get_job(job_id):
-            return {'error': 'unknown job'}, 404
         if not is_valid_csrf(request.headers.get('X-OpenLedger-CSRF', '')):
             return {'error': 'Invalid CSRF token.'}, 403
+        current = case_store.get_job(job_id)
+        if not current:
+            return {'error': 'unknown job'}, 404
         if not case_store.request_cancel(job_id):
-            return {'error': 'investigation is not running'}, 409
-        return {'ok': True}
+            current = case_store.get_job(job_id) or current
+            return {
+                'error': 'investigation is not running',
+                'status': current['status'],
+            }, 409
+        current = case_store.get_job(job_id)
+        return {
+            'ok': True,
+            'status': current['status'],
+            'cancel_requested': bool(current.get('cancel_requested')),
+            'cancel_requested_at': current.get('cancel_requested_at'),
+            'terminal': current['status'] in TERMINAL_STATUSES,
+        }
 
     job = live_jobs.get(job_id)
     if not job:
@@ -5071,7 +5445,12 @@ def scan_stop(job_id):
     task = job.get('task')
     if loop and task:
         loop.call_soon_threadsafe(task.cancel)
-    return {'ok': True}
+    return {
+        'ok': True,
+        'status': 'cancel_requested',
+        'cancel_requested': True,
+        'terminal': False,
+    }
 
 
 def persona_display_identifier_type(persona):
@@ -5611,6 +5990,12 @@ def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]
                 f"{identifier_count} identifier"
                 f"{'s' if identifier_count != 1 else ''} checked"
             )
+        runtime = profile_discovery_runtime_view(entry)
+        if runtime['budget_recorded']:
+            context_parts.append(
+                f"{runtime['mode_label']} · "
+                f"{runtime['budget_seconds'] // 60}-minute runtime budget"
+            )
         legacy_untriaged = (
             entry.get("status") == "completed"
             and entry.get("profile_reliability_version")
@@ -5648,6 +6033,8 @@ def build_investigation_history_context(entry: Dict[str, Any]) -> Dict[str, str]
         except (TypeError, ValueError):
             progress_found = 0
         finding_summary = f"{progress_found} findings so far"
+    elif status == 'budget_exhausted':
+        finding_summary = 'No retained findings · runtime budget reached'
 
     return {
         "type_label": type_label,
@@ -7147,12 +7534,11 @@ def live_start():
         return redirect(url_for('index'))
     try:
         usernames, investigation_plan = parse_investigation_submission(request.form)
-    except InvestigationInputError as error:
+        options = parse_search_options(request.form, investigation_plan)
+        job_id = start_live_job(usernames, options)
+    except (InvestigationInputError, ProfileDiscoveryPolicyError) as error:
         flash(str(error), 'danger')
         return redirect(url_for('index'))
-
-    options = parse_search_options(request.form, investigation_plan)
-    job_id = start_live_job(usernames, options)
     return redirect(url_for('live_results', job_id=job_id))
 
 
@@ -7171,8 +7557,18 @@ def live_results(job_id):
         flash("Unknown or expired scan session.", "danger")
         return redirect(url_for("index"))
 
+    view_job = dict(stored_job or {})
+    view_job.update(result or {})
+    if not view_job and job_id in live_jobs:
+        view_job = {
+            'status': (
+                'cancel_requested' if live_jobs[job_id].get('cancelled') else 'running'
+            ),
+            'kind': 'live',
+            'options': live_jobs[job_id].get('options') or {},
+        }
     done_redirect = None
-    result = result or stored_job
+    result = view_job
     if result and result.get("status") == "completed":
         if result.get("kind") in {"affiliation", "case_fusion"}:
             done_redirect = url_for("case_workspace", case_id=result["case_id"])
@@ -7223,6 +7619,7 @@ def live_results(job_id):
             "registry_candidate_count", 0
         ),
         completed_offshore_alert_count=(result or {}).get("offshore_alert_count", 0),
+        runtime_state=profile_discovery_runtime_view(result),
     )
 
 
@@ -7231,14 +7628,11 @@ def live_results(job_id):
 def search():
     try:
         usernames, investigation_plan = parse_investigation_submission(request.form)
-    except InvestigationInputError as error:
+        options = parse_search_options(request.form, investigation_plan)
+        job_id = start_live_job(usernames, options)
+    except (InvestigationInputError, ProfileDiscoveryPolicyError) as error:
         flash(str(error), 'danger')
         return redirect(url_for('index'))
-
-    # Create timestamp for this search session
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-    options = parse_search_options(request.form, investigation_plan)
     logging.info(
         'Starting search for usernames=%s tags=%s excluded=%s',
         safe_log_value(usernames),
@@ -7246,16 +7640,8 @@ def search():
         safe_log_value(options['excluded_tags']),
     )
 
-    # Start background job
-    background_jobs[timestamp] = {
-        'completed': False,
-        'thread': Thread(
-            target=process_search_task, args=(usernames, options, timestamp)
-        ),
-    }
-    background_jobs[timestamp]['thread'].start()  # type: ignore[union-attr]
-
-    return redirect(url_for('status', timestamp=timestamp))
+    # Legacy form clients now enter the same governed queue as live/API scans.
+    return redirect(url_for('live_results', job_id=job_id))
 
 
 @app.route('/status/<timestamp>')
@@ -7336,13 +7722,18 @@ def results(session_id):
         return redirect(url_for("history"))
 
     result_case = None
+    stored_job = None
     if case_store is not None:
         case_id = result_data.get("case_id")
-        if not case_id and session_id.startswith("search_"):
+        if session_id.startswith("search_"):
             stored_job = case_store.get_job(session_id.removeprefix("search_"))
+        if not case_id and stored_job:
             case_id = (stored_job or {}).get("case_id")
         if case_id:
             result_case = case_store.get_case(case_id)
+
+    runtime_source = dict(stored_job or {})
+    runtime_source.update(result_data)
 
     legacy_untriaged = (
         result_data.get('profile_reliability_version')
@@ -7388,6 +7779,7 @@ def results(session_id):
         csrf_token=get_csrf_token(),
         result_case=result_case,
         ai_analysis_status=get_ai_analysis_status(result_data),
+        runtime_state=profile_discovery_runtime_view(runtime_source),
     )
 
 
