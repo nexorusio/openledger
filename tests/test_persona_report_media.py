@@ -26,6 +26,9 @@ class _Response:
         chunk, self._body = self._body[:amount], self._body[amount:]
         return chunk
 
+    def read1(self, amount):
+        return self.read(amount)
+
     def release_conn(self):
         self.released = True
 
@@ -134,6 +137,31 @@ def test_public_image_fetch_rejects_large_or_non_image_responses(monkeypatch):
         media.fetch_public_image("https://example.test/large.png", maximum_bytes=10)
     with pytest.raises(ValueError, match="supported image"):
         media.fetch_public_image("https://example.test/not-image", maximum_bytes=10)
+
+
+def test_public_image_fetch_enforces_wall_clock_transfer_deadline(monkeypatch):
+    now = [0.0]
+
+    class _TrickleResponse(_Response):
+        def read1(self, amount):
+            now[0] += media.MAX_MEDIA_FETCH_SECONDS + 1
+            return b"x"
+
+    response = _TrickleResponse(headers={"content-type": "image/png"})
+    pool = _Pool(response)
+    monkeypatch.setattr(media.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        media,
+        "_validated_public_addresses",
+        lambda hostname, port: ("93.184.216.34",),
+    )
+    monkeypatch.setattr(media, "_pinned_pool", lambda *args: (pool, {}))
+
+    with pytest.raises(ValueError, match="transfer deadline"):
+        media.fetch_public_image("https://example.test/trickle.png")
+
+    assert response.released is True
+    assert pool.closed is True
 
 
 def test_redirect_target_is_revalidated_and_private_target_is_rejected(monkeypatch):

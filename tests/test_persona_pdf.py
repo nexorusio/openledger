@@ -341,6 +341,23 @@ def test_approved_media_failures_never_block_the_report(monkeypatch):
     assert b"%%EOF" in pdf_bytes[-1024:]
 
 
+def test_long_approved_name_does_not_break_the_hero_layout():
+    persona = _persona()
+    long_name = "Alice Example " * 120
+    persona["claims"].append(
+        _approved_claim("long-name", "full_name", long_name, 95)
+    )
+
+    pdf_bytes = generate_persona_pdf(
+        persona,
+        generated_by="analyst",
+        generated_at=datetime(2026, 9, 2, 12, 0, tzinfo=timezone.utc),
+    )
+
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert b"%%EOF" in pdf_bytes[-1024:]
+
+
 def test_investigation_pdf_embeds_approved_photo_and_map(monkeypatch):
     photo_calls = []
     map_calls = []

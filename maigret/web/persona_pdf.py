@@ -73,6 +73,7 @@ _SOFT_RISK = colors.HexColor("#FBECEC")
 # addition to the document margins. Keep every full-width flowable inside that
 # real frame width so nested media cards cannot bleed into the margins.
 _PAGE_WIDTH = A4[0] - 36 * mm - 12
+_HERO_NAME_LIMIT = 180
 _FONT_REGISTRATION_LOCK = threading.Lock()
 
 
@@ -1353,16 +1354,31 @@ def _hero(
     portrait_bytes: Optional[bytes],
     styles: Mapping[str, ParagraphStyle],
 ) -> Table:
+    full_name = str(report.get("name") or "Unnamed person")
+    displayed_name = full_name
+    name_note = None
+    if len(full_name) > _HERO_NAME_LIMIT:
+        displayed_name = f"{full_name[:_HERO_NAME_LIMIT].rstrip()}..."
+        name_note = _paragraph(
+            "Name abbreviated in the profile header; the complete approved value is retained in the evidence and audit register.",
+            styles["small"],
+        )
     name_details = [
         _paragraph("INVESTIGATION SUBJECT", styles["eyebrow"]),
-        _paragraph(report.get("name") or "Unnamed person", styles["title"]),
+        _paragraph(displayed_name, styles["title"]),
         _certainty_badge(report.get("name_confidence"), styles),
-        Spacer(1, 3 * mm),
-        _paragraph(
-            "Human-centred profile compiled from analyst-approved identity, location, affiliation, contact, asset, and risk records.",
-            styles["subtitle"],
-        ),
     ]
+    if name_note is not None:
+        name_details.extend([Spacer(1, 1.5 * mm), name_note])
+    name_details.extend(
+        [
+            Spacer(1, 3 * mm),
+            _paragraph(
+                "Human-centred profile compiled from analyst-approved identity, location, affiliation, contact, asset, and risk records.",
+                styles["subtitle"],
+            ),
+        ]
+    )
     hero = Table(
         [[_portrait_box(report, portrait_bytes, styles), name_details]],
         colWidths=[50 * mm, _PAGE_WIDTH - 50 * mm],

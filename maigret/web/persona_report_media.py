@@ -20,6 +20,7 @@ import urllib3
 MAX_PHOTO_BYTES = 4_000_000
 MAX_TILE_BYTES = 1_500_000
 MAX_PORTRAIT_PIXELS = 20_000_000
+MAX_MEDIA_FETCH_SECONDS = 15.0
 MAP_CACHE_SECONDS = 7 * 24 * 60 * 60
 MAP_ZOOM = 11
 MAP_WIDTH = 920
@@ -142,10 +143,18 @@ def _pinned_pool(hostname: str, address: str, port: int, scheme: str):
 def fetch_public_image(url: str, *, maximum_bytes: int = MAX_PHOTO_BYTES) -> bytes:
     """Fetch one image through a DNS-pinned, redirect-bounded public connection."""
     current_url = str(url or "")
+    deadline = time.monotonic() + MAX_MEDIA_FETCH_SECONDS
+
+    def require_time_remaining() -> None:
+        if time.monotonic() >= deadline:
+            raise ValueError("Media response exceeded its transfer deadline")
+
     for redirect_count in range(3):
+        require_time_remaining()
         current_url, hostname, port = _validated_media_url(current_url)
         parsed = urlparse(current_url)
         addresses = _validated_public_addresses(hostname, port)
+        require_time_remaining()
         pool, headers = _pinned_pool(
             hostname,
             addresses[0],
@@ -163,6 +172,7 @@ def fetch_public_image(url: str, *, maximum_bytes: int = MAX_PHOTO_BYTES) -> byt
                 preload_content=False,
                 retries=False,
             )
+            require_time_remaining()
             if response.status in _REDIRECT_STATUSES:
                 location = str(response.headers.get("location") or "").strip()
                 if not location or redirect_count >= 2:
@@ -186,8 +196,14 @@ def fetch_public_image(url: str, *, maximum_bytes: int = MAX_PHOTO_BYTES) -> byt
                 if parsed_length > maximum_bytes:
                     raise ValueError("Media response is too large")
             body = bytearray()
+            read_chunk = getattr(response, "read1", response.read)
             while True:
-                chunk = response.read(min(65_536, maximum_bytes + 1 - len(body)))
+                require_time_remaining()
+                # read1 performs at most one underlying socket read. Combined with
+                # the monotonic checks, a peer cannot keep this call alive by
+                # trickling bytes quickly enough to reset the socket read timeout.
+                chunk = read_chunk(min(65_536, maximum_bytes + 1 - len(body)))
+                require_time_remaining()
                 if not chunk:
                     break
                 body.extend(chunk)
