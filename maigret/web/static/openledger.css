@@ -82,6 +82,20 @@
 .business-context-finding dl > div { display: grid; grid-template-columns: 5rem minmax(0, 1fr); gap: .65rem; }
 .business-context-finding dt { color: var(--ol-muted); font-size: .7rem; text-transform: uppercase; }
 .business-context-finding dd { margin: 0; font-size: .78rem; }
+.profile-search-review { margin-bottom: 1rem; }
+.profile-search-metrics { margin: 0 0 .75rem; }
+.profile-search-audit-meta { overflow-wrap: anywhere; }
+.profile-search-candidate > header > div { display: flex; gap: .4rem; flex-wrap: wrap; }
+.profile-search-evidence { margin-top: .75rem; }
+.profile-search-evidence summary { cursor: pointer; color: var(--ol-muted); font-size: .8rem; }
+.profile-search-evidence ul { display: grid; gap: .45rem; margin: .75rem 0 0; padding-left: 1.1rem; }
+.profile-search-evidence li { overflow-wrap: anywhere; }
+.profile-search-evidence li small { display: block; color: var(--ol-muted); }
+.profile-search-review-history { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .75rem; }
+.profile-search-review-form { grid-template-columns: minmax(10rem, .7fr) minmax(16rem, 1.3fr); }
+.profile-search-review-form label { display: grid; gap: .3rem; color: var(--ol-muted); font-size: .75rem; font-weight: 600; }
+.profile-search-review-form select, .profile-search-review-form input { min-height: 2.25rem; border: 1px solid var(--ol-border); border-radius: .45rem; background: var(--ol-surface); color: var(--ol-text); padding: .45rem .65rem; }
+.profile-search-review-form .review-actions, .profile-search-review-form > small { grid-column: 1 / -1; }
 .public-web-research-analysis { white-space: pre-wrap; }
 .domain-context-card { display: grid; gap: .75rem; }
 .domain-context-card > header > div { display: grid; gap: .2rem; }

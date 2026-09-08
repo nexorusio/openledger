@@ -432,6 +432,105 @@
 </section>
 {% endif %}
 
+{% if case.profile_search_integrity_error %}
+<div class="alert alert-warning" role="alert">
+    <strong>Profile-search audit unavailable</strong>
+    <p class="mb-0">The latest native-search record failed its integrity check. No candidate was exposed or sent to a Persona.</p>
+</div>
+{% endif %}
+{% if case.profile_search_discovery %}
+{% set discovery = case.profile_search_discovery %}
+<section class="panel-card profile-search-review" aria-labelledby="profile-search-title">
+    <header class="panel-header">
+        <div>
+            <span class="eyebrow">Native search-first discovery</span>
+            <h2 id="profile-search-title">Major-platform profile candidates</h2>
+            <p>Search results are investigative leads, not verified accounts. Review priority orders the queue and is not an identity-confidence score.</p>
+        </div>
+        <span class="badge-soft warning">Analyst decision required</span>
+    </header>
+    <div class="panel-body">
+        <div class="persona-status-strip profile-search-metrics">
+            <span><strong>{{ discovery.candidate_count }}</strong> candidates</span>
+            <span><strong>{{ discovery.executed_query_count }}</strong> searches run</span>
+            <span><strong>{{ discovery.error_count }}</strong> provider errors</span>
+            <span><strong>0</strong> automatically approved</span>
+        </div>
+        <p class="form-text profile-search-audit-meta">Immutable audit {{ discovery.audit_id }} · SHA-256 {{ discovery.document_sha256[:12] }}… · {{ discovery.created_at }}</p>
+        {% if discovery.candidates %}
+        <div class="business-context-list profile-search-candidate-list">
+            {% for candidate in discovery.candidates %}
+            <article class="business-context-finding profile-search-candidate" id="{{ candidate.anchor_id }}">
+                <header>
+                    <div>
+                        <span class="badge-soft">{{ candidate.platform | upper if candidate.platform == 'x' else candidate.platform | title }}</span>
+                        <span class="badge-soft warning">Unverified candidate</span>
+                        <span class="badge-soft">{{ candidate.review_priority | title }} review priority · {{ candidate.discovery_score }} points</span>
+                    </div>
+                    <a href="{{ candidate.profile_url }}" target="_blank" rel="noopener noreferrer">Open public profile</a>
+                </header>
+                <strong>@{{ candidate.handle }}</strong>
+                <p class="form-text">Appeared in {{ candidate.source_count }} retained result{{ '' if candidate.source_count == 1 else 's' }} across {{ candidate.query_count }} bounded search{{ '' if candidate.query_count == 1 else 'es' }}. Appearance and handle similarity do not prove who controls the account.</p>
+                <details class="profile-search-evidence">
+                    <summary>Review ranking basis and source evidence</summary>
+                    <dl>
+                        {% for signal in candidate.ranking_signals %}
+                        <div><dt>{{ signal.points }} points</dt><dd>{{ signal.detail }}</dd></div>
+                        {% endfor %}
+                    </dl>
+                    <ul>
+                        {% for observation in candidate.observations %}
+                        <li>
+                            <a href="{{ observation.evidence.source_url }}" target="_blank" rel="noopener noreferrer">Result {{ observation.evidence.result_rank }} · {{ observation.evidence.title or candidate.profile_url }}</a>
+                            {% if observation.evidence.snippet %}<small>{{ observation.evidence.snippet }}</small>{% endif %}
+                            <small>{{ observation.provenance.provider | title }} · retrieved {{ observation.provenance.retrieved_at }}</small>
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </details>
+                {% if candidate.reviews %}
+                <div class="profile-search-review-history" aria-label="Current candidate decisions">
+                    {% for review in candidate.reviews %}
+                    <span class="badge-soft {{ 'success' if review.decision == 'proposed' else 'warning' }}">
+                        {{ review.persona_name }} · {{ 'Sent to Persona review' if review.decision == 'proposed' else review.decision | title }}
+                        {% if review.claim_review_status %} · claim {{ review.claim_review_status }}{% endif %}
+                    </span>
+                    {% endfor %}
+                </div>
+                {% endif %}
+                {% if case.personas %}
+                <form method="POST" action="{{ url_for('review_profile_search_candidate', case_id=case.id, audit_id=discovery.audit_id, candidate_id=candidate.candidate_id) }}" class="claim-review-form profile-search-review-form">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <label>
+                        <span>Target Persona</span>
+                        <select name="persona_id" required>
+                            {% if case.personas | length > 1 %}<option value="">Choose a Persona</option>{% endif %}
+                            {% for persona in case.personas %}<option value="{{ persona.id }}">{{ persona.display_name }}</option>{% endfor %}
+                        </select>
+                    </label>
+                    <label>
+                        <span>Review note <small>(optional)</small></span>
+                        <input type="text" name="note" maxlength="2000" placeholder="Why this candidate should advance, remain uncertain, or be rejected">
+                    </label>
+                    <div class="review-actions" role="group" aria-label="Review this profile candidate">
+                        <button name="decision" value="proposed" class="btn btn-sm btn-review approve" type="submit"><i data-lucide="arrow-right"></i> Send to Persona review</button>
+                        <button name="decision" value="uncertain" class="btn btn-sm btn-review uncertain" type="submit"><i data-lucide="circle-help"></i> Uncertain</button>
+                        <button name="decision" value="rejected" class="btn btn-sm btn-review reject" type="submit"><i data-lucide="x"></i> Reject</button>
+                    </div>
+                    <small class="form-text">Sending creates a pending social-account claim only. Canonical approval still happens in the Persona workspace.</small>
+                </form>
+                {% endif %}
+            </article>
+            {% endfor %}
+        </div>
+        {% if discovery.truncated_candidate_count %}<p class="form-text">{{ discovery.truncated_candidate_count }} additional low-priority candidates remain in the immutable audit and are omitted from this bounded view.</p>{% endif %}
+        {% else %}
+        <p class="form-text mb-0">The latest native search retained no major-platform profile candidate. This is an evidence gap, not proof that no account exists.</p>
+        {% endif %}
+    </div>
+</section>
+{% endif %}
+
 <div class="case-layout">
     <section class="panel-card">
         <header class="panel-header">

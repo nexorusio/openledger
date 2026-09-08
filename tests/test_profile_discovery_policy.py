@@ -17,6 +17,7 @@ def test_all_existing_safety_and_provider_flags_default_on():
         "user_scanner_enabled": True,
         "enrichment_providers_enabled": True,
         "provider_circuit_breakers_enabled": True,
+        "search_first_enabled": False,
     }
 
 
@@ -27,6 +28,20 @@ def test_only_explicit_false_values_disable_server_flags():
     assert profile_discovery_flags(
         environ={"OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED": "typo"}
     )["exhaustive_mode_enabled"] is True
+
+
+@pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
+def test_search_first_rollout_requires_an_explicit_true_value(value):
+    assert profile_discovery_flags(
+        environ={"OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": value}
+    )["search_first_enabled"] is True
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "typo"])
+def test_search_first_rollout_fails_closed(value):
+    assert profile_discovery_flags(
+        environ={"OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": value}
+    )["search_first_enabled"] is False
 
 
 def test_legacy_modes_receive_canonical_server_policy():
@@ -50,7 +65,10 @@ def test_client_cannot_forge_flags_or_disable_safety_controls():
             "execution_budget": {"total_seconds": 999_999_999},
             "profile_discovery_policy": {
                 "policy_version": "client",
-                "flags": {"provider_circuit_breakers_enabled": False},
+                "flags": {
+                    "provider_circuit_breakers_enabled": False,
+                    "search_first_enabled": True,
+                },
                 "safety_controls": {"durable_cancellation": False},
             },
         },
@@ -60,6 +78,7 @@ def test_client_cannot_forge_flags_or_disable_safety_controls():
     policy = governed["profile_discovery_policy"]
     assert policy["policy_version"] == PROFILE_DISCOVERY_POLICY_VERSION
     assert policy["flags"]["provider_circuit_breakers_enabled"] is True
+    assert policy["flags"]["search_first_enabled"] is False
     assert policy["safety_controls"]["durable_cancellation"] is True
     assert governed["execution_budget"]["total_seconds"] == 600
 

@@ -113,6 +113,13 @@ from maigret.web.profile_discovery_policy import (
     ProfileDiscoveryPolicyError,
     govern_profile_discovery_options,
 )
+from maigret.web.profile_search_backend import (
+    ProfileSearchClient,
+    ProfileSearchConfigurationError,
+    load_profile_search_config,
+)
+from maigret.web.profile_search_orchestrator import ProfileSearchOrchestrator
+from maigret.web.profile_search_runtime import GovernedProfileSearchClient
 from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web.investigation_input import (
     InvestigationInputError,
@@ -2928,6 +2935,126 @@ def hydrate_persistent_options(options):
     return hydrated
 
 
+def _profile_search_policy_flags(options):
+    policy = options.get('profile_discovery_policy')
+    if not isinstance(policy, dict):
+        return {}
+    flags = policy.get('flags')
+    return flags if isinstance(flags, dict) else {}
+
+
+async def run_native_profile_search_phase(
+    job, options, cancellation_check=None
+):
+    """Run the governed native-search phase without publishing identity claims."""
+    flags = _profile_search_policy_flags(options)
+    if not flags.get('search_first_enabled', False):
+        return None
+
+    q = job['queue']
+    q.put(
+        {
+            'type': 'collector_started',
+            'collector': 'native-profile-search',
+            'target_type': 'public_profile_candidate',
+        }
+    )
+    try:
+        config = load_profile_search_config()
+        if not config.enabled:
+            raise ProfileSearchConfigurationError(
+                'Native profile search provider is disabled'
+            )
+        client = GovernedProfileSearchClient(
+            ProfileSearchClient(config),
+            circuit_breaker_enabled=flags.get(
+                'provider_circuit_breakers_enabled', True
+            ),
+        )
+        search_task = asyncio.ensure_future(
+            ProfileSearchOrchestrator(client).discover(
+                options.get('investigation_spec') or {},
+                max_results=config.max_results,
+                cancellation_check=lambda: (
+                    bool(job.get('cancelled'))
+                    or bool(cancellation_check and cancellation_check())
+                ),
+            )
+        )
+        # The in-process fallback stop route cancels this same supervised task.
+        # Persistent workers cancel the outer stream, which cascades here too.
+        job['task'] = search_task
+        result = await search_task
+    except ProfileSearchConfigurationError:
+        q.put(
+            {
+                'type': 'collector_error',
+                'collector': 'native-profile-search',
+                'message': (
+                    'Native profile search is unavailable because its server '
+                    'configuration is incomplete.'
+                ),
+            }
+        )
+        return None
+    except Exception as error:
+        public_error = record_internal_error(
+            'Native profile search failed', error
+        )
+        q.put(
+            {
+                'type': 'collector_error',
+                'collector': 'native-profile-search',
+                'message': public_error,
+            }
+        )
+        return None
+
+    job['profile_search_result'] = result
+    result_sink = job.get('profile_search_result_sink')
+    if callable(result_sink):
+        try:
+            job['profile_search_audit_id'] = result_sink(result)
+        except Exception as error:
+            public_error = record_internal_error(
+                'Native profile-search audit persistence failed', error
+            )
+            q.put(
+                {
+                    'type': 'collector_error',
+                    'collector': 'native-profile-search-audit',
+                    'message': public_error,
+                }
+            )
+
+    if client.last_circuit_open is not None:
+        q.put(
+            provider_circuit_event(
+                client.last_circuit_open, 'native-profile-search'
+            )
+        )
+    if result.stopped:
+        q.put(
+            {
+                'type': 'stopped',
+                'collector': 'native-profile-search',
+            }
+        )
+    else:
+        q.put(
+            {
+                'type': 'collector_completed',
+                'collector': 'native-profile-search',
+                'status': result.status,
+                'planned_queries': result.planned_query_count,
+                'executed_queries': result.executed_query_count,
+                'errors': result.error_count,
+                'candidates': len(result.candidates),
+            }
+        )
+    return result
+
+
 async def _stream_search(job, usernames, options, cancellation_check=None):
     """Orchestrate case-scoped collectors while retaining native evidence."""
     q = job['queue']
@@ -2935,6 +3062,11 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     # Keep the partial collection reachable by the worker even if cancellation
     # lands between collector-specific exception handlers.
     job['general_results'] = general_results
+    profile_search_result = await run_native_profile_search_phase(
+        job, options, cancellation_check=cancellation_check
+    )
+    if profile_search_result is not None and profile_search_result.stopped:
+        return general_results
     for username in usernames:
         if job['cancelled'] or (cancellation_check and cancellation_check()):
             q.put({'type': 'stopped', 'username': username.strip()})
@@ -5149,6 +5281,11 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         "cancelled": False,
         "loop": None,
         "task": None,
+        "profile_search_result_sink": lambda result: (
+            store.record_profile_search_result(
+                job_id, result, worker_id=worker_id
+            )
+        ),
     }
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -6213,6 +6350,139 @@ def load_case_google_places_live(
         }
 
 
+def public_profile_search_discovery(discovery):
+    """Expose candidates without raw plans, queries, or provider errors."""
+    if not isinstance(discovery, dict):
+        return None
+    candidates = []
+    for raw_candidate in list(discovery.get('candidates') or [])[:100]:
+        if not isinstance(raw_candidate, dict):
+            continue
+        observations = []
+        for raw_observation in list(
+            raw_candidate.get('observations') or []
+        )[:10]:
+            if not isinstance(raw_observation, dict):
+                continue
+            raw_evidence = raw_observation.get('evidence')
+            evidence = raw_evidence if isinstance(raw_evidence, dict) else {}
+            raw_provenance = raw_observation.get('provenance')
+            provenance = (
+                raw_provenance if isinstance(raw_provenance, dict) else {}
+            )
+            observations.append(
+                {
+                    'evidence': {
+                        'result_rank': evidence.get('result_rank'),
+                        'source_url': str(evidence.get('source_url') or ''),
+                        'title': str(evidence.get('title') or ''),
+                        'snippet': str(evidence.get('snippet') or ''),
+                    },
+                    'provenance': {
+                        'provider': str(provenance.get('provider') or ''),
+                        'retrieved_at': str(
+                            provenance.get('retrieved_at') or ''
+                        ),
+                    },
+                }
+            )
+        candidates.append(
+            {
+                'candidate_id': str(raw_candidate.get('candidate_id') or ''),
+                'anchor_id': str(raw_candidate.get('anchor_id') or ''),
+                'platform': str(raw_candidate.get('platform') or ''),
+                'profile_url': str(raw_candidate.get('profile_url') or ''),
+                'alternate_profile_urls': [
+                    str(value)
+                    for value in list(
+                        raw_candidate.get('alternate_profile_urls') or []
+                    )[:10]
+                ],
+                'handle': str(raw_candidate.get('handle') or ''),
+                'account_status': 'candidate',
+                'identity_status': 'unverified',
+                'review_status': 'pending',
+                'source_count': int(raw_candidate.get('source_count') or 0),
+                'query_count': int(raw_candidate.get('query_count') or 0),
+                'discovery_score': int(
+                    raw_candidate.get('discovery_score') or 0
+                ),
+                'score_scope': 'discovery_review_priority',
+                'review_priority': str(
+                    raw_candidate.get('review_priority') or 'low'
+                ),
+                'ranking_signals': [
+                    {
+                        'code': str(signal.get('code') or ''),
+                        'points': int(signal.get('points') or 0),
+                        'detail': str(signal.get('detail') or ''),
+                    }
+                    for signal in list(
+                        raw_candidate.get('ranking_signals') or []
+                    )[:10]
+                    if isinstance(signal, dict)
+                ],
+                'observations': observations,
+                'reviews': list(raw_candidate.get('reviews') or [])[:50],
+            }
+        )
+    return {
+        'audit_id': str(discovery.get('audit_id') or ''),
+        'job_id': str(discovery.get('job_id') or ''),
+        'status': str(discovery.get('status') or ''),
+        'created_at': discovery.get('created_at'),
+        'document_sha256': str(discovery.get('document_sha256') or ''),
+        'candidate_count': int(discovery.get('candidate_count') or 0),
+        'displayed_candidate_count': len(candidates),
+        'truncated_candidate_count': int(
+            discovery.get('truncated_candidate_count') or 0
+        ),
+        'planned_query_count': int(
+            discovery.get('planned_query_count') or 0
+        ),
+        'executed_query_count': int(
+            discovery.get('executed_query_count') or 0
+        ),
+        'error_count': int(discovery.get('error_count') or 0),
+        'candidates': candidates,
+    }
+
+
+@app.route('/api/cases/<case_id>/profile-search')
+def case_profile_search_api(case_id):
+    if case_store is None:
+        return {'error': 'Profile search requires persistent storage.'}, 503
+    case = case_store.get_case(case_id)
+    if not case:
+        return {'error': 'That case does not exist.'}, 404
+    try:
+        stored_discovery = case_store.get_case_profile_search_discovery(case_id)
+    except ValueError as error:
+        record_internal_error(
+            'Profile-search audit integrity validation failed',
+            error,
+            case_id=case_id,
+        )
+        return {
+            'error': 'The profile-search audit failed its integrity check.'
+        }, 409
+    discovery = public_profile_search_discovery(stored_discovery)
+    return {
+        'case_id': case_id,
+        'personas': [
+            {'id': persona['id'], 'display_name': persona['display_name']}
+            for persona in case['personas']
+        ],
+        'discovery': discovery,
+        'governance': {
+            'candidate_identity_unverified': True,
+            'discovery_score_is_not_confidence': True,
+            'automatic_persona_claims': False,
+            'persona_approval_required': True,
+        },
+    }
+
+
 @app.route("/cases/<case_id>")
 def case_workspace(case_id):
     if case_store is None:
@@ -6268,7 +6538,74 @@ def case_workspace(case_id):
             latest_ai_job=latest_ai_job,
         )
     case["google_places_live"] = load_case_google_places_live(case)
+    try:
+        stored_discovery = case_store.get_case_profile_search_discovery(case_id)
+    except ValueError as error:
+        record_internal_error(
+            'Profile-search audit integrity validation failed',
+            error,
+            case_id=case_id,
+        )
+        case["profile_search_integrity_error"] = True
+        stored_discovery = None
+    case["profile_search_discovery"] = public_profile_search_discovery(
+        stored_discovery
+    )
     return render_template("case.html", case=case)
+
+
+@app.route(
+    '/cases/<case_id>/profile-search/<audit_id>/<candidate_id>/review',
+    methods=['POST'],
+)
+def review_profile_search_candidate(case_id, audit_id, candidate_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your candidate review session expired. Please try again.', 'danger')
+        return redirect(url_for('case_workspace', case_id=case_id))
+    if case_store is None:
+        flash('Profile-search review requires persistent storage.', 'warning')
+        return redirect(url_for('history'))
+    decision = str(request.form.get('decision') or '').strip().casefold()
+    reviewer = session.get('username') or 'local-operator'
+    try:
+        review = case_store.review_profile_search_candidate(
+            case_id,
+            audit_id,
+            candidate_id,
+            str(request.form.get('persona_id') or '').strip(),
+            decision,
+            reviewer,
+            note=request.form.get('note', ''),
+        )
+    except KeyError:
+        flash('That candidate does not belong to this case audit.', 'danger')
+    except ValueError as error:
+        flash(str(error), 'danger')
+    else:
+        if decision == 'proposed':
+            if review['claim_review_status'] == 'pending':
+                message = (
+                    f"Candidate sent to {review['persona_name']} as a pending "
+                    'social-account claim. Persona approval is still required.'
+                )
+            else:
+                message = (
+                    f"Candidate evidence was attached to the existing "
+                    f"{review['claim_review_status']} claim for "
+                    f"{review['persona_name']}. Its prior human decision was "
+                    'not changed.'
+                )
+            flash(message, 'success')
+        else:
+            flash(
+                f"Candidate marked {decision} for {review['persona_name']}. "
+                'No Persona claim was created or changed by this decision.',
+                'success',
+            )
+    anchor = 'profile-candidate-' + candidate_id.rsplit(':', 1)[-1]
+    return redirect(
+        url_for('case_workspace', case_id=case_id, _anchor=anchor)
+    )
 
 
 @app.route("/cases/<case_id>/combine/refresh", methods=["POST"])

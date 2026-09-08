@@ -7,7 +7,7 @@ from typing import Any, Mapping, MutableMapping, Optional
 
 from maigret.web.execution_budget import apply_execution_budget
 
-PROFILE_DISCOVERY_POLICY_VERSION = "profile-discovery-routing-v1"
+PROFILE_DISCOVERY_POLICY_VERSION = "profile-discovery-routing-v2"
 PROFILE_DISCOVERY_JOB_KINDS = frozenset({"live", "refresh"})
 
 _FLAG_ENVIRONMENT = {
@@ -20,8 +20,11 @@ _FLAG_ENVIRONMENT = {
     "provider_circuit_breakers_enabled": (
         "OPENLEDGER_PROVIDER_CIRCUIT_BREAKERS_ENABLED"
     ),
+    "search_first_enabled": "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED",
 }
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_DEFAULT_OFF_FLAGS = frozenset({"search_first_enabled"})
 
 
 class ProfileDiscoveryPolicyError(ValueError):
@@ -34,10 +37,18 @@ def _server_flag(
     environ: Optional[Mapping[str, str]] = None,
 ) -> bool:
     environment = os.environ if environ is None else environ
-    raw_value = str(environment.get(_FLAG_ENVIRONMENT[name], "")).strip().casefold()
+    raw_value = (
+        str(environment.get(_FLAG_ENVIRONMENT[name], ""))
+        .strip()
+        .casefold()
+    )
+    if name in _DEFAULT_OFF_FLAGS:
+        # New outbound capabilities must be explicitly enabled. Unknown values
+        # stay off so a typo cannot widen production network access.
+        return raw_value in _TRUE_VALUES
     if raw_value in _FALSE_VALUES:
         return False
-    # All controls are default-on, including for absent or malformed values.
+    # Preserve the P1 default-on contract, including malformed legacy values.
     return True
 
 
@@ -45,7 +56,10 @@ def profile_discovery_flags(
     *, environ: Optional[Mapping[str, str]] = None
 ) -> dict[str, bool]:
     """Read a bounded flag snapshot exclusively from the server environment."""
-    return {name: _server_flag(name, environ=environ) for name in _FLAG_ENVIRONMENT}
+    return {
+        name: _server_flag(name, environ=environ)
+        for name in _FLAG_ENVIRONMENT
+    }
 
 
 def profile_discovery_flag_enabled(name: str) -> bool:
@@ -60,7 +74,7 @@ def govern_profile_discovery_options(
     *,
     environ: Optional[Mapping[str, str]] = None,
 ) -> dict[str, Any]:
-    """Canonicalize a scan using only current server flags and fixed budgets."""
+    """Canonicalize a scan using server flags and fixed budgets."""
     source: MutableMapping[str, Any] = dict(options)
     flags = profile_discovery_flags(environ=environ)
     if not flags["profile_discovery_enabled"]:
