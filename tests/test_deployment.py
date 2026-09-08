@@ -97,6 +97,8 @@ def test_self_hosted_search_is_private_optional_and_resource_bounded():
     assert "public_instance: false" in settings
     assert "image_proxy: false" in settings
     assert "retries: 0" in settings
+    assert "secret_key: ultrasecretkey" in settings
+    assert "overridden-by-SEARXNG_SECRET" not in settings
 
 
 def test_install_and_example_keep_profile_search_disabled_by_default():
@@ -143,7 +145,12 @@ def test_self_hosted_search_operator_flow_is_guarded_and_reversible():
     assert "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED false" in script
     assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER searxng" in script
     assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER disabled" in script
-    assert "compose stop searxng" in script
+    assert "verify_searxng_secret" in script
+    assert "hmac.compare_digest" in script
+    assert "os.environ['SEARXNG_SECRET']" in script
+    assert "trap fail_closed_shutdown ERR" in script
+    assert "compose stop app worker searxng" in script
+    assert "recreate_runtimes disabled False" in script
     assert "brave_search_api_key" not in script
 
 

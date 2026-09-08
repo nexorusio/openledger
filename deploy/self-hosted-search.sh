@@ -127,18 +127,35 @@ wait_for_searxng() {
     fi
 }
 
+verify_searxng_secret() {
+    compose exec -T searxng \
+        /usr/local/searxng/.venv/bin/python -c \
+        "import hmac, os; from searx import settings; assert hmac.compare_digest(str(settings['server']['secret_key']), os.environ['SEARXNG_SECRET']); print('private search secret applied')"
+}
+
 probe_search() {
     compose exec -T app python -c \
         "import json, urllib.parse, urllib.request; p=urllib.parse.urlencode({'q':'site:example.com \"Example Domain\"','format':'json','safesearch':'2','language':'all','categories':'general'}); r=urllib.request.urlopen('http://searxng:8080/search?'+p, timeout=10); d=json.load(r); assert isinstance(d.get('results'), list); print('private search probe valid')"
 }
 
 recreate_runtimes() {
+    local expected_provider="$1"
+    local expected_enabled="$2"
     compose config --quiet
     compose up -d --no-deps --force-recreate app worker
-    compose exec -T app python -c \
-        "from maigret.web.profile_search_backend import load_profile_search_config; c=load_profile_search_config(); print('app provider='+c.provider)"
-    compose exec -T worker python -c \
-        "from maigret.web.profile_search_backend import load_profile_search_config; c=load_profile_search_config(); print('worker provider='+c.provider)"
+    local service
+    for service in app worker; do
+        compose exec -T "${service}" python -c \
+            "from maigret.web.profile_discovery_policy import profile_discovery_flag_enabled; from maigret.web.profile_search_backend import load_profile_search_config; c=load_profile_search_config(); assert c.provider == '${expected_provider}'; assert profile_discovery_flag_enabled('search_first_enabled') is ${expected_enabled}; print('${service} profile-search settings verified')"
+    done
+}
+
+fail_closed_shutdown() {
+    local exit_status=$?
+    trap - ERR
+    echo "Rollback did not complete; stopping app, worker, and private search to prevent stale enabled runtimes."
+    compose stop app worker searxng || true
+    exit "${exit_status}"
 }
 
 show_status() {
@@ -166,8 +183,9 @@ case "${ACTION}" in
         compose pull searxng
         compose up -d searxng
         wait_for_searxng
+        verify_searxng_secret
         probe_search
-        recreate_runtimes
+        recreate_runtimes searxng False
         show_status
         echo "Private search is prepared and verified; discovery remains disabled."
         ;;
@@ -178,20 +196,23 @@ case "${ACTION}" in
             exit 1
         fi
         wait_for_searxng
+        verify_searxng_secret
         probe_search
         backup_environment
         set_env_value OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED true
-        recreate_runtimes
+        recreate_runtimes searxng True
         show_status
         echo "Private search-first discovery is enabled."
         ;;
     disable)
         confirm_no_active_investigation
         backup_environment
+        trap fail_closed_shutdown ERR
         set_env_value OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED false
         set_env_value OPENLEDGER_PROFILE_SEARCH_PROVIDER disabled
-        recreate_runtimes
-        compose stop searxng || true
+        recreate_runtimes disabled False
+        compose stop searxng
+        trap - ERR
         show_status
         echo "Private search is disabled and its container is stopped."
         ;;

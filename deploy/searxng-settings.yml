@@ -18,8 +18,9 @@ search:
     - json
 
 server:
-  # Compose replaces this value through the protected SEARXNG_SECRET setting.
-  secret_key: overridden-by-SEARXNG_SECRET
+  # SearXNG recognizes this exact placeholder and replaces it from
+  # the protected SEARXNG_SECRET environment setting.
+  secret_key: ultrasecretkey
   limiter: false
   public_instance: false
   image_proxy: false
