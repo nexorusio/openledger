@@ -11,6 +11,24 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
+from maigret.web.profile_search_facebook import (
+    FACEBOOK_PROFILE_HOSTS,
+    parse_facebook_profile_url,
+)
+from maigret.web.profile_search_instagram import (
+    INSTAGRAM_PROFILE_HOSTS,
+    parse_instagram_profile_url,
+)
+from maigret.web.profile_search_threads import (
+    THREADS_PROFILE_HOSTS,
+    parse_threads_profile_url,
+)
+from maigret.web.profile_search_tiktok import (
+    TIKTOK_PROFILE_HOSTS,
+    parse_tiktok_profile_url,
+)
+from maigret.web.profile_search_x import X_PROFILE_HOSTS, parse_x_profile_url
+
 FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
     {
         "key": "identity",
@@ -71,6 +89,24 @@ FIELD_DISPLAY_LABELS = {
     for group in FIELD_GROUPS
     for field_name, label in group["fields"]
 }
+
+_SUPPORTED_SOCIAL_PROFILE_PARSERS = (
+    (FACEBOOK_PROFILE_HOSTS, parse_facebook_profile_url),
+    (INSTAGRAM_PROFILE_HOSTS, parse_instagram_profile_url),
+    (THREADS_PROFILE_HOSTS, parse_threads_profile_url),
+    (TIKTOK_PROFILE_HOSTS, parse_tiktok_profile_url),
+    (X_PROFILE_HOSTS, parse_x_profile_url),
+)
+
+
+def _supported_social_profile_reference(
+    value: str,
+) -> tuple[str, bool, Any]:
+    hostname = (urlparse(value).hostname or "").casefold()
+    for profile_hosts, profile_parser in _SUPPORTED_SOCIAL_PROFILE_PARSERS:
+        if hostname in profile_hosts:
+            return hostname, True, profile_parser(value)
+    return hostname, False, None
 
 
 def field_display_label(field_name: Any) -> str:
@@ -934,11 +970,22 @@ def extract_ai_persona_claims(
 
         stored_value: Any = value
         if field_name == "social_account":
-            hostname = urlparse(value).hostname or "Public account"
+            hostname, supported_profile, profile_reference = (
+                _supported_social_profile_reference(value)
+            )
+            account_username = username
+            if supported_profile:
+                if profile_reference is None:
+                    reject("invalid_social_profile_url")
+                    continue
+                value = profile_reference.canonical_url
+                account_username = profile_reference.handle
             stored_value = {
-                "platform": hostname.removeprefix("www.")[:300],
+                "platform": (
+                    hostname.removeprefix("www.")[:300] or "Public account"
+                ),
                 "url": value,
-                "username": username,
+                "username": account_username,
             }
         fingerprint = claim_fingerprint(field_name, stored_value)
         deduplication_key = (username.casefold(), fingerprint, source_url)

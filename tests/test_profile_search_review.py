@@ -21,7 +21,10 @@ from maigret.web.profile_search_contract import (
     ProfileSearchProvenance,
 )
 from maigret.web.profile_search_orchestrator import ProfileSearchOrchestrator
-from maigret.web.persona_intelligence import claim_fingerprint
+from maigret.web.persona_intelligence import (
+    claim_fingerprint,
+    extract_ai_persona_claims,
+)
 
 
 class _Client:
@@ -278,11 +281,21 @@ async def test_web_research_x_alias_reuses_existing_twitter_account(store):
         "username": "alice_example",
     }
     web_url = "https://x.com/alice_example"
-    web_value = {
-        "platform": "x.com",
-        "url": web_url,
-        "username": "alice_example",
-    }
+    web_candidates = extract_ai_persona_claims(
+        [
+            {
+                "username": "alice_example",
+                "field_name": "social_account",
+                "value": web_url,
+                "confidence": 50,
+                "source_url": web_url,
+                "reason": "The cited result is a public X profile.",
+            }
+        ],
+        sources=[{"title": "Alice Example on X", "url": web_url}],
+        usernames=["alice_example"],
+        model="test-model",
+    )
     with store.engine.begin() as connection:
         store._upsert_persona_candidates(
             connection,
@@ -312,28 +325,81 @@ async def test_web_research_x_alias_reuses_existing_twitter_account(store):
             connection,
             persona_id=seeded["persona_id"],
             job_id=seeded["job_id"],
-            candidates=(
-                {
-                    "field_name": "social_account",
-                    "value": web_value,
-                    "display_value": web_url,
-                    "normalized_value": json.dumps(web_value, sort_keys=True),
-                    "confidence": 50,
-                    "fingerprint": claim_fingerprint(
-                        "social_account", web_value
-                    ),
-                    "source_engine": "openai_web_research",
-                    "source_record_id": "proposal:x.com/alice_example",
-                    "native_status": "candidate_proposed",
-                    "evidence": [],
-                },
-            ),
+            candidates=web_candidates,
             now=datetime.now(timezone.utc),
         )
 
     claims = store.get_persona(seeded["persona_id"])["claims"]
     assert len(claims) == 1
     assert claims[0]["display_value"] == web_url
+
+
+@pytest.mark.asyncio
+async def test_web_research_x_url_cannot_overwrite_another_handle(store):
+    seeded = await _seed_discovery(store, platform="x")
+    legacy_url = "https://twitter.com/alice_example"
+    legacy_value = {
+        "platform": "Twitter",
+        "url": legacy_url,
+        "username": "alice_example",
+    }
+    bob_url = "https://x.com/bob_example"
+    web_candidates = extract_ai_persona_claims(
+        [
+            {
+                "username": "alice_example",
+                "field_name": "social_account",
+                "value": bob_url,
+                "confidence": 50,
+                "source_url": bob_url,
+                "reason": "The cited result is a public X profile.",
+            }
+        ],
+        sources=[{"title": "Bob Example on X", "url": bob_url}],
+        usernames=["alice_example"],
+        model="test-model",
+    )
+    assert web_candidates[0]["value"]["username"] == "bob_example"
+
+    with store.engine.begin() as connection:
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": legacy_value,
+                    "display_value": legacy_url,
+                    "normalized_value": json.dumps(
+                        legacy_value, sort_keys=True
+                    ),
+                    "confidence": 80,
+                    "fingerprint": claim_fingerprint(
+                        "social_account", legacy_value
+                    ),
+                    "source_engine": "maigret",
+                    "source_record_id": "Twitter:alice_example",
+                    "native_status": "claimed",
+                    "evidence": [],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=web_candidates,
+            now=datetime.now(timezone.utc),
+        )
+
+    claims = store.get_persona(seeded["persona_id"])["claims"]
+    assert len(claims) == 2
+    assert {claim["display_value"] for claim in claims} == {
+        legacy_url,
+        bob_url,
+    }
 
 
 @pytest.mark.asyncio
