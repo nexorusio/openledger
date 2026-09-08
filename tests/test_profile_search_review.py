@@ -32,15 +32,19 @@ class _Client:
             retrieved_at="2026-09-08T15:00:00Z",
             provider_request_id="request-review",
         )
+        source_url = {
+            "instagram": "https://instagram.com/alice_example/",
+            "x": "https://x.com/alice_example",
+        }[query.platform]
         return ProfileSearchRun(
             query=query,
             provenance=provenance,
             evidence=(
                 ProfileSearchEvidence(
                     result_rank=1,
-                    source_url="https://instagram.com/alice_example/",
+                    source_url=source_url,
                     title="Alice Example (@alice_example)",
-                    snippet="Public Instagram profile search result.",
+                    snippet="Public profile search result.",
                 ),
             ),
         )
@@ -56,7 +60,7 @@ def store(tmp_path):
     instance.dispose()
 
 
-async def _seed_discovery(store):
+async def _seed_discovery(store, *, platform="instagram"):
     job_id = store.create_investigation(["alice"], {})
     job = store.claim_next("worker:profile-search-review")
     result = await ProfileSearchOrchestrator(_Client()).discover(
@@ -66,7 +70,7 @@ async def _seed_discovery(store):
                 {"value": "alice_example", "source_type": "username"}
             ],
         },
-        platforms=("instagram",),
+        platforms=(platform,),
     )
     audit_id = store.record_profile_search_result(
         job_id, result, worker_id=job["worker_id"]
@@ -211,6 +215,57 @@ async def test_proposal_reuses_equivalent_existing_social_account(store):
     assert review["claim_id"] == existing_claim["id"]
     assert review["claim_review_status"] == "pending"
     assert len(store.get_persona(seeded["persona_id"])["claims"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_x_proposal_reuses_existing_legacy_twitter_account(store):
+    seeded = await _seed_discovery(store, platform="x")
+    legacy_url = "https://twitter.com/alice_example"
+    existing_value = {
+        "platform": "Twitter",
+        "url": legacy_url,
+        "username": "alice_example",
+    }
+    with store.engine.begin() as connection:
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": existing_value,
+                    "display_value": legacy_url,
+                    "normalized_value": json.dumps(
+                        existing_value, sort_keys=True
+                    ),
+                    "confidence": 80,
+                    "fingerprint": claim_fingerprint(
+                        "social_account", existing_value
+                    ),
+                    "source_engine": "maigret",
+                    "source_record_id": "Twitter:alice_example",
+                    "native_status": "claimed",
+                    "evidence": [],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+    existing_claim = store.get_persona(seeded["persona_id"])["claims"][0]
+
+    review = store.review_profile_search_candidate(
+        seeded["case_id"],
+        seeded["audit_id"],
+        seeded["candidate_id"],
+        seeded["persona_id"],
+        "proposed",
+        "analyst",
+    )
+
+    assert review["claim_id"] == existing_claim["id"]
+    claims = store.get_persona(seeded["persona_id"])["claims"]
+    assert len(claims) == 1
+    assert claims[0]["display_value"] == "https://x.com/alice_example"
 
 
 @pytest.mark.asyncio

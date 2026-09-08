@@ -798,6 +798,13 @@ MAX_PROFILE_SEARCH_AUDITS_PER_JOB = 10
 MAX_PROFILE_SEARCH_UI_CANDIDATES = 100
 MAX_PROFILE_SEARCH_UI_REVIEWS = 500
 PROFILE_SEARCH_PENDING_CLAIM_CONFIDENCE = 50
+PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES = {
+    "facebook": ("facebook", "facebook.com"),
+    "instagram": ("instagram", "instagram.com"),
+    "threads": ("threads", "threads.com", "threads.net"),
+    "tiktok": ("tiktok", "tiktok.com"),
+    "x": ("x", "twitter", "x.com", "twitter.com"),
+}
 PROFILE_SEARCH_CANDIDATE_ID_PATTERN = re.compile(
     r"^profile-search:[0-9a-f]{64}$"
 )
@@ -842,6 +849,50 @@ def _bounded_round_robin_case_records(
             break
         position += 1
     return selected
+
+
+def _persona_candidate_identity_match(candidate: Dict[str, Any]):
+    """Build the cross-source identity predicate for one validated claim."""
+    identity_match = (
+        persona_claims.c.fingerprint == candidate["fingerprint"]
+    )
+    if (
+        candidate.get("source_engine")
+        not in {"openai_web_research", "native_profile_search_review"}
+        or candidate.get("field_name") != "social_account"
+    ):
+        return identity_match
+    identity_match = or_(
+        identity_match,
+        (
+            (persona_claims.c.field_name == "social_account")
+            & (persona_claims.c.display_value == candidate["display_value"])
+        ),
+    )
+    value = candidate.get("value")
+    if not isinstance(value, dict):
+        return identity_match
+    platform = str(value.get("platform") or "").strip().casefold()
+    username = str(value.get("username") or "").strip().lstrip("@").casefold()
+    aliases = PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES.get(platform)
+    if not aliases or not username:
+        return identity_match
+    return or_(
+        identity_match,
+        (
+            (persona_claims.c.field_name == "social_account")
+            & (
+                func.lower(
+                    persona_claims.c.value["platform"].as_string()
+                ).in_(aliases)
+            )
+            & (
+                func.lower(
+                    persona_claims.c.value["username"].as_string()
+                ) == username
+            )
+        ),
+    )
 
 
 class ActiveInvestigationError(ValueError):
@@ -3120,18 +3171,16 @@ class CaseStore:
                             persona_claims.c.review_status,
                         ).where(
                             persona_claims.c.persona_id == persona_id,
-                            or_(
-                                persona_claims.c.fingerprint == fingerprint,
-                                (
-                                    (
-                                        persona_claims.c.field_name
-                                        == "social_account"
-                                    )
-                                    & (
-                                        persona_claims.c.display_value
-                                        == profile_url
-                                    )
-                                ),
+                            _persona_candidate_identity_match(
+                                {
+                                    "field_name": "social_account",
+                                    "value": value,
+                                    "display_value": profile_url,
+                                    "fingerprint": fingerprint,
+                                    "source_engine": (
+                                        "native_profile_search_review"
+                                    ),
+                                }
                             ),
                         )
                     )
@@ -4822,19 +4871,7 @@ class CaseStore:
         synchronized = 0
         for candidate in candidates:
             reactivate_legacy = False
-            identity_match = persona_claims.c.fingerprint == candidate["fingerprint"]
-            if (
-                candidate.get("source_engine")
-                in {"openai_web_research", "native_profile_search_review"}
-                and candidate.get("field_name") == "social_account"
-            ):
-                identity_match = or_(
-                    identity_match,
-                    (
-                        (persona_claims.c.field_name == "social_account")
-                        & (persona_claims.c.display_value == candidate["display_value"])
-                    ),
-                )
+            identity_match = _persona_candidate_identity_match(candidate)
             existing = (
                 connection.execute(
                     select(persona_claims).where(
