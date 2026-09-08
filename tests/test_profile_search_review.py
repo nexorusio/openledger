@@ -263,6 +263,8 @@ async def test_case_api_and_ui_are_bounded_and_review_safe(store, monkeypatch):
         f"/api/cases/{seeded['case_id']}/profile-search"
     )
     assert response.status_code == 200
+    assert response.mimetype == "application/json"
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
     payload = response.get_json()
     candidate = payload["discovery"]["candidates"][0]
     assert candidate["identity_status"] == "unverified"

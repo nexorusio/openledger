@@ -6467,20 +6467,28 @@ def case_profile_search_api(case_id):
             'error': 'The profile-search audit failed its integrity check.'
         }, 409
     discovery = public_profile_search_discovery(stored_discovery)
-    return {
-        'case_id': case_id,
-        'personas': [
-            {'id': persona['id'], 'display_name': persona['display_name']}
-            for persona in case['personas']
-        ],
-        'discovery': discovery,
-        'governance': {
-            'candidate_identity_unverified': True,
-            'discovery_score_is_not_confidence': True,
-            'automatic_persona_claims': False,
-            'persona_approval_required': True,
-        },
-    }
+    # Keep user- and provider-derived values inside Flask's explicit JSON
+    # response boundary. The application/json content type plus nosniff header
+    # prevents browsers from interpreting candidate evidence as active markup.
+    return jsonify(
+        {
+            'case_id': case_id,
+            'personas': [
+                {
+                    'id': persona['id'],
+                    'display_name': persona['display_name'],
+                }
+                for persona in case['personas']
+            ],
+            'discovery': discovery,
+            'governance': {
+                'candidate_identity_unverified': True,
+                'discovery_score_is_not_confidence': True,
+                'automatic_persona_claims': False,
+                'persona_approval_required': True,
+            },
+        }
+    )
 
 
 @app.route("/cases/<case_id>")
