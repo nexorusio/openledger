@@ -9,6 +9,7 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/deploy/.env"
 COMPOSE_FILE="${REPO_ROOT}/deploy/compose.yaml"
 BACKUP_DIR="${REPO_ROOT}/runtime/backups"
+OPENLEDGER_COMPOSE_PROJECT=openledger
 MINIMUM_AVAILABLE_MEMORY_KIB=786432
 MINIMUM_AVAILABLE_DISK_KIB=1048576
 
@@ -34,7 +35,8 @@ fi
 cd "${REPO_ROOT}"
 
 compose() {
-    docker compose --profile self-hosted-search \
+    docker compose --project-name "${OPENLEDGER_COMPOSE_PROJECT}" \
+        --profile self-hosted-search \
         --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
 }
 
@@ -154,7 +156,7 @@ recreate_runtimes() {
 running_service_containers() {
     local service="$1"
     docker ps --quiet \
-        --filter "label=com.docker.compose.project=openledger" \
+        --filter "label=com.docker.compose.project=${OPENLEDGER_COMPOSE_PROJECT}" \
         --filter "label=com.docker.compose.service=${service}"
 }
 

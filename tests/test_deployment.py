@@ -151,7 +151,9 @@ def test_self_hosted_search_operator_flow_is_guarded_and_reversible():
     assert "trap fail_closed_shutdown ERR" in script
     assert "stop_and_verify_services app worker searxng" in script
     assert 'for service in "$@"' in script
-    assert "label=com.docker.compose.project=openledger" in script
+    assert "OPENLEDGER_COMPOSE_PROJECT=openledger" in script
+    assert '--project-name "${OPENLEDGER_COMPOSE_PROJECT}"' in script
+    assert "label=com.docker.compose.project=${OPENLEDGER_COMPOSE_PROJECT}" in script
     assert "label=com.docker.compose.service=${service}" in script
     assert "running_service_containers" in script
     assert "CRITICAL: ${service} still has a running container" in script
