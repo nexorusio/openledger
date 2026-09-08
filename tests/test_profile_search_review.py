@@ -499,6 +499,53 @@ async def test_x_candidate_does_not_trust_legacy_chat_persona_username(store):
 
 
 @pytest.mark.asyncio
+async def test_x_candidate_reuses_user_scanner_url_despite_platform_label(store):
+    seeded = await _seed_discovery(store, platform="x")
+    scanner_url = "https://x.com/alice_example"
+    scanner_value = {
+        "platform": "X (Twitter)",
+        "url": scanner_url,
+        "username": "alice_example",
+    }
+    with store.engine.begin() as connection:
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": scanner_value,
+                    "display_value": "X (Twitter): @alice_example",
+                    "normalized_value": "x (twitter)\0alice_example",
+                    "confidence": 70,
+                    "fingerprint": claim_fingerprint(
+                        "social_account", scanner_value
+                    ),
+                    "source_engine": "user_scanner_username",
+                    "source_record_id": "X (Twitter):alice_example",
+                    "native_status": "found",
+                    "evidence": [],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+    existing = store.get_persona(seeded["persona_id"])["claims"][0]
+
+    review = store.review_profile_search_candidate(
+        seeded["case_id"],
+        seeded["audit_id"],
+        seeded["candidate_id"],
+        seeded["persona_id"],
+        "proposed",
+        "analyst",
+    )
+
+    assert review["claim_id"] == existing["id"]
+    assert len(store.get_persona(seeded["persona_id"])["claims"]) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("decision", ["rejected", "uncertain"])
 async def test_reject_or_uncertain_records_decision_without_claim(
     store, decision

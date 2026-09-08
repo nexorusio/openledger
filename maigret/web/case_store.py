@@ -59,23 +59,11 @@ from maigret.web.profile_discovery_policy import (
     govern_profile_discovery_options,
 )
 from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
-from maigret.web.profile_search_facebook import (
-    FACEBOOK_PROFILE_HOSTS,
-    parse_facebook_profile_url,
-)
-from maigret.web.profile_search_instagram import (
-    INSTAGRAM_PROFILE_HOSTS,
-    parse_instagram_profile_url,
-)
-from maigret.web.profile_search_threads import (
-    THREADS_PROFILE_HOSTS,
-    parse_threads_profile_url,
-)
-from maigret.web.profile_search_tiktok import (
-    TIKTOK_PROFILE_HOSTS,
-    parse_tiktok_profile_url,
-)
-from maigret.web.profile_search_x import X_PROFILE_HOSTS, parse_x_profile_url
+from maigret.web.profile_search_facebook import parse_facebook_profile_url
+from maigret.web.profile_search_instagram import parse_instagram_profile_url
+from maigret.web.profile_search_threads import parse_threads_profile_url
+from maigret.web.profile_search_tiktok import parse_tiktok_profile_url
+from maigret.web.profile_search_x import parse_x_profile_url
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
@@ -815,13 +803,6 @@ MAX_PROFILE_SEARCH_AUDITS_PER_JOB = 10
 MAX_PROFILE_SEARCH_UI_CANDIDATES = 100
 MAX_PROFILE_SEARCH_UI_REVIEWS = 500
 PROFILE_SEARCH_PENDING_CLAIM_CONFIDENCE = 50
-PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES = {
-    "facebook": tuple(sorted({"facebook", *FACEBOOK_PROFILE_HOSTS})),
-    "instagram": tuple(sorted({"instagram", *INSTAGRAM_PROFILE_HOSTS})),
-    "threads": tuple(sorted({"threads", *THREADS_PROFILE_HOSTS})),
-    "tiktok": tuple(sorted({"tiktok", *TIKTOK_PROFILE_HOSTS})),
-    "x": tuple(sorted({"x", "twitter", *X_PROFILE_HOSTS})),
-}
 PROFILE_SEARCH_PLATFORM_PARSERS = {
     "facebook": parse_facebook_profile_url,
     "instagram": parse_instagram_profile_url,
@@ -910,15 +891,11 @@ def _profile_search_candidate_alias_identity(candidate: Dict[str, Any]):
     ) or candidate.get("display_value")
     if not candidate_url:
         return None
-    for platform, parser in PROFILE_SEARCH_PLATFORM_PARSERS.items():
+    for parser in PROFILE_SEARCH_PLATFORM_PARSERS.values():
         profile_reference = parser(str(candidate_url))
         if profile_reference is None:
             continue
-        return (
-            PROFILE_SEARCH_PLATFORM_CLAIM_ALIASES[platform],
-            profile_reference.handle.casefold(),
-            parser,
-        )
+        return profile_reference.handle.casefold(), parser
     return None
 
 
@@ -948,15 +925,12 @@ def _persona_candidate_claim_with_connection(
     alias_identity = _profile_search_candidate_alias_identity(candidate)
     if alias_identity is None:
         return None
-    aliases, candidate_handle, parser = alias_identity
+    candidate_handle, parser = alias_identity
     possible_matches = connection.execute(
         select(persona_claims)
         .where(
             persona_claims.c.persona_id == persona_id,
             persona_claims.c.field_name == "social_account",
-            func.lower(
-                persona_claims.c.value["platform"].as_string()
-            ).in_(aliases),
         )
         .order_by(
             persona_claims.c.created_at.asc(),
