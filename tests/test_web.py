@@ -773,13 +773,13 @@ def test_search_empty_input_redirects_to_index(client):
 
 
 def test_search_redirects_to_status(client, web_app, monkeypatch):
-    monkeypatch.setattr(web_app, 'process_search_task', lambda *a, **kw: None)
+    monkeypatch.setattr(web_app, 'run_stream_job', lambda *a, **kw: None)
     monkeypatch.setattr(web_app, 'Thread', _SyncThread)
 
     resp = client.post('/search', data={'usernames': 'soxoj'})
 
     assert resp.status_code == 302
-    assert '/status/' in resp.location
+    assert '/live/' in resp.location
 
 
 def test_invalid_timestamp_redirects_to_index(client):
@@ -805,9 +805,9 @@ def test_status_running_renders_status_page(client, web_app, monkeypatch):
 
 
 def test_completed_search_redirects_to_results(client, web_app, monkeypatch):
-    """Happy path: POST /search → background completes → /status/<ts> → /results/<session>."""
+    """A completed legacy form scan stays visible before reports are opened."""
 
-    def fake_task(usernames, options, timestamp):
+    def fake_task(timestamp, usernames, options):
         web_app.job_results[timestamp] = {
             'status': 'completed',
             'session_folder': f'search_{timestamp}',
@@ -815,19 +815,19 @@ def test_completed_search_redirects_to_results(client, web_app, monkeypatch):
             'usernames': usernames,
             'individual_reports': [],
         }
-        web_app.background_jobs[timestamp]['completed'] = True
 
-    monkeypatch.setattr(web_app, 'process_search_task', fake_task)
+    monkeypatch.setattr(web_app, 'run_stream_job', fake_task)
     monkeypatch.setattr(web_app, 'Thread', _SyncThread)
 
     post = client.post('/search', data={'usernames': 'soxoj'})
     assert post.status_code == 302
 
-    status_resp = client.get(post.location)
-    assert status_resp.status_code == 302
-    assert '/results/search_' in status_resp.location
+    live_resp = client.get(post.location)
+    assert live_resp.status_code == 200
+    timestamp = post.location.rsplit('/', 1)[-1]
+    assert f'/results/search_{timestamp}' in live_resp.get_data(as_text=True)
 
-    results_resp = client.get(status_resp.location)
+    results_resp = client.get(f'/results/search_{timestamp}')
     assert results_resp.status_code == 200
     assert b'soxoj' in results_resp.data
 
@@ -836,7 +836,7 @@ def test_results_report_links_open_in_new_tab(client, web_app, monkeypatch):
     """CSV/JSON/PDF/HTML report links must open in a new tab, not navigate away
     from the results page."""
 
-    def fake_task(usernames, options, timestamp):
+    def fake_task(timestamp, usernames, options):
         web_app.job_results[timestamp] = {
             'status': 'completed',
             'session_folder': f'search_{timestamp}',
@@ -853,14 +853,13 @@ def test_results_report_links_open_in_new_tab(client, web_app, monkeypatch):
                 }
             ],
         }
-        web_app.background_jobs[timestamp]['completed'] = True
 
-    monkeypatch.setattr(web_app, 'process_search_task', fake_task)
+    monkeypatch.setattr(web_app, 'run_stream_job', fake_task)
     monkeypatch.setattr(web_app, 'Thread', _SyncThread)
 
     post = client.post('/search', data={'usernames': 'soxoj'})
-    status_resp = client.get(post.location)
-    results_resp = client.get(status_resp.location)
+    timestamp = post.location.rsplit('/', 1)[-1]
+    results_resp = client.get(f'/results/search_{timestamp}')
     body = results_resp.get_data(as_text=True)
 
     assert 'class="analysis-disclaimer"' in body
@@ -1657,18 +1656,17 @@ def test_ai_assessment_survives_structured_proposal_failure(
 
 
 def test_failed_task_redirects_to_index(client, web_app, monkeypatch):
-    def failing_task(usernames, options, timestamp):
+    def failing_task(timestamp, usernames, options):
         web_app.job_results[timestamp] = {'status': 'failed', 'error': 'boom'}
-        web_app.background_jobs[timestamp]['completed'] = True
 
-    monkeypatch.setattr(web_app, 'process_search_task', failing_task)
+    monkeypatch.setattr(web_app, 'run_stream_job', failing_task)
     monkeypatch.setattr(web_app, 'Thread', _SyncThread)
 
     post = client.post('/search', data={'usernames': 'soxoj'})
-    status_resp = client.get(post.location)
+    live_resp = client.get(post.location)
 
-    assert status_resp.status_code == 302
-    assert status_resp.location.endswith('/')
+    assert live_resp.status_code == 200
+    assert '"status": "failed"' in live_resp.get_data(as_text=True)
 
 
 def test_download_report_serves_file_inside_reports_folder(client, web_app, tmp_path):

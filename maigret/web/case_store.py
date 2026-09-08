@@ -2225,7 +2225,10 @@ class CaseStore:
             elif event_type == "found":
                 progress["found"] = int(progress.get("found", 0)) + 1
             progress_updates["progress"] = progress
-            progress_updates["heartbeat_at"] = now
+            # Queueing and other control-plane events are not worker activity.
+            # Only an owner-guarded runtime event may renew the worker lease.
+            if runtime_guard:
+                progress_updates["heartbeat_at"] = now
             progress_updates["updated_at"] = now
             result = connection.execute(
                 insert(investigation_events)

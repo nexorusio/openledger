@@ -1697,7 +1697,7 @@ def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
     assert f'value="{subject}"' in body
     assert "Cited public-web research" in body
     assert "Case source filters" in body
-    assert "Full check" in body
+    assert "Exhaustive" in body
     assert "Pending or uncertain evidence is not silently reused" in body
 
     with client.session_transaction() as browser_session:

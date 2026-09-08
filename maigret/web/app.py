@@ -3356,6 +3356,14 @@ def finalize_stream_job(
             'The execution budget ended collection; all evidence gathered before '
             'the deadline was retained.'
         )
+
+    def persist_terminal_result(result):
+        # Keep the legacy/in-memory call shape compatible with simple test and
+        # extension doubles. Durable workers still supply their lease token.
+        if worker_id is None:
+            return record_job_result(job_id, result)
+        return record_job_result(job_id, result, worker_id=worker_id)
+
     if general_results or has_reportable_collector_observations(
         collector_observations
     ):
@@ -3374,7 +3382,7 @@ def finalize_stream_job(
             if partial_status:
                 result['collection_status'] = partial_status
                 result['collection_message'] = partial_message
-            if record_job_result(job_id, result, worker_id=worker_id) is None:
+            if persist_terminal_result(result) is None:
                 return False
             terminal_status = 'completed'
             if partial_status:
@@ -3385,15 +3393,13 @@ def finalize_stream_job(
             public_error = record_internal_error(
                 'Investigation report generation failed', error, session=job_id
             )
-            if record_job_result(
-                job_id,
+            if persist_terminal_result(
                 {
                     'status': 'failed',
                     'error': public_error,
                     'usernames': usernames,
                     'started_at': started_at,
-                },
-                worker_id=worker_id,
+                }
             ) is None:
                 return False
     elif partial_status:
@@ -3417,22 +3423,16 @@ def finalize_stream_job(
         }
         if execution_budget:
             terminal_result['execution_budget'] = dict(execution_budget)
-        if record_job_result(
-            job_id,
-            terminal_result,
-            worker_id=worker_id,
-        ) is None:
+        if persist_terminal_result(terminal_result) is None:
             return False
     else:
-        if record_job_result(
-            job_id,
+        if persist_terminal_result(
             {
                 'status': 'failed',
                 'error': 'The investigation produced no reportable results.',
                 'usernames': usernames,
                 'started_at': started_at,
-            },
-            worker_id=worker_id,
+            }
         ) is None:
             return False
     done_event.setdefault('status', terminal_status)
@@ -4328,7 +4328,6 @@ def run_persistent_affiliation_job(
         'source_record_id': observation.get('source_record_id'),
         'source_errors': source_errors,
     }
-    store.finish(job_id, result, worker_id=worker_id)
     for source_name, _coroutine in source_specs:
         source_observation = source_observations[source_name]
         source_status = source_observation.get('status')
@@ -4459,6 +4458,8 @@ def run_persistent_affiliation_job(
                 'message': str(google_places_result.get('reason') or '')[:1000],
             }
         )
+    if not store.finish(job_id, result, worker_id=worker_id):
+        return None
     sink.put({'type': 'done', 'status': 'completed', 'redirect': f'/cases/{case_id}'})
 
 
@@ -4583,7 +4584,6 @@ def run_persistent_identity_enrichment_job(
         'offshore_alert_count': synchronized['offshore_alerts'],
         'source_errors': [str(message)[:1000] for message in source_errors[:2]],
     }
-    store.finish(job_id, result, worker_id=worker_id)
     if offshore_matches:
         sink.put(
             {
@@ -4605,6 +4605,8 @@ def run_persistent_identity_enrichment_job(
             'found': len(offshore_matches),
         }
     )
+    if not store.finish(job_id, result, worker_id=worker_id):
+        return None
     sink.put(
         {
             'type': 'done',
