@@ -91,22 +91,26 @@ FIELD_DISPLAY_LABELS = {
 }
 
 _SUPPORTED_SOCIAL_PROFILE_PARSERS = (
-    (FACEBOOK_PROFILE_HOSTS, parse_facebook_profile_url),
-    (INSTAGRAM_PROFILE_HOSTS, parse_instagram_profile_url),
-    (THREADS_PROFILE_HOSTS, parse_threads_profile_url),
-    (TIKTOK_PROFILE_HOSTS, parse_tiktok_profile_url),
-    (X_PROFILE_HOSTS, parse_x_profile_url),
+    (FACEBOOK_PROFILE_HOSTS, parse_facebook_profile_url, "facebook"),
+    (INSTAGRAM_PROFILE_HOSTS, parse_instagram_profile_url, "instagram"),
+    (THREADS_PROFILE_HOSTS, parse_threads_profile_url, "threads"),
+    (TIKTOK_PROFILE_HOSTS, parse_tiktok_profile_url, "tiktok"),
+    (X_PROFILE_HOSTS, parse_x_profile_url, "x"),
 )
 
 
 def _supported_social_profile_reference(
     value: str,
-) -> tuple[str, bool, Any]:
-    hostname = (urlparse(value).hostname or "").casefold()
-    for profile_hosts, profile_parser in _SUPPORTED_SOCIAL_PROFILE_PARSERS:
+) -> tuple[str, Optional[str], Any]:
+    hostname = (urlparse(value).hostname or "").casefold().rstrip(".")
+    for (
+        profile_hosts,
+        profile_parser,
+        canonical_platform,
+    ) in _SUPPORTED_SOCIAL_PROFILE_PARSERS:
         if hostname in profile_hosts:
-            return hostname, True, profile_parser(value)
-    return hostname, False, None
+            return hostname, canonical_platform, profile_parser(value)
+    return hostname, None, None
 
 
 def field_display_label(field_name: Any) -> str:
@@ -970,19 +974,21 @@ def extract_ai_persona_claims(
 
         stored_value: Any = value
         if field_name == "social_account":
-            hostname, supported_profile, profile_reference = (
+            hostname, canonical_platform, profile_reference = (
                 _supported_social_profile_reference(value)
             )
             account_username = username
-            if supported_profile:
+            if canonical_platform:
                 if profile_reference is None:
                     reject("invalid_social_profile_url")
                     continue
                 value = profile_reference.canonical_url
                 account_username = profile_reference.handle
             stored_value = {
-                "platform": (
-                    hostname.removeprefix("www.")[:300] or "Public account"
+                "platform": canonical_platform
+                or (
+                    hostname.removeprefix("www.")[:300]
+                    or "Public account"
                 ),
                 "url": value,
                 "username": account_username,

@@ -272,7 +272,22 @@ async def test_x_proposal_reuses_existing_legacy_twitter_account(store):
 
 
 @pytest.mark.asyncio
-async def test_web_research_x_alias_reuses_existing_twitter_account(store):
+@pytest.mark.parametrize(
+    ("web_url", "canonical_web_url"),
+    [
+        (
+            "https://x.com/alice_example",
+            "https://x.com/alice_example",
+        ),
+        (
+            "https://mobile.twitter.com/alice_example/with_replies",
+            "https://x.com/alice_example",
+        ),
+    ],
+)
+async def test_web_research_x_alias_reuses_existing_twitter_account(
+    store, web_url, canonical_web_url
+):
     seeded = await _seed_discovery(store, platform="x")
     legacy_url = "https://twitter.com/alice_example"
     legacy_value = {
@@ -280,7 +295,6 @@ async def test_web_research_x_alias_reuses_existing_twitter_account(store):
         "url": legacy_url,
         "username": "alice_example",
     }
-    web_url = "https://x.com/alice_example"
     web_candidates = extract_ai_persona_claims(
         [
             {
@@ -331,11 +345,21 @@ async def test_web_research_x_alias_reuses_existing_twitter_account(store):
 
     claims = store.get_persona(seeded["persona_id"])["claims"]
     assert len(claims) == 1
-    assert claims[0]["display_value"] == web_url
+    assert claims[0]["display_value"] == canonical_web_url
+    assert claims[0]["value"]["platform"] == "x"
 
 
 @pytest.mark.asyncio
-async def test_web_research_x_url_cannot_overwrite_another_handle(store):
+@pytest.mark.parametrize(
+    ("bob_url", "canonical_bob_url"),
+    [
+        ("https://x.com/bob_example", "https://x.com/bob_example"),
+        ("https://x.com./bob_example", "https://x.com/bob_example"),
+    ],
+)
+async def test_web_research_x_url_cannot_overwrite_another_handle(
+    store, bob_url, canonical_bob_url
+):
     seeded = await _seed_discovery(store, platform="x")
     legacy_url = "https://twitter.com/alice_example"
     legacy_value = {
@@ -343,7 +367,6 @@ async def test_web_research_x_url_cannot_overwrite_another_handle(store):
         "url": legacy_url,
         "username": "alice_example",
     }
-    bob_url = "https://x.com/bob_example"
     web_candidates = extract_ai_persona_claims(
         [
             {
@@ -360,6 +383,7 @@ async def test_web_research_x_url_cannot_overwrite_another_handle(store):
         model="test-model",
     )
     assert web_candidates[0]["value"]["username"] == "bob_example"
+    assert web_candidates[0]["value"]["platform"] == "x"
 
     with store.engine.begin() as connection:
         store._upsert_persona_candidates(
@@ -398,7 +422,7 @@ async def test_web_research_x_url_cannot_overwrite_another_handle(store):
     assert len(claims) == 2
     assert {claim["display_value"] for claim in claims} == {
         legacy_url,
-        bob_url,
+        canonical_bob_url,
     }
 
 
