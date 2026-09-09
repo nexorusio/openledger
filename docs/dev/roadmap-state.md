@@ -91,12 +91,20 @@ production-verified commit
 `d771486cfbd9683f97bd59b76829d2eac495f72a`; none was built on the old P2
 checkout.
 
-The phase integration branch is `codex/p3-evidence-correlation-pivots` in
-`/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its independently reviewed
-original-P3c checkpoint is `aae6891a7883905424a1405bcfc672cbbad19c4e`,
-tree `e85501c0d2588722b763838b900469955d351636`. The consolidated remote
-branch was reconstructed without squashing and its original-P3 pre-merge
-checkpoint has 21 commits with head
+The authoritative phase integration branch is
+`codex/p3-evidence-correlation-pivots`. A synchronized post-publication
+checkout is maintained at
+`/workspace/scratch/9472c4db1487/openledger-published`. The two-commit
+review-remediation publication was built directly on documentation head
+`8c0e87fb0b263ddc36aca9ee0abf59a2ddcc1ac1`, tree
+`8c8a1a179d648aa1e64e9c6567cbcead10e95bc9`, which had 26 commits over the
+unchanged P2 base. The connector-generated P3X2 code checkpoint is
+`00c01261552d3009ca03dc60f87ebdc579096fb8`, tree
+`8b790d6ca6fe93082c00656e9696097a4a5a9216`. The independently reviewed original-P3c checkpoint is
+`aae6891a7883905424a1405bcfc672cbbad19c4e`, tree
+`e85501c0d2588722b763838b900469955d351636`. The consolidated remote branch
+was reconstructed without squashing and its original-P3 pre-merge checkpoint
+has 21 commits with head
 `2386754ad198cba28da53723677cc06d8871ef88`; its tree
 `5bf3d1915961d506fd4fce7c05ecf93f7ba4087f` exactly matches the locally
 tested and reviewed application tree at local commit
@@ -108,7 +116,7 @@ was remote head `b1d4734157e9818c5653f6a9b469ca15bc75014e`, tree
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | Phase branch and worktree above | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a, P3b, and original P3c integrated locally; independently reviewed P3c checkpoint `aae6891a7883905424a1405bcfc672cbbad19c4e` |
+| Coordinator | Phase branch and worktree above | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a, P3b, and original P3c integrated locally; independently reviewed P3c checkpoint `aae6891a7883905424a1405bcfc672cbbad19c4e`; connector-generated P3X2 review fix `00c01261552d3009ca03dc60f87ebdc579096fb8` is tested; publication CI and thread resolution follow this documentation commit |
 | P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
 | P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
 | P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
@@ -247,7 +255,7 @@ Dependency: production-verified P2.
 | Programme-wide impact assessment | Completed read-only on 2026-09-09 against local commit `01fe35e3659d910b57ff11e8f156c6590b91f75f`, tree `5bf3d1915961d506fd4fce7c05ecf93f7ba4087f`, after original P3 reached its pre-merge checkpoint |
 | Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; `P3X1` and `P3X2` are complete, while `P3X3` and `P3X4` remain proposed and unauthorized |
 | Authorized implementation activity codes | `P3X1`, followed separately by `P3X2` |
-| Implementation | `P3X1` complete at code commit `704f499f7a28114358927786e371a3c6148f8a64`, tree `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`; `P3X2` complete at code commit `41bc787f8958a5ccac6a9bb8d610dbb092e8ea47`, tree `a194dada96a7616ae411641a060b1f03a09e637c`; `P3X3` and `P3X4` not authorized and not started |
+| Implementation | `P3X1` complete at code commit `704f499f7a28114358927786e371a3c6148f8a64`, tree `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`; P3X2 main implementation `41bc787f8958a5ccac6a9bb8d610dbb092e8ea47`, tree `a194dada96a7616ae411641a060b1f03a09e637c`, is superseded by tested connector-generated review-fix code commit `00c01261552d3009ca03dc60f87ebdc579096fb8`, tree `8b790d6ca6fe93082c00656e9696097a4a5a9216`; `P3X3` and `P3X4` not authorized and not started |
 | Merge effect | Original P3 must not be squash-merged before `P3X3` and `P3X4` are separately authorized, completed, tested with P3, and added to the same PR |
 
 #### P3X1 completion checkpoint
@@ -280,16 +288,36 @@ The start action remains disabled until the server preview reports an effective
 authorized route, including explicit confirmation for the bounded public email
 route. Generic public URLs and phone numbers remain visible context-only values.
 
-The P3X2 code checkpoint is
+The main implementation checkpoint was
 `41bc787f8958a5ccac6a9bb8d610dbb092e8ea47`, tree
-`a194dada96a7616ae411641a060b1f03a09e637c`. The web suite passed 139 tests;
-the investigation-input, route-policy, and case suite passed 144; persistent-job
-coverage passed 73; and the original P3 correlation and governed-pivot
-regression passed 309, for 665 passing tests across non-overlapping batches.
-Python compilation, Node syntax checking, critical Flake8, `git diff --check`,
-and wheel packaging passed. A local development-server check returned HTTP 200
-for both the builder and its external script. The wheel contains the new script,
-template, and stylesheet.
+`a194dada96a7616ae411641a060b1f03a09e637c`. The authoritative P3X2 review-fix code checkpoint is
+`00c01261552d3009ca03dc60f87ebdc579096fb8`, tree
+`8b790d6ca6fe93082c00656e9696097a4a5a9216`. Local pre-publication commits
+`2e47de9a03471614d2777f1348698d91090c6382` and `f9ce08c79fa677068019cb6880d5036567272f50` are superseded and are not
+authoritative remote checkpoints.
+
+GitHub Advanced Security review thread `PRRT_kwDOUF6utM6gpXba` identified the
+preview endpoint returning `str(error)`. Although current preview-reachable
+validation paths primarily carry bounded user-facing copy, that broad sink
+could disclose arbitrary internal, upstream, URL-resolution, filesystem, or
+credential details placed in the same exception type. The review fix replaces
+the sink with an explicit fixed-message allowlist and one static fallback.
+Focused coverage injects a chained exception containing a database credential,
+internal hostname, filesystem path, exception type, and traceback marker and
+proves none reaches the client; the existing private/local URL message remains
+visible. Before publication, the thread remained unresolved against remote head
+`8c0e87fb0b263ddc36aca9ee0abf59a2ddcc1ac1`. This two-commit publication exposes the fix for CI; answer
+and resolution follow only after applicable CI passes on the final documentation
+head.
+
+The review-fix gate passed 140 web tests; 145 investigation-input,
+route-policy, and case tests; 73 persistent-job tests; and 309 original P3
+correlation and governed-pivot tests, for 667 passing tests across
+non-overlapping batches. Python compilation, critical Flake8, and
+`git diff --check` passed. The earlier main-implementation gate also passed
+Node syntax checking and wheel packaging; a local development-server check
+returned HTTP 200 for both the builder and its external script, and the wheel
+contains the new script, template, and stylesheet.
 
 Automated live-browser verification was attempted but could not launch because
 the environment had no browser binary and the browser download failed certificate
