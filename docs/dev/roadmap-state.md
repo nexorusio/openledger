@@ -93,11 +93,13 @@ The phase integration branch is `codex/p3-evidence-correlation-pivots` in
 `/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its independently reviewed
 original-P3c checkpoint is `aae6891a7883905424a1405bcfc672cbbad19c4e`,
 tree `e85501c0d2588722b763838b900469955d351636`. The consolidated remote
-branch was reconstructed without squashing and its PR-state checkpoint has 20
-commits with head `fd9da98f5f407f954dba0a104162f5955fb91a72`; its tree
-`ce952c3e338ac77d5a2c537931f2931a83961012` differs from the locally tested
-application tree only by the durable PR-state record.
-Consolidated P3 pull request #51 targets unchanged P2 `main` at
+branch was reconstructed without squashing and its original-P3 pre-merge
+checkpoint has 21 commits with head
+`2386754ad198cba28da53723677cc06d8871ef88`; its tree
+`5bf3d1915961d506fd4fce7c05ecf93f7ba4087f` exactly matches the locally
+tested and reviewed application tree at local commit
+`01fe35e3659d910b57ff11e8f156c6590b91f75f`. Consolidated P3 pull request
+#51 targets unchanged P2 `main` at
 `288fdd216c1a107113719cc1c850d9fc0dd47808`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
@@ -196,15 +198,15 @@ PostgreSQL worker queue, existing public-source adapters, and private SearXNG.
 No Brave credential or subscription is required. At this checkpoint nothing
 has been merged or deployed, and no production action has occurred. The
 consolidated branch and PR #51 are open. All applicable GitHub workflows passed
-at `fd9da98`, including five Python versions, minimal install, CodeQL, governed
+at `2386754`, including five Python versions, minimal install, CodeQL, governed
 source audit, PostgreSQL migrations and persistence, Compose validation,
-production image build, and non-root image verification. GitHub review then
-identified one unusable disabled-state control and one test-only URL substring;
-both are resolved in the current verified worktree, with CI rerun pending. The
-next original-P3 action is pre-merge checkpoint verification. Only after that checkpoint
-may the mandated read-only programme-wide P3-extension assessment begin. Extension
-implementation still requires separate activity-code authorization; squash,
-merge, deployment, and production modification remain unauthorized.
+production image build, and non-root image verification. GitHub's two review
+threads are resolved and no unresolved thread remains. Original P3 has
+therefore reached its pre-merge checkpoint. The mandatory read-only,
+programme-wide P3-extension assessment was then completed against the exact
+local tree above. Extension implementation still requires separate
+activity-code authorization; squash, merge, deployment, and production
+modification remain unauthorized.
 
 ## P3 -- Evidence correlation and governed pivots
 
@@ -236,11 +238,154 @@ Dependency: production-verified P2.
 
 | Extension state | Current record |
 |---|---|
-| Programme-wide impact assessment | Mandated after the original-P3 pre-merge checkpoint; not started |
-| Proposed implementation activity codes | None yet; they must be produced by the assessment |
+| Programme-wide impact assessment | Completed read-only on 2026-09-09 against local commit `01fe35e3659d910b57ff11e8f156c6590b91f75f`, tree `5bf3d1915961d506fd4fce7c05ecf93f7ba4087f`, after original P3 reached its pre-merge checkpoint |
+| Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; proposed only, not authorized |
 | Authorized implementation activity codes | None |
 | Implementation | Not authorized and not started |
 | Merge effect | Original P3 must not be squash-merged before the assessed extension activities are separately authorized, completed, tested with P3, and added to the same PR |
+
+#### Assessment finding and fixed mode mapping
+
+The current ordinary builder is materially more complex than the requested
+journey: it exposes typed rows, result grouping, category/country filters, User
+Scanner platform choices, GitHub and archive enrichment, external-AI consent,
+an editable alias plan, and Focused/Exhaustive coverage. This can narrow or
+withhold routes without making the effect clear. The replacement is not a
+template-only change because the browser currently supplies identifier types
+and several routing booleans, while the persistent store requires at least one
+username target.
+
+The assessed ordinary mode contract is:
+
+| User choice | Canonical persisted mode | Maigret coverage | Server budget | Other behavior |
+|---|---|---|---:|---|
+| Quick Scan | `focused` | Configured top-ranked eligible, enabled, non-quarantined sites; no ordinary category/country exclusions | 600 seconds after worker claim | Token type selects an eligible existing route; server flags, consent, circuit breakers, cancellation, and partial-result rules remain authoritative |
+| Full Scan | `exhaustive` | Every eligible, enabled, non-quarantined site in the bundled database; this is not a claim of complete Internet coverage | 1,800 seconds after worker claim | Same token and consent rules as Quick; mode increases governed breadth and time only |
+
+Literal legacy modes `fast`, `focused`, `full`, and `exhaustive`, the
+`all_sites` compatibility field, schema-v1 investigation specifications,
+typed-row forms, saved jobs, Persona reruns, and the documented legacy
+username-only `/api/scan` payload remain readable. New ordinary submissions
+use same-subject grouping and submit no case source filters. Legacy/internal
+interfaces may continue to carry those controls, but the former checklist is
+not exposed in the new ordinary journey.
+
+Identifier routing is deterministic and server-owned. Email, absolute public
+URL, explicit phone syntax, `@` handle, whitespace-containing full name, and
+bare account/username are classified in that order after bounded NFKC
+normalization. Ambiguity remains visible rather than being silently guessed.
+Supported public profile URLs may produce exact account targets through the
+existing database resolver. A generic public URL may be retained only as
+clearly labelled, unverified context and must never use the current final-path
+fallback to become an account target; it causes no preview fetch, DNS lookup,
+pivot, archive request, or arbitrary scan. Phone values are likewise context
+only. A context-only set with no authorized runnable route receives a clear
+response rather than creating a misleading scan.
+
+Username, handle, and supported-profile tokens retain the existing Maigret and
+server-enabled native-search planning. A deliberate email token may use only
+the existing bounded, silent User Scanner email route after the authoritative
+plan clearly discloses that route and the user confirms the scan; an unavailable
+route is reported and is not silently widened. Full names can use the existing
+native-search exact-name seed when enabled and the optional ranked-alias route.
+Neither Quick nor Full alone enables external AI, `api.vxtwitter.com`, GitHub
+enrichment, archive lookup, or another consent-gated route. Existing explicit
+legacy/API consent remains honoured without being manufactured by the
+simplified form.
+
+The sole ordinary advanced choice is one clearly named optional control,
+`Search likely username aliases`. It reuses the existing deterministic ranking,
+score/reason provenance, 24-candidate and 16-selected limits, deduplication,
+case boundary, and pending human review. It performs no numeric spray and does
+not expose the former nickname, contextual-number, editable-candidate, or
+platform checklist in the ordinary flow.
+
+#### Relationship-result finding
+
+An empty shared graph is normally a valid evidence result rather than a graph
+failure. The current projection requires the same exact normalized,
+relationship-eligible value to be approved on at least two Personas. Pending,
+uncertain, rejected, legacy-untriaged, conflicting, private, blocked, and
+indeterminate material correctly cannot become an approved edge. However, the
+current template has only generic empty copy, so it cannot distinguish a clean
+no-match from pending review, Quick/budget limitation, cancellation,
+interruption, provider blocking/degradation, failure, or a stale combined-case
+snapshot.
+
+The extension should add one bounded, read-only `relationship_state` aggregate
+derived from persisted jobs, events, effective plans, reviews, and the selected
+scope. Presentation precedence is: no scope, active collection, graph ready,
+pending review, failed, degraded/partial, then clean no qualifying relationship.
+This metadata remains outside graph nodes and edges. The vis-network version,
+graph schema, exact-match rule, layouts, filters, controls, table view,
+navigation, and interactions remain unchanged.
+
+#### Assessed surfaces
+
+- Routes and API: `/`, `/live`, `/search`, `/api/scan`, a bounded
+  CSRF-protected plan-preview API, Persona investigate/rerun, scan runtime and
+  stop endpoints, and `/relationships`.
+- Template, JavaScript, and CSS: `templates/index.html`, the minimal cached
+  token-builder module and styles, `templates/live.html`, `results.html`,
+  `history.html`, and `relationships.html`. `static/relationships.js` and the
+  bundled vis-network library are preservation boundaries, not redesign
+  targets.
+- Store and worker: `CaseStore.create_investigation`, Persona repeat, immutable
+  JSON options/events, claim synchronization, relationship aggregates, job
+  claim/revalidation, cancellation, partial completion, and terminal results.
+  The existing worker service and queue remain unchanged architecturally.
+- Policy and planner: `investigation_input.py`, `execution_budget.py`,
+  `profile_discovery_policy.py`, `profile_search_planner.py`, ranked aliases,
+  detector health, provider circuits, and P3 governed-pivot policy. Client
+  documents cannot widen the effective plan or budgets.
+- Focused tests: investigation input/classification, profile-search planning,
+  alias policy, execution budgets, discovery policy/UX, Flask routes and API,
+  case store, persistent jobs and worker outcomes, relationship projection,
+  P2 compatibility, P3 correlation and pivots, deployment/config parity, and
+  manual browser keyboard/responsive acceptance. Existing correlation fixtures
+  cover private, blocked, conflicting, and indeterminate outcomes.
+
+#### Proposed separately authorizable activities
+
+| Code | Owner boundary and acceptance outcome | Estimate | Dependency and concurrency |
+|---|---|---:|---|
+| `P3X1` | Backend contract owner: versioned token schema; bounded classifier and type-specific duplicate keys; public/private URL safety; immutable requested/effective/skipped route plan; Quick/Full mapping; legacy form/API/spec compatibility; store support required by authorized non-username routes; unit and contract tests. No template redesign. | 90 min | First and serial; freezes the server contract used by every later activity |
+| `P3X2` | Investigation UX owner: one labelled token editor; whole-value Tab commit and normal empty-Tab navigation; visible classified chips; edit/remove/focus/error behavior; one alias option; Quick/Full controls; authoritative preview; minimal responsive/focus-visible CSS; template/API/browser acceptance. No graph changes. | 90 min | Depends on `P3X1`; may run in parallel with `P3X3` only after both codes are separately authorized |
+| `P3X3` | Relationship-state owner: bounded persisted-state aggregate; truthful active, pending, clean-empty, partial, budget-limited, cancelled/interrupted, blocked/degraded, failed, and stale-snapshot presentation; unchanged graph projection/model/library/interactions; focused store/route/template tests. | 75 min | Depends on the `P3X1` plan-state contract; safely parallel with `P3X2` under isolated ownership |
+| `P3X4` | Coordinator and operations owner: integrate shared app/store/worker seams; consistent Quick/Full labels in live/results/history; separate app-only `OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED` rollout/rollback flag; docs; manual keyboard/mobile verification; P2 plus original-P3 plus extension regression; PostgreSQL/deployment checks; PR CI and review gate. | 60 min | Serial after `P3X1`--`P3X3` |
+
+The serial estimate is 315 minutes. If `P3X2` and `P3X3` are both separately
+authorized after `P3X1`, their isolated work can overlap and the estimated
+critical path is approximately four hours including final integration. No
+further split is justified unless an activity exceeds 90 minutes at a safe
+checkpoint. The extension adds this work before P3 merge but does not change
+phase ordering or amend P4--P18.
+
+No database migration, dependency, lockfile, service, queue, registry, server,
+paid provider, Brave credential, graph replacement, or production-data change
+is indicated. Optional plan and relationship-state metadata fit the existing
+JSON job options/results/events. The proposed UI flag is app-only and initially
+off for staged verification; disabling it restores the legacy builder while
+preserving jobs, evidence, reviews, and P3 pivot controls. The extension remains
+entirely within the current single-Droplet architecture.
+
+#### Programme-wide recommendations (no P4--P18 amendment)
+
+| Phase | Assessed impact and recommendation |
+|---|---|
+| P3 | Preserve evidence identities, correlation, provenance, review status, pivot origins, depth one, fixed pivot budgets, and the pivot kill switch; Quick/Full cannot widen a pivot. |
+| P4 | Segment benchmarks and privacy-safe telemetry by planner version, token class, effective mode/routes, duplicate/invalid outcomes, and relationship-state reason; add rollout thresholds for classification and accidental suppression. |
+| P5 | Keep User Scanner behind its adapter, deployment flag, silent-module policy, consent disclosure, bounded inputs, and distinct outcomes; refresh compatibility tests without copying its logic into the token planner. |
+| P6 | Pin and reproduce the new app flag and app/worker policy parity; add no runtime dependency or service; retain protected rollback to the legacy builder. |
+| P7 | Add end-to-end Quick/Full, token, alias, cancellation, partial/degraded, relationship-empty, legacy API, privacy, and P3-governance acceptance. |
+| P8--P11 | Store future project, creator, membership, and active-project ownership with each accepted plan/job; scope preview and rerun routes; create no global token/plan cache and no cross-project relationship diagnostic. |
+| P12 | Extend the classifier registry later for organization/domain inputs only with P12 authorization; do not classify an organization name or domain as an active P3 organization scan now. |
+| P13 | Keep verified organization-domain and passive theHarvester policy separate; the P3 token planner cannot activate it or pass arbitrary arguments. |
+| P14 | Reuse the simple planning vocabulary where suitable, but design organization scan/review UX only in P14 and retain its explicit source boundaries. |
+| P15 | Reject `.onion`, Tor, and arbitrary manual retrieval as unsupported in P3; Robin remains a separate manual, purpose-bound, Tor-only activity. |
+| P16 | Persist the immutable effective token plan, owner, project, purpose, mode, and route reasons when monitoring is later authorized; do not create scheduling now. |
+| P17 | Add authorized-corpus measurements for classification stability, Quick/Full useful recall and latency, suppression, empty-state truthfulness, duplicates, and degraded outcomes. |
+| P18 | Treat the token builder as a preserve/reskin candidate and include its Tab/focus/mobile/performance states in the preservation audit; retain the relationship graph and postpone broad visual work. |
 
 ## P4 -- Benchmarking, telemetry, and controlled rollout
 
