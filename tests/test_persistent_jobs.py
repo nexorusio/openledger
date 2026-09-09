@@ -1711,10 +1711,10 @@ def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
     assert builder.status_code == 200
     assert "Configure this person investigation" in body
     assert f'value="{subject}"' in body
-    assert "Cited public-web research" in body
-    assert "Case source filters" in body
-    assert "Exhaustive" in body
-    assert "Pending or uncertain evidence is not silently reused" in body
+    assert "Investigation tokens" in body
+    assert "Authoritative plan" in body
+    assert "Full Scan" in body
+    assert "Pending, uncertain, rejected, or deferred evidence is not silently reused" in body
 
     with client.session_transaction() as browser_session:
         browser_session["csrf_token"] = "configured-persona-csrf"
@@ -1793,7 +1793,7 @@ def test_persona_rerun_preserves_exact_username_origin(client, persistent_store)
     page = client.get(f"/personas/{persona_id}/investigate").get_data(
         as_text=True
     )
-    assert '<option value="username" selected>Username</option>' in page
+    assert 'data-token-type="username"' in page
     assert f'value="{username}"' in page
 
     with client.session_transaction() as browser_session:
@@ -1863,8 +1863,8 @@ def test_persona_prefill_ignores_another_personas_targeted_refresh(
     bob_builder = client.get(
         f"/personas/{personas['bob']}/investigate"
     ).get_data(as_text=True)
-    assert '<option value="username" selected>Username</option>' in bob_builder
-    assert '<option value="full_name" selected>' not in bob_builder
+    assert 'data-token-type="username"' in bob_builder
+    assert 'data-token-type="full_name"' not in bob_builder
 
 
 def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(

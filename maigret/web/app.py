@@ -113,6 +113,7 @@ from maigret.web.profile_discovery_policy import (
     ProfileDiscoveryPolicyError,
     govern_profile_discovery_options,
     profile_discovery_flag_enabled,
+    profile_discovery_flags,
 )
 from maigret.web.profile_search_backend import (
     ProfileSearchClient,
@@ -125,9 +126,13 @@ from maigret.web.profile_search_runtime import GovernedProfileSearchClient
 from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web.investigation_input import (
     InvestigationInputError,
+    MAX_IDENTIFIERS,
+    MAX_TOKEN_LENGTH,
     build_investigation_plan,
     build_unified_investigation_plan,
     extract_profile_usernames,
+    finalize_investigation_route_plan,
+    investigation_has_effective_collection_route,
     is_unified_investigation_plan,
     normalize_profile_url,
     normalize_username,
@@ -5938,6 +5943,100 @@ def api_username_aliases():
         ],
         'exact_target_keys': exact_target_keys,
     }
+
+
+@app.route("/api/investigation-plan-preview", methods=["POST"])
+def api_investigation_plan_preview():
+    """Return the bounded, server-authoritative plan for the token editor."""
+    if not is_valid_csrf(request.headers.get("X-OpenLedger-CSRF", "")):
+        return {"error": "Invalid CSRF token."}, 403
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {"error": "A JSON investigation preview is required."}, 400
+
+    raw_tokens = payload.get("tokens", [])
+    if (
+        not isinstance(raw_tokens, list)
+        or len(raw_tokens) > MAX_IDENTIFIERS
+        or any(
+            not isinstance(value, str) or len(value) > MAX_TOKEN_LENGTH
+            for value in raw_tokens
+        )
+    ):
+        return {"error": "Investigation preview inputs are invalid."}, 400
+    mode = payload.get("mode", "quick")
+    if not isinstance(mode, str):
+        return {"error": "Select Quick Scan or Full Scan."}, 400
+
+    preview_form = {
+        "investigation_token": raw_tokens,
+        "mode": mode,
+    }
+    if payload.get("search_likely_username_aliases") is True:
+        preview_form["search_likely_username_aliases"] = "on"
+    if payload.get("confirm_email_route") is True:
+        preview_form["confirm_email_route"] = "on"
+
+    try:
+        plan = build_unified_investigation_plan(
+            preview_form,
+            profile_url_resolver=resolve_profile_url_identifiers,
+        )
+        flags = profile_discovery_flags()
+        flags["user_scanner_enabled"] = bool(
+            flags["user_scanner_enabled"] and user_scanner_available()
+        )
+        discovery_enabled = bool(
+            flags["profile_discovery_enabled"]
+            and flags[f'{plan["execution_mode"]}_mode_enabled']
+        )
+        if not discovery_enabled:
+            flags["maigret_enabled"] = False
+            flags["search_first_enabled"] = False
+            flags["user_scanner_enabled"] = False
+        plan = finalize_investigation_route_plan(
+            plan,
+            flags=flags,
+            execution_mode=plan["execution_mode"],
+        )
+    except InvestigationInputError as error:
+        return {"error": str(error)}, 400
+
+    tokens = list(plan.get("tokens") or [])
+    confirmation_required = bool(
+        any(token.get("type") == "email" for token in tokens)
+        and not plan.get("email_route_confirmed")
+    )
+    has_collection_route = investigation_has_effective_collection_route(plan)
+    blocking_error = ""
+    if not flags["profile_discovery_enabled"]:
+        blocking_error = (
+            "Profile discovery is temporarily disabled by server policy."
+        )
+    elif not flags[f'{plan["execution_mode"]}_mode_enabled']:
+        blocking_error = (
+            f'{plan["requested_mode"].title()} Scan is disabled by server policy.'
+        )
+    elif confirmation_required:
+        blocking_error = "Confirm the bounded public email check before starting."
+    elif not has_collection_route:
+        blocking_error = (
+            "No authorized collection route is currently available for these "
+            "investigation values."
+        )
+    response = jsonify(
+        {
+            "schema_version": plan["schema_version"],
+            "input_contract": plan["input_contract"],
+            "tokens": tokens,
+            "route_plan": plan["route_plan"],
+            "requires_email_confirmation": confirmation_required,
+            "can_start": bool(has_collection_route and not confirmation_required),
+            "blocking_error": blocking_error,
+        }
+    )
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    return response
 
 
 @app.route('/settings', methods=['GET', 'POST'])

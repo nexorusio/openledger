@@ -77,18 +77,22 @@ def client(web_app):
 
 
 def test_index_renders(client):
-    resp = client.get('/')
+    resp = client.get("/")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'name="identifier_type"' in body
-    assert 'name="identifier_value"' in body
-    assert '<form' in body
-    assert 'Case source filters' in body
-    assert 'name="enable_github_profile_enrichment"' in body
-    assert 'name="enable_archived_url_evidence"' in body
-    assert 'e.g. John Doe' in body
-    assert 'Jati Pratomo' not in body
-    assert 'Nexorus, urban planning' not in body
+    assert 'id="investigation-token-input"' in body
+    assert 'name="investigation_token"' in body
+    assert 'data-preview-url="/api/investigation-plan-preview"' in body
+    assert "<form" in body
+    assert "Search likely username aliases" in body
+    assert "Quick Scan" in body
+    assert "Full Scan" in body
+    assert 'name="identifier_type"' not in body
+    assert "Case source filters" not in body
+    assert 'name="enable_github_profile_enrichment"' not in body
+    assert 'name="enable_archived_url_evidence"' not in body
+    assert "Jati Pratomo" not in body
+    assert "Nexorus, urban planning" not in body
 
 
 def test_alias_preview_uses_authoritative_unicode_casefolding(client):
@@ -162,42 +166,204 @@ def test_alias_preview_resolves_profile_urls_for_target_budget(
     assert response.get_json()['exact_target_keys'] == ['exact-account', 'alice']
 
 
-def test_username_verification_requires_explicit_browser_opt_in(
+def test_investigation_plan_preview_requires_csrf_and_bounded_json(client):
+    assert client.post("/api/investigation-plan-preview", json={}).status_code == 403
+
+    csrf_token = _csrf_token(client)
+    invalid_json = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        data="not-json",
+        content_type="application/json",
+    )
+    assert invalid_json.status_code == 400
+    assert invalid_json.get_json() == {
+        "error": "A JSON investigation preview is required."
+    }
+
+    too_many = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json={"tokens": ["alice"] * 25, "mode": "quick"},
+    )
+    assert too_many.status_code == 400
+    assert too_many.get_json() == {"error": "Investigation preview inputs are invalid."}
+
+
+def test_investigation_plan_preview_classifies_tokens_and_exposes_server_plan(
     client, web_app, monkeypatch
 ):
-    monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
+    monkeypatch.setattr(
+        web_app,
+        "resolve_profile_url_identifiers",
+        lambda url: (
+            {"alice": "username"} if url == "https://instagram.com/alice" else {}
+        ),
+    )
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={
+            "tokens": [
+                "Alice Example",
+                "@Alice",
+                "+62 812-3456-7890",
+                "https://instagram.com/alice",
+                "https://public.example.com/reference/alice",
+            ],
+            "mode": "full",
+            "search_likely_username_aliases": True,
+        },
+    )
 
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
+    payload = response.get_json()
+    assert payload["schema_version"] == 2
+    assert payload["input_contract"] == "investigation-tokens-v1"
+    assert [token["type"] for token in payload["tokens"]] == [
+        "full_name",
+        "social_handle",
+        "phone",
+        "profile_url",
+        "public_url",
+    ]
+    route_plan = payload["route_plan"]
+    assert route_plan["server_authoritative"] is True
+    assert route_plan["requested_mode"] == "full"
+    assert route_plan["execution_mode"] == "exhaustive"
+    assert route_plan["budget_seconds"] == 1800
+    assert [route["route"] for route in route_plan["effective_routes"]] == [
+        "likely_username_aliases",
+        "maigret",
+        "native_profile_search",
+    ]
+    assert [route["reason_code"] for route in route_plan["skipped_routes"]] == [
+        "context_only_no_outbound",
+        "context_only_no_outbound",
+    ]
+    assert payload["can_start"] is True
+    assert payload["requires_email_confirmation"] is False
+
+
+def test_investigation_plan_preview_requires_email_confirmation_and_availability(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_USER_SCANNER_DISCOVERY_ENABLED", "true")
+    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
+    csrf_token = _csrf_token(client)
+    request_body = {"tokens": ["alice@example.com"], "mode": "quick"}
+
+    unconfirmed = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json=request_body,
+    )
+    assert unconfirmed.status_code == 200
+    unconfirmed_payload = unconfirmed.get_json()
+    assert unconfirmed_payload["requires_email_confirmation"] is True
+    assert unconfirmed_payload["can_start"] is False
+    assert (
+        unconfirmed_payload["route_plan"]["skipped_routes"][0]["reason_code"]
+        == "confirmation_required"
+    )
+
+    confirmed = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json={**request_body, "confirm_email_route": True},
+    )
+    assert confirmed.status_code == 200
+    confirmed_payload = confirmed.get_json()
+    assert confirmed_payload["requires_email_confirmation"] is False
+    assert confirmed_payload["can_start"] is True
+    assert confirmed_payload["route_plan"]["effective_routes"][0]["route"] == (
+        "user_scanner_email"
+    )
+
+    monkeypatch.setattr(web_app, "user_scanner_available", lambda: False)
+    unavailable = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json={**request_body, "confirm_email_route": True},
+    )
+    assert unavailable.status_code == 200
+    unavailable_payload = unavailable.get_json()
+    assert unavailable_payload["can_start"] is False
+    assert (
+        unavailable_payload["route_plan"]["skipped_routes"][0]["reason_code"]
+        == "server_disabled"
+    )
+
+
+def test_investigation_plan_preview_rejects_private_url_without_fetching(
+    client, web_app, monkeypatch
+):
+    resolver_called = False
+
+    def forbidden_resolver(_url):
+        nonlocal resolver_called
+        resolver_called = True
+        return {}
+
+    monkeypatch.setattr(web_app, "resolve_profile_url_identifiers", forbidden_resolver)
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={"tokens": ["http://127.0.0.1/private"], "mode": "quick"},
+    )
+
+    assert response.status_code == 400
+    assert "private or local" in response.get_json()["error"]
+    assert resolver_called is False
+
+
+def test_investigation_plan_preview_reflects_global_and_mode_kill_switches(
+    client, monkeypatch
+):
+    csrf_token = _csrf_token(client)
+    request_body = {'tokens': ['alice'], 'mode': 'quick'}
+    monkeypatch.setenv('OPENLEDGER_PROFILE_DISCOVERY_ENABLED', 'false')
+
+    globally_disabled = client.post(
+        '/api/investigation-plan-preview',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        json=request_body,
+    ).get_json()
+    assert globally_disabled['can_start'] is False
+    assert globally_disabled['blocking_error'] == (
+        'Profile discovery is temporarily disabled by server policy.'
+    )
+    assert globally_disabled['route_plan']['skipped_routes'][0][
+        'reason_code'
+    ] == 'server_disabled'
+
+    monkeypatch.setenv('OPENLEDGER_PROFILE_DISCOVERY_ENABLED', 'true')
+    monkeypatch.setenv('OPENLEDGER_FOCUSED_DISCOVERY_ENABLED', 'false')
+    mode_disabled = client.post(
+        '/api/investigation-plan-preview',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        json=request_body,
+    ).get_json()
+    assert mode_disabled['can_start'] is False
+    assert mode_disabled['blocking_error'] == (
+        'Quick Scan is disabled by server policy.'
+    )
+
+
+def test_unified_browser_does_not_silently_enable_legacy_username_verification(
+    client,
+):
     body = client.get('/').get_data(as_text=True)
-    marker = 'id="enable-user-scanner-username"'
-    marker_position = body.index(marker)
-    input_start = body.rindex('<input', 0, marker_position)
-    input_end = body.index('>', marker_position)
 
-    assert 'checked' not in body[input_start:input_end]
-
-    with open(
-        os.path.join(CUR_PATH, '../maigret/web/templates/index.html'),
-        encoding='utf-8',
-    ) as template_file:
-        template = template_file.read()
-    handler_start = template.index(
-        "userScannerUsernameToggle.addEventListener('change'"
-    )
-    handler_end = template.index('});', handler_start)
-    handler = template[handler_start:handler_end]
-    assert 'enforceAliasSelectionLimit()' in handler
-    assert 'refreshAliasCandidates()' not in handler
-    assert (
-        "const aliasSourceTypes = new Set(['username', 'social_handle', "
-        "'profile_url', 'full_name']);" in template
-    )
-    assert "refreshAliasesForIdentifierChanges(type.value)" in template
-    selection_handler = template.index("selected.addEventListener('change'")
-    selection_handler_end = template.index('});', selection_handler)
-    assert (
-        'enforceAliasSelectionLimit()'
-        in template[selection_handler:selection_handler_end]
-    )
+    assert 'name="enable_user_scanner_username"' not in body
+    assert 'name="user_scanner_platform"' not in body
+    assert 'name="allow_user_scanner_vxtwitter"' not in body
+    assert body.count('name="search_likely_username_aliases"') == 1
+    assert 'name="confirm_email_route"' in body
+    assert 'id="email-route-confirmation" hidden' in body
 
 
 def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
@@ -599,15 +765,16 @@ def test_context_only_investigation_is_rejected_before_queueing(
 
 
 def test_investigation_builder_explains_identifier_capabilities(client):
-    body = client.get('/').get_data(as_text=True)
+    body = client.get("/").get_data(as_text=True)
 
-    assert 'Known identifiers' in body
-    assert 'A full name may contain spaces' in body
-    assert 'Phone and email values are never permuted' in body
-    assert 'Case source filters' in body
-    assert 'Include terms' not in body
-    assert 'Exclude terms' not in body
-    assert 'Query plan' in body
+    assert "Investigation tokens" in body
+    assert "spaces stay inside the value" in body
+    assert "server-ranked account variants" in body
+    assert "Generic public URLs and phone numbers remain context only" in body
+    assert "Case source filters" not in body
+    assert "Include terms" not in body
+    assert "Exclude terms" not in body
+    assert "Authoritative plan" in body
 
 
 def test_role_organization_suggestion_preserves_legal_suffix_and_fails_ambiguous(
