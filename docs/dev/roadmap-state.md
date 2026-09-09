@@ -75,38 +75,72 @@ configuration, five-result maximum, and ten-second timeout.
 
 ## Current P3 checkpoint
 
-P3a completed at a safe integration checkpoint on 2026-09-09. P3b and P3c
-are not authorized. All P3 work started from exact production-verified commit
+P3a and P3b completed at safe integration checkpoints on 2026-09-09. P3c is
+not authorized. All P3 work started from exact production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
-`d771486cfbd9683f97bd59b76829d2eac495f72a`.
+`d771486cfbd9683f97bd59b76829d2eac495f72a`; none was built on the old P2
+checkout.
+
+The phase integration branch is `codex/p3-evidence-correlation-pivots` in
+`/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its reviewed P3b code
+checkpoint before this state update is
+`bd27e5c1e8e79f92474dc23bed1edcdc02e6533d`, tree
+`6655127174d0abc9ff2a791c8e57f828e2079113`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | `codex/p3-evidence-correlation-pivots` in `/workspace/scratch/a7cc4d9992b8/openledger-p3` | Architecture freeze, integration, dependency decisions, review, and final P3a testing | P3a integrated and verified at `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` before this state update |
-| Contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | New correlation contract module and schema; sole owner of the shared contract | Complete; source commit `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
-| Acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Black-box fixtures and acceptance tests for equivalence, conflicts, failure taxonomy, provenance, and reruns | Complete; source commit `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
-| Continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | `docs/dev/multi-agent-runbook.md` and this roadmap state | Complete; source commit `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1` |
+| Coordinator | Phase branch and worktree above | Architecture, shared adapter and `case_store.py` integration, review fixes, test gate, and durable checkpoint | P3a and P3b integrated; P3b code checkpoint `bd27e5c1e8e79f92474dc23bed1edcdc02e6533d` |
+| P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
+| P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
+| P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
+| P3b engine worker | `codex/p3b-correlation-engine` in `/workspace/scratch/a7cc4d9992b8/openledger-p3b-engine` | Pure deterministic clustering, relationships, confidence, and unit tests | Source `fd1d6e7c34b90e2c1fb81b0fc990f25c63a244b5`; integrated as `c8c4e63bea44ab1bc611c40c64c84400dcdb7975` |
+| P3b acceptance worker | `codex/p3b-correlation-acceptance` in `/workspace/scratch/a7cc4d9992b8/openledger-p3b-tests` | Black-box correlation and Persona acceptance coverage | Source `46eff6754d6c42e67832273ee7b38087e4b6365f`; integrated as `a96145aa3d311e86c615effe46fa4398930dc5c6` |
+| P3b adapter workers | `codex/p3b-profile-search-adapter` in `/workspace/scratch/a7cc4d9992b8/openledger-p3b-adapter` | Proposed isolated adapter ownership | Both attempts stopped without changes; coordinator completed the shared integration in `fb670bb`, `53afafd`, and `bd27e5c` |
+| P3b reviewer | Read-only review of the phase worktree | Correlation, provenance, compatibility, idempotency, and human-control review | No remaining actionable findings at `bd27e5c`; 102 focused tests passed; no edits made |
 
-P3a froze a provider-neutral, case-scoped correlation contract with canonical
-profile identities and URLs, explicit source and immutable-snapshot lineage,
-eight distinct evidence outcomes, four evidence-relationship kinds,
-case-bound relationship endpoints, bounded explainable confidence metadata,
-and stable observation, cluster, and relationship identifiers. It exposes no
-automatic-approval surface and implements no correlation engine, persistence,
-pivot, UI, migration, or deployment behavior.
+P3a froze the provider-neutral, case-scoped evidence contract. P3b now adds a
+bounded deterministic correlation engine and a strict adapter for immutable P2
+profile-search audits. Supported-platform aliases share one canonical claim;
+same-snapshot observations are duplicates; independently attributable source
+signals remain separate; explicit conflicting or unrelated classifications
+suppress incompatible inference; and correlation confidence is deterministic,
+bounded, and never an approval decision. All eight outcome classes remain
+distinct, including ambiguous provider and parser failures.
 
-Integrated verification recorded 142 passing P3a contract and acceptance
-tests plus 72 passing available synchronous P2 regression tests. Thirty P2
-async tests could not execute in the existing temporary environment because
-`pytest-asyncio` was unavailable; they reported the same missing-plugin error
-and no assertion failure. Black formatting, critical Flake8 checks, Python
-compilation, JSON/schema parsing, coordinator smoke assertions, and committed
-range whitespace checks passed. Full dependency-complete regression remains a
-P3c release-gate requirement.
+Repeated observation identities retain every unique retrieval time, query,
+citation set, and immutable snapshot locator. Profile-search snapshots use a
+deterministic normalized digest that excludes query-relative rank and provider
+identity; the locator remains audit/source-record-specific and embeds the exact
+digest. The overall audit ID and SHA remain separately retained. Source errors
+use their native occurrence time. Legacy P2 profile URLs with credential-like
+tracking-key names remain readable because citations use the safe canonical
+profile URL while the immutable raw audit remains referenced.
 
-No P3 migration, production change, pull request, remote-head SHA, CI result,
-or release result is recorded at this checkpoint. The exact next authorization
-is **P3b**.
+Persona proposals reuse canonical social-account claims. Reruns from the same
+logical source do not add evidence cards or increase confidence. Existing P2
+evidence rows are reused without changing their payload, fingerprint, or
+timestamp; new correlation context is recorded in append-only claim lineage.
+Alias-only observations cannot replace the curated representation or
+confidence of a reviewed claim. Correlation remains visible before review but
+creates no claim automatically, and no AI, adapter, or engine can approve a
+claim.
+
+Final coordinator verification recorded 507 passing tests across the P3
+contract, engine, adapter, persistence/review, profile discovery, case,
+Persona, external-evidence, report, and worker suites. The review-fix focused
+set passed 90 tests, and the independent reviewer passed 102 focused tests.
+Black checks passed for the new and P3-owned correlation files, critical
+Flake8 checks passed for all changed Python files, Python compilation and
+`git diff --check` passed. The temporary test environment lacked
+`pytest-asyncio`, so a test-only local compatibility plugin executed async
+tests; no repository dependency or lock file changed. A dependency-complete
+full release regression remains part of P3c.
+
+P3b added no migration and changed no `app.py`, `worker.py`, template,
+deployment configuration, or dependency lock. Nothing was pushed, no P3 pull
+request was opened, and no production or production-data action occurred. One
+consolidated P3 pull request and all release gates remain deferred until P3c.
+The exact next authorization is **P3c**.
 
 ## P3 -- Evidence correlation and governed pivots
 
