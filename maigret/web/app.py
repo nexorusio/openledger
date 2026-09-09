@@ -128,6 +128,7 @@ from maigret.web.investigation_input import (
     InvestigationInputError,
     MAX_IDENTIFIERS,
     MAX_TOKEN_LENGTH,
+    MAX_USERNAME_LENGTH,
     build_investigation_plan,
     build_unified_investigation_plan,
     extract_profile_usernames,
@@ -5945,6 +5946,69 @@ def api_username_aliases():
     }
 
 
+INVESTIGATION_PREVIEW_INVALID_MESSAGE = (
+    "Investigation preview inputs are invalid."
+)
+INVESTIGATION_PREVIEW_PUBLIC_ERRORS = {
+    "Enter an investigation token.": "Enter an investigation token.",
+    f"Investigation tokens must be {MAX_TOKEN_LENGTH} characters or fewer.": (
+        f"Investigation tokens must be {MAX_TOKEN_LENGTH} characters or fewer."
+    ),
+    "Enter a valid public HTTP or HTTPS URL.": (
+        "Enter a valid public HTTP or HTTPS URL."
+    ),
+    "Enter a complete public HTTP or HTTPS URL.": (
+        "Enter a complete public HTTP or HTTPS URL."
+    ),
+    "Investigation URLs must not contain credentials.": (
+        "Investigation URLs must not contain credentials."
+    ),
+    "Investigation URLs may use only the default HTTP or HTTPS port.": (
+        "Investigation URLs may use only the default HTTP or HTTPS port."
+    ),
+    "Investigation URLs must use a public Internet hostname.": (
+        "Investigation URLs must use a public Internet hostname."
+    ),
+    "Investigation URLs must not target private or local addresses.": (
+        "Investigation URLs must not target private or local addresses."
+    ),
+    "Enter a username or social handle.": "Enter a username or social handle.",
+    f"Usernames must be {MAX_USERNAME_LENGTH} characters or fewer.": (
+        f"Usernames must be {MAX_USERNAME_LENGTH} characters or fewer."
+    ),
+    "Phone numbers must contain between 7 and 15 digits.": (
+        "Phone numbers must contain between 7 and 15 digits."
+    ),
+    "Enter a complete name of 300 characters or fewer.": (
+        "Enter a complete name of 300 characters or fewer."
+    ),
+    f"Use no more than {MAX_IDENTIFIERS} investigation tokens.": (
+        f"Use no more than {MAX_IDENTIFIERS} investigation tokens."
+    ),
+    "Add at least one investigation token.": (
+        "Add at least one investigation token."
+    ),
+    "Select Quick Scan or Full Scan.": "Select Quick Scan or Full Scan.",
+    "The current bounded email route accepts one email per investigation.": (
+        "The current bounded email route accepts one email per investigation."
+    ),
+    "These tokens are context only. Add a name, username, social handle, "
+    "supported public profile URL, or email with an available authorized route.": (
+        "These tokens are context only. Add a name, username, social handle, "
+        "supported public profile URL, or email with an available authorized route."
+    ),
+}
+
+
+def public_investigation_preview_error(error):
+    """Return only reviewed validation copy, never exception-derived details."""
+    if len(error.args) != 1 or not isinstance(error.args[0], str):
+        return INVESTIGATION_PREVIEW_INVALID_MESSAGE
+    return INVESTIGATION_PREVIEW_PUBLIC_ERRORS.get(
+        error.args[0], INVESTIGATION_PREVIEW_INVALID_MESSAGE
+    )
+
+
 @app.route("/api/investigation-plan-preview", methods=["POST"])
 def api_investigation_plan_preview():
     """Return the bounded, server-authoritative plan for the token editor."""
@@ -6000,7 +6064,7 @@ def api_investigation_plan_preview():
             execution_mode=plan["execution_mode"],
         )
     except InvestigationInputError as error:
-        return {"error": str(error)}, 400
+        return {"error": public_investigation_preview_error(error)}, 400
 
     tokens = list(plan.get("tokens") or [])
     confirmation_required = bool(

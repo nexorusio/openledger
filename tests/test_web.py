@@ -320,6 +320,40 @@ def test_investigation_plan_preview_rejects_private_url_without_fetching(
     assert resolver_called is False
 
 
+def test_investigation_plan_preview_does_not_expose_exception_details(
+    client, web_app, monkeypatch
+):
+    sensitive_details = (
+        "resolver failed for postgresql://operator:secret@db.internal/openledger "
+        "using /etc/openledger/private.json"
+    )
+
+    def unsafe_plan(*_args, **_kwargs):
+        try:
+            raise RuntimeError(sensitive_details)
+        except RuntimeError as internal_error:
+            raise web_app.InvestigationInputError(
+                f"Internal URL resolution error: {internal_error}"
+            ) from internal_error
+
+    monkeypatch.setattr(web_app, "build_unified_investigation_plan", unsafe_plan)
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={"tokens": ["alice"], "mode": "quick"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json() == {
+        "error": web_app.INVESTIGATION_PREVIEW_INVALID_MESSAGE
+    }
+    body = response.get_data(as_text=True)
+    assert "operator:secret" not in body
+    assert "/etc/openledger/private.json" not in body
+    assert "RuntimeError" not in body
+    assert "Traceback" not in body
+
+
 def test_investigation_plan_preview_reflects_global_and_mode_kill_switches(
     client, monkeypatch
 ):
