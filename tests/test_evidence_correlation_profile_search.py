@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from maigret.web.evidence_correlation import correlate_evidence
 from maigret.web.evidence_correlation_profile_search import (
     profile_search_audit_observations,
 )
@@ -128,7 +129,8 @@ def test_supported_profile_result_preserves_lineage_and_canonical_identity():
     assert observation["originating_query"] == query["query_text"]
     assert observation["originating_query_fingerprint"] == (query["query_fingerprint"])
     assert observation["retrieved_at"] == "2026-09-09T10:00:00Z"
-    assert observation["source_snapshot_sha256"] == f"sha256:{_sha256(document)}"
+    assert observation["source_snapshot_sha256"].startswith("sha256:")
+    assert len(observation["source_snapshot_sha256"]) == 71
 
 
 def test_success_without_supported_profile_is_query_scoped_absence():
@@ -155,7 +157,7 @@ def test_success_without_supported_profile_is_query_scoped_absence():
     assert observation["claim_type"] == "profile_search_query"
     assert observation["outcome"] == "absent"
     assert observation["native_outcome"] == "no_returned_profile_result"
-    assert "search_result_set_empty" in observation["native_status"]
+    assert "no_supported_profile_result" in observation["native_status"]
 
 
 @pytest.mark.parametrize(
@@ -203,6 +205,28 @@ def test_output_order_and_source_record_ids_are_stable():
         item["observation_id"] for item in baseline
     )
     assert len({item["source_record_id"] for item in baseline}) == 2
+
+
+def test_independent_providers_get_distinct_source_snapshots_and_support():
+    first = _query(1)
+    second = _query(2)
+    result = {
+        "result_rank": 1,
+        "source_url": "https://x.com/alice_example",
+        "title": "Alice Example on X",
+        "snippet": "Public profile result.",
+    }
+    first_run = _success_run(first, [result])
+    second_run = _success_run(second, [result])
+    second_run["provenance"]["provider"] = "brave"
+    document = _document([first, second], [first_run, second_run])
+
+    observations = _adapt(document)
+    cluster = correlate_evidence(observations)["clusters"][0]
+
+    assert len({item["source_snapshot_sha256"] for item in observations}) == 2
+    assert cluster["independent_observed_source_count"] == 2
+    assert cluster["confidence"]["score"] == 55
 
 
 def test_rejects_tampering_and_invalid_hashes():

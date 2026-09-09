@@ -99,6 +99,17 @@ def _record_id(kind: str, material: Any) -> str:
     return f"profile-search-{kind}:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def _snapshot_sha256(material: Any) -> str:
+    encoded = json.dumps(
+        material,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
 def _base_observation(
     *,
     case_id: str,
@@ -241,7 +252,6 @@ def profile_search_audit_observations(
     if len(candidates) != candidate_count:
         raise ValueError("Profile-search audit candidate count is inconsistent")
 
-    snapshot_sha256 = f"sha256:{expected_sha256}"
     snapshot_ref = f"evidence://openledger/profile-search-audit/{audit_id}"
     source_version = str(orchestration_version)
     observations = []
@@ -299,7 +309,16 @@ def profile_search_audit_observations(
                     citations=[],
                     retrieved_at=retrieved_at,
                     query=query,
-                    snapshot_sha256=snapshot_sha256,
+                    snapshot_sha256=_snapshot_sha256(
+                        {
+                            "provider": provider,
+                            "error": {
+                                key: value
+                                for key, value in error.items()
+                                if key != "occurred_at"
+                            },
+                        }
+                    ),
                     snapshot_ref=snapshot_ref,
                 )
             )
@@ -360,7 +379,9 @@ def profile_search_audit_observations(
                     citations=[{"url": source_url, "title": title.strip()[:300]}],
                     retrieved_at=provenance_retrieved_at,
                     query=query,
-                    snapshot_sha256=snapshot_sha256,
+                    snapshot_sha256=_snapshot_sha256(
+                        {"provider": provider, "result": result}
+                    ),
                     snapshot_ref=snapshot_ref,
                 )
             )
@@ -377,11 +398,13 @@ def profile_search_audit_observations(
                     ),
                     outcome="absent",
                     native_outcome="no_returned_profile_result",
-                    native_status="successful_search_result_set_empty",
+                    native_status=("successful_search_no_supported_profile_result"),
                     citations=[],
                     retrieved_at=provenance_retrieved_at,
                     query=query,
-                    snapshot_sha256=snapshot_sha256,
+                    snapshot_sha256=_snapshot_sha256(
+                        {"provider": provider, "supported_profile_results": []}
+                    ),
                     snapshot_ref=snapshot_ref,
                 )
             )

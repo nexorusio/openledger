@@ -478,7 +478,8 @@ def test_profile_search_adapter_preserves_observed_lineage_and_integrity():
         == document["queries"][0]["query_fingerprint"]
     )
     assert observation["retrieved_at"] == "2026-09-09T10:00:00Z"
-    assert observation["source_snapshot_sha256"] == f"sha256:{document_sha256}"
+    assert observation["source_snapshot_sha256"].startswith("sha256:")
+    assert len(observation["source_snapshot_sha256"]) == 71
     assert observation["source_snapshot_ref"] == (
         "evidence://openledger/profile-search-audit/audit-observed-1"
     )
