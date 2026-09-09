@@ -455,6 +455,125 @@ def test_typed_investigation_builder_creates_a_grouped_query_plan(
     assert '+628123456789' not in captured['usernames']
 
 
+def test_unified_token_submission_uses_the_authoritative_schema_v2_route_plan(
+    client, web_app, monkeypatch
+):
+    captured = {}
+
+    def fake_start(usernames, options):
+        captured['usernames'] = usernames
+        captured['options'] = options
+        return 'token-plan'
+
+    monkeypatch.setattr(web_app, 'start_live_job', fake_start)
+    monkeypatch.setattr(
+        web_app,
+        'resolve_profile_url_identifiers',
+        lambda _url: {},
+    )
+    configured_settings = web_app.load_settings()
+    configured_settings['site_list'] = ['LegacyOnlySite']
+    monkeypatch.setattr(
+        web_app,
+        'load_settings',
+        lambda: dict(configured_settings),
+    )
+    response = client.post(
+        '/api/scan',
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+        data={
+            'investigation_token': [
+                'Alice Example',
+                '@alice',
+                '+62 812 3456 789',
+                'https://public.example.com/reference/alice',
+            ],
+            'search_likely_username_aliases': 'on',
+            'mode': 'quick',
+            # Removed ordinary controls cannot be smuggled into schema v2.
+            'allow_ai_context': 'on',
+            'enable_archived_url_evidence': 'on',
+            'tags': ['social'],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.get_json() == {'job_id': 'token-plan'}
+    specification = captured['options']['investigation_spec']
+    assert specification['schema_version'] == 2
+    assert specification['processing_mode'] == 'same_subject'
+    assert specification['allow_ai_context'] is False
+    assert specification['enable_archived_url_evidence'] is False
+    assert specification['tags'] == []
+    assert captured['options']['tags'] == []
+    assert captured['options']['site_list'] == []
+    assert captured['options']['execution_mode'] == 'focused'
+    assert captured['options']['all_sites'] is False
+    assert captured['options']['execution_budget']['total_seconds'] == 600
+    route_plan = specification['route_plan']
+    assert route_plan['server_authoritative'] is True
+    assert route_plan['requested_mode'] == 'quick'
+    assert route_plan['execution_mode'] == 'focused'
+    assert route_plan['budget_seconds'] == 600
+    assert [item['route'] for item in route_plan['effective_routes']] == [
+        'likely_username_aliases',
+        'maigret',
+    ]
+    assert [item['route'] for item in route_plan['skipped_routes']] == [
+        'native_profile_search',
+        'context_only',
+        'context_only',
+    ]
+    assert '+628123456789' not in captured['usernames']
+    assert 'alice' in [value.casefold() for value in captured['usernames']]
+
+
+def test_unified_email_route_requires_confirmation_and_supports_no_username_target(
+    client, web_app, monkeypatch
+):
+    captured = {}
+
+    def fake_start(usernames, options):
+        captured['usernames'] = usernames
+        captured['options'] = options
+        return 'email-token-plan'
+
+    monkeypatch.setattr(web_app, 'start_live_job', fake_start)
+    monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
+    csrf_token = _csrf_token(client)
+    refused = client.post(
+        '/api/scan',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        data={
+            'investigation_token': ['alice@example.com'],
+            'mode': 'quick',
+        },
+    )
+
+    assert refused.status_code == 400
+    assert 'confirm' in refused.get_json()['error'].casefold()
+    assert captured == {}
+
+    accepted = client.post(
+        '/api/scan',
+        headers={'X-OpenLedger-CSRF': csrf_token},
+        data={
+            'investigation_token': ['alice@example.com'],
+            'confirm_email_route': 'on',
+            'mode': 'quick',
+        },
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.get_json() == {'job_id': 'email-token-plan'}
+    assert captured['usernames'] == []
+    route_plan = captured['options']['investigation_spec']['route_plan']
+    assert [item['route'] for item in route_plan['effective_routes']] == [
+        'user_scanner_email'
+    ]
+    assert route_plan['effective_routes'][0]['requires_confirmation'] is True
+
+
 def test_context_only_investigation_is_rejected_before_queueing(
     client, web_app, monkeypatch
 ):

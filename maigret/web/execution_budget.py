@@ -14,6 +14,7 @@ EXHAUSTIVE_BUDGET_SECONDS = 30 * 60
 _MODE_ALIASES = {
     "fast": "focused",
     "focused": "focused",
+    "quick": "focused",
     "full": "exhaustive",
     "exhaustive": "exhaustive",
 }

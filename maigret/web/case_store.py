@@ -54,6 +54,9 @@ from maigret.web.external_evidence import (
 )
 from maigret.web.execution_budget import execution_budget_spec_from_options
 from maigret.web.governed_pivots import build_governed_pivot_plan
+from maigret.web.investigation_input import (
+    investigation_has_effective_collection_route,
+)
 from maigret.web.profile_discovery_policy import (
     PROFILE_DISCOVERY_JOB_KINDS,
     ProfileDiscoveryPolicyError,
@@ -1352,9 +1355,16 @@ class CaseStore:
         kind: str = "live",
     ) -> str:
         normalized = [str(value).strip() for value in usernames if str(value).strip()]
-        if not normalized:
+        stored_options = (
+            govern_profile_discovery_options(options)
+            if kind in PROFILE_DISCOVERY_JOB_KINDS
+            else dict(options)
+        )
+        investigation_spec = stored_options.get("investigation_spec")
+        if not normalized and not investigation_has_effective_collection_route(
+            investigation_spec
+        ):
             raise ValueError("At least one username is required")
-        investigation_spec = options.get("investigation_spec")
         grouped = (
             isinstance(investigation_spec, dict)
             and investigation_spec.get("processing_mode") == "same_subject"
@@ -1364,15 +1374,13 @@ class CaseStore:
             if isinstance(investigation_spec, dict)
             else ""
         )
-        persona_names = [subject_label or normalized[0]] if grouped else normalized
+        persona_seed = subject_label or (normalized[0] if normalized else "")
+        if not persona_seed:
+            raise ValueError("The investigation subject is required")
+        persona_names = [persona_seed] if grouped else normalized
         now = utcnow()
         case_id = str(uuid.uuid4())
         job_id = str(uuid.uuid4())
-        stored_options = (
-            govern_profile_discovery_options(options)
-            if kind in PROFILE_DISCOVERY_JOB_KINDS
-            else dict(options)
-        )
         budget = (
             execution_budget_spec_from_options(stored_options)
             if kind in PROFILE_DISCOVERY_JOB_KINDS
@@ -2726,8 +2734,6 @@ class CaseStore:
                 )
             )
             queued_usernames = [value for value in queued_usernames if value]
-            if not queued_usernames:
-                raise ValueError("No searchable account identifiers are available")
             if explicit_plan:
                 specification = (
                     dict(investigation_spec)
@@ -2741,6 +2747,14 @@ class CaseStore:
                 )
                 queued_options["investigation_spec"] = specification
             queued_options = govern_profile_discovery_options(queued_options)
+            investigation_spec = queued_options.get("investigation_spec")
+            if (
+                not queued_usernames
+                and not investigation_has_effective_collection_route(
+                    investigation_spec
+                )
+            ):
+                raise ValueError("No searchable account identifiers are available")
             budget = execution_budget_spec_from_options(queued_options)
             connection.execute(
                 insert(investigation_jobs).values(

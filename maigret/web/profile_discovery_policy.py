@@ -6,6 +6,11 @@ import os
 from typing import Any, Mapping, MutableMapping, Optional
 
 from maigret.web.execution_budget import apply_execution_budget
+from maigret.web.investigation_input import (
+    finalize_investigation_route_plan,
+    investigation_has_effective_collection_route,
+    is_unified_investigation_plan,
+)
 
 PROFILE_DISCOVERY_POLICY_VERSION = "profile-discovery-routing-v2"
 PROFILE_DISCOVERY_JOB_KINDS = frozenset({"live", "refresh"})
@@ -94,22 +99,43 @@ def govern_profile_discovery_options(
         raise ProfileDiscoveryPolicyError(
             f"{mode.title()} profile discovery is disabled by server policy."
         )
-    if not flags["maigret_enabled"]:
+
+    specification = governed.get("investigation_spec")
+    unified_plan = is_unified_investigation_plan(specification)
+    if not unified_plan and not flags["maigret_enabled"]:
         raise ProfileDiscoveryPolicyError(
             "Maigret profile discovery is disabled by server policy."
         )
-
-    specification = governed.get("investigation_spec")
     if isinstance(specification, Mapping):
         specification = dict(specification)
         user_scanner_requested = bool(
             specification.get("enable_user_scanner_email")
             or specification.get("enable_user_scanner_username")
         )
-        if user_scanner_requested and not flags["user_scanner_enabled"]:
+        if (
+            user_scanner_requested
+            and not flags["user_scanner_enabled"]
+            and not unified_plan
+        ):
             raise ProfileDiscoveryPolicyError(
                 "User Scanner verification is disabled by server policy."
             )
+        if unified_plan:
+            # Schema-v2 ordinary scans have no hidden case source filters or
+            # site checklist. Quick/Full breadth remains server-owned.
+            governed["tags"] = []
+            governed["excluded_tags"] = []
+            governed["site_list"] = []
+            specification = finalize_investigation_route_plan(
+                specification,
+                flags=flags,
+                execution_mode=mode,
+            )
+            if not investigation_has_effective_collection_route(specification):
+                raise ProfileDiscoveryPolicyError(
+                    "No authorized collection route is currently available for "
+                    "these investigation tokens."
+                )
         governed["investigation_spec"] = specification
 
     if (

@@ -21,6 +21,7 @@ from maigret.web.case_store import (
     persona_claims,
     utcnow,
 )
+from maigret.web.investigation_input import build_unified_investigation_plan
 from maigret.web.persona_intelligence import extract_case_chat_persona_claims
 
 
@@ -107,6 +108,57 @@ def test_job_lifecycle_is_transactional_and_auditable(store):
     completed = store.get_job(job_id)
     assert completed["status"] == "completed"
     assert completed["found_count"] == 1
+
+
+def test_schema_v2_full_name_route_can_create_and_rerun_without_username_targets(
+    store, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    plan = build_unified_investigation_plan(
+        {"investigation_token": ["Alice Example"], "mode": "quick"}
+    )
+
+    job_id = store.create_investigation([], {"investigation_spec": plan})
+    queued = store.get_job(job_id)
+    route_plan = queued["options"]["investigation_spec"]["route_plan"]
+    case = store.get_case(queued["case_id"])
+
+    assert queued["usernames"] == []
+    assert [item["route"] for item in route_plan["effective_routes"]] == [
+        "native_profile_search"
+    ]
+    assert route_plan["execution_mode"] == "focused"
+    assert route_plan["budget_seconds"] == 600
+    assert case["title"] == "Alice Example"
+    assert [persona["display_name"] for persona in case["personas"]] == [
+        "Alice Example"
+    ]
+
+    claimed = store.claim_next("worker:full-name")
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": [],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+        worker_id=claimed["worker_id"],
+    )
+    refresh_id = store.repeat_persona_investigation(case["personas"][0]["id"])
+    refresh = store.get_job(refresh_id)
+
+    assert refresh["kind"] == "refresh"
+    assert refresh["usernames"] == []
+    assert refresh["options"]["investigation_spec"]["route_plan"][
+        "effective_routes"
+    ][0]["route"] == "native_profile_search"
+
+
+def test_schema_v1_store_contract_still_rejects_an_empty_username_set(store):
+    with pytest.raises(ValueError, match="At least one username"):
+        store.create_investigation([], {})
 
 
 def test_case_personas_and_events_are_removed_with_terminal_job(store):

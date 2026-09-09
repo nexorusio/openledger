@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
+import json
 import re
 import unicodedata
-from typing import Any, Callable, Dict, List, Optional
-from urllib.parse import unquote, urlsplit
+from typing import Any, Callable, Dict, List, Mapping, Optional
+from urllib.parse import unquote, urlsplit, urlunsplit
 
 from maigret.utils import is_plausible_username
+from maigret.web.execution_budget import execution_budget_spec
+from maigret.web.profile_search_planner import plan_profile_search_queries
 from maigret.web.username_aliases import (
     MAX_ALIAS_CANDIDATES,
     MAX_SELECTED_ALIASES,
@@ -17,6 +22,12 @@ from maigret.web.username_aliases import (
 )
 
 SCHEMA_VERSION = 1
+UNIFIED_INVESTIGATION_SCHEMA_VERSION = 2
+TOKEN_SCHEMA_VERSION = 1
+ROUTE_PLAN_SCHEMA_VERSION = 1
+UNIFIED_INPUT_CONTRACT = "investigation-tokens-v1"
+ROUTE_PLAN_POLICY_VERSION = "investigation-routes-v1"
+TOKEN_FORM_FIELD = "investigation_token"
 IDENTIFIER_TYPES = {
     "username",
     "social_handle",
@@ -33,6 +44,7 @@ MAX_USERNAME_LENGTH = 128
 MAX_CONTEXT_LENGTH = 500
 MAX_VARIANTS = 16
 MAX_USER_SCANNER_USERNAME_TARGETS = 16
+MAX_TOKEN_LENGTH = 2000
 USER_SCANNER_USERNAME_PLATFORMS = {
     "facebook",
     "instagram",
@@ -47,6 +59,20 @@ _EMAIL_PATTERN = re.compile(
 )
 _TERM_SPLIT_PATTERN = re.compile(r"[,\n\r]+")
 _SOURCE_TAG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+_BLOCKED_PUBLIC_HOST_SUFFIXES = (
+    ".example",
+    ".home.arpa",
+    ".internal",
+    ".invalid",
+    ".local",
+    ".localhost",
+    ".test",
+)
+_COLLECTION_ROUTES = frozenset(
+    {"maigret", "native_profile_search", "user_scanner_email"}
+)
 _GENERIC_PROFILE_SEGMENTS = {
     "account",
     "accounts",
@@ -66,6 +92,186 @@ _GENERIC_PROFILE_SEGMENTS = {
 
 class InvestigationInputError(ValueError):
     """A user-facing validation error for a submitted investigation plan."""
+
+
+def _token_text(value: Any) -> str:
+    text = unicodedata.normalize("NFKC", str(value or ""))
+    text = " ".join(text.split())
+    if not text:
+        raise InvestigationInputError("Enter an investigation token.")
+    if len(text) > MAX_TOKEN_LENGTH:
+        raise InvestigationInputError(
+            f"Investigation tokens must be {MAX_TOKEN_LENGTH} characters or fewer."
+        )
+    return text
+
+
+def _duplicate_key(token_type: str, value: str) -> str:
+    digest = hashlib.sha256(value.casefold().encode("utf-8")).hexdigest()
+    return f"{token_type}:{digest}"
+
+
+def _public_hostname(hostname: str) -> str:
+    try:
+        host = hostname.rstrip(".").encode("idna").decode("ascii").casefold()
+    except UnicodeError as error:
+        raise InvestigationInputError(
+            "Enter a valid public HTTP or HTTPS URL."
+        ) from error
+    if not host or len(host) > 253:
+        raise InvestigationInputError("Enter a valid public HTTP or HTTPS URL.")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        if (
+            "." not in host
+            or all(character.isdigit() or character == "." for character in host)
+            or host == "localhost"
+            or host.endswith(_BLOCKED_PUBLIC_HOST_SUFFIXES)
+            or any(
+                not _DOMAIN_LABEL_PATTERN.fullmatch(label) for label in host.split(".")
+            )
+        ):
+            raise InvestigationInputError(
+                "Investigation URLs must use a public Internet hostname."
+            )
+    else:
+        if not address.is_global:
+            raise InvestigationInputError(
+                "Investigation URLs must not target private or local addresses."
+            )
+    return host
+
+
+def normalize_public_url(value: Any) -> str:
+    """Normalize a public URL without resolving DNS or fetching the destination."""
+    url = _token_text(value)
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except ValueError as error:
+        raise InvestigationInputError(
+            "Enter a valid public HTTP or HTTPS URL."
+        ) from error
+    scheme = parsed.scheme.casefold()
+    if scheme not in {"http", "https"} or not parsed.hostname:
+        raise InvestigationInputError("Enter a complete public HTTP or HTTPS URL.")
+    if parsed.username is not None or parsed.password is not None:
+        raise InvestigationInputError(
+            "Investigation URLs must not contain credentials."
+        )
+    if port is not None and port != (80 if scheme == "http" else 443):
+        raise InvestigationInputError(
+            "Investigation URLs may use only the default HTTP or HTTPS port."
+        )
+    host = _public_hostname(parsed.hostname)
+    netloc = f"[{host}]" if ":" in host else host
+    path = parsed.path or "/"
+    return urlunsplit((scheme, netloc, path, parsed.query, ""))
+
+
+def _explicit_phone_token(value: str) -> bool:
+    candidate = value[4:].strip() if value.casefold().startswith("tel:") else value
+    if not candidate or not re.fullmatch(r"[0-9+().\-\s]+", candidate):
+        return False
+    return candidate.startswith("+") or bool(re.search(r"[().\-\s]", candidate))
+
+
+def _resolved_profile_accounts(
+    url: str,
+    resolver: Optional[Callable[[str], Dict[str, str]]],
+) -> List[str]:
+    if resolver is None:
+        return []
+    resolved: List[str] = []
+    for identifier, identifier_type in (resolver(url) or {}).items():
+        if identifier_type != "username":
+            continue
+        try:
+            username = normalize_username(identifier)
+        except InvestigationInputError:
+            continue
+        if username.casefold() not in {item.casefold() for item in resolved}:
+            resolved.append(username)
+    return resolved
+
+
+def classify_investigation_token(
+    value: Any,
+    *,
+    profile_url_resolver: Optional[Callable[[str], Dict[str, str]]] = None,
+) -> Dict[str, Any]:
+    """Classify one bounded token in the fixed, server-owned precedence order."""
+    token = _token_text(value)
+    if _EMAIL_PATTERN.fullmatch(token):
+        token_type = "email"
+        normalized = normalize_email(token)
+    elif _SCHEME_PATTERN.match(token):
+        normalized = normalize_public_url(token)
+        account_targets = _resolved_profile_accounts(normalized, profile_url_resolver)
+        token_type = "profile_url" if account_targets else "public_url"
+        classified = {
+            "schema_version": TOKEN_SCHEMA_VERSION,
+            "type": token_type,
+            "value": normalized,
+            "duplicate_key": _duplicate_key(token_type, normalized),
+            "context_only": not bool(account_targets),
+        }
+        if account_targets:
+            classified["account_targets"] = account_targets
+        return classified
+    elif _explicit_phone_token(token):
+        token_type = "phone"
+        phone_value = (
+            token[4:].strip() if token.casefold().startswith("tel:") else token
+        )
+        normalized = normalize_phone(phone_value)
+    elif token.startswith("@"):
+        token_type = "social_handle"
+        normalized = normalize_username(token)
+    elif any(character.isspace() for character in token):
+        token_type = "full_name"
+        normalized = token
+        if len(normalized) < 2 or len(normalized) > 300:
+            raise InvestigationInputError(
+                "Enter a complete name of 300 characters or fewer."
+            )
+    else:
+        token_type = "username"
+        normalized = normalize_username(token)
+    return {
+        "schema_version": TOKEN_SCHEMA_VERSION,
+        "type": token_type,
+        "value": normalized,
+        "duplicate_key": _duplicate_key(token_type, normalized),
+        "context_only": token_type in {"phone"},
+    }
+
+
+def classify_investigation_tokens(
+    values: List[Any],
+    *,
+    profile_url_resolver: Optional[Callable[[str], Dict[str, str]]] = None,
+) -> List[Dict[str, Any]]:
+    if len(values) > MAX_IDENTIFIERS:
+        raise InvestigationInputError(
+            f"Use no more than {MAX_IDENTIFIERS} investigation tokens."
+        )
+    classified: List[Dict[str, Any]] = []
+    seen = set()
+    for value in values:
+        token = classify_investigation_token(
+            value,
+            profile_url_resolver=profile_url_resolver,
+        )
+        duplicate_key = token["duplicate_key"]
+        if duplicate_key in seen:
+            continue
+        seen.add(duplicate_key)
+        classified.append(token)
+    if not classified:
+        raise InvestigationInputError("Add at least one investigation token.")
+    return classified
 
 
 def _normalize_text(value: Any, *, limit: int = MAX_CONTEXT_LENGTH) -> str:
@@ -203,6 +409,380 @@ def parse_source_tags(form: Any, key: str) -> List[str]:
         if len(tags) >= MAX_SOURCE_TAGS:
             break
     return tags
+
+
+_UNIFIED_MODE_ALIASES = {
+    "fast": ("quick", "focused"),
+    "focused": ("quick", "focused"),
+    "quick": ("quick", "focused"),
+    "full": ("full", "exhaustive"),
+    "exhaustive": ("full", "exhaustive"),
+}
+
+
+def normalize_unified_scan_mode(value: Any) -> tuple[str, str]:
+    requested = str(value or "quick").strip().casefold()
+    normalized = _UNIFIED_MODE_ALIASES.get(requested)
+    if normalized is None:
+        raise InvestigationInputError("Select Quick Scan or Full Scan.")
+    return normalized
+
+
+def is_unified_investigation_plan(plan: Any) -> bool:
+    return bool(
+        isinstance(plan, Mapping)
+        and plan.get("schema_version") == UNIFIED_INVESTIGATION_SCHEMA_VERSION
+        and plan.get("input_contract") == UNIFIED_INPUT_CONTRACT
+        and plan.get("token_schema_version") == TOKEN_SCHEMA_VERSION
+    )
+
+
+def build_unified_investigation_plan(
+    form: Any,
+    *,
+    profile_url_resolver: Optional[Callable[[str], Dict[str, str]]] = None,
+    require_route_confirmation: bool = False,
+) -> Dict[str, Any]:
+    """Build the schema-v2 same-subject plan used by the unified token journey."""
+    raw_tokens = [
+        value
+        for value in _form_list(form, TOKEN_FORM_FIELD)
+        if str(value or "").strip()
+    ]
+    tokens = classify_investigation_tokens(
+        raw_tokens,
+        profile_url_resolver=profile_url_resolver,
+    )
+    requested_mode, execution_mode = normalize_unified_scan_mode(form.get("mode"))
+    search_likely_aliases = "search_likely_username_aliases" in form
+    identifiers: List[Dict[str, Any]] = []
+    search_targets: List[Dict[str, Any]] = []
+    full_names: List[str] = []
+    confirmed_usernames: List[str] = []
+
+    def add_target(
+        username: str,
+        source_type: str,
+        source_value: str,
+        *,
+        alias_score: Optional[int] = None,
+        alias_reason: str = "",
+    ) -> None:
+        if username.casefold() in {
+            str(target["value"]).casefold() for target in search_targets
+        }:
+            return
+        target: Dict[str, Any] = {
+            "value": username,
+            "source_type": source_type,
+            "source_value": source_value,
+        }
+        if alias_score is not None:
+            target["alias_score"] = alias_score
+            target["alias_reason"] = alias_reason[:240]
+        search_targets.append(target)
+
+    for token in tokens:
+        token_type = str(token["type"])
+        value = str(token["value"])
+        identifiers.append({"type": token_type, "value": value})
+        if token_type in {"username", "social_handle"}:
+            add_target(value, token_type, value)
+        elif token_type == "profile_url":
+            for username in list(token.get("account_targets") or []):
+                add_target(str(username), "profile_url", value)
+                confirmed_usernames.append(str(username))
+        elif token_type == "full_name":
+            full_names.append(value)
+
+    email_count = sum(token["type"] == "email" for token in tokens)
+    if email_count > 1:
+        raise InvestigationInputError(
+            "The current bounded email route accepts one email per investigation."
+        )
+    email_route_confirmed = str(
+        form.get("confirm_email_route", "")
+    ).strip().casefold() in {"1", "on", "true", "yes"}
+    if require_route_confirmation and email_count and not email_route_confirmed:
+        raise InvestigationInputError(
+            "Review and confirm the bounded public email route before starting "
+            "this investigation."
+        )
+
+    alias_candidates = (
+        rank_username_aliases(
+            full_names,
+            confirmed_usernames=confirmed_usernames,
+        )
+        if search_likely_aliases and full_names
+        else []
+    )
+    selected_aliases = [
+        candidate for candidate in alias_candidates if candidate.get("selected")
+    ][:MAX_SELECTED_ALIASES]
+    selected_keys = {
+        str(candidate["value"]).casefold() for candidate in selected_aliases
+    }
+    for candidate in alias_candidates:
+        candidate["selected"] = str(candidate["value"]).casefold() in selected_keys
+    for candidate in selected_aliases:
+        add_target(
+            str(candidate["value"]),
+            "ranked_alias",
+            full_names[0],
+            alias_score=int(candidate["score"]),
+            alias_reason=str(candidate["reason"]),
+        )
+
+    has_potential_route = bool(search_targets or full_names or email_count)
+    if not has_potential_route:
+        raise InvestigationInputError(
+            "These tokens are context only. Add a name, username, social handle, "
+            "supported public profile URL, or email with an available authorized route."
+        )
+
+    subject_label = next(
+        (str(token["value"]) for token in tokens if token["type"] == "full_name"),
+        "",
+    )
+    if not subject_label:
+        subject_label = (
+            str(search_targets[0]["value"])
+            if search_targets
+            else str(tokens[0]["value"])
+        )
+    return {
+        "schema_version": UNIFIED_INVESTIGATION_SCHEMA_VERSION,
+        "input_contract": UNIFIED_INPUT_CONTRACT,
+        "token_schema_version": TOKEN_SCHEMA_VERSION,
+        "processing_mode": "same_subject",
+        "requested_mode": requested_mode,
+        "execution_mode": execution_mode,
+        "search_likely_username_aliases": search_likely_aliases,
+        # Preserve the established internal keys while the schema-v2 contract
+        # removes the legacy controls from the ordinary browser journey.
+        "generate_name_variants": search_likely_aliases,
+        "allow_ai_context": False,
+        "enable_user_scanner_email": bool(email_count),
+        "email_route_confirmed": email_route_confirmed,
+        "enable_user_scanner_username": False,
+        "user_scanner_username_platforms": [],
+        "allow_user_scanner_vxtwitter": False,
+        "enable_github_profile_enrichment": False,
+        "enable_archived_url_evidence": False,
+        "subject_label": subject_label[:500],
+        "tokens": tokens,
+        "identifiers": identifiers,
+        "alias_nicknames": [],
+        "alias_context_numbers": [],
+        "alias_candidates": alias_candidates,
+        "tags": [],
+        "excluded_tags": [],
+        "include_terms": [],
+        "exclude_terms": [],
+        "search_targets": search_targets,
+    }
+
+
+def _route(
+    route: str,
+    label: str,
+    *,
+    kind: str,
+    target_count: int,
+    token_types: List[str],
+) -> Dict[str, Any]:
+    return {
+        "route": route,
+        "label": label,
+        "kind": kind,
+        "target_count": int(target_count),
+        "token_types": sorted(set(token_types)),
+    }
+
+
+def finalize_investigation_route_plan(
+    plan: Mapping[str, Any],
+    *,
+    flags: Mapping[str, Any],
+    execution_mode: Any = None,
+) -> Dict[str, Any]:
+    """Replace any supplied route document with a deterministic server plan."""
+    normalized = dict(plan)
+    if not is_unified_investigation_plan(normalized):
+        return normalized
+    requested_mode, contract_mode = normalize_unified_scan_mode(
+        execution_mode
+        or normalized.get("execution_mode")
+        or normalized.get("requested_mode")
+    )
+    budget = execution_budget_spec(contract_mode)
+    tokens = [
+        item for item in list(normalized.get("tokens") or []) if isinstance(item, dict)
+    ]
+    token_types = [str(item.get("type") or "") for item in tokens]
+    search_targets = [
+        item
+        for item in list(normalized.get("search_targets") or [])
+        if isinstance(item, dict) and item.get("value")
+    ]
+    full_name_count = token_types.count("full_name")
+    email_count = token_types.count("email")
+    requested_routes: List[Dict[str, Any]] = []
+    effective_routes: List[Dict[str, Any]] = []
+    skipped_routes: List[Dict[str, Any]] = []
+
+    if normalized.get("search_likely_username_aliases") and full_name_count:
+        alias_route = _route(
+            "likely_username_aliases",
+            "Search likely username aliases",
+            kind="planning",
+            target_count=sum(
+                bool(item.get("selected"))
+                for item in list(normalized.get("alias_candidates") or [])
+                if isinstance(item, dict)
+            ),
+            token_types=["full_name"],
+        )
+        requested_routes.append(alias_route)
+        effective_routes.append(dict(alias_route))
+
+    if search_targets:
+        maigret_route = _route(
+            "maigret",
+            "Public account discovery",
+            kind="collection",
+            target_count=len(search_targets),
+            token_types=[
+                item
+                for item in token_types
+                if item in {"profile_url", "social_handle", "username"}
+            ]
+            + (
+                ["ranked_alias"]
+                if normalized.get("search_likely_username_aliases")
+                else []
+            ),
+        ) | {
+            "coverage": (
+                "all_eligible_enabled_non_quarantined"
+                if budget["mode"] == "exhaustive"
+                else "configured_top_ranked_enabled_non_quarantined"
+            )
+        }
+        requested_routes.append(maigret_route)
+        if flags.get("maigret_enabled"):
+            effective_routes.append(dict(maigret_route))
+        else:
+            skipped_routes.append({**maigret_route, "reason_code": "server_disabled"})
+
+    if search_targets or full_name_count:
+        native_queries = plan_profile_search_queries(normalized)
+        native_route = _route(
+            "native_profile_search",
+            "Major-platform public profile search",
+            kind="collection",
+            target_count=len(
+                {(query.seed_kind, query.seed_value) for query in native_queries}
+            ),
+            token_types=[
+                item
+                for item in token_types
+                if item in {"full_name", "profile_url", "social_handle", "username"}
+            ],
+        ) | {"planned_request_count": len(native_queries)}
+        requested_routes.append(native_route)
+        if flags.get("search_first_enabled"):
+            effective_routes.append(dict(native_route))
+        else:
+            skipped_routes.append({**native_route, "reason_code": "server_disabled"})
+
+    if email_count:
+        email_route = _route(
+            "user_scanner_email",
+            "Bounded public email discovery",
+            kind="collection",
+            target_count=email_count,
+            token_types=["email"],
+        ) | {"requires_confirmation": True}
+        requested_routes.append(email_route)
+        if not normalized.get("email_route_confirmed"):
+            skipped_routes.append(
+                {**email_route, "reason_code": "confirmation_required"}
+            )
+        elif flags.get("user_scanner_enabled"):
+            effective_routes.append(dict(email_route))
+        else:
+            skipped_routes.append({**email_route, "reason_code": "server_disabled"})
+
+    for context_type, label in (
+        ("phone", "Phone retained as unverified context"),
+        ("public_url", "Generic public URL retained as unverified context"),
+    ):
+        count = token_types.count(context_type)
+        if count:
+            skipped_routes.append(
+                _route(
+                    "context_only",
+                    label,
+                    kind="context",
+                    target_count=count,
+                    token_types=[context_type],
+                )
+                | {"reason_code": "context_only_no_outbound"}
+            )
+
+    input_sha256 = hashlib.sha256(
+        json.dumps(
+            {
+                "tokens": tokens,
+                "search_targets": search_targets,
+                "alias_candidates": list(normalized.get("alias_candidates") or []),
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    unsigned_route_plan = {
+        "schema_version": ROUTE_PLAN_SCHEMA_VERSION,
+        "policy_version": ROUTE_PLAN_POLICY_VERSION,
+        "server_authoritative": True,
+        "input_sha256": input_sha256,
+        "requested_mode": requested_mode,
+        "execution_mode": str(budget["mode"]),
+        "budget_seconds": int(budget["total_seconds"]),
+        "requested_routes": requested_routes,
+        "effective_routes": effective_routes,
+        "skipped_routes": skipped_routes,
+    }
+    route_plan_sha256 = hashlib.sha256(
+        json.dumps(
+            unsigned_route_plan,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    normalized["requested_mode"] = requested_mode
+    normalized["execution_mode"] = str(budget["mode"])
+    normalized["route_plan"] = {
+        **unsigned_route_plan,
+        "sha256": route_plan_sha256,
+    }
+    return normalized
+
+
+def investigation_has_effective_collection_route(plan: Any) -> bool:
+    if not is_unified_investigation_plan(plan):
+        return False
+    route_plan = plan.get("route_plan")
+    if not isinstance(route_plan, Mapping):
+        return False
+    return any(
+        isinstance(item, Mapping) and item.get("route") in _COLLECTION_ROUTES
+        for item in list(route_plan.get("effective_routes") or [])
+    )
 
 
 def build_investigation_plan(

@@ -126,7 +126,9 @@ from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web.investigation_input import (
     InvestigationInputError,
     build_investigation_plan,
+    build_unified_investigation_plan,
     extract_profile_usernames,
+    is_unified_investigation_plan,
     normalize_profile_url,
     normalize_username,
     public_ai_context,
@@ -2826,6 +2828,18 @@ def resolve_profile_url_identifiers(url):
 
 def parse_investigation_submission(form):
     """Return scan targets plus a bounded, persisted investigation plan."""
+    if form.getlist('investigation_token'):
+        plan = build_unified_investigation_plan(
+            form,
+            profile_url_resolver=resolve_profile_url_identifiers,
+            require_route_confirmation=True,
+        )
+        if plan.get('enable_user_scanner_email') and not user_scanner_available():
+            raise InvestigationInputError(
+                'The bounded email route is unavailable in this deployment.'
+            )
+        return search_usernames(plan), plan
+
     if form.getlist('identifier_type'):
         plan = build_investigation_plan(
             form,
@@ -2885,6 +2899,7 @@ def parse_investigation_submission(form):
 
 def parse_search_options(form, investigation_plan=None):
     settings = load_settings()
+    unified_plan = is_unified_investigation_plan(investigation_plan)
     case_tags = (
         list(investigation_plan.get('tags') or [])
         if isinstance(investigation_plan, dict)
@@ -2909,7 +2924,9 @@ def parse_search_options(form, investigation_plan=None):
         # Categories and countries belong to the case, not global settings.
         'tags': case_tags,
         'excluded_tags': case_excluded_tags,
-        'site_list': settings['site_list'],
+        # Quick/Full schema-v2 plans cannot inherit a hidden source checklist.
+        # Legacy/internal submissions retain the existing configured list.
+        'site_list': [] if unified_plan else settings['site_list'],
     }
     if investigation_plan:
         options['investigation_spec'] = investigation_plan
