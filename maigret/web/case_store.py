@@ -53,10 +53,12 @@ from maigret.web.external_evidence import (
     validate_locator_authority,
 )
 from maigret.web.execution_budget import execution_budget_spec_from_options
+from maigret.web.governed_pivots import build_governed_pivot_plan
 from maigret.web.profile_discovery_policy import (
     PROFILE_DISCOVERY_JOB_KINDS,
     ProfileDiscoveryPolicyError,
     govern_profile_discovery_options,
+    profile_discovery_flag_enabled,
 )
 from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
 from maigret.web.profile_search_facebook import parse_facebook_profile_url
@@ -78,6 +80,13 @@ LEGACY_PROFILE_CLAIM_ENGINES = frozenset(
 LEGACY_UNTRIAGED_SOURCE_PREFIX = "legacy_untriaged:"
 RELIABILITY_MIGRATION_REVIEWER = "openledger-reliability-migration"
 LEGACY_EVIDENCE_MARKER = "_openledger_reliability"
+GOVERNED_PROFILE_PIVOT_SITES = (
+    "Facebook",
+    "Instagram",
+    "Threads",
+    "TikTok",
+    "Twitter",
+)
 
 
 def _legacy_untriaged_source(
@@ -1746,6 +1755,7 @@ class CaseStore:
         source_claim_id: str,
         *,
         selected_wikipedia_page_id: Optional[str] = None,
+        requested_by: Optional[str] = None,
     ) -> str:
         """Queue governed public-record checks for one approved full-name claim."""
         source_claim_id = str(source_claim_id or "").strip()
@@ -1768,9 +1778,13 @@ class CaseStore:
             claim = (
                 connection.execute(
                     select(
+                        persona_claims.c.id,
                         persona_claims.c.display_value,
+                        persona_claims.c.value,
                         persona_claims.c.field_name,
                         persona_claims.c.review_status,
+                        persona_claims.c.reviewed_by,
+                        persona_claims.c.source_job_id,
                     ).where(
                         persona_claims.c.id == source_claim_id,
                         persona_claims.c.persona_id == persona_id,
@@ -1787,6 +1801,39 @@ class CaseStore:
                 raise ValueError(
                     "Public-record enrichment requires an approved full name"
                 )
+            if not profile_discovery_flag_enabled("governed_pivots_enabled"):
+                raise ValueError(
+                    "Governed evidence pivots are disabled by server policy"
+                )
+            requested_by = str(
+                requested_by or claim["reviewed_by"] or ""
+            ).strip()
+            pivot_plan = build_governed_pivot_plan(
+                {
+                    "id": str(claim["id"]),
+                    "case_id": str(persona_row["case_id"]),
+                    "persona_id": persona_id,
+                    "field_name": str(claim["field_name"]),
+                    "review_status": str(claim["review_status"]),
+                    "value": str(claim["display_value"] or ""),
+                },
+                case_id=str(persona_row["case_id"]),
+                persona_id=persona_id,
+                requested_by=requested_by,
+            )
+            if claim["source_job_id"]:
+                source_options = connection.scalar(
+                    select(investigation_jobs.c.options).where(
+                        investigation_jobs.c.id == claim["source_job_id"]
+                    )
+                )
+                if isinstance(source_options, Mapping) and isinstance(
+                    source_options.get("governed_pivot_plan"), Mapping
+                ):
+                    raise ValueError(
+                        "Governed pivots cannot expand beyond depth one"
+                    )
+            feature_snapshot = {"governed_pivots_enabled": True}
             if connection.scalar(
                 select(investigation_jobs.c.id)
                 .where(
@@ -1837,6 +1884,11 @@ class CaseStore:
                 "confirmed_name": confirmed_name[:300],
                 "selected_wikipedia_page_id": selected_page_id,
             }
+            stored_options = {
+                "investigation_spec": specification,
+                "governed_pivot_plan": pivot_plan,
+                "governed_pivot_feature_snapshot": feature_snapshot,
+            }
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,
@@ -1844,12 +1896,16 @@ class CaseStore:
                     kind="identity_enrichment",
                     status="queued",
                     usernames=[],
-                    options={"investigation_spec": specification},
+                    options=stored_options,
                     progress={"checked": 0, "total": 2, "found": 0},
                     result=None,
                     error=None,
                     cancel_requested=False,
                     attempts=0,
+                    budget_seconds=int(
+                        pivot_plan["execution_budget"]["total_seconds"]
+                    ),
+                    budget_policy_version=str(pivot_plan["policy_version"]),
                     created_at=now,
                     updated_at=now,
                 )
@@ -1865,9 +1921,322 @@ class CaseStore:
                 "type": "queued",
                 "target_type": "confirmed_person_name",
                 "persona_id": persona_id,
+                "reason": "governed_pivot",
+                "governed_pivot_plan": pivot_plan,
+                "governed_pivot_feature_snapshot": feature_snapshot,
             },
         )
         return job_id
+
+    def create_verified_link_pivot(
+        self,
+        persona_id: str,
+        source_claim_id: str,
+        requested_by: str,
+    ) -> str:
+        """Queue one bounded same-case refresh from an approved profile URL."""
+        source_claim_id = str(source_claim_id or "").strip()
+        requested_by = str(requested_by or "").strip()
+        if not profile_discovery_flag_enabled("governed_pivots_enabled"):
+            raise ValueError(
+                "Governed evidence pivots are disabled by server policy"
+            )
+        now, job_id = utcnow(), str(uuid.uuid4())
+        with self.engine.begin() as connection:
+            persona_statement = select(
+                personas.c.case_id,
+                personas.c.display_name,
+            ).where(personas.c.id == persona_id)
+            if self.engine.dialect.name == "postgresql":
+                persona_statement = persona_statement.with_for_update()
+            persona_row = connection.execute(persona_statement).mappings().first()
+            if not persona_row:
+                raise KeyError(persona_id)
+            claim = (
+                connection.execute(
+                    select(
+                        persona_claims.c.id,
+                        persona_claims.c.value,
+                        persona_claims.c.field_name,
+                        persona_claims.c.review_status,
+                        persona_claims.c.source_job_id,
+                    ).where(
+                        persona_claims.c.id == source_claim_id,
+                        persona_claims.c.persona_id == persona_id,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if not claim:
+                raise ValueError(
+                    "Verified-link discovery requires an approved social account"
+                )
+            case_id = str(persona_row["case_id"])
+            pivot_plan = build_governed_pivot_plan(
+                {
+                    "id": str(claim["id"]),
+                    "case_id": case_id,
+                    "persona_id": persona_id,
+                    "field_name": str(claim["field_name"]),
+                    "review_status": str(claim["review_status"]),
+                    "value": claim["value"],
+                },
+                case_id=case_id,
+                persona_id=persona_id,
+                requested_by=requested_by,
+            )
+            if pivot_plan["pivot_kind"] != "verified_profile_discovery":
+                raise ValueError(
+                    "Verified-link discovery requires an approved social account"
+                )
+            if claim["source_job_id"]:
+                source_options = connection.scalar(
+                    select(investigation_jobs.c.options).where(
+                        investigation_jobs.c.id == claim["source_job_id"]
+                    )
+                )
+                if isinstance(source_options, Mapping) and isinstance(
+                    source_options.get("governed_pivot_plan"), Mapping
+                ):
+                    raise ValueError(
+                        "Governed pivots cannot expand beyond depth one"
+                    )
+            if connection.scalar(
+                select(investigation_jobs.c.id)
+                .where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                )
+                .limit(1)
+            ):
+                raise ValueError("This case already has an active investigation")
+            prior_rows = connection.execute(
+                select(
+                    investigation_jobs.c.options,
+                    investigation_jobs.c.status,
+                )
+                .where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.kind == "refresh",
+                    investigation_jobs.c.status == "completed",
+                )
+                .order_by(
+                    investigation_jobs.c.created_at.desc(),
+                    investigation_jobs.c.id.desc(),
+                )
+                .limit(100)
+            ).mappings()
+            for prior in prior_rows:
+                prior_options = prior["options"]
+                prior_options = (
+                    prior_options if isinstance(prior_options, Mapping) else {}
+                )
+                prior_plan = prior_options.get("governed_pivot_plan")
+                prior_plan = prior_plan if isinstance(prior_plan, Mapping) else {}
+                prior_source = prior_plan.get("source_claim")
+                prior_source = (
+                    prior_source if isinstance(prior_source, Mapping) else {}
+                )
+                if (
+                    prior_plan.get("pivot_kind")
+                    == "verified_profile_discovery"
+                    and str(prior_source.get("id") or "") == source_claim_id
+                ):
+                    raise ValueError(
+                        "This approved profile pivot already completed; use the "
+                        "ordinary Persona rerun workflow for a new investigation"
+                    )
+            latest_job = (
+                connection.execute(
+                    select(investigation_jobs.c.options)
+                    .where(
+                        investigation_jobs.c.case_id == case_id,
+                        investigation_jobs.c.kind.in_(PROFILE_DISCOVERY_JOB_KINDS),
+                    )
+                    .order_by(
+                        investigation_jobs.c.created_at.desc(),
+                        investigation_jobs.c.id.desc(),
+                    )
+                    .limit(1)
+                )
+                .mappings()
+                .first()
+            )
+            if not latest_job:
+                raise ValueError(
+                    "The approved profile has no compatible source investigation"
+                )
+            target = pivot_plan["target"]
+            handle = str(target["handle"])
+            canonical_url = str(target["canonical_url"])
+            previous_options = dict(latest_job["options"] or {})
+            previous_specification = previous_options.get("investigation_spec")
+            previous_specification = (
+                previous_specification
+                if isinstance(previous_specification, Mapping)
+                else {}
+            )
+            investigation_specification = {
+                "schema_version": 1,
+                "investigation_type": "verified_link_pivot",
+                "processing_mode": "same_subject",
+                "generate_name_variants": False,
+                "allow_ai_context": False,
+                "enable_user_scanner_email": False,
+                "enable_user_scanner_username": False,
+                "user_scanner_username_platforms": [],
+                "allow_user_scanner_vxtwitter": False,
+                "enable_github_profile_enrichment": False,
+                "enable_archived_url_evidence": False,
+                "subject_label": str(persona_row["display_name"])[:500],
+                "identifiers": [
+                    {"type": "profile_url", "value": canonical_url}
+                ],
+                "alias_nicknames": [],
+                "alias_context_numbers": [],
+                "alias_candidates": [],
+                "tags": list(previous_specification.get("tags") or [])[:64],
+                "excluded_tags": list(
+                    previous_specification.get("excluded_tags") or []
+                )[:64],
+                "include_terms": [],
+                "exclude_terms": [],
+                "search_targets": [
+                    {
+                        "value": handle,
+                        "source_type": "profile_url",
+                        "source_value": canonical_url,
+                    }
+                ],
+                "target_persona_id": persona_id,
+            }
+            queued_options = dict(previous_options)
+            queued_options.update(
+                top_sites=len(GOVERNED_PROFILE_PIVOT_SITES),
+                all_sites=False,
+                disable_recursive_search=True,
+                disable_extracting=True,
+                with_domains=False,
+                site_list=list(GOVERNED_PROFILE_PIVOT_SITES),
+                investigation_spec=investigation_specification,
+                governed_pivot_plan=pivot_plan,
+            )
+            queued_options.pop("execution_budget", None)
+            queued_options.pop("profile_discovery_policy", None)
+            feature_snapshot = {"governed_pivots_enabled": True}
+            queued_options["governed_pivot_feature_snapshot"] = feature_snapshot
+            queued_options = govern_profile_discovery_options(
+                queued_options,
+                "focused",
+            )
+            budget = execution_budget_spec_from_options(queued_options)
+            connection.execute(
+                insert(investigation_jobs).values(
+                    id=job_id,
+                    case_id=case_id,
+                    kind="refresh",
+                    status="queued",
+                    usernames=[handle],
+                    options=queued_options,
+                    progress={"checked": 0, "total": None, "found": 0},
+                    result=None,
+                    error=None,
+                    cancel_requested=False,
+                    attempts=0,
+                    budget_seconds=int(budget["total_seconds"]),
+                    budget_policy_version=str(budget["policy_version"]),
+                    deadline_at=None,
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(updated_at=now)
+            )
+        self.append_event(
+            job_id,
+            {
+                "type": "queued",
+                "reason": "governed_verified_link_pivot",
+                "target_type": "verified_profile_link",
+                "target_persona_id": persona_id,
+                "governed_pivot_plan": pivot_plan,
+                "governed_pivot_feature_snapshot": feature_snapshot,
+            },
+        )
+        return job_id
+
+    def validate_governed_pivot_job(
+        self, job: Mapping[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Revalidate an approved pivot source immediately before execution."""
+        options = job.get("options")
+        options = options if isinstance(options, Mapping) else {}
+        stored_plan = options.get("governed_pivot_plan")
+        if not isinstance(stored_plan, Mapping):
+            return None
+        if not profile_discovery_flag_enabled("governed_pivots_enabled"):
+            raise ValueError(
+                "Governed evidence pivots are disabled by server policy"
+            )
+        source_claim = stored_plan.get("source_claim")
+        source_claim = source_claim if isinstance(source_claim, Mapping) else {}
+        claim_id = str(source_claim.get("id") or "")
+        persona_id = str(stored_plan.get("persona_id") or "")
+        case_id = str(job.get("case_id") or "")
+        if case_id != str(stored_plan.get("case_id") or ""):
+            raise ValueError("Governed pivot case scope changed before execution")
+        with self.engine.connect() as connection:
+            row = (
+                connection.execute(
+                    select(
+                        persona_claims.c.id,
+                        persona_claims.c.value,
+                        persona_claims.c.display_value,
+                        persona_claims.c.field_name,
+                        persona_claims.c.review_status,
+                        personas.c.case_id,
+                    )
+                    .select_from(
+                        persona_claims.join(
+                            personas,
+                            personas.c.id == persona_claims.c.persona_id,
+                        )
+                    )
+                    .where(
+                        persona_claims.c.id == claim_id,
+                        persona_claims.c.persona_id == persona_id,
+                        personas.c.case_id == case_id,
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if not row:
+            raise ValueError("Governed pivot source is no longer available")
+        field_name = str(row["field_name"])
+        rebuilt_plan = build_governed_pivot_plan(
+            {
+                "id": str(row["id"]),
+                "case_id": case_id,
+                "persona_id": persona_id,
+                "field_name": field_name,
+                "review_status": str(row["review_status"]),
+                "value": (
+                    str(row["display_value"] or "")
+                    if field_name == "full_name"
+                    else row["value"]
+                ),
+            },
+            case_id=case_id,
+            persona_id=persona_id,
+            requested_by=str(stored_plan.get("requested_by") or ""),
+            depth=int(stored_plan.get("input_depth", -1)),
+        )
+        if dict(stored_plan) != rebuilt_plan:
+            raise ValueError("Governed pivot policy changed before execution")
+        return rebuilt_plan
 
     def select_affiliation_organization(
         self, case_id: str, candidate_key: str, reviewed_by: str
@@ -4896,6 +5265,7 @@ class CaseStore:
                 connection.execute(
                     select(
                         persona_claims.c.field_name,
+                        persona_claims.c.id,
                         persona_claims.c.value,
                         persona_claims.c.review_status,
                     )
@@ -7633,11 +8003,12 @@ class CaseStore:
 
     def request_cancel(self, job_id: str) -> bool:
         now = utcnow()
-        event_type = None
+        event_types = []
         with self.engine.begin() as connection:
             statement = select(
                 investigation_jobs.c.status,
                 investigation_jobs.c.usernames,
+                investigation_jobs.c.options,
                 investigation_jobs.c.cancel_requested,
                 investigation_jobs.c.cancel_requested_at,
             ).where(investigation_jobs.c.id == job_id)
@@ -7676,7 +8047,11 @@ class CaseStore:
                         updated_at=now,
                     )
                 )
-                event_type = "cancelled"
+                options = row["options"]
+                options = options if isinstance(options, Mapping) else {}
+                if isinstance(options.get("governed_pivot_plan"), Mapping):
+                    event_types.append("cancel_requested")
+                event_types.append("cancelled")
             else:
                 connection.execute(
                     update(investigation_jobs)
@@ -7688,8 +8063,9 @@ class CaseStore:
                         updated_at=now,
                     )
                 )
-                event_type = "cancel_requested"
-        self.append_event(job_id, {"type": event_type})
+                event_types.append("cancel_requested")
+        for event_type in event_types:
+            self.append_event(job_id, {"type": event_type})
         return True
 
     def is_cancel_requested(self, job_id: str) -> bool:

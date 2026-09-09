@@ -15,7 +15,8 @@ from maigret.web.case_store import CaseStore, persona_claims
 
 
 @pytest.fixture
-def store(tmp_path):
+def store(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENLEDGER_GOVERNED_PIVOTS_ENABLED", "true")
     instance = CaseStore(
         f"sqlite:///{tmp_path / 'openledger.db'}",
         create_schema=True,
@@ -494,6 +495,22 @@ def test_verified_link_pivot_can_be_cancelled_before_execution(store):
         "cancel_requested",
         "cancelled",
     ]
+
+
+def test_queued_pivot_is_revalidated_against_the_current_review_decision(store):
+    persona_id, _case_id, claim_id = _approved_social_claim(store)
+    job_id = store.create_verified_link_pivot(
+        persona_id,
+        claim_id,
+        "pivot.analyst",
+    )
+    claimed = store.claim_next("worker:revalidate-pivot")
+    assert claimed["job_id"] == job_id
+
+    store.review_claim(claim_id, "rejected", "source.reviewer", "Revoked")
+
+    with pytest.raises(ValueError, match="approved|policy"):
+        store.validate_governed_pivot_job(claimed)
 
 
 def test_confirmed_name_enrichment_remains_approved_name_only_and_pending(

@@ -112,6 +112,7 @@ from maigret.web.execution_budget import ExecutionBudget
 from maigret.web.profile_discovery_policy import (
     ProfileDiscoveryPolicyError,
     govern_profile_discovery_options,
+    profile_discovery_flag_enabled,
 )
 from maigret.web.profile_search_backend import (
     ProfileSearchClient,
@@ -2956,12 +2957,25 @@ def _profile_search_existing_evidence(store, options):
         persona_id,
         limit=MAX_EXISTING_PROFILE_SEEDS,
     )
+    pivot_plan = options.get('governed_pivot_plan')
+    pivot_plan = pivot_plan if isinstance(pivot_plan, dict) else {}
+    source_claim = pivot_plan.get('source_claim')
+    source_claim = source_claim if isinstance(source_claim, dict) else {}
+    source_claim_id = (
+        str(source_claim.get('id') or '').strip()
+        if pivot_plan.get('pivot_kind') == 'verified_profile_discovery'
+        else ''
+    )
     approved = [
         claim
         for claim in claims
         if isinstance(claim, dict)
         and claim.get('field_name') == 'social_account'
         and claim.get('review_status') == 'approved'
+        and (
+            not source_claim_id
+            or str(claim.get('id') or '') == source_claim_id
+        )
     ]
     return tuple(approved[:MAX_EXISTING_PROFILE_SEEDS])
 
@@ -4626,6 +4640,17 @@ def run_persistent_identity_enrichment_job(
 ):
     job_id = job['job_id']
     specification = (job.get('options') or {}).get('investigation_spec') or {}
+    pivot_plan = (job.get('options') or {}).get('governed_pivot_plan') or {}
+    execution_budget = (
+        pivot_plan.get('execution_budget')
+        if isinstance(pivot_plan, dict)
+        else None
+    )
+    budget_seconds = (
+        int(execution_budget.get('total_seconds'))
+        if isinstance(execution_budget, dict)
+        else None
+    )
     persona_id = str(specification.get('persona_id') or '')
     confirmed_name = str(specification.get('confirmed_name') or '').strip()
     selected_page_id = (
@@ -4654,15 +4679,24 @@ def run_persistent_identity_enrichment_job(
             return_exceptions=True,
         )
 
-    task = loop.create_task(collect_sources())
+    source_collection = collect_sources()
+    if budget_seconds is not None:
+        source_collection = asyncio.wait_for(
+            source_collection,
+            timeout=max(1, min(budget_seconds, 120)),
+        )
+    task = loop.create_task(source_collection)
     watcher = loop.create_task(
         watch_persistent_job_stop(
             store, job_id, task, runtime_job, shutdown_check=shutdown_check
         )
     )
     source_results = None
+    budget_exhausted = False
     try:
         source_results = loop.run_until_complete(task)
+    except asyncio.TimeoutError:
+        budget_exhausted = True
     except asyncio.CancelledError:
         pass
     finally:
@@ -4699,6 +4733,11 @@ def run_persistent_identity_enrichment_job(
         'matches': [],
     }
     source_errors = []
+    if budget_exhausted:
+        source_errors.append(
+            'Public-record enrichment reached its governed execution budget; '
+            'uncompleted sources remain indeterminate.'
+        )
     if isinstance(source_results, list) and len(source_results) == 2:
         if isinstance(source_results[0], Exception):
             source_errors.append(
@@ -4727,7 +4766,7 @@ def run_persistent_identity_enrichment_job(
     )
     offshore_matches = list(icij_observation.get('matches') or [])[:5]
     result = {
-        'status': 'completed',
+        'status': 'budget_exhausted' if budget_exhausted else 'completed',
         'usernames': [],
         'persona_id': persona_id,
         'confirmed_name': confirmed_name,
@@ -4742,6 +4781,9 @@ def run_persistent_identity_enrichment_job(
         'offshore_alert_count': synchronized['offshore_alerts'],
         'source_errors': [str(message)[:1000] for message in source_errors[:2]],
     }
+    if budget_exhausted:
+        result['collection_status'] = 'budget_exhausted'
+        result['execution_budget'] = dict(execution_budget)
     if offshore_matches:
         sink.put(
             {
@@ -4755,23 +4797,36 @@ def run_persistent_identity_enrichment_job(
         )
     sink.put(
         {
-            'type': 'collector_completed',
+            'type': (
+                'collector_error'
+                if budget_exhausted
+                else 'collector_completed'
+            ),
             'collector': 'public-record-enrichment',
             'observations': (
                 synchronized['wikipedia_claims'] + synchronized['offshore_alerts']
             ),
             'found': len(offshore_matches),
+            'message': source_errors[0] if budget_exhausted else None,
         }
     )
+    if budget_exhausted:
+        sink.put(
+            {
+                'type': 'budget_exhausted',
+                'execution_budget': dict(execution_budget),
+            }
+        )
     if not store.finish(job_id, result, worker_id=worker_id):
         return None
-    sink.put(
-        {
-            'type': 'done',
-            'status': 'completed',
-            'redirect': f'/personas/{persona_id}',
-        }
-    )
+    done_event = {
+        'type': 'done',
+        'status': 'partial' if budget_exhausted else 'completed',
+        'redirect': f'/personas/{persona_id}',
+    }
+    if budget_exhausted:
+        done_event['reason'] = 'budget_exhausted'
+    sink.put(done_event)
 
 
 class CombinedAiStopped(Exception):
@@ -5283,6 +5338,7 @@ def combined_case_chat_context(case: Dict[str, Any]):
 
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
     """Execute a claimed database job independently from any browser request."""
+    store.validate_governed_pivot_job(job)
     if job.get("kind") == "case_fusion_ai":
         return run_persistent_combined_ai_job(store, job, shutdown_check=shutdown_check)
     if job.get("kind") == "affiliation":
@@ -7327,6 +7383,9 @@ def persona_workspace(persona_id):
         approved_full_name=approved_full_name,
         offshore_matches=offshore_matches,
         identity_enrichment=identity_enrichment,
+        governed_pivots_enabled=profile_discovery_flag_enabled(
+            'governed_pivots_enabled'
+        ),
         map_locations=map_locations,
         ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
         field_display_label=field_display_label,
@@ -7563,7 +7622,9 @@ def enrich_identity_claim(claim_id):
         return redirect(url_for('cases_workspace'))
     try:
         job_id = case_store.create_identity_enrichment(
-            claim['persona_id'], claim_id
+            claim['persona_id'],
+            claim_id,
+            requested_by=session.get('username') or 'local-operator',
         )
     except KeyError:
         flash('That Persona no longer exists.', 'danger')
@@ -7576,6 +7637,37 @@ def enrich_identity_claim(claim_id):
     flash(
         'Wikipedia and ICIJ public-record checks were queued. '
         'Every proposal still requires review.',
+        'success',
+    )
+    return redirect(url_for('live_results', job_id=job_id))
+
+
+@app.route('/claims/<claim_id>/pivot-profile', methods=['POST'])
+def pivot_verified_profile_claim(claim_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    if case_store is None:
+        flash('Verified-link discovery requires persistent storage.', 'warning')
+        return redirect(url_for('cases_workspace'))
+    claim = case_store.get_claim(claim_id)
+    if not claim:
+        flash('That verified profile record no longer exists.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    try:
+        job_id = case_store.create_verified_link_pivot(
+            claim['persona_id'],
+            claim_id,
+            session.get('username') or 'local-operator',
+        )
+    except (KeyError, ValueError) as error:
+        flash(str(error), 'warning')
+        return redirect(
+            url_for('persona_workspace', persona_id=claim['persona_id'])
+        )
+    flash(
+        'A bounded same-case investigation was queued. '
+        'Every new assertion remains pending review.',
         'success',
     )
     return redirect(url_for('live_results', job_id=job_id))
@@ -7594,6 +7686,7 @@ def select_wikipedia_biography(persona_id):
             persona_id,
             request.form.get('source_claim_id', ''),
             selected_wikipedia_page_id=request.form.get('page_id', ''),
+            requested_by=session.get('username') or 'local-operator',
         )
     except KeyError:
         flash('That Persona no longer exists.', 'danger')
@@ -7835,7 +7928,11 @@ def review_persona_claim(claim_id):
         and reviewed_claim.get('review_status') != 'approved'
     ):
         try:
-            case_store.create_identity_enrichment(stored_persona_id, claim_id)
+            case_store.create_identity_enrichment(
+                stored_persona_id,
+                claim_id,
+                requested_by=reviewer,
+            )
         except ValueError as error:
             flash(
                 f'Name approved, but public-record enrichment was not queued: {error}',

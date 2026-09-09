@@ -25,7 +25,8 @@ from maigret.web.persona_intelligence import extract_case_chat_persona_claims
 
 
 @pytest.fixture
-def store(tmp_path):
+def store(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENLEDGER_GOVERNED_PIVOTS_ENABLED", "true")
     instance = CaseStore(
         f"sqlite:///{tmp_path / 'openledger.db'}",
         create_schema=True,

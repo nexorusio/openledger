@@ -20,11 +20,14 @@ _FLAG_ENVIRONMENT = {
     "provider_circuit_breakers_enabled": (
         "OPENLEDGER_PROVIDER_CIRCUIT_BREAKERS_ENABLED"
     ),
+    "governed_pivots_enabled": "OPENLEDGER_GOVERNED_PIVOTS_ENABLED",
     "search_first_enabled": "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED",
 }
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_DEFAULT_OFF_FLAGS = frozenset({"search_first_enabled"})
+_DEFAULT_OFF_FLAGS = frozenset(
+    {"governed_pivots_enabled", "search_first_enabled"}
+)
 
 
 class ProfileDiscoveryPolicyError(ValueError):
@@ -108,6 +111,14 @@ def govern_profile_discovery_options(
                 "User Scanner verification is disabled by server policy."
             )
         governed["investigation_spec"] = specification
+
+    if (
+        isinstance(governed.get("governed_pivot_plan"), Mapping)
+        and not flags["governed_pivots_enabled"]
+    ):
+        raise ProfileDiscoveryPolicyError(
+            "Governed evidence pivots are disabled by server policy."
+        )
 
     # Replace any client-supplied policy document with the server snapshot.
     governed["profile_discovery_policy"] = {

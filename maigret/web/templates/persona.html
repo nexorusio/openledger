@@ -123,6 +123,13 @@
     </form>
     {% if claim.review_status == 'approved' %}</details>{% endif %}
     {% if claim.reviewed_by %}<small class="review-meta">Last reviewed by {{ claim.reviewed_by }} · {{ claim.reviewed_at }}</small>{% endif %}
+    {% if governed_pivots_enabled and claim.review_status == 'approved' and claim.field_name == 'social_account' %}
+    <form method="POST" action="{{ url_for('pivot_verified_profile_claim', claim_id=claim.id) }}" class="affiliation-investigation-action">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="scan-search"></i> Investigate verified link</button>
+        <small>Runs one bounded, same-case follow-up from this approved public profile. New assertions remain pending review.</small>
+    </form>
+    {% endif %}
     {% if claim.review_status == 'approved' and (claim.field_name == 'company' or (claim.field_name == 'occupation' and claim.suggested_organization_target)) %}
     <form method="POST" action="{{ url_for('investigate_affiliation_claim', claim_id=claim.id) }}" class="affiliation-investigation-action">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">

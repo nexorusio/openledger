@@ -42,6 +42,7 @@ def client(web_app):
 
 @pytest.fixture
 def persistent_store(tmp_path, web_app, monkeypatch):
+    monkeypatch.setenv("OPENLEDGER_GOVERNED_PIVOTS_ENABLED", "true")
     store = CaseStore(
         f"sqlite:///{tmp_path / 'persistent-web.db'}",
         create_schema=True,
@@ -3812,6 +3813,63 @@ def _persistent_approved_full_name(store, name="Alice Example"):
     return persona_id, name_claim["id"]
 
 
+def _persistent_approved_social_account(store):
+    job_id = store.create_investigation(["alice_example"], {})
+    job = store.claim_next("worker:verified-link-source")
+    result = {
+        "status": "completed",
+        "usernames": ["alice_example"],
+        "individual_reports": [
+            {
+                "username": "alice_example",
+                "claimed_profiles": [
+                    {
+                        "site_name": "X",
+                        "url": "https://x.com/alice_example",
+                        "confidence": "strong",
+                        "evidence": {},
+                    }
+                ],
+            }
+        ],
+    }
+    store.finish(job_id, result)
+    store.sync_persona_claims(job_id, result)
+    persona_id = store.get_case(job["case_id"])["personas"][0]["id"]
+    social_claim = next(
+        claim
+        for claim in store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "social_account"
+    )
+    store.review_claim(social_claim["id"], "approved", "analyst")
+    return persona_id, social_claim["id"]
+
+
+def test_verified_profile_pivot_route_queues_a_bounded_same_case_job(
+    client, persistent_store
+):
+    persona_id, claim_id = _persistent_approved_social_account(persistent_store)
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "verified-link-pivot-csrf"
+
+    response = client.post(
+        f"/claims/{claim_id}/pivot-profile",
+        data={"csrf_token": "verified-link-pivot-csrf"},
+    )
+
+    assert response.status_code == 302
+    job_id = response.location.rsplit("/", 1)[-1]
+    queued = persistent_store.get_job(job_id)
+    assert queued["case_id"] == persistent_store.get_persona(persona_id)["case_id"]
+    assert queued["status"] == "queued"
+    assert queued["kind"] == "refresh"
+    assert queued["budget_seconds"] == 600
+    assert queued["options"]["execution_mode"] == "focused"
+    assert queued["options"]["governed_pivot_plan"]["source_claim"]["id"] == (
+        claim_id
+    )
+
+
 def test_completed_identity_enrichment_opens_persona_instead_of_results(
     client, persistent_store
 ):
@@ -3886,6 +3944,40 @@ def test_identity_worker_degrades_sources_and_persists_review_gated_alerts(
     assert "Potential ICIJ Offshore Leaks name match" in page
     assert "not confirmed identity or evidence of wrongdoing" in page
     assert "Review ICIJ source" in page
+
+
+def test_identity_worker_budget_timeout_remains_indeterminate(
+    web_app, persistent_store, monkeypatch
+):
+    persona_id, name_claim_id = _persistent_approved_full_name(persistent_store)
+    job_id = persistent_store.create_identity_enrichment(persona_id, name_claim_id)
+    job = persistent_store.claim_next("worker:identity-budget")
+
+    async def exhaust_budget(awaitable, *, timeout):
+        assert timeout == 120
+        awaitable.close()
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(web_app.asyncio, "wait_for", exhaust_budget)
+    web_app.run_persistent_job(persistent_store, job)
+
+    completed = persistent_store.get_job(job_id)
+    assert completed["status"] == "budget_exhausted"
+    assert completed["collection_status"] == "budget_exhausted"
+    assert completed["wikipedia_status"] == "unavailable"
+    assert completed["offshore_status"] == "unavailable"
+    assert "indeterminate" in completed["source_errors"][0]
+    assert not [
+        claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+        if claim["source_job_id"] == job_id
+    ]
+    events = [item["event"] for item in persistent_store.get_events(job_id)]
+    assert [event["type"] for event in events[-2:]] == [
+        "budget_exhausted",
+        "done",
+    ]
+    assert events[-1]["status"] == "partial"
 
 
 def test_approving_full_name_queues_confirmed_name_enrichment(
