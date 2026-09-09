@@ -1,0 +1,311 @@
+{
+  "instagram_variants": [
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://instagram.com/Alice.Example/?utm_source=search",
+      "source_id": "native.profile-search",
+      "source_version": "1",
+      "source_record_id": "instagram-result-1",
+      "outcome": "observed",
+      "native_outcome": "candidate",
+      "native_status": "public",
+      "citations": [
+        {
+          "url": "https://instagram.com/Alice.Example/",
+          "title": "Alice Example on Instagram"
+        }
+      ],
+      "retrieved_at": "2026-09-09T02:00:00Z",
+      "originating_query": "site:instagram.com Alice Example",
+      "originating_query_fingerprint": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      "source_snapshot_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_snapshot_ref": "urn:openledger:profile-search-audit:instagram-result-1"
+    },
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://www.instagram.com/alice.example/tagged/",
+      "source_id": "maigret",
+      "source_version": "0.5.0",
+      "source_record_id": "maigret-instagram-1",
+      "outcome": "observed",
+      "native_outcome": "claimed",
+      "native_status": "status-claimed",
+      "citations": [
+        {
+          "url": "https://www.instagram.com/alice.example/tagged/",
+          "title": "Maigret public observation"
+        }
+      ],
+      "retrieved_at": "2026-09-09T02:01:00+00:00",
+      "originating_query": "alice.example",
+      "originating_query_fingerprint": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+      "source_snapshot_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "source_snapshot_ref": "urn:openledger:maigret-run:maigret-instagram-1"
+    }
+  ],
+  "x_variants": [
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://twitter.com/Alice_Example/status/1234567890?s=20",
+      "source_id": "native.profile-search",
+      "source_version": "1",
+      "source_record_id": "x-result-1",
+      "outcome": "observed",
+      "native_outcome": "candidate",
+      "native_status": "public",
+      "citations": [
+        {
+          "url": "https://twitter.com/Alice_Example/status/1234567890",
+          "title": "X profile-linked search result"
+        }
+      ],
+      "retrieved_at": "2026-09-09T02:02:00Z",
+      "originating_query": "site:x.com Alice Example",
+      "originating_query_fingerprint": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+      "source_snapshot_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "source_snapshot_ref": "urn:openledger:profile-search-audit:x-result-1"
+    },
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://www.x.com/alice_example/with_replies",
+      "source_id": "user-scanner",
+      "source_version": "6fcd9d6",
+      "source_record_id": "user-scanner-x-1",
+      "outcome": "observed",
+      "native_outcome": "found",
+      "native_status": "good",
+      "citations": [
+        {
+          "url": "https://www.x.com/alice_example/with_replies",
+          "title": "User Scanner public observation"
+        }
+      ],
+      "retrieved_at": "2026-09-09T02:03:00Z",
+      "originating_query": "alice_example",
+      "originating_query_fingerprint": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+      "source_snapshot_sha256": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "source_snapshot_ref": "urn:openledger:user-scanner-run:user-scanner-x-1"
+    }
+  ],
+  "same_handle_different_platforms": [
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://www.instagram.com/alice_example/",
+      "source_id": "native.profile-search",
+      "source_version": "1",
+      "source_record_id": "cross-platform-instagram",
+      "outcome": "observed",
+      "native_outcome": "candidate",
+      "native_status": "public",
+      "citations": [
+        {
+          "url": "https://www.instagram.com/alice_example/",
+          "title": "Instagram profile"
+        }
+      ],
+      "retrieved_at": "2026-09-09T02:04:00Z",
+      "originating_query": "alice_example",
+      "originating_query_fingerprint": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+      "source_snapshot_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "source_snapshot_ref": "urn:openledger:profile-search-audit:cross-platform-instagram"
+    },
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://x.com/alice_example",
+      "source_id": "native.profile-search",
+      "source_version": "1",
+      "source_record_id": "cross-platform-x",
+      "outcome": "observed",
+      "native_outcome": "candidate",
+      "native_status": "public",
+      "citations": [
+        {
+          "url": "https://x.com/alice_example",
+          "title": "X profile"
+        }
+      ],
+      "retrieved_at": "2026-09-09T02:05:00Z",
+      "originating_query": "alice_example",
+      "originating_query_fingerprint": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+      "source_snapshot_sha256": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "source_snapshot_ref": "urn:openledger:profile-search-audit:cross-platform-x"
+    }
+  ],
+  "cross_source_claim": [
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://instagram.com/alice_example/",
+      "source_id": "native.profile-search",
+      "source_version": "1",
+      "source_record_id": "native-42",
+      "outcome": "observed",
+      "native_outcome": "candidate",
+      "native_status": "public",
+      "citations": [
+        {
+          "url": "https://instagram.com/alice_example/",
+          "title": "Native search evidence"
+        }
+      ],
+      "retrieved_at": "2026-09-09T03:00:00Z",
+      "originating_query": "site:instagram.com alice_example",
+      "originating_query_fingerprint": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "source_snapshot_sha256": "sha256:1000000000000000000000000000000000000000000000000000000000000001",
+      "source_snapshot_ref": "urn:openledger:profile-search-audit:native-42"
+    },
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://www.instagram.com/alice_example/",
+      "source_id": "maigret",
+      "source_version": "0.5.0",
+      "source_record_id": "maigret-42",
+      "outcome": "observed",
+      "native_outcome": "claimed",
+      "native_status": "status-claimed",
+      "citations": [
+        {
+          "url": "https://www.instagram.com/alice_example/",
+          "title": "Maigret evidence"
+        }
+      ],
+      "retrieved_at": "2026-09-09T03:01:00Z",
+      "originating_query": "alice_example",
+      "originating_query_fingerprint": "sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "source_snapshot_sha256": "sha256:2000000000000000000000000000000000000000000000000000000000000002",
+      "source_snapshot_ref": "urn:openledger:maigret-run:maigret-42"
+    },
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://m.instagram.com/alice_example/",
+      "source_id": "user-scanner",
+      "source_version": "6fcd9d6",
+      "source_record_id": "user-scanner-42",
+      "outcome": "observed",
+      "native_outcome": "found",
+      "native_status": "good",
+      "citations": [
+        {
+          "url": "https://m.instagram.com/alice_example/",
+          "title": "User Scanner evidence"
+        }
+      ],
+      "retrieved_at": "2026-09-09T03:02:00Z",
+      "originating_query": "alice_example",
+      "originating_query_fingerprint": "sha256:2123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "source_snapshot_sha256": "sha256:3000000000000000000000000000000000000000000000000000000000000003",
+      "source_snapshot_ref": "urn:openledger:user-scanner-run:user-scanner-42"
+    },
+    {
+      "schema_version": 1,
+      "case_id": "case:alpha",
+      "claim_type": "profile",
+      "claim_value": "https://www.instagram.com/alice_example/tagged/",
+      "source_id": "ai.cited-web",
+      "source_version": "1",
+      "source_record_id": "ai-proposal-42",
+      "outcome": "observed",
+      "native_outcome": "proposed",
+      "native_status": "pending-review",
+      "citations": [
+        {
+          "url": "https://www.instagram.com/alice_example/tagged/",
+          "title": "Cited public webpage"
+        }
+      ],
+      "retrieved_at": "2026-09-09T03:03:00Z",
+      "originating_query": "Alice Example Instagram",
+      "originating_query_fingerprint": "sha256:3123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "source_snapshot_sha256": "sha256:4000000000000000000000000000000000000000000000000000000000000004",
+      "source_snapshot_ref": "urn:openledger:ai-proposal:ai-proposal-42"
+    }
+  ],
+  "reruns": {
+    "original": {
+      "schema_version": 1,
+      "case_id": "case:rerun",
+      "claim_type": "profile",
+      "claim_value": "https://instagram.com/alice_example/",
+      "source_id": "native.profile-search",
+      "source_version": "1",
+      "source_record_id": "stable-record-42",
+      "outcome": "observed",
+      "native_outcome": "candidate",
+      "native_status": "public",
+      "citations": [
+        {
+          "url": "https://instagram.com/alice_example/",
+          "title": "Stable source"
+        }
+      ],
+      "retrieved_at": "2026-09-09T04:00:00Z",
+      "originating_query": "first query",
+      "originating_query_fingerprint": "sha256:7000000000000000000000000000000000000000000000000000000000000007",
+      "source_snapshot_sha256": "sha256:8000000000000000000000000000000000000000000000000000000000000008",
+      "source_snapshot_ref": "urn:openledger:profile-search-audit:stable-record-42"
+    },
+    "changed_retrieval_context": {
+      "schema_version": 1,
+      "case_id": "case:rerun",
+      "claim_type": "profile",
+      "claim_value": "https://instagram.com/alice_example/",
+      "source_id": "native.profile-search",
+      "source_version": "1",
+      "source_record_id": "stable-record-42",
+      "outcome": "observed",
+      "native_outcome": "candidate",
+      "native_status": "public",
+      "citations": [
+        {
+          "url": "https://instagram.com/alice_example/",
+          "title": "Stable source"
+        }
+      ],
+      "retrieved_at": "2026-09-10T04:00:00+00:00",
+      "originating_query": "a different approved query",
+      "originating_query_fingerprint": "sha256:9000000000000000000000000000000000000000000000000000000000000009",
+      "source_snapshot_sha256": "sha256:8000000000000000000000000000000000000000000000000000000000000008",
+      "source_snapshot_ref": "urn:openledger:profile-search-audit:stable-record-42"
+    },
+    "changed_snapshot": {
+      "schema_version": 1,
+      "case_id": "case:rerun",
+      "claim_type": "profile",
+      "claim_value": "https://www.instagram.com/alice_example/",
+      "source_id": "native.profile-search",
+      "source_version": "1",
+      "source_record_id": "stable-record-42",
+      "outcome": "observed",
+      "native_outcome": "candidate",
+      "native_status": "public",
+      "citations": [
+        {
+          "url": "https://instagram.com/alice_example/",
+          "title": "Stable source"
+        }
+      ],
+      "retrieved_at": "2026-09-11T04:00:00Z",
+      "originating_query": "first query",
+      "originating_query_fingerprint": "sha256:7000000000000000000000000000000000000000000000000000000000000007",
+      "source_snapshot_sha256": "sha256:a00000000000000000000000000000000000000000000000000000000000000a",
+      "source_snapshot_ref": "urn:openledger:profile-search-audit:stable-record-42"
+    }
+  }
+}

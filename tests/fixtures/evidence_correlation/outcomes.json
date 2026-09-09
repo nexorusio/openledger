@@ -1,0 +1,42 @@
+[
+  {
+    "outcome": "observed",
+    "native_outcome": "claimed",
+    "native_status": "status-claimed"
+  },
+  {
+    "outcome": "absent",
+    "native_outcome": "available",
+    "native_status": "status-available"
+  },
+  {
+    "outcome": "private",
+    "native_outcome": "private-profile",
+    "native_status": "http-403-private"
+  },
+  {
+    "outcome": "blocked",
+    "native_outcome": "blocked-by-provider",
+    "native_status": "http-403-blocked"
+  },
+  {
+    "outcome": "rate_limited",
+    "native_outcome": "too-many-requests",
+    "native_status": "http-429"
+  },
+  {
+    "outcome": "parser_error",
+    "native_outcome": "unexpected-response",
+    "native_status": "parser-signature-mismatch"
+  },
+  {
+    "outcome": "provider_error",
+    "native_outcome": "upstream-unavailable",
+    "native_status": "http-503"
+  },
+  {
+    "outcome": "indeterminate",
+    "native_outcome": "unknown",
+    "native_status": "ambiguous-response"
+  }
+]
