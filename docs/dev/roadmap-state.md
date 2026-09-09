@@ -82,8 +82,9 @@ configuration, five-result maximum, and ten-second timeout.
 
 P3a, P3b, and original P3c completed local integration checkpoints on
 2026-09-09. The mandatory P3-extension assessment then completed, and the user
-separately authorized `P3X1` on 2026-09-09. That authorization did not authorize
-`P3X2`, `P3X3`, `P3X4`, squash, merge, deployment, or production modification.
+separately authorized `P3X1` and then `P3X2` on 2026-09-09. Both activities are
+complete at isolated code checkpoints. Those authorizations did not authorize
+`P3X3`, `P3X4`, squash, merge, deployment, or production modification.
 All P3 work started from exact
 production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
@@ -244,10 +245,10 @@ Dependency: production-verified P2.
 | Extension state | Current record |
 |---|---|
 | Programme-wide impact assessment | Completed read-only on 2026-09-09 against local commit `01fe35e3659d910b57ff11e8f156c6590b91f75f`, tree `5bf3d1915961d506fd4fce7c05ecf93f7ba4087f`, after original P3 reached its pre-merge checkpoint |
-| Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; `P3X1` is complete, while `P3X2`--`P3X4` remain proposed and unauthorized |
-| Authorized implementation activity codes | `P3X1` only |
-| Implementation | `P3X1` complete at code commit `704f499f7a28114358927786e371a3c6148f8a64`, tree `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`; `P3X2`--`P3X4` not authorized and not started |
-| Merge effect | Original P3 must not be squash-merged before `P3X2`--`P3X4` are separately authorized, completed, tested with P3, and added to the same PR |
+| Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; `P3X1` and `P3X2` are complete, while `P3X3` and `P3X4` remain proposed and unauthorized |
+| Authorized implementation activity codes | `P3X1`, followed separately by `P3X2` |
+| Implementation | `P3X1` complete at code commit `704f499f7a28114358927786e371a3c6148f8a64`, tree `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`; `P3X2` complete at code commit `41bc787f8958a5ccac6a9bb8d610dbb092e8ea47`, tree `a194dada96a7616ae411641a060b1f03a09e637c`; `P3X3` and `P3X4` not authorized and not started |
+| Merge effect | Original P3 must not be squash-merged before `P3X3` and `P3X4` are separately authorized, completed, tested with P3, and added to the same PR |
 
 #### P3X1 completion checkpoint
 
@@ -265,8 +266,40 @@ in bounded batches and passed 1,586 tests with 9 skips and 24 slow/live-network
 tests explicitly deselected. Python compilation, critical Flake8, JSON-schema
 parsing, Black for the new contract test, and `git diff --check` passed. No
 database migration, dependency, lockfile, service, paid provider, production
-data, deployment, or production change was introduced. `P3X2` is the next
-serial activity in the assessed plan, but remains unauthorized.
+data, deployment, or production change was introduced. `P3X2` was subsequently
+separately authorized and completed without repeating this contract work.
+
+#### P3X2 completion checkpoint
+
+`P3X2` replaces the ordinary investigation form with one labelled whole-value
+token editor, visible server-classified chips, edit/remove/focus/error behavior,
+one optional likely-username-alias control, Quick/Full controls, and a
+server-authoritative route preview. Enter and non-empty Tab commit the complete
+current value, including spaces; empty Tab retains normal keyboard navigation.
+The start action remains disabled until the server preview reports an effective
+authorized route, including explicit confirmation for the bounded public email
+route. Generic public URLs and phone numbers remain visible context-only values.
+
+The P3X2 code checkpoint is
+`41bc787f8958a5ccac6a9bb8d610dbb092e8ea47`, tree
+`a194dada96a7616ae411641a060b1f03a09e637c`. The web suite passed 139 tests;
+the investigation-input, route-policy, and case suite passed 144; persistent-job
+coverage passed 73; and the original P3 correlation and governed-pivot
+regression passed 309, for 665 passing tests across non-overlapping batches.
+Python compilation, Node syntax checking, critical Flake8, `git diff --check`,
+and wheel packaging passed. A local development-server check returned HTTP 200
+for both the builder and its external script. The wheel contains the new script,
+template, and stylesheet.
+
+Automated live-browser verification was attempted but could not launch because
+the environment had no browser binary and the browser download failed certificate
+validation; TLS verification was not bypassed. Source-level browser acceptance
+covers whole-value Tab behavior, empty-Tab navigation, editing, removal, focus,
+errors, authoritative previewing, responsive layout, and focus-visible styling.
+The separately defined manual keyboard/mobile verification remains part of
+`P3X4`. No graph, database migration, dependency, lockfile, service, deployment,
+production data, or production change was introduced. `P3X3` is the next
+proposed activity and remains unauthorized.
 
 #### Assessment finding and fixed mode mapping
 
