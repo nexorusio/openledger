@@ -6,9 +6,9 @@ from datetime import datetime, timedelta, timezone
 from threading import Timer
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, update
 
-from maigret.web.case_store import CaseStore, investigation_jobs
+from maigret.web.case_store import CaseStore, cases, investigation_jobs
 from maigret.web.persona_intelligence import extract_case_chat_persona_claims
 from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web import app as web_app_module
@@ -2055,6 +2055,8 @@ def test_relationship_workspace_renders_shared_approved_attributes(
     assert "Cross-Persona relationship leads" in page
     assert "Nexorus" in page
     assert "exact normalized matches across personas" in page
+    assert 'data-relationship-state="graph_ready"' in page
+    assert "Relationship graph ready" in page
     assert "/static/vendor/vis-network-10.1.1.min.js" in page
     assert "https://unpkg.com/vis-network" not in page
 
@@ -2066,6 +2068,74 @@ def test_relationship_workspace_renders_shared_approved_attributes(
     assert "Review status remains visible" in persona_page
     assert "/static/vendor/vis-network-10.1.1.min.js" in persona_page
     assert "/static/relationships.js" in persona_page
+
+
+def test_relationship_workspace_presents_persisted_empty_and_degraded_states(
+    client, persistent_store
+):
+    assert web_app_module.relationship_graph_is_ready(
+        {
+            "nodes": [{"id": "persona:one"}, {"id": "persona:two"}],
+            "edges": [{"id": "proposal", "review_status": "pending"}],
+        },
+        mode="shared",
+    ) is False
+    assert web_app_module.relationship_graph_is_ready(
+        {
+            "nodes": [{"id": "persona:one"}, {"id": "persona:two"}],
+            "edges": [{"id": "approved", "review_status": "approved"}],
+        },
+        mode="shared",
+    ) is True
+
+    no_scope = client.get("/relationships?mode=shared").get_data(as_text=True)
+    assert 'data-relationship-state="no_scope"' in no_scope
+    assert "No relationship scope selected" in no_scope
+
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.get_job(job_id)
+    active = client.get(
+        f"/relationships?mode=shared&case_id={job['case_id']}"
+    ).get_data(as_text=True)
+    assert 'data-relationship-state="active_collection"' in active
+    assert "Collection in progress" in active
+
+    persistent_store.claim_next("worker:relationship-page")
+    persistent_store.append_event(
+        job_id,
+        {"type": "provider_circuit_open", "provider": "test-provider"},
+    )
+    persistent_store.finish(
+        job_id,
+        {"status": "completed", "usernames": ["alice"]},
+    )
+    degraded = client.get(
+        f"/relationships?mode=shared&case_id={job['case_id']}"
+    ).get_data(as_text=True)
+    assert 'data-relationship-state="degraded"' in degraded
+    assert 'data-relationship-reason="blocked_provider"' in degraded
+    assert "A provider was blocked or rate-limited" in degraded
+    assert "not as proof that no qualifying relationship exists" in degraded
+
+
+def test_relationship_workspace_presents_clean_empty_as_valid_evidence_result(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:clean-empty")
+    persistent_store.finish(
+        job_id,
+        {"status": "completed", "usernames": ["alice"]},
+    )
+
+    page = client.get(
+        f"/relationships?mode=shared&case_id={job['case_id']}"
+    ).get_data(as_text=True)
+
+    assert 'data-relationship-state="clean_empty"' in page
+    assert "Clean result: no qualifying relationship" in page
+    assert "valid empty evidence result, not a failure" in page
+    assert 'id="relationshipGraphData"' not in page
 
 
 def test_case_fusion_worker_publishes_versioned_snapshot(
@@ -2478,6 +2548,18 @@ def test_combined_case_selection_and_workspace_flow(client, web_app, persistent_
         f"/relationships?mode=shared&case_id={combined_case['id']}"
     ).get_data(as_text=True)
     assert "Versioned combined-case snapshot" in relationships
+    with persistent_store.engine.begin() as connection:
+        connection.execute(
+            update(cases)
+            .where(cases.c.id == source_case_ids[0])
+            .values(updated_at=datetime.now(timezone.utc) + timedelta(seconds=1))
+        )
+    stale_relationships = client.get(
+        f"/relationships?mode=shared&case_id={combined_case['id']}"
+    ).get_data(as_text=True)
+    assert 'data-relationship-state="degraded"' in stale_relationships
+    assert 'data-relationship-reason="stale_snapshot"' in stale_relationships
+    assert "Combined-case snapshot is stale" in stale_relationships
     source_case = persistent_store.get_case(source_case_ids[0])
     source_job_id = source_case["jobs"][0]["job_id"]
     protected_delete = client.post(

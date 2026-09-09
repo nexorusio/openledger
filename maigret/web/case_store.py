@@ -838,6 +838,26 @@ RELATIONSHIP_FIELDS = {
     "company_ownership",
     "vehicle_ownership",
 }
+MAX_RELATIONSHIP_STATE_CASES = 500
+MAX_RELATIONSHIP_STATE_JOBS = 500
+MAX_RELATIONSHIP_STATE_EVENTS = 2000
+MAX_RELATIONSHIP_STATE_AUDITS = 500
+RELATIONSHIP_STATE_DEGRADED_OUTCOMES = {
+    "blocked",
+    "circuit_open",
+    "error",
+    "failed",
+    "partial",
+    "provider_error",
+    "rate_limited",
+    "timed_out",
+    "unavailable",
+}
+RELATIONSHIP_STATE_BLOCKED_OUTCOMES = {
+    "blocked",
+    "circuit_open",
+    "rate_limited",
+}
 
 
 def _bounded_round_robin_case_records(
@@ -7863,6 +7883,519 @@ class CaseStore:
                 "connection_count": len(edges),
                 "field_counts": field_counts,
             },
+        }
+
+    def build_relationship_state(
+        self,
+        *,
+        case_id: Optional[str] = None,
+        persona_id: Optional[str] = None,
+        mode: str = "shared",
+        graph_ready: bool = False,
+    ) -> Dict[str, Any]:
+        """Summarize bounded persisted diagnostics without changing the graph."""
+        if mode not in {"persona", "shared"}:
+            raise ValueError("Relationship state mode must be persona or shared")
+
+        selected_case_id = str(case_id or "").strip() or None
+        selected_persona_id = str(persona_id or "").strip() or None
+        combined_scope = False
+        scope_kind = mode
+        scope_case_ids: list[str] = []
+        job_case_ids: list[str] = []
+        member_versions: Dict[str, str] = {}
+        scope_truncated = False
+        scope_exists = False
+
+        with self.engine.connect() as connection:
+            if mode == "persona":
+                persona_row = (
+                    connection.execute(
+                        select(personas.c.id, personas.c.case_id).where(
+                            personas.c.id == selected_persona_id
+                        )
+                    )
+                    .mappings()
+                    .first()
+                    if selected_persona_id
+                    else None
+                )
+                if persona_row and (
+                    not selected_case_id
+                    or selected_case_id == str(persona_row["case_id"])
+                ):
+                    selected_case_id = str(persona_row["case_id"])
+                    scope_case_ids = [selected_case_id]
+                    job_case_ids = list(scope_case_ids)
+                    scope_kind = "persona"
+                    scope_exists = True
+            elif selected_case_id:
+                case_row = (
+                    connection.execute(
+                        select(cases.c.id, cases.c.case_type).where(
+                            cases.c.id == selected_case_id
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if case_row:
+                    scope_exists = True
+                    combined_scope = str(case_row["case_type"]) == "combined"
+                    if combined_scope:
+                        scope_kind = "combined_case"
+                        member_rows = list(
+                            connection.execute(
+                                select(
+                                    combined_case_members.c.source_case_id,
+                                    cases.c.updated_at,
+                                )
+                                .join(
+                                    cases,
+                                    cases.c.id
+                                    == combined_case_members.c.source_case_id,
+                                )
+                                .where(
+                                    combined_case_members.c.combined_case_id
+                                    == selected_case_id
+                                )
+                                .order_by(combined_case_members.c.position)
+                                .limit(MAX_COMBINED_SOURCE_CASES)
+                            ).mappings()
+                        )
+                        scope_case_ids = [
+                            str(row["source_case_id"]) for row in member_rows
+                        ]
+                        member_versions = {
+                            str(row["source_case_id"]): str(
+                                _as_iso(row["updated_at"]) or ""
+                            )
+                            for row in member_rows
+                        }
+                        job_case_ids = [selected_case_id, *scope_case_ids]
+                    else:
+                        scope_kind = "case"
+                        scope_case_ids = [selected_case_id]
+                        job_case_ids = list(scope_case_ids)
+            else:
+                case_rows = list(
+                    connection.execute(
+                        select(cases.c.id)
+                        .where(cases.c.case_type == "standalone")
+                        .order_by(cases.c.updated_at.desc(), cases.c.id)
+                        .limit(MAX_RELATIONSHIP_STATE_CASES + 1)
+                    ).mappings()
+                )
+                scope_truncated = len(case_rows) > MAX_RELATIONSHIP_STATE_CASES
+                scope_case_ids = [
+                    str(row["id"])
+                    for row in case_rows[:MAX_RELATIONSHIP_STATE_CASES]
+                ]
+                job_case_ids = list(scope_case_ids)
+                scope_kind = "all_cases"
+                scope_exists = bool(scope_case_ids)
+            if not scope_exists:
+                return {
+                    "schema_version": 1,
+                    "status": "no_scope",
+                    "reason": "no_scope",
+                    "scope": {
+                        "kind": scope_kind,
+                        "case_id": selected_case_id,
+                        "persona_id": selected_persona_id,
+                        "case_count": 0,
+                        "persona_count": 0,
+                        "truncated": scope_truncated,
+                    },
+                    "counts": {
+                        "active_jobs": 0,
+                        "failed_jobs": 0,
+                        "pending_reviews": 0,
+                        "uncertain_reviews": 0,
+                        "approved_reviews": 0,
+                        "rejected_reviews": 0,
+                        "legacy_untriaged": 0,
+                        "provider_issues": 0,
+                    },
+                    "latest_plan": None,
+                    "diagnostics": [],
+                    "diagnostics_truncated": False,
+                }
+
+            persona_scope = [personas.c.case_id.in_(scope_case_ids)]
+            if mode == "persona":
+                persona_scope.append(personas.c.id == selected_persona_id)
+            claim_scope = list(persona_scope)
+            if mode == "shared":
+                claim_scope.append(persona_claims.c.field_name.in_(RELATIONSHIP_FIELDS))
+            current_claim_scope = [
+                *claim_scope,
+                ~persona_claims.c.source_engine.like(
+                    f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}%"
+                ),
+            ]
+            claim_join = persona_claims.join(
+                personas, personas.c.id == persona_claims.c.persona_id
+            )
+
+            review_counts = {
+                status: int(
+                    connection.scalar(
+                        select(func.count())
+                        .select_from(claim_join)
+                        .where(
+                            *current_claim_scope,
+                            persona_claims.c.review_status == status,
+                        )
+                    )
+                    or 0
+                )
+                for status in ("pending", "uncertain", "approved", "rejected")
+            }
+            legacy_untriaged_count = int(
+                connection.scalar(
+                    select(func.count())
+                    .select_from(claim_join)
+                    .where(
+                        *claim_scope,
+                        persona_claims.c.source_engine.like(
+                            f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}%"
+                        ),
+                    )
+                )
+                or 0
+            )
+            persona_count = int(
+                connection.scalar(
+                    select(func.count()).select_from(personas).where(*persona_scope)
+                )
+                or 0
+            )
+
+            job_rows = list(
+                connection.execute(
+                    select(investigation_jobs)
+                    .where(
+                        investigation_jobs.c.case_id.in_(job_case_ids),
+                        investigation_jobs.c.kind != "case_fusion_ai",
+                    )
+                    .order_by(
+                        investigation_jobs.c.created_at.desc(),
+                        investigation_jobs.c.id.desc(),
+                    )
+                    .limit(MAX_RELATIONSHIP_STATE_JOBS + 1)
+                ).mappings()
+            )
+            jobs_truncated = len(job_rows) > MAX_RELATIONSHIP_STATE_JOBS
+            bounded_job_rows = job_rows[:MAX_RELATIONSHIP_STATE_JOBS]
+            latest_by_case: Dict[str, Any] = {}
+            for row in bounded_job_rows:
+                latest_by_case.setdefault(str(row["case_id"]), row)
+            current_jobs = list(latest_by_case.values())
+            current_job_ids = [str(row["id"]) for row in current_jobs]
+
+            event_rows = (
+                list(
+                    connection.execute(
+                        select(
+                            investigation_events.c.job_id,
+                            investigation_events.c.event,
+                        )
+                        .where(investigation_events.c.job_id.in_(current_job_ids))
+                        .order_by(investigation_events.c.id.desc())
+                        .limit(MAX_RELATIONSHIP_STATE_EVENTS + 1)
+                    ).mappings()
+                )
+                if current_job_ids
+                else []
+            )
+            events_truncated = len(event_rows) > MAX_RELATIONSHIP_STATE_EVENTS
+            bounded_events = event_rows[:MAX_RELATIONSHIP_STATE_EVENTS]
+            audit_rows = (
+                list(
+                    connection.execute(
+                        select(
+                            profile_search_audits.c.job_id,
+                            profile_search_audits.c.status,
+                            profile_search_audits.c.document,
+                        )
+                        .where(profile_search_audits.c.job_id.in_(current_job_ids))
+                        .order_by(profile_search_audits.c.created_at.desc())
+                        .limit(MAX_RELATIONSHIP_STATE_AUDITS + 1)
+                    ).mappings()
+                )
+                if current_job_ids
+                else []
+            )
+            audits_truncated = len(audit_rows) > MAX_RELATIONSHIP_STATE_AUDITS
+            bounded_audits = audit_rows[:MAX_RELATIONSHIP_STATE_AUDITS]
+
+            completed_fusion = next(
+                (
+                    row
+                    for row in bounded_job_rows
+                    if combined_scope
+                    and str(row["case_id"]) == selected_case_id
+                    and str(row["kind"]) == "case_fusion"
+                    and str(row["status"]) == "completed"
+                ),
+                None,
+            )
+            proposal_counts = {
+                "pending": 0,
+                "uncertain": 0,
+                "approved": 0,
+                "rejected": 0,
+            }
+            if completed_fusion is not None:
+                proposal_rows = connection.execute(
+                    select(
+                        combined_relationship_proposals.c.review_status,
+                        func.count().label("review_count"),
+                    )
+                    .join(
+                        combined_analysis_runs,
+                        combined_analysis_runs.c.id
+                        == combined_relationship_proposals.c.analysis_run_id,
+                    )
+                    .where(
+                        combined_analysis_runs.c.combined_case_id
+                        == selected_case_id,
+                        combined_analysis_runs.c.job_id == completed_fusion["id"],
+                        combined_analysis_runs.c.status == "completed",
+                    )
+                    .group_by(combined_relationship_proposals.c.review_status)
+                ).mappings()
+                for row in proposal_rows:
+                    status = str(row["review_status"])
+                    if status in proposal_counts:
+                        proposal_counts[status] = int(row["review_count"] or 0)
+
+        active_jobs = sum(
+            str(row["status"]) in ACTIVE_STATUSES for row in current_jobs
+        )
+        failed_jobs = sum(str(row["status"]) == "failed" for row in current_jobs)
+        cancel_requested = any(
+            str(row["status"]) == "cancel_requested" for row in current_jobs
+        )
+        partial_completion = False
+        budget_limited = False
+        cancelled = False
+        interrupted = False
+        blocked_provider = False
+        degraded_provider = False
+        provider_issue_count = 0
+        plan_summaries = []
+
+        for row in current_jobs:
+            status = str(row["status"])
+            result = dict(row["result"] or {})
+            collection_status = str(result.get("collection_status") or "").casefold()
+            if status == "completed" and collection_status in {
+                "budget_exhausted",
+                "cancelled",
+                "interrupted",
+            }:
+                partial_completion = True
+            budget_limited = budget_limited or status == "budget_exhausted" or (
+                collection_status == "budget_exhausted"
+            )
+            cancelled = cancelled or status == "cancelled" or (
+                collection_status == "cancelled"
+            )
+            interrupted = interrupted or status == "interrupted" or (
+                collection_status == "interrupted"
+            )
+            if str(result.get("affiliation_status") or "").casefold() == "partial":
+                partial_completion = True
+            if list(result.get("source_errors") or []):
+                degraded_provider = True
+                provider_issue_count += 1
+            for observation in list(result.get("collector_observations") or [])[:500]:
+                if not isinstance(observation, Mapping):
+                    continue
+                outcome = str(observation.get("status") or "").casefold()
+                if outcome in RELATIONSHIP_STATE_BLOCKED_OUTCOMES:
+                    blocked_provider = True
+                    provider_issue_count += 1
+                elif outcome in RELATIONSHIP_STATE_DEGRADED_OUTCOMES:
+                    degraded_provider = True
+                    provider_issue_count += 1
+
+            options = row["options"] if isinstance(row["options"], Mapping) else {}
+            specification = options.get("investigation_spec")
+            specification = specification if isinstance(specification, Mapping) else {}
+            route_plan = specification.get("route_plan")
+            if isinstance(route_plan, Mapping):
+                effective_routes = [
+                    str(item.get("route") or "")[:64]
+                    for item in list(route_plan.get("effective_routes") or [])[:16]
+                    if isinstance(item, Mapping) and item.get("route")
+                ]
+                requested_mode = str(route_plan.get("requested_mode") or "").casefold()
+                execution_mode = str(route_plan.get("execution_mode") or "").casefold()
+                label_source = requested_mode or execution_mode
+                mode_label = {
+                    "quick": "Quick Scan",
+                    "focused": "Quick Scan",
+                    "full": "Full Scan",
+                    "exhaustive": "Full Scan",
+                }.get(label_source)
+                plan_summaries.append(
+                    {
+                        "job_id": str(row["id"]),
+                        "requested_mode": requested_mode or None,
+                        "execution_mode": execution_mode or None,
+                        "mode_label": mode_label,
+                        "effective_routes": effective_routes,
+                        "effective_route_count": len(effective_routes),
+                        "skipped_route_count": len(
+                            list(route_plan.get("skipped_routes") or [])[:32]
+                        ),
+                        "budget_seconds": route_plan.get("budget_seconds"),
+                    }
+                )
+
+        for row in bounded_events:
+            event_payload = row["event"]
+            event_payload = event_payload if isinstance(event_payload, Mapping) else {}
+            event_type = str(event_payload.get("type") or "").casefold()
+            event_status = str(event_payload.get("status") or "").casefold()
+            if event_type == "budget_exhausted":
+                budget_limited = True
+            if event_type == "provider_circuit_open" or (
+                event_status in RELATIONSHIP_STATE_BLOCKED_OUTCOMES
+            ):
+                blocked_provider = True
+                provider_issue_count += 1
+            elif event_type in {"collector_error", "error"} or (
+                event_status in RELATIONSHIP_STATE_DEGRADED_OUTCOMES
+            ):
+                degraded_provider = True
+                provider_issue_count += 1
+            if event_status == "partial":
+                partial_completion = True
+
+        for row in bounded_audits:
+            audit_status = str(row["status"] or "").casefold()
+            if audit_status == "partial":
+                partial_completion = True
+            if audit_status in {"partial", "failed"}:
+                degraded_provider = True
+                provider_issue_count += 1
+            document = row["document"] if isinstance(row["document"], Mapping) else {}
+            for run in list(document.get("runs") or [])[:100]:
+                if not isinstance(run, Mapping):
+                    continue
+                error = run.get("error")
+                error = error if isinstance(error, Mapping) else {}
+                outcome = str(error.get("code") or "").casefold()
+                if outcome in RELATIONSHIP_STATE_BLOCKED_OUTCOMES:
+                    blocked_provider = True
+                elif outcome in RELATIONSHIP_STATE_DEGRADED_OUTCOMES:
+                    degraded_provider = True
+
+        stale_snapshot = False
+        if combined_scope and completed_fusion is not None:
+            result = dict(completed_fusion["result"] or {})
+            snapshot = result.get("snapshot")
+            snapshot = snapshot if isinstance(snapshot, Mapping) else {}
+            snapshot_versions = {
+                str(item.get("id")): str(item.get("updated_at") or "")
+                for item in list(snapshot.get("source_cases") or [])
+                if isinstance(item, Mapping) and item.get("id")
+            }
+            stale_snapshot = bool(snapshot_versions) and (
+                set(snapshot_versions) != set(member_versions)
+                or any(
+                    snapshot_versions[source_case_id]
+                    != member_versions[source_case_id]
+                    for source_case_id in snapshot_versions.keys()
+                    & member_versions.keys()
+                )
+            )
+
+        review_counts["pending"] += proposal_counts["pending"]
+        review_counts["uncertain"] += proposal_counts["uncertain"]
+        review_counts["approved"] += proposal_counts["approved"]
+        review_counts["rejected"] += proposal_counts["rejected"]
+        pending_review_count = review_counts["pending"] + review_counts["uncertain"]
+
+        diagnostics = []
+        for enabled, code in (
+            (failed_jobs > 0, "failed_collection"),
+            (partial_completion, "partial_completion"),
+            (budget_limited, "budget_limited"),
+            (cancelled, "cancelled"),
+            (interrupted, "interrupted"),
+            (blocked_provider, "blocked_provider"),
+            (degraded_provider, "degraded_provider"),
+            (stale_snapshot, "stale_snapshot"),
+        ):
+            if enabled:
+                diagnostics.append(code)
+
+        if active_jobs:
+            state_status = "active_collection"
+            state_reason = "cancel_requested" if cancel_requested else "active_collection"
+        elif graph_ready:
+            state_status = "graph_ready"
+            state_reason = "qualifying_relationship"
+        elif pending_review_count:
+            state_status = "pending_review"
+            state_reason = "pending_review"
+        elif failed_jobs:
+            state_status = "failed"
+            state_reason = "failed_collection"
+        elif diagnostics:
+            state_status = "degraded"
+            state_reason = next(
+                code
+                for code in (
+                    "stale_snapshot",
+                    "budget_limited",
+                    "interrupted",
+                    "cancelled",
+                    "blocked_provider",
+                    "partial_completion",
+                    "degraded_provider",
+                )
+                if code in diagnostics
+            )
+        else:
+            state_status = "clean_empty"
+            state_reason = "no_qualifying_relationship"
+
+        return {
+            "schema_version": 1,
+            "status": state_status,
+            "reason": state_reason,
+            "scope": {
+                "kind": scope_kind,
+                "case_id": selected_case_id,
+                "persona_id": selected_persona_id,
+                "case_count": len(scope_case_ids),
+                "persona_count": persona_count,
+                "truncated": scope_truncated,
+            },
+            "counts": {
+                "active_jobs": active_jobs,
+                "failed_jobs": failed_jobs,
+                "pending_reviews": review_counts["pending"],
+                "uncertain_reviews": review_counts["uncertain"],
+                "approved_reviews": review_counts["approved"],
+                "rejected_reviews": review_counts["rejected"],
+                "legacy_untriaged": legacy_untriaged_count,
+                "provider_issues": provider_issue_count,
+            },
+            "latest_plan": plan_summaries[0] if plan_summaries else None,
+            "diagnostics": diagnostics,
+            "diagnostics_truncated": bool(
+                scope_truncated
+                or jobs_truncated
+                or events_truncated
+                or audits_truncated
+            ),
         }
 
     def build_persona_graph(self, persona_id: str) -> Dict[str, Any]:

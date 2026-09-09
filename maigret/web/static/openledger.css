@@ -4303,6 +4303,46 @@ textarea.form-control.compact-textarea {
     padding: 11px 14px;
     border-radius: 10px;
 }
+.relationship-state {
+    display: grid;
+    grid-template-columns: 20px minmax(0, 1fr);
+    gap: 11px;
+    margin-bottom: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--ol-border);
+    border-radius: 10px;
+    background: var(--ol-surface-muted);
+}
+.relationship-state > svg { width: 19px; color: var(--ol-accent-strong); }
+.relationship-state-copy,
+.relationship-state-copy > strong,
+.relationship-state-copy > span { display: block; }
+.relationship-state-copy > strong { font-size: .78rem; }
+.relationship-state-copy > span {
+    margin-top: 2px;
+    color: var(--ol-muted);
+    font-size: .7rem;
+    line-height: 1.5;
+}
+.relationship-state--failed > svg,
+.relationship-state--degraded > svg { color: var(--ol-warning); }
+.relationship-state--graph_ready > svg,
+.relationship-state--clean_empty > svg { color: var(--ol-success); }
+.relationship-state-metadata {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin: 8px 0 0;
+    padding: 0;
+    list-style: none;
+}
+.relationship-state-metadata li {
+    padding: 3px 7px;
+    border: 1px solid var(--ol-border);
+    border-radius: 999px;
+    color: var(--ol-muted);
+    font-size: .61rem;
+}
 .relationship-scope-field { min-width: 0; display: grid; gap: 4px; }
 .relationship-scope-field label,
 .relationship-control-label {

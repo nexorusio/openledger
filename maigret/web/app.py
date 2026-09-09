@@ -7659,6 +7659,247 @@ def configure_persona_investigation(persona_id):
     return redirect(url_for('live_results', job_id=job_id))
 
 
+def relationship_state_presentation(
+    relationship_state: Dict[str, Any], *, mode: str
+) -> Dict[str, Any]:
+    """Attach static, review-safe presentation copy to persisted diagnostics."""
+    state = dict(relationship_state or {})
+    status = str(state.get("status") or "no_scope")
+    reason = str(state.get("reason") or "")
+    persona_mode = mode == "persona"
+    presentations = {
+        "no_scope": {
+            "icon": "folder-search-2",
+            "title": "No relationship scope selected",
+            "message": (
+                "Select a case with a Persona before interpreting relationship "
+                "evidence."
+            ),
+            "empty_title": "Select a case or Persona",
+            "empty_message": (
+                "The graph remains empty until a persisted investigation scope is "
+                "available."
+            ),
+        },
+        "active_collection": {
+            "icon": "loader-circle",
+            "title": "Collection in progress",
+            "message": (
+                "A persisted collection or combined snapshot job is still active. "
+                "Existing evidence remains readable while this scope may change."
+            ),
+            "empty_title": "Waiting for persisted collection",
+            "empty_message": (
+                "The relationship view will update after collection finishes and "
+                "reviewable evidence is stored."
+            ),
+        },
+        "graph_ready": {
+            "icon": "git-compare-arrows" if not persona_mode else "contact-round",
+            "title": (
+                "Relationship graph ready"
+                if not persona_mode
+                else "Persona evidence graph ready"
+            ),
+            "message": (
+                "The graph contains qualifying exact approved relationships."
+                if not persona_mode
+                else "The graph contains persisted reviewable Persona evidence."
+            ),
+            "empty_title": "Graph ready",
+            "empty_message": "Persisted graph evidence is available.",
+        },
+        "pending_review": {
+            "icon": "clipboard-check",
+            "title": "Evidence is awaiting review",
+            "message": (
+                "Pending or uncertain evidence cannot create a relationship edge "
+                "until an analyst approves the exact relationship-eligible value."
+            ),
+            "empty_title": "No qualifying graph yet",
+            "empty_message": (
+                "Review the pending evidence. Rejected, uncertain, and unapproved "
+                "records remain outside the relationship graph."
+            ),
+        },
+        "failed": {
+            "icon": "circle-alert",
+            "title": "Collection failed",
+            "message": (
+                "The latest persisted collection failed before it produced a "
+                "qualifying relationship result. Existing reviewed evidence was "
+                "not changed."
+            ),
+            "empty_title": "No relationship result available",
+            "empty_message": (
+                "Inspect the failed investigation and rerun it only when the source "
+                "and authorization remain valid."
+            ),
+        },
+        "clean_empty": {
+            "icon": "circle-check",
+            "title": "Clean result: no qualifying relationship",
+            "message": (
+                "Collection completed without the same exact approved, "
+                "relationship-eligible value on at least two Personas. This is a "
+                "valid empty evidence result, not a failure."
+            ),
+            "empty_title": "No qualifying relationship",
+            "empty_message": (
+                "No action is required. Future reviewed evidence may change this "
+                "result without altering the exact-match rule."
+            ),
+        },
+    }
+    degraded_presentations = {
+        "stale_snapshot": {
+            "title": "Combined-case snapshot is stale",
+            "message": (
+                "A source case changed after the latest immutable snapshot. Refresh "
+                "the combined investigation before treating this empty graph as current."
+            ),
+            "empty_message": (
+                "Refresh the combined investigation to evaluate the current approved "
+                "source evidence."
+            ),
+        },
+        "budget_limited": {
+            "title": "Collection ended at its budget",
+            "message": (
+                "The persisted execution budget stopped collection. Evidence gathered "
+                "before the deadline remains available, but the empty result is partial."
+            ),
+            "empty_message": (
+                "Treat the empty result as budget-limited rather than as evidence that "
+                "no qualifying relationship exists."
+            ),
+        },
+        "interrupted": {
+            "title": "Collection was interrupted",
+            "message": (
+                "The worker stopped before collection completed. Retained evidence and "
+                "review history remain unchanged."
+            ),
+            "empty_message": (
+                "Treat the empty result as interrupted until an authorized rerun "
+                "completes."
+            ),
+        },
+        "cancelled": {
+            "title": "Collection was cancelled",
+            "message": (
+                "An operator stopped collection. Any retained evidence remains "
+                "reviewable, but this is not a clean negative result."
+            ),
+            "empty_message": (
+                "Treat the empty result as cancelled unless an authorized collection "
+                "later completes."
+            ),
+        },
+        "blocked_provider": {
+            "title": "A provider was blocked or rate-limited",
+            "message": (
+                "Persisted provider diagnostics show that part of collection was "
+                "blocked. No negative identity or relationship decision was inferred."
+            ),
+            "empty_message": (
+                "Treat the empty result as provider-limited, not as proof that no "
+                "qualifying relationship exists."
+            ),
+        },
+        "partial_completion": {
+            "title": "Collection completed partially",
+            "message": (
+                "Persisted events show incomplete collection. Available evidence "
+                "remains reviewable without converting missing work into a negative."
+            ),
+            "empty_message": (
+                "Treat the empty result as partial until the missing collection work "
+                "is resolved."
+            ),
+        },
+        "degraded_provider": {
+            "title": "Collection completed with degraded providers",
+            "message": (
+                "One or more persisted provider outcomes were unavailable or failed. "
+                "No ambiguous provider outcome became a relationship decision."
+            ),
+            "empty_message": (
+                "Treat the empty result as degraded rather than as a clean no-match."
+            ),
+        },
+    }
+    if status == "degraded":
+        presentation = {
+            "icon": "triangle-alert",
+            "empty_title": "No current qualifying graph",
+            **degraded_presentations.get(
+                reason, degraded_presentations["degraded_provider"]
+            ),
+        }
+    else:
+        presentation = presentations.get(status, presentations["no_scope"])
+
+    diagnostics = list(state.get("diagnostics") or [])
+    if status == "graph_ready" and "stale_snapshot" in diagnostics:
+        presentation = {
+            **presentation,
+            "message": (
+                f"{presentation['message']} The latest combined-case snapshot is "
+                "stale; refresh it before treating the graph as current."
+            ),
+        }
+
+    diagnostic_labels = {
+        "failed_collection": "Failed collection",
+        "partial_completion": "Partial completion",
+        "budget_limited": "Budget-limited",
+        "cancelled": "Cancelled",
+        "interrupted": "Interrupted",
+        "blocked_provider": "Blocked or rate-limited provider",
+        "degraded_provider": "Degraded provider",
+        "stale_snapshot": "Stale combined snapshot",
+    }
+    counts = state.get("counts") if isinstance(state.get("counts"), dict) else {}
+    metadata = []
+    if int(counts.get("active_jobs") or 0):
+        metadata.append(f"{int(counts['active_jobs'])} active job(s)")
+    pending_count = int(counts.get("pending_reviews") or 0)
+    uncertain_count = int(counts.get("uncertain_reviews") or 0)
+    if pending_count:
+        metadata.append(f"{pending_count} pending review(s)")
+    if uncertain_count:
+        metadata.append(f"{uncertain_count} uncertain review(s)")
+    latest_plan = state.get("latest_plan")
+    if isinstance(latest_plan, dict):
+        mode_label = latest_plan.get("mode_label")
+        route_count = int(latest_plan.get("effective_route_count") or 0)
+        if mode_label:
+            metadata.append(f"{mode_label} · {route_count} effective route(s)")
+    metadata.extend(
+        diagnostic_labels[code]
+        for code in diagnostics
+        if code in diagnostic_labels
+    )
+    if state.get("diagnostics_truncated"):
+        metadata.append("Bounded diagnostic window")
+    state.update(presentation, metadata=metadata)
+    return state
+
+
+def relationship_graph_is_ready(graph: Dict[str, Any], *, mode: str) -> bool:
+    """Keep pending or uncertain hypotheses from claiming graph readiness."""
+    nodes = list(graph.get("nodes") or [])
+    if mode == "persona":
+        return bool(nodes) and bool((graph.get("stats") or {}).get("claim_count"))
+    return any(
+        str(edge.get("review_status") or "approved")
+        not in {"pending", "uncertain", "rejected"}
+        for edge in list(graph.get("edges") or [])
+        if isinstance(edge, dict)
+    )
+
+
 @app.route("/relationships")
 def relationships_workspace():
     if case_store is None:
@@ -7753,9 +7994,20 @@ def relationships_workspace():
     for edge in graph.get("edges", []):
         if edge.get("field_name") and not edge.get("relationship_rule"):
             edge["label"] = field_display_label(edge["field_name"])
+    graph_ready = relationship_graph_is_ready(graph, mode=mode)
+    relationship_state = relationship_state_presentation(
+        case_store.build_relationship_state(
+            case_id=selected_case_id or None,
+            persona_id=selected_persona_id or None,
+            mode=mode,
+            graph_ready=graph_ready,
+        ),
+        mode=mode,
+    )
     return render_template(
         "relationships.html",
         graph=graph,
+        relationship_state=relationship_state,
         cases=cases,
         mode=mode,
         selected_case_id=selected_case_id,
