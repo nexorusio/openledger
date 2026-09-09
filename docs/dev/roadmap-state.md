@@ -81,9 +81,10 @@ configuration, five-result maximum, and ten-second timeout.
 ## Current P3 checkpoint
 
 P3a, P3b, and original P3c completed local integration checkpoints on
-2026-09-09. The user authorized original P3c; that authorization did not
-authorize the separate mandatory P3 usability extension, squash, merge,
-deployment, or production modification. All P3 work started from exact
+2026-09-09. The mandatory P3-extension assessment then completed, and the user
+separately authorized `P3X1` on 2026-09-09. That authorization did not authorize
+`P3X2`, `P3X3`, `P3X4`, squash, merge, deployment, or production modification.
+All P3 work started from exact
 production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
 `d771486cfbd9683f97bd59b76829d2eac495f72a`; none was built on the old P2
@@ -100,7 +101,9 @@ checkpoint has 21 commits with head
 tested and reviewed application tree at local commit
 `01fe35e3659d910b57ff11e8f156c6590b91f75f`. Consolidated P3 pull request
 #51 targets unchanged P2 `main` at
-`288fdd216c1a107113719cc1c850d9fc0dd47808`.
+`288fdd216c1a107113719cc1c850d9fc0dd47808`. The assessed extension baseline
+was remote head `b1d4734157e9818c5653f6a9b469ca15bc75014e`, tree
+`0b79843dbe2aad2d72e97ebd8cc255701f012ec0`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
@@ -204,9 +207,11 @@ production image build, and non-root image verification. GitHub's two review
 threads are resolved and no unresolved thread remains. Original P3 has
 therefore reached its pre-merge checkpoint. The mandatory read-only,
 programme-wide P3-extension assessment was then completed against the exact
-local tree above. Extension implementation still requires separate
-activity-code authorization; squash, merge, deployment, and production
-modification remain unauthorized.
+local tree above. `P3X1` subsequently completed at code checkpoint
+`704f499f7a28114358927786e371a3c6148f8a64`, tree
+`79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`. The remaining extension
+activities still require their own activity-code authorization; squash, merge,
+deployment, and production modification remain unauthorized.
 
 ## P3 -- Evidence correlation and governed pivots
 
@@ -239,10 +244,29 @@ Dependency: production-verified P2.
 | Extension state | Current record |
 |---|---|
 | Programme-wide impact assessment | Completed read-only on 2026-09-09 against local commit `01fe35e3659d910b57ff11e8f156c6590b91f75f`, tree `5bf3d1915961d506fd4fce7c05ecf93f7ba4087f`, after original P3 reached its pre-merge checkpoint |
-| Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; proposed only, not authorized |
-| Authorized implementation activity codes | None |
-| Implementation | Not authorized and not started |
-| Merge effect | Original P3 must not be squash-merged before the assessed extension activities are separately authorized, completed, tested with P3, and added to the same PR |
+| Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; `P3X1` is complete, while `P3X2`--`P3X4` remain proposed and unauthorized |
+| Authorized implementation activity codes | `P3X1` only |
+| Implementation | `P3X1` complete at code commit `704f499f7a28114358927786e371a3c6148f8a64`, tree `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`; `P3X2`--`P3X4` not authorized and not started |
+| Merge effect | Original P3 must not be squash-merged before `P3X2`--`P3X4` are separately authorized, completed, tested with P3, and added to the same PR |
+
+#### P3X1 completion checkpoint
+
+`P3X1` freezes the versioned unified-token and server-owned route-plan
+contract. It adds bounded deterministic classification and type-specific
+duplicate keys, public/private URL safety, immutable requested/effective/
+skipped route records, Quick-to-`focused` and Full-to-`exhaustive` mapping,
+legacy form/API/spec compatibility, and persistence support for an authorized
+non-username route. It does not redesign the template or activate a new user
+journey.
+
+The focused P3X1 contract set passed 80 tests. The unchanged original-P3
+regression set passed 347 tests. The complete current offline gate was covered
+in bounded batches and passed 1,586 tests with 9 skips and 24 slow/live-network
+tests explicitly deselected. Python compilation, critical Flake8, JSON-schema
+parsing, Black for the new contract test, and `git diff --check` passed. No
+database migration, dependency, lockfile, service, paid provider, production
+data, deployment, or production change was introduced. `P3X2` is the next
+serial activity in the assessed plan, but remains unauthorized.
 
 #### Assessment finding and fixed mode mapping
 
