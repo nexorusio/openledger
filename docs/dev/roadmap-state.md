@@ -85,14 +85,13 @@ production-verified commit
 checkout.
 
 The phase integration branch is `codex/p3-evidence-correlation-pivots` in
-`/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its original-P3c coordinator
-checkpoint before the final documentation and review update is
-`6bcef56cdb869e3daed1fbbc5cd50ed2ff8a6f97`, tree
-`f7ad471e0696d4a2b92b87bc31158646af362915`.
+`/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its original-P3c review-fix
+checkpoint is `44281616752bc38b29b76dac7a40bb6470381a2b`, tree
+`64bfb8c84c0e4d333467500527f95267395fd83f`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | Phase branch and worktree above | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a, P3b, and original P3c integrated locally; P3c code checkpoint `6bcef56cdb869e3daed1fbbc5cd50ed2ff8a6f97` |
+| Coordinator | Phase branch and worktree above | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a, P3b, and original P3c integrated locally; P3c review-fix checkpoint `44281616752bc38b29b76dac7a40bb6470381a2b` |
 | P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
 | P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
 | P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
@@ -103,7 +102,7 @@ checkpoint before the final documentation and review update is
 | P3c policy worker | `codex/p3c-governed-pivot-policy` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-policy` | Pure deterministic governed-pivot policy and unit tests | Source `8c8d985501d23dbd48b7557a235fad83bb25a13b`; integrated as `0634ca5` |
 | P3c acceptance worker | `codex/p3c-governed-pivot-acceptance` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-acceptance` | Black-box origin, scope, budget, audit, review, cancellation, rerun, and failure acceptance | Source `297363aea6d44d378e67c92de16172577cd00f3e`; integrated as `2db5a2e` |
 | P3c operations worker | `codex/p3c-governed-pivot-ops` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-ops` | Governed-pivot policy, operations, rollback, cost, and release documentation | Source `e3666ca062f0ab3cb8b2c06d6ddfd4b5733b6b4d`; integrated as `5233a75` |
-| P3c reviewer | Fresh read-only review of exact committed phase tree | Policy, security, runtime, persistence, compatibility, tests, operations, and cost boundaries | Review of `6bcef56` found two release blockers: missing explicit per-pivot purpose/scope authorization and deployment defaults that enabled the flag; both are resolved in the current verified worktree, with an exact-commit re-review pending; no edit authority |
+| P3c reviewer | Fresh read-only review of exact committed phase tree | Policy, security, runtime, persistence, compatibility, tests, operations, and cost boundaries | Review of `6bcef56` found two release blockers: missing explicit per-pivot purpose/scope authorization and deployment defaults that enabled the flag; both are resolved and verified at `4428161`, with an exact-commit re-review pending; no edit authority |
 
 P3a froze the provider-neutral, case-scoped evidence contract. P3b now adds a
 bounded deterministic correlation engine and a strict adapter for immutable P2
