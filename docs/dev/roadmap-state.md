@@ -82,10 +82,11 @@ configuration, five-result maximum, and ten-second timeout.
 
 P3a, P3b, and original P3c completed local integration checkpoints on
 2026-09-09. The mandatory P3-extension assessment then completed, and the user
-separately authorized `P3X1`, `P3X2`, and then `P3X3` on 2026-09-09. All three
-activities are complete at isolated code checkpoints. Those authorizations did
-not authorize `P3X4`, squash, merge, deployment, production modification, or
-publication of the local P3X3 commits.
+separately authorized `P3X1`, `P3X2`, `P3X3`, and `P3X4` on 2026-09-09.
+P3X1--P3X3 are complete and published. P3X4 implementation, its local
+regression gate, and code-checkpoint publication CI are complete; roadmap/PR
+publication and the final review gate remain in progress. No authorization has
+been given for squash, merge, deployment, or production modification.
 All P3 work started from exact
 production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
@@ -101,12 +102,16 @@ review-remediation publication was built directly on documentation head
 `8c8a1a179d648aa1e64e9c6567cbcead10e95bc9`, which had 26 commits over the
 unchanged P2 base. The connector-generated P3X2 code checkpoint is
 `00c01261552d3009ca03dc60f87ebdc579096fb8`, tree
-`8b790d6ca6fe93082c00656e9696097a4a5a9216`. The remote documentation head is
-`d5d47f9fbb1f037345e4da4e80ed9892cc6ae553`, tree
-`a0b517dd03b3af9ee2b2d512174368e3909ca989`. P3X3 is committed locally on top
-of that remote head at code commit
+`8b790d6ca6fe93082c00656e9696097a4a5a9216`. The authoritative P3X3 code
+checkpoint is
 `f355917ca59b21a2d2b1b0808d1b91b5be305205`, tree
-`cca70522e35b7931f12626775e2ffdbe5e7bae70`; it has not been pushed. The
+`cca70522e35b7931f12626775e2ffdbe5e7bae70`, followed by roadmap commit
+`4a579e7dcbe5a521e54df4afb06daf61ba640562`, tree
+`71253877e6368bf00decfbe68738e2f9a77b0c64`. The published P3X4 code
+checkpoint is `7756a9816abef2fb498e76cfeb23afe4f4978a69`, tree
+`31cb69f2445a27bd324ab5dd70041634a7fccc35`. Local code commit
+`44af93857ecf549ebbf458844ad99b174d47d9f9` has the identical tested tree and
+is superseded only as a publication identifier. The
 independently reviewed original-P3c checkpoint is
 `aae6891a7883905424a1405bcfc672cbbad19c4e`, tree
 `e85501c0d2588722b763838b900469955d351636`. The consolidated remote branch
@@ -123,7 +128,7 @@ was remote head `b1d4734157e9818c5653f6a9b469ca15bc75014e`, tree
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | Phase branch and worktree above | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a, P3b, and original P3c integrated locally; independently reviewed P3c checkpoint `aae6891a7883905424a1405bcfc672cbbad19c4e`; connector-generated P3X2 review fix `00c01261552d3009ca03dc60f87ebdc579096fb8` and local P3X3 code checkpoint `f355917ca59b21a2d2b1b0808d1b91b5be305205` are tested; P3X3 publication remains separately gated |
+| Coordinator | Phase branch and isolated P3X4 worktree | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a--P3c and P3X1--P3X3 are published; P3X4 code checkpoint `7756a9816abef2fb498e76cfeb23afe4f4978a69`, tree `31cb69f2445a27bd324ab5dd70041634a7fccc35`, is published, locally tested, and green in code-checkpoint CI; roadmap/PR publication and final review are in progress |
 | P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
 | P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
 | P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
@@ -226,9 +231,10 @@ programme-wide P3-extension assessment was then completed against the exact
 local tree above. `P3X1` subsequently completed at code checkpoint
 `704f499f7a28114358927786e371a3c6148f8a64`, tree
 `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`. `P3X2` and `P3X3` subsequently
-completed at separately authorized checkpoints. `P3X4` still requires its exact
-activity-code authorization; P3X3 publication, squash, merge, deployment, and
-production modification remain unauthorized.
+completed at separately authorized checkpoints. `P3X4` was then separately
+authorized; its implementation, local regression gate, and code-checkpoint CI
+are complete, with roadmap/PR publication and final review still in progress.
+Squash, merge, deployment, and production modification remain unauthorized.
 
 ## P3 -- Evidence correlation and governed pivots
 
@@ -261,10 +267,10 @@ Dependency: production-verified P2.
 | Extension state | Current record |
 |---|---|
 | Programme-wide impact assessment | Completed read-only on 2026-09-09 against local commit `01fe35e3659d910b57ff11e8f156c6590b91f75f`, tree `5bf3d1915961d506fd4fce7c05ecf93f7ba4087f`, after original P3 reached its pre-merge checkpoint |
-| Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; `P3X1` through `P3X3` are complete, while `P3X4` remains proposed and unauthorized |
-| Authorized implementation activity codes | `P3X1`, followed separately by `P3X2` and `P3X3` |
-| Implementation | `P3X1` complete at code commit `704f499f7a28114358927786e371a3c6148f8a64`, tree `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`; P3X2 main implementation `41bc787f8958a5ccac6a9bb8d610dbb092e8ea47`, tree `a194dada96a7616ae411641a060b1f03a09e637c`, is superseded by tested connector-generated review-fix code commit `00c01261552d3009ca03dc60f87ebdc579096fb8`, tree `8b790d6ca6fe93082c00656e9696097a4a5a9216`; P3X3 is complete locally at code commit `f355917ca59b21a2d2b1b0808d1b91b5be305205`, tree `cca70522e35b7931f12626775e2ffdbe5e7bae70`; `P3X4` is not authorized or started |
-| Merge effect | Original P3 must not be squash-merged before the local P3X3 commits are authorized for publication and `P3X4` is separately authorized, completed, tested with P3, and added to the same PR |
+| Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; all four are separately authorized and implemented |
+| Authorized implementation activity codes | `P3X1`, followed separately by `P3X2`, `P3X3`, and `P3X4` |
+| Implementation | `P3X1` complete at code commit `704f499f7a28114358927786e371a3c6148f8a64`, tree `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`; P3X2 authoritative review-fix code commit `00c01261552d3009ca03dc60f87ebdc579096fb8`, tree `8b790d6ca6fe93082c00656e9696097a4a5a9216`; P3X3 authoritative code commit `f355917ca59b21a2d2b1b0808d1b91b5be305205`, tree `cca70522e35b7931f12626775e2ffdbe5e7bae70`; P3X4 published code commit `7756a9816abef2fb498e76cfeb23afe4f4978a69`, tree `31cb69f2445a27bd324ab5dd70041634a7fccc35`, with all applicable code-checkpoint CI passed |
+| Merge effect | Original P3 and the extension are present in PR #51, but squash merge remains human-controlled and unauthorized until the P3X4 roadmap/PR publication, final review, and manual keyboard/mobile acceptance are complete |
 
 #### P3X1 completion checkpoint
 
@@ -361,7 +367,7 @@ marks the shared graph ready; pending AI relationship hypotheses do not. The
 exact-match rule, projection, graph schema, vis-network version, layouts,
 filters, controls, navigation, and interactions remain unchanged.
 
-The exact local P3X3 code checkpoint is
+The authoritative published P3X3 code checkpoint is
 `f355917ca59b21a2d2b1b0808d1b91b5be305205`, tree
 `cca70522e35b7931f12626775e2ffdbe5e7bae70`. The final post-fix focused gate
 passed 18 relationship-state store, route, and template tests, and the exact
@@ -379,8 +385,52 @@ P3X3 changed only the relationship aggregate/store logic, relationship route,
 relationship template and minimal status styling, plus focused case-store and
 persistent-job tests. It adds no migration, dependency, lockfile, service,
 queue, provider, paid infrastructure, production data, deployment, or
-production change. The local commits have not been pushed. `P3X4` remains the
-only proposed P3 extension activity and requires exact separate authorization.
+production change. It was published with roadmap head
+`4a579e7dcbe5a521e54df4afb06daf61ba640562`, tree
+`71253877e6368bf00decfbe68738e2f9a77b0c64`; applicable CI passed and all three
+review threads remained resolved. `P3X4` was subsequently separately
+authorized and is recorded below.
+
+#### P3X4 integration checkpoint
+
+`P3X4` completes the shared application/store/worker integration without
+changing persisted execution contracts. The canonical `focused` and
+`exhaustive` values are now presented consistently as **Quick Scan** and
+**Full Scan** in live progress, results, and history. The separate app-only
+`OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED` flag defaults off and enables
+the unified builder only for explicit true values. Missing, false, empty, and
+malformed values restore the legacy typed builder; the unified preview and
+submission paths fail closed. The flag is absent from the worker environment,
+so rollout and rollback do not reinterpret queued jobs, stored plans, evidence,
+review history, or graph state.
+
+The published code checkpoint is
+`7756a9816abef2fb498e76cfeb23afe4f4978a69`, tree
+`31cb69f2445a27bd324ab5dd70041634a7fccc35`. The superseded local publication
+hash is `44af93857ecf549ebbf458844ad99b174d47d9f9` with the identical tree. Changed
+surfaces are the web application, legacy and live templates, Compose/default
+environment/installer configuration, profile-discovery and governed-pivot
+operations documentation, and focused web/persistence/deployment tests. No
+migration, dependency, lockfile, worker service, queue, provider, paid
+infrastructure, production data, deployment, graph projection, relationship
+logic, graph schema, or vis-network change was introduced.
+
+The focused rollout/label gate passed 11 tests. The combined web, persistent-job,
+and deployment suites passed 241 tests. The complete offline repository gate
+passed 1,614 tests with 9 intentional skips and 25 slow/live-network tests
+explicitly deselected; the legacy running-status case separately passed against
+a fresh initialized local SQLite database. Python compilation, critical Flake8,
+Alembic head inspection (`b3e9d7c4a610`), and `git diff --check` passed.
+
+The connected browser could not reach the workspace loopback server, so manual
+keyboard and mobile acceptance remains a human pre-merge action; no TLS or
+network control was bypassed. The local environment also lacked Docker and a
+disposable PostgreSQL endpoint. Code-checkpoint CI provisioned PostgreSQL 17
+and passed Alembic upgrade/check, all PostgreSQL integrity tests, Compose
+validation, production-image build, and non-root image verification. Python
+3.10--3.14 coverage, minimal installation, CodeQL, and the governed-source audit
+also passed; upstream integrity was intentionally skipped. Squash, merge,
+deployment, and production modification remain unauthorized.
 
 #### Assessment finding and fixed mode mapping
 
