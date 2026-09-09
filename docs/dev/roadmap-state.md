@@ -75,21 +75,38 @@ configuration, five-result maximum, and ten-second timeout.
 
 ## Current P3 checkpoint
 
-P3a is authorized and in progress as of 2026-09-09. P3b and P3c are not
-authorized. All P3a work starts from exact production-verified commit
+P3a completed at a safe integration checkpoint on 2026-09-09. P3b and P3c
+are not authorized. All P3 work started from exact production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
 `d771486cfbd9683f97bd59b76829d2eac495f72a`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | `codex/p3-evidence-correlation-pivots` in `/workspace/scratch/a7cc4d9992b8/openledger-p3` | Architecture freeze, integration, dependency decisions, review, and final P3a testing | P3a authorized; work in progress |
-| Contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | New correlation contract module and schema; sole owner of the shared contract | Assigned; completion and tests not yet recorded |
-| Acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Black-box fixtures and acceptance tests for equivalence, conflicts, failure taxonomy, provenance, and reruns | Assigned; completion and tests not yet recorded |
-| Continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | `docs/dev/multi-agent-runbook.md` and this roadmap state | Documentation content prepared for validation and coordinator integration; worker result is recorded separately |
+| Coordinator | `codex/p3-evidence-correlation-pivots` in `/workspace/scratch/a7cc4d9992b8/openledger-p3` | Architecture freeze, integration, dependency decisions, review, and final P3a testing | P3a integrated and verified at `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` before this state update |
+| Contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | New correlation contract module and schema; sole owner of the shared contract | Complete; source commit `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
+| Acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Black-box fixtures and acceptance tests for equivalence, conflicts, failure taxonomy, provenance, and reruns | Complete; source commit `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
+| Continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | `docs/dev/multi-agent-runbook.md` and this roadmap state | Complete; source commit `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1` |
 
-No P3 migration, production change, pull request, remote-head SHA, CI result, or
-release result is recorded at this checkpoint. The next authorization after
-completed P3a is **P3b**.
+P3a froze a provider-neutral, case-scoped correlation contract with canonical
+profile identities and URLs, explicit source and immutable-snapshot lineage,
+eight distinct evidence outcomes, four evidence-relationship kinds,
+case-bound relationship endpoints, bounded explainable confidence metadata,
+and stable observation, cluster, and relationship identifiers. It exposes no
+automatic-approval surface and implements no correlation engine, persistence,
+pivot, UI, migration, or deployment behavior.
+
+Integrated verification recorded 142 passing P3a contract and acceptance
+tests plus 72 passing available synchronous P2 regression tests. Thirty P2
+async tests could not execute in the existing temporary environment because
+`pytest-asyncio` was unavailable; they reported the same missing-plugin error
+and no assertion failure. Black formatting, critical Flake8 checks, Python
+compilation, JSON/schema parsing, coordinator smoke assertions, and committed
+range whitespace checks passed. Full dependency-complete regression remains a
+P3c release-gate requirement.
+
+No P3 migration, production change, pull request, remote-head SHA, CI result,
+or release result is recorded at this checkpoint. The exact next authorization
+is **P3b**.
 
 ## P3 -- Evidence correlation and governed pivots
 
