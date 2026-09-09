@@ -23,6 +23,7 @@ from maigret.web.governed_pivots import (
 CASE_ID = "case-01"
 PERSONA_ID = "persona-01"
 ACTOR = "analyst.one"
+PURPOSE = "Corroborate this approved identity within the assigned case."
 
 
 def _claim(field_name, value, **updates):
@@ -41,6 +42,8 @@ def _plan(claim, **updates):
         "case_id": CASE_ID,
         "persona_id": PERSONA_ID,
         "requested_by": ACTOR,
+        "purpose": PURPOSE,
+        "scope_confirmed": True,
     }
     arguments.update(updates)
     return build_governed_pivot_plan(claim, **arguments)
@@ -140,6 +143,13 @@ def test_source_claim_identity_and_request_scope_are_retained():
     assert plan["case_id"] == CASE_ID
     assert plan["persona_id"] == PERSONA_ID
     assert plan["requested_by"] == ACTOR
+    assert plan["governance"] == {
+        "declared_purpose": PURPOSE,
+        "scope_confirmed": True,
+        "confirmed_by": ACTOR,
+        "authorization_basis": "analyst_confirmed_lawful_scope",
+        "external_ai_consent": False,
+    }
     assert plan["source_claim"] == {
         "id": "claim-01",
         "field_name": "full_name",
@@ -293,6 +303,8 @@ def test_malformed_ids_are_rejected(field_name, value):
         "case_id": CASE_ID,
         "persona_id": PERSONA_ID,
         "requested_by": ACTOR,
+        "purpose": PURPOSE,
+        "scope_confirmed": True,
     }
     if field_name == "source_claim.id":
         claim["id"] = value
@@ -310,6 +322,21 @@ def test_malformed_ids_are_rejected(field_name, value):
 def test_request_actor_is_mandatory_and_bounded(requested_by):
     with pytest.raises(GovernedPivotPolicyError, match="requested_by"):
         _plan(_claim("full_name", "Alice Example"), requested_by=requested_by)
+
+
+@pytest.mark.parametrize("purpose", [None, "", "   ", 7, "case\x00purpose"])
+def test_declared_purpose_is_mandatory_and_bounded(purpose):
+    with pytest.raises(GovernedPivotPolicyError, match="purpose"):
+        _plan(_claim("full_name", "Alice Example"), purpose=purpose)
+
+
+@pytest.mark.parametrize("scope_confirmed", [False, None, 1, "true"])
+def test_lawful_scope_requires_an_explicit_boolean_confirmation(scope_confirmed):
+    with pytest.raises(GovernedPivotPolicyError, match="confirm|scope"):
+        _plan(
+            _claim("full_name", "Alice Example"),
+            scope_confirmed=scope_confirmed,
+        )
 
 
 @pytest.mark.parametrize(

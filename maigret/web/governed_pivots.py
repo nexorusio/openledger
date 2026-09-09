@@ -46,13 +46,18 @@ _CONTROLLED_FIELDS = frozenset(
         "automaticapproval",
         "autoapprovalallowed",
         "autoapproved",
+        "authorization",
         "budget",
         "budgets",
+        "consent",
         "depth",
+        "declaredpurpose",
         "executionbudget",
         "executionmode",
+        "externalaiconsent",
         "featureflags",
         "featuresnapshot",
+        "governance",
         "inputdepth",
         "maxdepth",
         "maxrequests",
@@ -69,12 +74,14 @@ _CONTROLLED_FIELDS = frozenset(
         "planid",
         "pivotkind",
         "policyversion",
+        "purpose",
         "requestbudget",
         "requestedby",
         "requireshumanreview",
         "resultreviewstatus",
         "serverowned",
         "sourcebudget",
+        "scopeconfirmed",
         "sourceroutes",
         "timeout",
         "timeoutseconds",
@@ -231,6 +238,8 @@ def build_governed_pivot_plan(
     case_id: str,
     persona_id: str,
     requested_by: str,
+    purpose: str,
+    scope_confirmed: bool,
     depth: int = 0,
 ) -> Dict[str, Any]:
     """Build one deterministic, case-scoped pivot plan without network access.
@@ -248,6 +257,11 @@ def build_governed_pivot_plan(
     normalized_persona_id = _identifier(persona_id, "persona_id")
     claim_id = _identifier(source_claim.get("id"), "source_claim.id")
     actor = _actor(requested_by)
+    declared_purpose = " ".join(_text(purpose, "purpose", maximum=2_000).split())
+    if scope_confirmed is not True:
+        raise GovernedPivotPolicyError(
+            "The analyst must confirm lawful purpose and authorized scope"
+        )
     _matches_scope(source_claim, "case_id", normalized_case_id)
     _matches_scope(source_claim, "persona_id", normalized_persona_id)
 
@@ -286,6 +300,13 @@ def build_governed_pivot_plan(
         "case_id": normalized_case_id,
         "persona_id": normalized_persona_id,
         "requested_by": actor,
+        "governance": {
+            "declared_purpose": declared_purpose,
+            "scope_confirmed": True,
+            "confirmed_by": actor,
+            "authorization_basis": "analyst_confirmed_lawful_scope",
+            "external_ai_consent": False,
+        },
         "source_claim": {
             "id": claim_id,
             "field_name": field_name,

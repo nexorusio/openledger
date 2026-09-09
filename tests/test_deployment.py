@@ -69,14 +69,14 @@ def test_profile_search_deployment_is_fail_closed_with_runtime_parity():
     assert "../runtime/secrets:/app/runtime/secrets:ro" in worker
     governed_switch = (
         "OPENLEDGER_GOVERNED_PIVOTS_ENABLED: "
-        '"${OPENLEDGER_GOVERNED_PIVOTS_ENABLED:-true}"'
+        '"${OPENLEDGER_GOVERNED_PIVOTS_ENABLED:-false}"'
     )
     assert governed_switch in app
     assert governed_switch in worker
-    assert "OPENLEDGER_GOVERNED_PIVOTS_ENABLED=true" in (
+    assert "OPENLEDGER_GOVERNED_PIVOTS_ENABLED=false" in (
         REPOSITORY_ROOT / "deploy" / ".env.example"
     ).read_text(encoding="utf-8")
-    assert "OPENLEDGER_GOVERNED_PIVOTS_ENABLED='true'" in (
+    assert "OPENLEDGER_GOVERNED_PIVOTS_ENABLED='false'" in (
         REPOSITORY_ROOT / "deploy" / "install.sh"
     ).read_text(encoding="utf-8")
 

@@ -10,8 +10,9 @@ PROFILE_FLAGS = (
     "OPENLEDGER_USER_SCANNER_DISCOVERY_ENABLED",
     "OPENLEDGER_ENRICHMENT_PROVIDERS_ENABLED",
     "OPENLEDGER_PROVIDER_CIRCUIT_BREAKERS_ENABLED",
-    "OPENLEDGER_GOVERNED_PIVOTS_ENABLED",
 )
+
+GOVERNED_PIVOT_FLAG = "OPENLEDGER_GOVERNED_PIVOTS_ENABLED"
 
 
 def test_production_compose_passes_default_on_flags_to_app_and_worker():
@@ -26,6 +27,13 @@ def test_production_compose_passes_default_on_flags_to_app_and_worker():
         assert expected in app_section
         assert expected in worker_section
         assert compose.count(expected) == 2
+
+
+def test_governed_pivot_flag_requires_explicit_deployment_enablement():
+    compose = (ROOT / "deploy" / "compose.yaml").read_text(encoding="utf-8")
+    expected = f'{GOVERNED_PIVOT_FLAG}: "${{{GOVERNED_PIVOT_FLAG}:-false}}"'
+
+    assert compose.count(expected) == 2
 
 
 def test_investigation_builder_uses_canonical_mode_names_and_fixed_budgets():

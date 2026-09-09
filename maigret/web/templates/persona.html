@@ -126,6 +126,14 @@
     {% if governed_pivots_enabled and claim.review_status == 'approved' and claim.field_name == 'social_account' %}
     <form method="POST" action="{{ url_for('pivot_verified_profile_claim', claim_id=claim.id) }}" class="affiliation-investigation-action">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>
+            <span>Follow-up purpose</span>
+            <input type="text" name="pivot_purpose" maxlength="2000" placeholder="State the lawful case purpose for this follow-up" required>
+        </label>
+        <label class="affiliation-domain-toggle">
+            <input type="checkbox" name="pivot_scope_confirmed" value="1" required>
+            <span>I confirm this public-source follow-up is permitted by the applicable authorization or consent and remains within the stated case purpose.</span>
+        </label>
         <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="scan-search"></i> Investigate verified link</button>
         <small>Runs one bounded, same-case follow-up from this approved public profile. New assertions remain pending review.</small>
     </form>
@@ -199,6 +207,11 @@
             {% else %}
             <form method="POST" action="{{ url_for('enrich_identity_claim', claim_id=approved_full_name.id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="text" name="pivot_purpose" maxlength="2000" placeholder="Lawful follow-up purpose" aria-label="Lawful follow-up purpose" required>
+                <label class="affiliation-domain-toggle">
+                    <input type="checkbox" name="pivot_scope_confirmed" value="1" required>
+                    <span>Permitted by the applicable authorization or consent and within the case purpose</span>
+                </label>
                 <button type="submit" class="btn btn-outline-secondary"><i data-lucide="scan-search"></i> Enrich confirmed name</button>
             </form>
             {% endif %}
@@ -244,6 +257,11 @@
                 <input type="hidden" name="source_claim_id" value="{{ approved_full_name.id }}">
                 <input type="hidden" name="page_id" value="{{ candidate.page_id }}">
                 <span><strong>{{ candidate.title }}</strong><small>{{ candidate.extract | truncate(220) }}</small></span>
+                <input type="text" name="pivot_purpose" maxlength="2000" placeholder="Lawful follow-up purpose" aria-label="Lawful follow-up purpose" required>
+                <label class="affiliation-domain-toggle">
+                    <input type="checkbox" name="pivot_scope_confirmed" value="1" required>
+                    <span>Permitted by the applicable authorization or consent and within the case purpose</span>
+                </label>
                 <button type="submit" class="btn btn-sm btn-outline-secondary">Use this biography</button>
             </form>
             {% endfor %}

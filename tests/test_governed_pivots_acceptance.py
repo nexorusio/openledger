@@ -89,6 +89,26 @@ def _approved_social_claim(
     return persona_id, case_id, claim["id"]
 
 
+def _authorized_pivot(store, persona_id, claim_id, requested_by):
+    return store.create_verified_link_pivot(
+        persona_id,
+        claim_id,
+        requested_by,
+        purpose="Corroborate this approved identity within the assigned case.",
+        scope_confirmed=True,
+    )
+
+
+def _authorized_identity_enrichment(store, persona_id, claim_id, **kwargs):
+    return store.create_identity_enrichment(
+        persona_id,
+        claim_id,
+        purpose="Corroborate this approved identity within the assigned case.",
+        scope_confirmed=True,
+        **kwargs,
+    )
+
+
 def _replace_claim_url(store, claim_id, url):
     """Model an unsafe legacy row so the public pivot boundary must reject it."""
     with store.engine.begin() as connection:
@@ -123,7 +143,8 @@ def test_verified_link_pivot_queues_auditable_focused_refresh_in_same_case(
     monkeypatch.setenv("OPENLEDGER_TEST_ONLY_SECRET", "must-not-be-persisted")
     persona_id, case_id, claim_id = _approved_social_claim(store)
 
-    job_id = store.create_verified_link_pivot(
+    job_id = _authorized_pivot(
+        store,
         persona_id,
         claim_id,
         "pivot.analyst",
@@ -150,6 +171,15 @@ def test_verified_link_pivot_queues_auditable_focused_refresh_in_same_case(
     assert plan["persona_id"] == persona_id
     assert plan["case_id"] == case_id
     assert plan["requested_by"] == "pivot.analyst"
+    assert plan["governance"] == {
+        "declared_purpose": (
+            "Corroborate this approved identity within the assigned case."
+        ),
+        "scope_confirmed": True,
+        "confirmed_by": "pivot.analyst",
+        "authorization_basis": "analyst_confirmed_lawful_scope",
+        "external_ai_consent": False,
+    }
     assert plan["source_claim"] == {
         "id": claim_id,
         "field_name": "social_account",
@@ -218,7 +248,8 @@ def test_verified_link_pivot_requires_an_approved_source_claim(store, review_sta
         )
 
     with pytest.raises(ValueError, match="approved|verified"):
-        store.create_verified_link_pivot(
+        _authorized_pivot(
+            store,
             persona_id,
             claim["id"],
             "pivot.analyst",
@@ -268,7 +299,8 @@ def test_verified_link_pivot_rejects_a_claim_from_another_persona_in_same_case(
     store.review_claim(bob_claim["id"], "approved", "source.reviewer")
 
     with pytest.raises((KeyError, ValueError)):
-        store.create_verified_link_pivot(
+        _authorized_pivot(
+            store,
             personas["alice"],
             bob_claim["id"],
             "pivot.analyst",
@@ -285,7 +317,8 @@ def test_verified_link_pivot_rejects_a_claim_from_another_case(store):
     assert bob_id != alice_id
 
     with pytest.raises((KeyError, ValueError)):
-        store.create_verified_link_pivot(
+        _authorized_pivot(
+            store,
             alice_id,
             bob_claim,
             "pivot.analyst",
@@ -310,7 +343,8 @@ def test_verified_link_pivot_rejects_unsupported_arbitrary_or_private_urls(
     _replace_claim_url(store, claim_id, unsafe_url)
 
     with pytest.raises(ValueError, match="canonical|public|supported|verified"):
-        store.create_verified_link_pivot(
+        _authorized_pivot(
+            store,
             persona_id,
             claim_id,
             "pivot.analyst",
@@ -322,7 +356,28 @@ def test_verified_link_pivot_requires_an_identified_actor(store, requested_by):
     persona_id, _case_id, claim_id = _approved_social_claim(store)
 
     with pytest.raises(ValueError, match="actor|requester|required"):
-        store.create_verified_link_pivot(persona_id, claim_id, requested_by)
+        _authorized_pivot(store, persona_id, claim_id, requested_by)
+
+
+def test_verified_link_pivot_requires_purpose_and_scope_confirmation(store):
+    persona_id, _case_id, claim_id = _approved_social_claim(store)
+
+    with pytest.raises(ValueError, match="purpose"):
+        store.create_verified_link_pivot(
+            persona_id,
+            claim_id,
+            "pivot.analyst",
+            purpose="",
+            scope_confirmed=True,
+        )
+    with pytest.raises(ValueError, match="confirm|scope"):
+        store.create_verified_link_pivot(
+            persona_id,
+            claim_id,
+            "pivot.analyst",
+            purpose="Authorized case follow-up",
+            scope_confirmed=False,
+        )
 
 
 def test_verified_link_pivot_kill_switch_is_non_destructive(store, monkeypatch):
@@ -331,7 +386,8 @@ def test_verified_link_pivot_kill_switch_is_non_destructive(store, monkeypatch):
     monkeypatch.setenv("OPENLEDGER_GOVERNED_PIVOTS_ENABLED", "false")
 
     with pytest.raises(ValueError, match="disabled|policy"):
-        store.create_verified_link_pivot(
+        _authorized_pivot(
+            store,
             persona_id,
             claim_id,
             "pivot.analyst",
@@ -348,7 +404,8 @@ def test_verified_link_pivot_rejects_an_active_case_conflict(store):
     store.repeat_persona_investigation(persona_id)
 
     with pytest.raises(ValueError, match="active investigation"):
-        store.create_verified_link_pivot(
+        _authorized_pivot(
+            store,
             persona_id,
             claim_id,
             "pivot.analyst",
@@ -357,7 +414,8 @@ def test_verified_link_pivot_rejects_an_active_case_conflict(store):
 
 def test_verified_link_pivot_cannot_repeat_the_same_completed_origin(store):
     persona_id, _case_id, claim_id = _approved_social_claim(store)
-    first_id = store.create_verified_link_pivot(
+    first_id = _authorized_pivot(
+        store,
         persona_id,
         claim_id,
         "pivot.analyst",
@@ -374,7 +432,8 @@ def test_verified_link_pivot_cannot_repeat_the_same_completed_origin(store):
     )
 
     with pytest.raises(ValueError, match="already|duplicate|limit|budget"):
-        store.create_verified_link_pivot(
+        _authorized_pivot(
+            store,
             persona_id,
             claim_id,
             "pivot.analyst",
@@ -383,7 +442,8 @@ def test_verified_link_pivot_cannot_repeat_the_same_completed_origin(store):
 
 def test_verified_link_pivot_does_not_permit_unbounded_depth(store):
     persona_id, _case_id, source_claim_id = _approved_social_claim(store)
-    first_id = store.create_verified_link_pivot(
+    first_id = _authorized_pivot(
+        store,
         persona_id,
         source_claim_id,
         "pivot.analyst",
@@ -405,7 +465,8 @@ def test_verified_link_pivot_does_not_permit_unbounded_depth(store):
     store.review_claim(child_claim["id"], "approved", "source.reviewer")
 
     with pytest.raises(ValueError, match="depth|expansion|pivot"):
-        store.create_verified_link_pivot(
+        _authorized_pivot(
+            store,
             persona_id,
             child_claim["id"],
             "pivot.analyst",
@@ -416,7 +477,8 @@ def test_verified_link_pivot_rerun_preserves_decisions_and_new_claims_pending(
     store,
 ):
     persona_id, _case_id, source_claim_id = _approved_social_claim(store)
-    job_id = store.create_verified_link_pivot(
+    job_id = _authorized_pivot(
+        store,
         persona_id,
         source_claim_id,
         "pivot.analyst",
@@ -447,7 +509,8 @@ def test_verified_link_pivot_rerun_preserves_decisions_and_new_claims_pending(
 
 def test_verified_link_pivot_ambiguous_failure_is_not_negative_evidence(store):
     persona_id, _case_id, source_claim_id = _approved_social_claim(store)
-    job_id = store.create_verified_link_pivot(
+    job_id = _authorized_pivot(
+        store,
         persona_id,
         source_claim_id,
         "pivot.analyst",
@@ -479,7 +542,8 @@ def test_verified_link_pivot_ambiguous_failure_is_not_negative_evidence(store):
 
 def test_verified_link_pivot_can_be_cancelled_before_execution(store):
     persona_id, _case_id, claim_id = _approved_social_claim(store)
-    job_id = store.create_verified_link_pivot(
+    job_id = _authorized_pivot(
+        store,
         persona_id,
         claim_id,
         "pivot.analyst",
@@ -499,7 +563,8 @@ def test_verified_link_pivot_can_be_cancelled_before_execution(store):
 
 def test_queued_pivot_is_revalidated_against_the_current_review_decision(store):
     persona_id, _case_id, claim_id = _approved_social_claim(store)
-    job_id = store.create_verified_link_pivot(
+    job_id = _authorized_pivot(
+        store,
         persona_id,
         claim_id,
         "pivot.analyst",
@@ -524,10 +589,12 @@ def test_confirmed_name_enrichment_remains_approved_name_only_and_pending(
     name = _claim(store, persona_id, "full_name", "Alice Example")
 
     with pytest.raises(ValueError, match="approved full name"):
-        store.create_identity_enrichment(persona_id, social["id"])
+        _authorized_identity_enrichment(store, persona_id, social["id"])
 
     store.review_claim(name["id"], "approved", "identity.reviewer")
-    enrichment_id = store.create_identity_enrichment(persona_id, name["id"])
+    with pytest.raises(ValueError, match="purpose"):
+        store.create_identity_enrichment(persona_id, name["id"])
+    enrichment_id = _authorized_identity_enrichment(store, persona_id, name["id"])
     store.claim_next("worker:identity-enrichment")
     store.sync_identity_enrichment(
         enrichment_id,

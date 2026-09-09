@@ -7625,6 +7625,8 @@ def enrich_identity_claim(claim_id):
             claim['persona_id'],
             claim_id,
             requested_by=session.get('username') or 'local-operator',
+            purpose=request.form.get('pivot_purpose', ''),
+            scope_confirmed='pivot_scope_confirmed' in request.form,
         )
     except KeyError:
         flash('That Persona no longer exists.', 'danger')
@@ -7659,6 +7661,8 @@ def pivot_verified_profile_claim(claim_id):
             claim['persona_id'],
             claim_id,
             session.get('username') or 'local-operator',
+            purpose=request.form.get('pivot_purpose', ''),
+            scope_confirmed='pivot_scope_confirmed' in request.form,
         )
     except (KeyError, ValueError) as error:
         flash(str(error), 'warning')
@@ -7687,6 +7691,8 @@ def select_wikipedia_biography(persona_id):
             request.form.get('source_claim_id', ''),
             selected_wikipedia_page_id=request.form.get('page_id', ''),
             requested_by=session.get('username') or 'local-operator',
+            purpose=request.form.get('pivot_purpose', ''),
+            scope_confirmed='pivot_scope_confirmed' in request.form,
         )
     except KeyError:
         flash('That Persona no longer exists.', 'danger')
@@ -7927,22 +7933,11 @@ def review_persona_claim(claim_id):
         and reviewed_claim.get('field_name') == 'full_name'
         and reviewed_claim.get('review_status') != 'approved'
     ):
-        try:
-            case_store.create_identity_enrichment(
-                stored_persona_id,
-                claim_id,
-                requested_by=reviewer,
-            )
-        except ValueError as error:
-            flash(
-                f'Name approved, but public-record enrichment was not queued: {error}',
-                'warning',
-            )
-        else:
-            flash(
-                'Confirmed-name Wikipedia and Offshore Leaks checks were queued.',
-                'success',
-            )
+        flash(
+            'Name approved. Use Enrich confirmed name to declare the follow-up '
+            'purpose and confirm its authorized scope before collection.',
+            'info',
+        )
     if generated_map_center:
         flash(
             'Record approved and mapped to the generated place centroid.',

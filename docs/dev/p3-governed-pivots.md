@@ -11,8 +11,13 @@ A governed pivot is allowed only when all of these conditions are true:
 
 1. An authenticated analyst explicitly requests the pivot through the existing
    case and Persona workflow, with the existing CSRF and authorization checks.
-2. The case retains its declared lawful investigation purpose and every
-   applicable external-use consent is present.
+   The request must state a non-empty, bounded lawful purpose and affirm that
+   the public-source follow-up is permitted by the applicable authorization or
+   consent and remains within that purpose.
+2. The server records the normalized purpose, affirmative scope confirmation,
+   confirming actor, and authorization basis in the immutable job plan and
+   queued event. Approval of an origin claim alone is never authorization for
+   a follow-up; approving a full name therefore does not queue enrichment.
 3. The origin is either an analyst-approved full-name claim or an
    analyst-approved, supported public social/profile link. A pending, rejected,
    uncertain, malformed, private, local, or unsupported origin is ineligible.
@@ -69,7 +74,10 @@ plan and applies the tighter deadline.
 `OPENLEDGER_GOVERNED_PIVOTS_ENABLED` is the P3c kill switch. It must be
 interpreted fail-closed: only an explicit true value enables creation of a new
 governed pivot; a missing, false, or unrecognized value keeps the capability
-off. The application and worker must load the same value.
+off. The application and worker must load the same value. Compose, the
+installation script, and the deployment environment template all ship it as
+false; an operator must explicitly enable it for both processes after the
+release controls are satisfied.
 
 This flag never overrides an existing capability flag. The following existing
 controls remain authoritative where applicable:

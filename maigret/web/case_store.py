@@ -1756,6 +1756,8 @@ class CaseStore:
         *,
         selected_wikipedia_page_id: Optional[str] = None,
         requested_by: Optional[str] = None,
+        purpose: Optional[str] = None,
+        scope_confirmed: bool = False,
     ) -> str:
         """Queue governed public-record checks for one approved full-name claim."""
         source_claim_id = str(source_claim_id or "").strip()
@@ -1820,6 +1822,8 @@ class CaseStore:
                 case_id=str(persona_row["case_id"]),
                 persona_id=persona_id,
                 requested_by=requested_by,
+                purpose=purpose,
+                scope_confirmed=scope_confirmed,
             )
             if claim["source_job_id"]:
                 source_options = connection.scalar(
@@ -1933,6 +1937,9 @@ class CaseStore:
         persona_id: str,
         source_claim_id: str,
         requested_by: str,
+        *,
+        purpose: str,
+        scope_confirmed: bool,
     ) -> str:
         """Queue one bounded same-case refresh from an approved profile URL."""
         source_claim_id = str(source_claim_id or "").strip()
@@ -1985,6 +1992,8 @@ class CaseStore:
                 case_id=case_id,
                 persona_id=persona_id,
                 requested_by=requested_by,
+                purpose=purpose,
+                scope_confirmed=scope_confirmed,
             )
             if pivot_plan["pivot_kind"] != "verified_profile_discovery":
                 raise ValueError(
@@ -2216,6 +2225,10 @@ class CaseStore:
         if not row:
             raise ValueError("Governed pivot source is no longer available")
         field_name = str(row["field_name"])
+        governance = stored_plan.get("governance")
+        governance = (
+            governance if isinstance(governance, Mapping) else {}
+        )
         rebuilt_plan = build_governed_pivot_plan(
             {
                 "id": str(row["id"]),
@@ -2232,6 +2245,8 @@ class CaseStore:
             case_id=case_id,
             persona_id=persona_id,
             requested_by=str(stored_plan.get("requested_by") or ""),
+            purpose=str(governance.get("declared_purpose") or ""),
+            scope_confirmed=governance.get("scope_confirmed") is True,
             depth=int(stored_plan.get("input_depth", -1)),
         )
         if dict(stored_plan) != rebuilt_plan:

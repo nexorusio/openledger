@@ -75,21 +75,24 @@ configuration, five-result maximum, and ten-second timeout.
 
 ## Current P3 checkpoint
 
-P3a and P3b completed at safe integration checkpoints on 2026-09-09. P3c is
-not authorized. All P3 work started from exact production-verified commit
+P3a, P3b, and original P3c completed local integration checkpoints on
+2026-09-09. The user authorized original P3c; that authorization did not
+authorize the separate mandatory P3 usability extension, squash, merge,
+deployment, or production modification. All P3 work started from exact
+production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
 `d771486cfbd9683f97bd59b76829d2eac495f72a`; none was built on the old P2
 checkout.
 
 The phase integration branch is `codex/p3-evidence-correlation-pivots` in
-`/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its reviewed P3b code
-checkpoint before this state update is
-`bd27e5c1e8e79f92474dc23bed1edcdc02e6533d`, tree
-`6655127174d0abc9ff2a791c8e57f828e2079113`.
+`/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its original-P3c coordinator
+checkpoint before the final documentation and review update is
+`6bcef56cdb869e3daed1fbbc5cd50ed2ff8a6f97`, tree
+`f7ad471e0696d4a2b92b87bc31158646af362915`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | Phase branch and worktree above | Architecture, shared adapter and `case_store.py` integration, review fixes, test gate, and durable checkpoint | P3a and P3b integrated; P3b code checkpoint `bd27e5c1e8e79f92474dc23bed1edcdc02e6533d` |
+| Coordinator | Phase branch and worktree above | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a, P3b, and original P3c integrated locally; P3c code checkpoint `6bcef56cdb869e3daed1fbbc5cd50ed2ff8a6f97` |
 | P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
 | P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
 | P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
@@ -97,6 +100,10 @@ checkpoint before this state update is
 | P3b acceptance worker | `codex/p3b-correlation-acceptance` in `/workspace/scratch/a7cc4d9992b8/openledger-p3b-tests` | Black-box correlation and Persona acceptance coverage | Source `46eff6754d6c42e67832273ee7b38087e4b6365f`; integrated as `a96145aa3d311e86c615effe46fa4398930dc5c6` |
 | P3b adapter workers | `codex/p3b-profile-search-adapter` in `/workspace/scratch/a7cc4d9992b8/openledger-p3b-adapter` | Proposed isolated adapter ownership | Both attempts stopped without changes; coordinator completed the shared integration in `fb670bb`, `53afafd`, and `bd27e5c` |
 | P3b reviewer | Read-only review of the phase worktree | Correlation, provenance, compatibility, idempotency, and human-control review | No remaining actionable findings at `bd27e5c`; 102 focused tests passed; no edits made |
+| P3c policy worker | `codex/p3c-governed-pivot-policy` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-policy` | Pure deterministic governed-pivot policy and unit tests | Source `8c8d985501d23dbd48b7557a235fad83bb25a13b`; integrated as `0634ca5` |
+| P3c acceptance worker | `codex/p3c-governed-pivot-acceptance` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-acceptance` | Black-box origin, scope, budget, audit, review, cancellation, rerun, and failure acceptance | Source `297363aea6d44d378e67c92de16172577cd00f3e`; integrated as `2db5a2e` |
+| P3c operations worker | `codex/p3c-governed-pivot-ops` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-ops` | Governed-pivot policy, operations, rollback, cost, and release documentation | Source `e3666ca062f0ab3cb8b2c06d6ddfd4b5733b6b4d`; integrated as `5233a75` |
+| P3c reviewer | Fresh read-only review of exact committed phase tree | Policy, security, runtime, persistence, compatibility, tests, operations, and cost boundaries | Review of `6bcef56` found two release blockers: missing explicit per-pivot purpose/scope authorization and deployment defaults that enabled the flag; both are resolved in the current verified worktree, with an exact-commit re-review pending; no edit authority |
 
 P3a froze the provider-neutral, case-scoped evidence contract. P3b now adds a
 bounded deterministic correlation engine and a strict adapter for immutable P2
@@ -125,22 +132,63 @@ confidence of a reviewed claim. Correlation remains visible before review but
 creates no claim automatically, and no AI, adapter, or engine can approve a
 claim.
 
-Final coordinator verification recorded 507 passing tests across the P3
-contract, engine, adapter, persistence/review, profile discovery, case,
-Persona, external-evidence, report, and worker suites. The review-fix focused
-set passed 90 tests, and the independent reviewer passed 102 focused tests.
-Black checks passed for the new and P3-owned correlation files, critical
-Flake8 checks passed for all changed Python files, Python compilation and
-`git diff --check` passed. The temporary test environment lacked
-`pytest-asyncio`, so a test-only local compatibility plugin executed async
-tests; no repository dependency or lock file changed. A dependency-complete
-full release regression remains part of P3c.
+Original P3c adds deterministic, analyst-directed pivots from only an approved
+full-name claim or a supported approved public-profile claim in the same
+Persona and case. The server owns the plan, source allowlist, request ceiling,
+depth-one limit, focused execution mode, deadline, feature snapshot, and audit
+event. Confirmed-name enrichment is restricted to the existing Wikipedia and
+ICIJ adapters with at most two source attempts and 120 seconds. Verified-link
+discovery is restricted to the existing Facebook, Instagram, Threads, TikTok,
+and X routes, at most 25 planned native-search requests, and the existing
+600-second focused ceiling. The worker revalidates the source claim, case,
+Persona, review decision, plan, and current kill switch immediately before
+execution. Pivots cannot request AI, User Scanner, recursive expansion,
+arbitrary URLs, private/local destinations, or exhaustive mode.
 
-P3b added no migration and changed no `app.py`, `worker.py`, template,
-deployment configuration, or dependency lock. Nothing was pushed, no P3 pull
-request was opened, and no production or production-data action occurred. One
-consolidated P3 pull request and all release gates remain deferred until P3c.
-The exact next authorization is **P3c**.
+Every derived assertion continues through the existing pending analyst-review
+workflow. Existing approvals and review history survive reruns; repeated
+completed link pivots from the same origin are refused; output from a pivot
+cannot become another pivot origin; ambiguous failures and budget exhaustion
+remain indeterminate rather than negative evidence; and queued cancellation is
+explicitly auditable. Each request now requires a bounded lawful purpose and an
+affirmative declaration that the public-source follow-up is permitted by the
+applicable authorization or consent and remains within that purpose. The plan
+and queued event retain the purpose, confirmation, actor, and authorization
+basis. Approving a full name does not itself queue enrichment.
+`OPENLEDGER_GOVERNED_PIVOTS_ENABLED` fails closed when missing, false, or
+malformed. Compose, the install script, and the deployment environment template
+all ship it disabled for both app and worker; an operator must explicitly
+enable it after the release controls are satisfied. Disabling it blocks new and
+not-yet-executed pivots without deleting retained evidence or disabling
+ordinary P2 discovery.
+
+After the review fixes, the P3c-focused and shared integration set passed 284
+tests. The dependency-complete relevant release regression passed 993 tests
+with one intentional skip across correlation, governed pivots, profile discovery,
+profile-search backends/planning/ranking/orchestration/platforms/runtime,
+persistence/review, case store, Persona intelligence, external evidence,
+reports, workers, deployment, budgets, inputs, collectors, stream
+finalization, User Scanner, and alias UX. The initial complete repository run
+passed 1,562 tests with 11 skips; its only three failures were unchanged slow
+tests that require live Reddit, Google Play, and Cloudflare access, which the
+current workspace proxy/DNS could not reach. After the review fixes, the
+offline repository sweep passed 1,575 tests with 11 skips and those three
+network probes explicitly deselected. Critical Flake8 checks, Python
+compilation, `git diff --check`, and Black checks for new P3-owned policy and
+acceptance files passed. No test compatibility plugin or repository workaround
+was required in the dependency-complete environment.
+
+P3c adds no migration, dependency, lockfile, service, paid API, managed
+infrastructure, or production-data change. It reuses the single Droplet,
+PostgreSQL worker queue, existing public-source adapters, and private SearXNG.
+No Brave credential or subscription is required. At this checkpoint nothing
+has been pushed, no P3 pull request exists, and no production action has
+occurred. The next original-P3 actions are fresh read-only review, the final
+state commit, consolidated branch push, PR creation, CI resolution, and
+pre-merge checkpoint verification. Only after that checkpoint may the mandated
+read-only programme-wide P3-extension assessment begin. Extension
+implementation still requires separate activity-code authorization; squash,
+merge, deployment, and production modification remain unauthorized.
 
 ## P3 -- Evidence correlation and governed pivots
 
@@ -167,6 +215,16 @@ functional. Release requires a tested, merged, deployed, and
 production-verified P3.
 
 Dependency: production-verified P2.
+
+### Mandatory P3 extension gate
+
+| Extension state | Current record |
+|---|---|
+| Programme-wide impact assessment | Mandated after the original-P3 pre-merge checkpoint; not started |
+| Proposed implementation activity codes | None yet; they must be produced by the assessment |
+| Authorized implementation activity codes | None |
+| Implementation | Not authorized and not started |
+| Merge effect | Original P3 must not be squash-merged before the assessed extension activities are separately authorized, completed, tested with P3, and added to the same PR |
 
 ## P4 -- Benchmarking, telemetry, and controlled rollout
 

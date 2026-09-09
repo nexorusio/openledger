@@ -35,6 +35,16 @@ def store(tmp_path, monkeypatch):
     instance.dispose()
 
 
+def _authorized_identity_enrichment(store, persona_id, claim_id, **kwargs):
+    return store.create_identity_enrichment(
+        persona_id,
+        claim_id,
+        purpose="Corroborate this approved identity within the assigned case.",
+        scope_confirmed=True,
+        **kwargs,
+    )
+
+
 def test_job_lifecycle_is_transactional_and_auditable(store):
     job_id = store.create_investigation(
         ["alice", "bob"],
@@ -2870,7 +2880,7 @@ def _icij_identity_observation():
 
 def test_confirmed_name_enrichment_persists_only_pending_review_candidates(store):
     persona_id, name_claim_id = _approved_full_name(store)
-    enrichment_id = store.create_identity_enrichment(persona_id, name_claim_id)
+    enrichment_id = _authorized_identity_enrichment(store, persona_id, name_claim_id)
     job = store.claim_next("worker:identity")
 
     assert job["job_id"] == enrichment_id
@@ -2909,7 +2919,7 @@ def test_confirmed_name_enrichment_persists_only_pending_review_candidates(store
 
 def test_wikipedia_selection_accepts_only_a_stored_candidate_for_same_persona(store):
     persona_id, name_claim_id = _approved_full_name(store)
-    enrichment_id = store.create_identity_enrichment(persona_id, name_claim_id)
+    enrichment_id = _authorized_identity_enrichment(store, persona_id, name_claim_id)
     store.claim_next("worker:identity")
     store.finish(
         enrichment_id,
@@ -2926,13 +2936,15 @@ def test_wikipedia_selection_accepts_only_a_stored_candidate_for_same_persona(st
     )
 
     with pytest.raises(ValueError, match="not a stored candidate"):
-        store.create_identity_enrichment(
+        _authorized_identity_enrichment(
+            store,
             persona_id,
             name_claim_id,
             selected_wikipedia_page_id="999",
         )
     selected = store.get_job(
-        store.create_identity_enrichment(
+        _authorized_identity_enrichment(
+            store,
             persona_id,
             name_claim_id,
             selected_wikipedia_page_id="123",
