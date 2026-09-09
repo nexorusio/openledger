@@ -92,7 +92,12 @@ checkout.
 The phase integration branch is `codex/p3-evidence-correlation-pivots` in
 `/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its independently reviewed
 original-P3c checkpoint is `aae6891a7883905424a1405bcfc672cbbad19c4e`,
-tree `e85501c0d2588722b763838b900469955d351636`.
+tree `e85501c0d2588722b763838b900469955d351636`. The consolidated remote
+branch was reconstructed without squashing as 19 commits with head
+`c062a9eb97bfb5e8edd10c8efab0f537d317c120`; its final tree exactly matches
+the locally tested tree `f053bb88509ce6fb38bcea9fe96c3cae1577e5c3`.
+Consolidated P3 pull request #51 targets unchanged P2 `main` at
+`288fdd216c1a107113719cc1c850d9fc0dd47808`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
@@ -188,11 +193,10 @@ P3c adds no migration, dependency, lockfile, service, paid API, managed
 infrastructure, or production-data change. It reuses the single Droplet,
 PostgreSQL worker queue, existing public-source adapters, and private SearXNG.
 No Brave credential or subscription is required. At this checkpoint nothing
-has been pushed, no P3 pull request exists, and no production action has
-occurred. The next original-P3 actions are the final state commit, consolidated
-branch push, PR creation, CI resolution, and
-pre-merge checkpoint verification. Only after that checkpoint may the mandated
-read-only programme-wide P3-extension assessment begin. Extension
+has been merged or deployed, and no production action has occurred. The
+consolidated branch and PR #51 are open; the next original-P3 actions are CI
+resolution and pre-merge checkpoint verification. Only after that checkpoint
+may the mandated read-only programme-wide P3-extension assessment begin. Extension
 implementation still requires separate activity-code authorization; squash,
 merge, deployment, and production modification remain unauthorized.
 
