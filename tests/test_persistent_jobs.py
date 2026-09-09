@@ -53,9 +53,11 @@ def persistent_store(tmp_path, web_app, monkeypatch):
 
 
 def _authorized_identity_enrichment(store, persona_id, claim_id, **kwargs):
+    requested_by = kwargs.pop("requested_by", "identity.analyst")
     return store.create_identity_enrichment(
         persona_id,
         claim_id,
+        requested_by=requested_by,
         purpose="Corroborate this approved identity within the assigned case.",
         scope_confirmed=True,
         **kwargs,

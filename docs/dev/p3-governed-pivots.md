@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 PT Daya Prana Inovasi
+SPDX-License-Identifier: LicenseRef-Nexorus-Proprietary
+-->
+
 # P3 governed pivots: operations and release gate
 
 This document defines the original P3c operating contract. It covers safe

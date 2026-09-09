@@ -1754,10 +1754,10 @@ class CaseStore:
         persona_id: str,
         source_claim_id: str,
         *,
+        requested_by: str,
+        purpose: str,
+        scope_confirmed: bool,
         selected_wikipedia_page_id: Optional[str] = None,
-        requested_by: Optional[str] = None,
-        purpose: Optional[str] = None,
-        scope_confirmed: bool = False,
     ) -> str:
         """Queue governed public-record checks for one approved full-name claim."""
         source_claim_id = str(source_claim_id or "").strip()
@@ -1785,7 +1785,6 @@ class CaseStore:
                         persona_claims.c.value,
                         persona_claims.c.field_name,
                         persona_claims.c.review_status,
-                        persona_claims.c.reviewed_by,
                         persona_claims.c.source_job_id,
                     ).where(
                         persona_claims.c.id == source_claim_id,
@@ -1807,9 +1806,7 @@ class CaseStore:
                 raise ValueError(
                     "Governed evidence pivots are disabled by server policy"
                 )
-            requested_by = str(
-                requested_by or claim["reviewed_by"] or ""
-            ).strip()
+            requested_by = str(requested_by or "").strip()
             pivot_plan = build_governed_pivot_plan(
                 {
                     "id": str(claim["id"]),

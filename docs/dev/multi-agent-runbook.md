@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 PT Daya Prana Inovasi
+SPDX-License-Identifier: LicenseRef-Nexorus-Proprietary
+-->
+
 # Multi-agent development runbook
 
 This runbook is the authoritative operating protocol for coordinated

@@ -100,9 +100,11 @@ def _authorized_pivot(store, persona_id, claim_id, requested_by):
 
 
 def _authorized_identity_enrichment(store, persona_id, claim_id, **kwargs):
+    requested_by = kwargs.pop("requested_by", "identity.analyst")
     return store.create_identity_enrichment(
         persona_id,
         claim_id,
+        requested_by=requested_by,
         purpose="Corroborate this approved identity within the assigned case.",
         scope_confirmed=True,
         **kwargs,
@@ -592,8 +594,22 @@ def test_confirmed_name_enrichment_remains_approved_name_only_and_pending(
         _authorized_identity_enrichment(store, persona_id, social["id"])
 
     store.review_claim(name["id"], "approved", "identity.reviewer")
+    with pytest.raises(ValueError, match="requested_by"):
+        store.create_identity_enrichment(
+            persona_id,
+            name["id"],
+            requested_by="",
+            purpose="Authorized case follow-up",
+            scope_confirmed=True,
+        )
     with pytest.raises(ValueError, match="purpose"):
-        store.create_identity_enrichment(persona_id, name["id"])
+        store.create_identity_enrichment(
+            persona_id,
+            name["id"],
+            requested_by="identity.analyst",
+            purpose="",
+            scope_confirmed=True,
+        )
     enrichment_id = _authorized_identity_enrichment(store, persona_id, name["id"])
     store.claim_next("worker:identity-enrichment")
     store.sync_identity_enrichment(

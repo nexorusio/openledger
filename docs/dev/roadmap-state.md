@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 PT Daya Prana Inovasi
+SPDX-License-Identifier: LicenseRef-Nexorus-Proprietary
+-->
+
 # OpenLedger programme roadmap and state
 
 This document is the durable source of truth for the approved P3--P18
@@ -102,7 +107,7 @@ checkpoint is `44281616752bc38b29b76dac7a40bb6470381a2b`, tree
 | P3c policy worker | `codex/p3c-governed-pivot-policy` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-policy` | Pure deterministic governed-pivot policy and unit tests | Source `8c8d985501d23dbd48b7557a235fad83bb25a13b`; integrated as `0634ca5` |
 | P3c acceptance worker | `codex/p3c-governed-pivot-acceptance` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-acceptance` | Black-box origin, scope, budget, audit, review, cancellation, rerun, and failure acceptance | Source `297363aea6d44d378e67c92de16172577cd00f3e`; integrated as `2db5a2e` |
 | P3c operations worker | `codex/p3c-governed-pivot-ops` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-ops` | Governed-pivot policy, operations, rollback, cost, and release documentation | Source `e3666ca062f0ab3cb8b2c06d6ddfd4b5733b6b4d`; integrated as `5233a75` |
-| P3c reviewer | Fresh read-only review of exact committed phase tree | Policy, security, runtime, persistence, compatibility, tests, operations, and cost boundaries | Review of `6bcef56` found two release blockers: missing explicit per-pivot purpose/scope authorization and deployment defaults that enabled the flag; both are resolved and verified at `4428161`, with an exact-commit re-review pending; no edit authority |
+| P3c reviewer | Fresh read-only review of exact committed phase tree | Policy, security, runtime, persistence, compatibility, tests, operations, and cost boundaries | Review of `6bcef56` found two blockers, resolved at `4428161`; re-review of `9ee5c2f` found one remaining actor-attribution blocker, resolved in the current worktree by requiring the current requester for every identity pivot; final exact-commit re-review pending; no edit authority |
 
 P3a froze the provider-neutral, case-scoped evidence contract. P3b now adds a
 bounded deterministic correlation engine and a strict adapter for immutable P2
