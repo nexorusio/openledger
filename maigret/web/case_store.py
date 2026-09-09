@@ -802,6 +802,7 @@ MAX_PROFILE_SEARCH_AUDIT_BYTES = 12_000_000
 MAX_PROFILE_SEARCH_AUDITS_PER_JOB = 10
 MAX_PROFILE_SEARCH_UI_CANDIDATES = 100
 MAX_PROFILE_SEARCH_UI_REVIEWS = 500
+MAX_PROFILE_SEARCH_CORRELATED_EVIDENCE = 128
 PROFILE_SEARCH_PENDING_CLAIM_CONFIDENCE = 50
 PROFILE_SEARCH_PLATFORM_PARSERS = {
     "facebook": parse_facebook_profile_url,
@@ -878,12 +879,12 @@ def _persona_candidate_identity_match(candidate: Dict[str, Any]):
 
 
 def _profile_search_candidate_alias_identity(candidate: Dict[str, Any]):
-    """Derive a supported account identity only from its validated URL."""
-    if (
-        candidate.get("source_engine")
-        not in {"openai_web_research", "native_profile_search_review"}
-        or candidate.get("field_name") != "social_account"
-    ):
+    """Derive a supported account identity only from its validated URL.
+
+    Supported-platform URL parsing is the shared trust boundary. Source labels
+    and user-supplied username fields are never used to merge claims.
+    """
+    if candidate.get("field_name") != "social_account":
         return None
     value = candidate.get("value")
     candidate_url = (
@@ -1140,6 +1141,32 @@ def _serialize_profile_search_audit(row: Any) -> Dict[str, Any]:
         "document": dict(row["document"]),
         "created_at": _as_iso(row["created_at"]),
     }
+
+
+def _profile_search_correlation(
+    case_id: str, audit: Dict[str, Any]
+) -> Dict[str, Any]:
+    """Correlate one verified immutable audit without creating assertions."""
+    from maigret.web.evidence_correlation import correlate_evidence
+    from maigret.web.evidence_correlation_profile_search import (
+        profile_search_audit_observations,
+    )
+
+    observations = profile_search_audit_observations(
+        case_id=case_id,
+        audit_id=str(audit["id"]),
+        document_sha256=str(audit["document_sha256"]),
+        document=dict(audit["document"]),
+        retrieved_at=str(audit["created_at"]),
+    )
+    if not observations:
+        return {
+            "schema_version": 1,
+            "case_id": case_id,
+            "clusters": [],
+            "relationships": [],
+        }
+    return correlate_evidence(observations)
 
 
 def _profile_search_candidate_from_document(
@@ -3070,6 +3097,7 @@ class CaseStore:
             candidate["anchor_id"] = (
                 "profile-candidate-" + candidate_id.rsplit(":", 1)[-1]
             )
+        correlation = _profile_search_correlation(case_id, audit)
         return {
             "audit_id": audit["id"],
             "job_id": audit["job_id"],
@@ -3085,6 +3113,7 @@ class CaseStore:
             "executed_query_count": audit["executed_query_count"],
             "error_count": audit["error_count"],
             "candidates": candidates,
+            "correlation": correlation,
         }
 
     def review_profile_search_candidate(
@@ -3116,6 +3145,7 @@ class CaseStore:
                     profile_search_audits.c.job_id,
                     profile_search_audits.c.document,
                     profile_search_audits.c.document_sha256,
+                    profile_search_audits.c.created_at,
                 )
                 .join(
                     investigation_jobs,
@@ -3155,6 +3185,9 @@ class CaseStore:
             claim_id = None
             claim_review_status = None
             if decision == "proposed":
+                from maigret.web.evidence_correlation_contract import (
+                    canonical_profile_identity,
+                )
                 from maigret.web.persona_intelligence import (
                     claim_fingerprint,
                     evidence_fingerprint,
@@ -3167,14 +3200,55 @@ class CaseStore:
                     "url": profile_url,
                     "username": str(candidate["handle"]),
                 }
-                fingerprint = claim_fingerprint("social_account", value)
-                evidence = {
-                    "evidence_type": "native_profile_search_candidate",
-                    "source_name": (
-                        f"Native profile search · {platform.title()}"
-                    )[:300],
-                    "source_url": profile_url,
-                    "details": {
+                canonical_identity = canonical_profile_identity(profile_url)
+                if canonical_identity is None:
+                    raise ValueError(
+                        "Profile-search candidate has no supported identity"
+                    )
+                fingerprint = claim_fingerprint(
+                    "social_account", canonical_identity
+                )
+                correlation = _profile_search_correlation(
+                    case_id,
+                    {
+                        "id": str(audit["id"]),
+                        "document_sha256": str(audit["document_sha256"]),
+                        "document": document,
+                        "created_at": _as_iso(audit["created_at"]),
+                    },
+                )
+                matching_clusters = [
+                    cluster
+                    for cluster in correlation["clusters"]
+                    if cluster.get("canonical_profile_identity")
+                    == canonical_identity
+                ]
+                if len(matching_clusters) != 1:
+                    raise ValueError(
+                        "Profile-search correlation does not match candidate"
+                    )
+                cluster = matching_clusters[0]
+                observed = [
+                    observation
+                    for observation in cluster["observations"]
+                    if observation.get("outcome") == "observed"
+                ]
+                retained_observations = observed[
+                    :MAX_PROFILE_SEARCH_CORRELATED_EVIDENCE
+                ]
+                if not retained_observations:
+                    raise ValueError(
+                        "Profile-search candidate has no observed evidence"
+                    )
+                evidence_rows = []
+                for observation in retained_observations:
+                    citations = list(observation.get("citations") or [])
+                    source_url = (
+                        str(citations[0].get("url") or "")
+                        if citations
+                        else profile_url
+                    )
+                    details = {
                         "audit_id": str(audit["id"]),
                         "audit_sha256": str(audit["document_sha256"]),
                         "candidate_id": candidate_id,
@@ -3188,9 +3262,52 @@ class CaseStore:
                         "candidate_identity_unverified": True,
                         "human_review_required": True,
                         "proposed_by": reviewer,
-                    },
-                }
-                evidence["fingerprint"] = evidence_fingerprint(evidence)
+                        "correlation": {
+                            "observation_id": observation["observation_id"],
+                            "cluster_id": cluster["cluster_id"],
+                            "source_id": observation["source_id"],
+                            "source_version": observation["source_version"],
+                            "source_record_id": observation["source_record_id"],
+                            "outcome": observation["outcome"],
+                            "native_outcome": observation["native_outcome"],
+                            "native_status": observation["native_status"],
+                            "citations": citations,
+                            "retrieved_at": observation["retrieved_at"],
+                            "originating_query": observation[
+                                "originating_query"
+                            ],
+                            "originating_query_fingerprint": observation[
+                                "originating_query_fingerprint"
+                            ],
+                            "source_snapshot_sha256": observation[
+                                "source_snapshot_sha256"
+                            ],
+                            "source_snapshot_ref": observation[
+                                "source_snapshot_ref"
+                            ],
+                            "confidence": cluster["confidence"],
+                        },
+                    }
+                    evidence = {
+                        "evidence_type": "native_profile_search_candidate",
+                        "source_name": (
+                            "Native profile search · "
+                            + str(observation["source_id"])
+                        )[:300],
+                        "source_url": source_url,
+                        "details": details,
+                    }
+                    evidence["fingerprint"] = evidence_fingerprint(
+                        {
+                            "evidence_type": evidence["evidence_type"],
+                            "source_id": observation["source_id"],
+                            "source_record_id": observation[
+                                "source_record_id"
+                            ],
+                            "canonical_profile_identity": canonical_identity,
+                        }
+                    )
+                    evidence_rows.append(evidence)
                 self._upsert_persona_candidates(
                     connection,
                     persona_id=str(persona["id"]),
@@ -3212,9 +3329,27 @@ class CaseStore:
                             "source_engine": "native_profile_search_review",
                             "source_record_id": candidate_id,
                             "native_status": "candidate_proposed",
-                            "evidence": [evidence],
+                            "evidence": evidence_rows,
                             "observation_details": {
                                 "audit_id": str(audit["id"]),
+                                "audit_sha256": str(audit["document_sha256"]),
+                                "correlation_cluster_id": cluster["cluster_id"],
+                                "correlation_observation_ids": [
+                                    observation["observation_id"]
+                                    for observation in retained_observations
+                                ],
+                                "correlation_observation_count": len(
+                                    observed
+                                ),
+                                "correlation_evidence_count": len(
+                                    retained_observations
+                                ),
+                                "correlation_evidence_truncated": (
+                                    len(observed) > len(retained_observations)
+                                ),
+                                "correlation_confidence": cluster[
+                                    "confidence"
+                                ],
                                 "candidate_identity_unverified": True,
                                 "human_review_required": True,
                             },

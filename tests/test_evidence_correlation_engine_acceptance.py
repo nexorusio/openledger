@@ -479,7 +479,9 @@ def test_profile_search_adapter_preserves_observed_lineage_and_integrity():
     )
     assert observation["retrieved_at"] == "2026-09-09T10:00:00Z"
     assert observation["source_snapshot_sha256"] == f"sha256:{document_sha256}"
-    assert observation["source_snapshot_ref"].endswith(":audit-observed-1")
+    assert observation["source_snapshot_ref"] == (
+        "evidence://openledger/profile-search-audit/audit-observed-1"
+    )
     assert observation["citations"] == [
         {
             "url": "https://instagram.com/alice_example/?ref=search",
