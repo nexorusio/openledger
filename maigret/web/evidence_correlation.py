@@ -27,9 +27,12 @@ MAX_CORRELATION_OUTPUT_BYTES = 96 * 1024 * 1024
 
 _RETRIEVAL_CONTEXT_FIELDS = (
     "observation_id",
+    "citations",
     "retrieved_at",
     "originating_query",
     "originating_query_fingerprint",
+    "source_snapshot_sha256",
+    "source_snapshot_ref",
 )
 
 
@@ -61,7 +64,7 @@ def _canonical_observation(variants: Sequence[Dict[str, Any]]) -> Dict[str, Any]
     return min(variants, key=_json_key)
 
 
-def _retrieval_context(observation: Dict[str, Any]) -> Dict[str, str]:
+def _retrieval_context(observation: Dict[str, Any]) -> Dict[str, Any]:
     return {field: observation[field] for field in _RETRIEVAL_CONTEXT_FIELDS}
 
 
@@ -244,6 +247,7 @@ def correlate_evidence(
     }
     relationship_map: Dict[str, Dict[str, Any]] = {}
     explicit_ids: set[str] = set()
+    explicit_pairs: set[tuple[str, str]] = set()
     for payload in raw_relationships:
         relationship = normalize_evidence_relationship(payload)
         if relationship["case_id"] != case_id:
@@ -258,6 +262,7 @@ def correlate_evidence(
             raise CorrelationContractError(
                 "Evidence relationship endpoint is absent from observations"
             )
+        explicit_pairs.add(tuple(sorted(endpoints)))
         _add_relationship(
             relationship_map,
             relationship,
@@ -271,6 +276,9 @@ def correlate_evidence(
     for items in cluster_observations.values():
         items.sort(key=lambda item: item["observation_id"])
         for left, right in combinations(items, 2):
+            pair = tuple(sorted((left["observation_id"], right["observation_id"])))
+            if pair in explicit_pairs:
+                continue
             relationship = _auto_relationship(case_id, left, right)
             if relationship is not None:
                 _add_relationship(

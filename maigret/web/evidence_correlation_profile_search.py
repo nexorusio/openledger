@@ -110,6 +110,14 @@ def _snapshot_sha256(material: Any) -> str:
     return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
 
+def _snapshot_ref(audit_id: str, source_record_id: str, snapshot_sha256: str) -> str:
+    return (
+        "evidence://openledger/profile-search-audit/"
+        f"{audit_id}/records/{source_record_id}/snapshots/"
+        f"{snapshot_sha256.removeprefix('sha256:')}"
+    )
+
+
 def _base_observation(
     *,
     case_id: str,
@@ -252,7 +260,6 @@ def profile_search_audit_observations(
     if len(candidates) != candidate_count:
         raise ValueError("Profile-search audit candidate count is inconsistent")
 
-    snapshot_ref = f"evidence://openledger/profile-search-audit/{audit_id}"
     source_version = str(orchestration_version)
     observations = []
     seen_run_ids = set()
@@ -287,11 +294,25 @@ def profile_search_audit_observations(
             provider = _text(error.get("provider"), "error.provider", 100).casefold()
             code = _text(error.get("code"), "error.code", 64).casefold()
             outcome = _ERROR_OUTCOMES.get(code, "indeterminate")
+            occurred_at = _text(error.get("occurred_at"), "error.occurred_at", 64)
             http_status = error.get("http_status")
             native_status = (
                 f"{code}:http_{http_status}"
                 if isinstance(http_status, int) and not isinstance(http_status, bool)
                 else code
+            )
+            source_record_id = _record_id(
+                "query", {"provider": provider, "query_id": query_id}
+            )
+            snapshot_sha256 = _snapshot_sha256(
+                {
+                    "provider": provider,
+                    "error": {
+                        key: value
+                        for key, value in error.items()
+                        if key != "occurred_at"
+                    },
+                }
             )
             observations.append(
                 _base_observation(
@@ -300,26 +321,17 @@ def profile_search_audit_observations(
                     claim_value=query["query_text"],
                     source_id=provider,
                     source_version=source_version,
-                    source_record_id=_record_id(
-                        "query", {"provider": provider, "query_id": query_id}
-                    ),
+                    source_record_id=source_record_id,
                     outcome=outcome,
                     native_outcome=code,
                     native_status=native_status,
                     citations=[],
-                    retrieved_at=retrieved_at,
+                    retrieved_at=occurred_at,
                     query=query,
-                    snapshot_sha256=_snapshot_sha256(
-                        {
-                            "provider": provider,
-                            "error": {
-                                key: value
-                                for key, value in error.items()
-                                if key != "occurred_at"
-                            },
-                        }
+                    snapshot_sha256=snapshot_sha256,
+                    snapshot_ref=_snapshot_ref(
+                        audit_id, source_record_id, snapshot_sha256
                     ),
-                    snapshot_ref=snapshot_ref,
                 )
             )
             continue
@@ -351,12 +363,32 @@ def profile_search_audit_observations(
                 100,
             )
             source_url = _text(result.get("source_url"), "source_url", 2_000)
-            if canonical_profile_identity(source_url) is None:
+            profile_identity = canonical_profile_identity(source_url)
+            if profile_identity is None:
                 continue
             title = result.get("title")
             if not isinstance(title, str) or len(title) > 500:
                 raise ValueError("Profile-search audit result title is invalid")
+            snippet = result.get("snippet")
+            if not isinstance(snippet, str) or len(snippet) > 2_000:
+                raise ValueError("Profile-search audit result snippet is invalid")
             retained += 1
+            source_record_id = _record_id(
+                "result",
+                {
+                    "provider": provider,
+                    "query_id": query_id,
+                    "result_rank": rank,
+                    "source_url": source_url.casefold(),
+                },
+            )
+            snapshot_sha256 = _snapshot_sha256(
+                {
+                    "source_url": profile_identity["canonical_url"],
+                    "title": title.strip(),
+                    "snippet": snippet.strip(),
+                }
+            )
             observations.append(
                 _base_observation(
                     case_id=case_id,
@@ -364,28 +396,31 @@ def profile_search_audit_observations(
                     claim_value=source_url,
                     source_id=provider,
                     source_version=source_version,
-                    source_record_id=_record_id(
-                        "result",
-                        {
-                            "provider": provider,
-                            "query_id": query_id,
-                            "result_rank": rank,
-                            "source_url": source_url.casefold(),
-                        },
-                    ),
+                    source_record_id=source_record_id,
                     outcome="observed",
                     native_outcome="returned_profile_result",
                     native_status="public_search_result",
-                    citations=[{"url": source_url, "title": title.strip()[:300]}],
+                    citations=[
+                        {
+                            "url": profile_identity["canonical_url"],
+                            "title": title.strip()[:300],
+                        }
+                    ],
                     retrieved_at=provenance_retrieved_at,
                     query=query,
-                    snapshot_sha256=_snapshot_sha256(
-                        {"provider": provider, "result": result}
+                    snapshot_sha256=snapshot_sha256,
+                    snapshot_ref=_snapshot_ref(
+                        audit_id, source_record_id, snapshot_sha256
                     ),
-                    snapshot_ref=snapshot_ref,
                 )
             )
         if retained == 0:
+            source_record_id = _record_id(
+                "query", {"provider": provider, "query_id": query_id}
+            )
+            snapshot_sha256 = _snapshot_sha256(
+                {"provider": provider, "supported_profile_results": []}
+            )
             observations.append(
                 _base_observation(
                     case_id=case_id,
@@ -393,19 +428,17 @@ def profile_search_audit_observations(
                     claim_value=query["query_text"],
                     source_id=provider,
                     source_version=source_version,
-                    source_record_id=_record_id(
-                        "query", {"provider": provider, "query_id": query_id}
-                    ),
+                    source_record_id=source_record_id,
                     outcome="absent",
                     native_outcome="no_returned_profile_result",
                     native_status=("successful_search_no_supported_profile_result"),
                     citations=[],
                     retrieved_at=provenance_retrieved_at,
                     query=query,
-                    snapshot_sha256=_snapshot_sha256(
-                        {"provider": provider, "supported_profile_results": []}
+                    snapshot_sha256=snapshot_sha256,
+                    snapshot_ref=_snapshot_ref(
+                        audit_id, source_record_id, snapshot_sha256
                     ),
-                    snapshot_ref=snapshot_ref,
                 )
             )
 

@@ -481,11 +481,14 @@ def test_profile_search_adapter_preserves_observed_lineage_and_integrity():
     assert observation["source_snapshot_sha256"].startswith("sha256:")
     assert len(observation["source_snapshot_sha256"]) == 71
     assert observation["source_snapshot_ref"] == (
-        "evidence://openledger/profile-search-audit/audit-observed-1"
+        "evidence://openledger/profile-search-audit/audit-observed-1/records/"
+        + observation["source_record_id"]
+        + "/snapshots/"
+        + observation["source_snapshot_sha256"].removeprefix("sha256:")
     )
     assert observation["citations"] == [
         {
-            "url": "https://instagram.com/alice_example/?ref=search",
+            "url": "https://www.instagram.com/alice_example/",
             "title": "Alice Example on Instagram",
         }
     ]
@@ -577,6 +580,37 @@ def test_case_store_exposes_correlation_without_automatic_claim(store):
     persona = store.get_case(job["case_id"])["personas"][0]
     assert store.get_persona(persona["id"])["claims"] == []
     _assert_no_approval_fields(discovery["correlation"])
+
+
+def test_case_store_reads_legacy_audit_with_credential_like_tracking_key(store):
+    job_id = store.create_investigation(["alice_example"], {})
+    job = store.claim_next("worker:legacy-audit-compatibility")
+    result = _run_discovery(
+        _ObservedProfileClient(
+            source_url=("https://x.com/alice_example?token=public-tracking-value")
+        ),
+        platforms=("x",),
+    )
+    audit_id = store.record_profile_search_result(
+        job_id,
+        result,
+        worker_id=job["worker_id"],
+    )
+
+    discovery = store.get_case_profile_search_discovery(job["case_id"])
+
+    assert discovery["audit_id"] == audit_id
+    observation = discovery["correlation"]["clusters"][0]["observations"][0]
+    assert observation["claim_value"].endswith("?token=public-tracking-value")
+    assert observation["citations"] == [
+        {
+            "url": "https://x.com/alice_example",
+            "title": "Alice Example on Instagram",
+        }
+    ]
+    assert observation["source_snapshot_ref"].startswith(
+        f"evidence://openledger/profile-search-audit/{audit_id}/records/"
+    )
 
 
 def test_case_store_reuses_claim_retains_lineage_and_preserves_human_approval(store):

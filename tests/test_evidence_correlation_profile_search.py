@@ -131,6 +131,20 @@ def test_supported_profile_result_preserves_lineage_and_canonical_identity():
     assert observation["retrieved_at"] == "2026-09-09T10:00:00Z"
     assert observation["source_snapshot_sha256"].startswith("sha256:")
     assert len(observation["source_snapshot_sha256"]) == 71
+    assert observation["source_snapshot_ref"] == (
+        "evidence://openledger/profile-search-audit/audit-adapter/records/"
+        + observation["source_record_id"]
+        + "/snapshots/"
+        + observation["source_snapshot_sha256"].removeprefix("sha256:")
+    )
+    expected_snapshot = {
+        "source_url": "https://x.com/alice_1",
+        "title": "Alice on X",
+        "snippet": "Public profile result.",
+    }
+    assert observation["source_snapshot_sha256"] == (
+        "sha256:" + _sha256(expected_snapshot)
+    )
 
 
 def test_success_without_supported_profile_is_query_scoped_absence():
@@ -186,7 +200,7 @@ def test_failure_taxonomy_never_converts_errors_to_absence(code, outcome):
     assert observation["outcome"] == outcome
     assert observation["outcome"] != "absent"
     assert observation["native_outcome"] == code
-    assert observation["retrieved_at"] == "2026-09-09T10:00:01Z"
+    assert observation["retrieved_at"] == "2026-09-09T10:00:00Z"
 
 
 def test_output_order_and_source_record_ids_are_stable():
@@ -207,7 +221,7 @@ def test_output_order_and_source_record_ids_are_stable():
     assert len({item["source_record_id"] for item in baseline}) == 2
 
 
-def test_independent_providers_get_distinct_source_snapshots_and_support():
+def test_independent_providers_preserve_lineage_without_duplicate_support():
     first = _query(1)
     second = _query(2)
     result = {
@@ -222,11 +236,26 @@ def test_independent_providers_get_distinct_source_snapshots_and_support():
     document = _document([first, second], [first_run, second_run])
 
     observations = _adapt(document)
-    cluster = correlate_evidence(observations)["clusters"][0]
+    correlation = correlate_evidence(observations)
+    cluster = correlation["clusters"][0]
 
-    assert len({item["source_snapshot_sha256"] for item in observations}) == 2
-    assert cluster["independent_observed_source_count"] == 2
-    assert cluster["confidence"]["score"] == 55
+    assert len({item["source_snapshot_sha256"] for item in observations}) == 1
+    assert len({item["source_snapshot_ref"] for item in observations}) == 2
+    assert all(
+        item["source_snapshot_ref"]
+        == (
+            "evidence://openledger/profile-search-audit/audit-adapter/records/"
+            + item["source_record_id"]
+            + "/snapshots/"
+            + item["source_snapshot_sha256"].removeprefix("sha256:")
+        )
+        for item in observations
+    )
+    assert cluster["independent_observed_source_count"] == 1
+    assert cluster["confidence"]["score"] == 40
+    assert {item["relationship_kind"] for item in correlation["relationships"]} == {
+        "duplicate"
+    }
 
 
 def test_rejects_tampering_and_invalid_hashes():

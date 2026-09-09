@@ -124,14 +124,40 @@ def test_explicit_conflicts_remain_visible_and_reduce_confidence():
     )
 
     assert {item["relationship_kind"] for item in result["relationships"]} == {
-        "conflicting",
-        "supporting",
+        "conflicting"
     }
     assert result["clusters"][0]["confidence"]["score"] == 35
     assert any(
         "explicit conflicting relationship" in item
         for item in result["clusters"][0]["confidence"]["basis"]
     )
+
+
+def test_same_observation_retains_distinct_snapshot_and_citation_contexts():
+    first = observation()
+    second = copy.deepcopy(first)
+    second.update(
+        citations=[
+            {
+                "url": "https://evidence.example.org/alternate",
+                "title": "Alternate immutable citation",
+            }
+        ],
+        source_snapshot_ref="evidence://openledger/audit/alternate",
+    )
+
+    cluster = correlate_evidence([first, second])["clusters"][0]
+
+    assert len(cluster["observations"]) == 1
+    assert len(cluster["retrieval_contexts"]) == 2
+    assert {item["source_snapshot_ref"] for item in cluster["retrieval_contexts"]} == {
+        first["source_snapshot_ref"],
+        second["source_snapshot_ref"],
+    }
+    assert {item["citations"][0]["url"] for item in cluster["retrieval_contexts"]} == {
+        first["citations"][0]["url"],
+        second["citations"][0]["url"],
+    }
 
 
 @pytest.mark.parametrize("outcome", sorted(EVIDENCE_OUTCOMES))

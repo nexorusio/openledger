@@ -23,6 +23,7 @@ from maigret.web.profile_search_contract import (
 from maigret.web.profile_search_orchestrator import ProfileSearchOrchestrator
 from maigret.web.persona_intelligence import (
     claim_fingerprint,
+    evidence_fingerprint,
     extract_ai_persona_claims,
 )
 
@@ -172,6 +173,122 @@ async def test_repeat_proposal_never_overwrites_persona_review_decision(store):
 
 
 @pytest.mark.asyncio
+async def test_same_provider_account_across_queries_keeps_one_evidence_card(
+    store,
+):
+    seeded = await _seed_discovery(store)
+    first = store.review_profile_search_candidate(
+        seeded["case_id"],
+        seeded["audit_id"],
+        seeded["candidate_id"],
+        seeded["persona_id"],
+        "proposed",
+        "analyst.one",
+    )
+    initial_claim = store.get_persona(seeded["persona_id"])["claims"][0]
+    initial_evidence_id = initial_claim["evidence"][0]["id"]
+
+    second_result = await ProfileSearchOrchestrator(_Client()).discover(
+        {
+            "identifiers": [{"type": "full_name", "value": "Alice Example"}],
+            "search_targets": [],
+        },
+        platforms=("instagram",),
+    )
+    assert second_result.queries[0].query_id != seeded["result"].queries[0].query_id
+    assert second_result.candidates[0].candidate.candidate_id == seeded["candidate_id"]
+    second_audit_id = store.record_profile_search_result(
+        seeded["job_id"],
+        second_result,
+        worker_id="worker:profile-search-review",
+    )
+    second = store.review_profile_search_candidate(
+        seeded["case_id"],
+        second_audit_id,
+        seeded["candidate_id"],
+        seeded["persona_id"],
+        "proposed",
+        "analyst.two",
+    )
+
+    claims = store.get_persona(seeded["persona_id"])["claims"]
+    assert len(claims) == 1
+    assert first["claim_id"] == second["claim_id"] == claims[0]["id"]
+    assert len(claims[0]["evidence"]) == 1
+    assert claims[0]["evidence"][0]["id"] == initial_evidence_id
+    assert len(store.get_claim_lineage(claims[0]["id"])) == 2
+
+
+@pytest.mark.asyncio
+async def test_first_p3_proposal_adopts_existing_p2_evidence_row(store):
+    seeded = await _seed_discovery(store)
+    profile_url = "https://www.instagram.com/alice_example/"
+    value = {
+        "platform": "instagram",
+        "url": profile_url,
+        "username": "alice_example",
+    }
+    legacy_evidence = {
+        "evidence_type": "native_profile_search_candidate",
+        "source_name": "Native profile search · Instagram",
+        "source_url": profile_url,
+        "details": {
+            "audit_id": seeded["audit_id"],
+            "candidate_id": seeded["candidate_id"],
+            "candidate_identity_unverified": True,
+            "human_review_required": True,
+        },
+    }
+    legacy_evidence["fingerprint"] = evidence_fingerprint(legacy_evidence)
+    with store.engine.begin() as connection:
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": value,
+                    "display_value": profile_url,
+                    "normalized_value": json.dumps(value, sort_keys=True),
+                    "confidence": PROFILE_SEARCH_PENDING_CLAIM_CONFIDENCE,
+                    "fingerprint": claim_fingerprint("social_account", value),
+                    "source_engine": "native_profile_search_review",
+                    "source_record_id": seeded["candidate_id"],
+                    "native_status": "candidate_proposed",
+                    "evidence": [legacy_evidence],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+    legacy_claim = store.get_persona(seeded["persona_id"])["claims"][0]
+    legacy_evidence_id = legacy_claim["evidence"][0]["id"]
+
+    review = store.review_profile_search_candidate(
+        seeded["case_id"],
+        seeded["audit_id"],
+        seeded["candidate_id"],
+        seeded["persona_id"],
+        "proposed",
+        "analyst",
+    )
+
+    claim = store.get_persona(seeded["persona_id"])["claims"][0]
+    assert review["claim_id"] == legacy_claim["id"] == claim["id"]
+    assert len(claim["evidence"]) == 1
+    assert claim["evidence"][0] == legacy_claim["evidence"][0]
+    assert claim["evidence"][0]["id"] == legacy_evidence_id
+    assert "correlation" not in claim["evidence"][0]["details"]
+    lineage = store.get_claim_lineage(claim["id"])
+    assert len(lineage) == 2
+    correlation = lineage[-1]["details"]["observation"]
+    assert correlation["audit_id"] == seeded["audit_id"]
+    assert correlation["correlation_cluster_id"].startswith(
+        "evidence-cluster:"
+    )
+
+
+@pytest.mark.asyncio
 async def test_proposal_reuses_equivalent_existing_social_account(store):
     seeded = await _seed_discovery(store)
     profile_url = "https://www.instagram.com/alice_example/"
@@ -269,6 +386,84 @@ async def test_x_proposal_reuses_existing_legacy_twitter_account(store):
     claims = store.get_persona(seeded["persona_id"])["claims"]
     assert len(claims) == 1
     assert claims[0]["display_value"] == "https://x.com/alice_example"
+
+
+@pytest.mark.asyncio
+async def test_alias_only_observation_does_not_mutate_approved_claim(store):
+    seeded = await _seed_discovery(store, platform="x")
+    approved_value = {
+        "platform": "Twitter",
+        "url": "https://twitter.com/alice_example",
+        "username": "alice_example",
+    }
+    with store.engine.begin() as connection:
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": approved_value,
+                    "display_value": approved_value["url"],
+                    "normalized_value": json.dumps(approved_value, sort_keys=True),
+                    "confidence": 80,
+                    "fingerprint": claim_fingerprint("social_account", approved_value),
+                    "source_engine": "maigret",
+                    "source_record_id": "Twitter:alice_example",
+                    "native_status": "claimed",
+                    "evidence": [],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+    original = store.get_persona(seeded["persona_id"])["claims"][0]
+    store.review_claim(original["id"], "approved", "senior-analyst")
+
+    raw_url = "https://x.com/alice_example/status/12345?utm_source=discovery"
+    raw_value = {
+        "platform": "x",
+        "url": raw_url,
+        "username": "alice_example",
+    }
+    adapter_evidence = {
+        "evidence_type": "adapter_profile",
+        "source_name": "Bounded external adapter",
+        "source_url": "https://x.com/alice_example/status/12345",
+        "details": {"human_review_required": True},
+    }
+    adapter_evidence["fingerprint"] = evidence_fingerprint(adapter_evidence)
+    with store.engine.begin() as connection:
+        store._upsert_persona_candidates(
+            connection,
+            persona_id=seeded["persona_id"],
+            job_id=seeded["job_id"],
+            candidates=(
+                {
+                    "field_name": "social_account",
+                    "value": raw_value,
+                    "display_value": raw_url,
+                    "normalized_value": json.dumps(raw_value, sort_keys=True),
+                    "confidence": 40,
+                    "fingerprint": claim_fingerprint("social_account", raw_value),
+                    "source_engine": "bounded_external_adapter",
+                    "source_record_id": "adapter:x:alice_example:12345",
+                    "native_status": "observed",
+                    "evidence": [adapter_evidence],
+                },
+            ),
+            now=datetime.now(timezone.utc),
+        )
+
+    claim = store.get_persona(seeded["persona_id"])["claims"][0]
+    assert claim["id"] == original["id"]
+    assert claim["review_status"] == "approved"
+    assert claim["reviewed_by"] == "senior-analyst"
+    assert claim["value"] == approved_value
+    assert claim["display_value"] == approved_value["url"]
+    assert claim["confidence"] == 80
+    assert len(claim["evidence"]) == 1
+    assert len(store.get_claim_lineage(claim["id"])) == 2
 
 
 @pytest.mark.asyncio

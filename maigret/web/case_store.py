@@ -10,7 +10,7 @@ import os
 import re
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional
 from urllib.parse import quote, urlsplit
 
 from sqlalchemy import (
@@ -898,6 +898,20 @@ def _profile_search_candidate_alias_identity(candidate: Dict[str, Any]):
             continue
         return profile_reference.handle.casefold(), parser
     return None
+
+
+def _persona_candidate_row_is_exact(
+    existing: Mapping[str, Any], candidate: Dict[str, Any]
+) -> bool:
+    """Distinguish an exact lookup hit from a supported-URL alias hit."""
+    if str(existing["fingerprint"]) == str(candidate["fingerprint"]):
+        return True
+    return bool(
+        candidate.get("source_engine")
+        in {"openai_web_research", "native_profile_search_review"}
+        and candidate.get("field_name") == "social_account"
+        and existing["display_value"] == candidate["display_value"]
+    )
 
 
 def _persona_candidate_claim_with_connection(
@@ -3301,9 +3315,6 @@ class CaseStore:
                         {
                             "evidence_type": evidence["evidence_type"],
                             "source_id": observation["source_id"],
-                            "source_record_id": observation[
-                                "source_record_id"
-                            ],
                             "canonical_profile_identity": canonical_identity,
                         }
                     )
@@ -5062,6 +5073,13 @@ class CaseStore:
                 legacy_source = _legacy_untriaged_source_details(
                     existing["source_engine"]
                 )
+                preserve_curated_alias = bool(
+                    not legacy_source
+                    and existing["review_status"] != "pending"
+                    and not _persona_candidate_row_is_exact(
+                        existing, candidate
+                    )
+                )
                 candidate_engine = str(candidate.get("source_engine") or "")
                 reactivate_from_profile = bool(
                     legacy_source
@@ -5090,14 +5108,20 @@ class CaseStore:
                     or existing["review_status"] == "pending"
                 ):
                     confidence = max(confidence, int(candidate["confidence"]))
-                updated_values = {
-                    "value": candidate["value"],
-                    "display_value": candidate["display_value"],
-                    "normalized_value": candidate["normalized_value"],
-                    "confidence": confidence,
-                    "last_seen_at": now,
-                    "updated_at": now,
-                }
+                if preserve_curated_alias:
+                    updated_values = {
+                        "last_seen_at": now,
+                        "updated_at": now,
+                    }
+                else:
+                    updated_values = {
+                        "value": candidate["value"],
+                        "display_value": candidate["display_value"],
+                        "normalized_value": candidate["normalized_value"],
+                        "confidence": confidence,
+                        "last_seen_at": now,
+                        "updated_at": now,
+                    }
                 if legacy_source and reactivate_from_profile:
                     restored_status, _original_engine = legacy_source
                     updated_values.update(
@@ -5149,8 +5173,10 @@ class CaseStore:
                         source_engine=candidate_engine,
                         source_job_id=job_id,
                     )
-                if job_id is not None and (
-                    not legacy_source or reactivate_legacy
+                if (
+                    job_id is not None
+                    and not preserve_curated_alias
+                    and (not legacy_source or reactivate_legacy)
                 ):
                     updated_values["source_job_id"] = job_id
                 if (
@@ -5230,6 +5256,54 @@ class CaseStore:
                             )
                         )
                     continue
+                if (
+                    evidence["evidence_type"]
+                    == "native_profile_search_candidate"
+                    and isinstance(evidence.get("details"), dict)
+                ):
+                    candidate_id = str(
+                        evidence["details"].get("candidate_id") or ""
+                    )
+                    legacy_rows = (
+                        connection.execute(
+                            select(
+                                claim_evidence.c.id,
+                                claim_evidence.c.details,
+                                claim_evidence.c.fingerprint,
+                            )
+                            .where(
+                                claim_evidence.c.claim_id == claim_id,
+                                claim_evidence.c.evidence_type
+                                == "native_profile_search_candidate",
+                            )
+                            .order_by(
+                                claim_evidence.c.observed_at.desc(),
+                                claim_evidence.c.id.desc(),
+                            )
+                        )
+                        .mappings()
+                        .all()
+                    )
+                    legacy = next(
+                        (
+                            row
+                            for row in legacy_rows
+                            if isinstance(row["details"], dict)
+                            and "correlation" not in row["details"]
+                            and str(
+                                row["details"].get("candidate_id") or ""
+                            )
+                            == candidate_id
+                        ),
+                        None,
+                    )
+                    if legacy is not None:
+                        # Preserve the immutable P2 row byte-for-byte. The new
+                        # audit/cluster context is retained by the claim
+                        # observation written below, while its evidence link
+                        # continues to name the existing row fingerprint.
+                        evidence["fingerprint"] = legacy["fingerprint"]
+                        continue
                 connection.execute(
                     insert(claim_evidence).values(
                         id=str(uuid.uuid4()),
