@@ -204,7 +204,7 @@
         {% if approved_full_name %}
             {% if identity_enrichment and identity_enrichment.status in ('queued', 'running', 'cancel_requested') %}
             <a href="{{ url_for('live_results', job_id=identity_enrichment.job_id) }}" class="btn btn-outline-secondary"><i data-lucide="scan-search"></i> Public-record progress</a>
-            {% else %}
+            {% elif governed_pivots_enabled %}
             <form method="POST" action="{{ url_for('enrich_identity_claim', claim_id=approved_full_name.id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="text" name="pivot_purpose" maxlength="2000" placeholder="Lawful follow-up purpose" aria-label="Lawful follow-up purpose" required>
@@ -252,6 +252,7 @@
         <p class="form-text">No biography is used until you choose one of the stored candidates.</p>
         <div class="affiliation-candidate-list">
             {% for candidate in identity_enrichment.wikipedia_candidates %}
+            {% if governed_pivots_enabled %}
             <form method="POST" action="{{ url_for('select_wikipedia_biography', persona_id=persona.id) }}" class="affiliation-candidate">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                 <input type="hidden" name="source_claim_id" value="{{ approved_full_name.id }}">
@@ -264,6 +265,11 @@
                 </label>
                 <button type="submit" class="btn btn-sm btn-outline-secondary">Use this biography</button>
             </form>
+            {% else %}
+            <div class="affiliation-candidate">
+                <span><strong>{{ candidate.title }}</strong><small>{{ candidate.extract | truncate(220) }}</small></span>
+            </div>
+            {% endif %}
             {% endfor %}
         </div>
         {% elif identity_enrichment.wikipedia_status == 'observed' %}

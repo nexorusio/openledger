@@ -3910,6 +3910,46 @@ def test_verified_profile_pivot_route_requires_purpose_and_authorized_scope(
     assert {job["job_id"] for job in persistent_store.list_jobs()} == baseline_job_ids
 
 
+def test_disabled_governed_pivots_hide_actions_but_keep_stored_candidates(
+    client, persistent_store, monkeypatch
+):
+    persona_id, name_claim_id = _persistent_approved_full_name(persistent_store)
+    enrichment_id = _authorized_identity_enrichment(
+        persistent_store, persona_id, name_claim_id
+    )
+    persistent_store.claim_next("worker:identity-candidate")
+    persistent_store.finish(
+        enrichment_id,
+        {
+            "status": "completed",
+            "persona_id": persona_id,
+            "wikipedia_status": "needs_selection",
+            "wikipedia_candidates": [
+                {
+                    "page_id": "123",
+                    "title": "Alice Example (researcher)",
+                    "extract": "A stored candidate remains visible for review.",
+                }
+            ],
+            "offshore_status": "no_match",
+        },
+    )
+    social_persona_id, _social_claim_id = _persistent_approved_social_account(
+        persistent_store
+    )
+    monkeypatch.setenv("OPENLEDGER_GOVERNED_PIVOTS_ENABLED", "false")
+
+    name_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    social_page = client.get(f"/personas/{social_persona_id}").get_data(as_text=True)
+
+    assert "Alice Example (researcher)" in name_page
+    assert "Enrich confirmed name" not in name_page
+    assert "Use this biography" not in name_page
+    assert "/wikipedia/select" not in name_page
+    assert "Investigate verified link" not in social_page
+    assert "/pivot-profile" not in social_page
+
+
 def test_completed_identity_enrichment_opens_persona_instead_of_results(
     client, persistent_store
 ):

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from urllib.parse import urlsplit
 
 import pytest
 from sqlalchemy import update
@@ -31,7 +32,11 @@ def _profile_report(username, *urls, full_name=None):
         evidence = {"fullname": full_name} if full_name and index == 0 else {}
         profiles.append(
             {
-                "site_name": "X" if "x.com" in url else "Instagram",
+                "site_name": (
+                    "X"
+                    if urlsplit(url).hostname in {"x.com", "www.x.com"}
+                    else "Instagram"
+                ),
                 "url": url,
                 "confidence": "strong",
                 "evidence": evidence,

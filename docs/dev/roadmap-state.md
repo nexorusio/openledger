@@ -93,9 +93,10 @@ The phase integration branch is `codex/p3-evidence-correlation-pivots` in
 `/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its independently reviewed
 original-P3c checkpoint is `aae6891a7883905424a1405bcfc672cbbad19c4e`,
 tree `e85501c0d2588722b763838b900469955d351636`. The consolidated remote
-branch was reconstructed without squashing as 19 commits with head
-`c062a9eb97bfb5e8edd10c8efab0f537d317c120`; its final tree exactly matches
-the locally tested tree `f053bb88509ce6fb38bcea9fe96c3cae1577e5c3`.
+branch was reconstructed without squashing and its PR-state checkpoint has 20
+commits with head `fd9da98f5f407f954dba0a104162f5955fb91a72`; its tree
+`ce952c3e338ac77d5a2c537931f2931a83961012` differs from the locally tested
+application tree only by the durable PR-state record.
 Consolidated P3 pull request #51 targets unchanged P2 `main` at
 `288fdd216c1a107113719cc1c850d9fc0dd47808`.
 
@@ -171,8 +172,8 @@ enable it after the release controls are satisfied. Disabling it blocks new and
 not-yet-executed pivots without deleting retained evidence or disabling
 ordinary P2 discovery.
 
-After the review fixes, the P3c-focused and shared integration set passed 284
-tests. The dependency-complete relevant release regression passed 993 tests
+After the GitHub review fixes, the P3c-focused and shared integration set passed
+285 tests. The dependency-complete relevant release regression passed 994 tests
 with one intentional skip across correlation, governed pivots, profile discovery,
 profile-search backends/planning/ranking/orchestration/platforms/runtime,
 persistence/review, case store, Persona intelligence, external evidence,
@@ -194,8 +195,13 @@ infrastructure, or production-data change. It reuses the single Droplet,
 PostgreSQL worker queue, existing public-source adapters, and private SearXNG.
 No Brave credential or subscription is required. At this checkpoint nothing
 has been merged or deployed, and no production action has occurred. The
-consolidated branch and PR #51 are open; the next original-P3 actions are CI
-resolution and pre-merge checkpoint verification. Only after that checkpoint
+consolidated branch and PR #51 are open. All applicable GitHub workflows passed
+at `fd9da98`, including five Python versions, minimal install, CodeQL, governed
+source audit, PostgreSQL migrations and persistence, Compose validation,
+production image build, and non-root image verification. GitHub review then
+identified one unusable disabled-state control and one test-only URL substring;
+both are resolved in the current verified worktree, with CI rerun pending. The
+next original-P3 action is pre-merge checkpoint verification. Only after that checkpoint
 may the mandated read-only programme-wide P3-extension assessment begin. Extension
 implementation still requires separate activity-code authorization; squash,
 merge, deployment, and production modification remain unauthorized.
