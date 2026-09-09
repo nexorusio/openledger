@@ -90,13 +90,13 @@ production-verified commit
 checkout.
 
 The phase integration branch is `codex/p3-evidence-correlation-pivots` in
-`/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its original-P3c final-fix
-checkpoint is `e2ff1044efaa61e40062bbf192aa99dfbac11317`, tree
-`d65f57391ac999fdf71779f822c58286b4fae34e`.
+`/workspace/scratch/a7cc4d9992b8/openledger-p3`. Its independently reviewed
+original-P3c checkpoint is `aae6891a7883905424a1405bcfc672cbbad19c4e`,
+tree `e85501c0d2588722b763838b900469955d351636`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | Phase branch and worktree above | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a, P3b, and original P3c integrated locally; P3c final-fix checkpoint `e2ff1044efaa61e40062bbf192aa99dfbac11317` |
+| Coordinator | Phase branch and worktree above | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a, P3b, and original P3c integrated locally; independently reviewed P3c checkpoint `aae6891a7883905424a1405bcfc672cbbad19c4e` |
 | P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
 | P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
 | P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
@@ -107,7 +107,7 @@ checkpoint is `e2ff1044efaa61e40062bbf192aa99dfbac11317`, tree
 | P3c policy worker | `codex/p3c-governed-pivot-policy` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-policy` | Pure deterministic governed-pivot policy and unit tests | Source `8c8d985501d23dbd48b7557a235fad83bb25a13b`; integrated as `0634ca5` |
 | P3c acceptance worker | `codex/p3c-governed-pivot-acceptance` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-acceptance` | Black-box origin, scope, budget, audit, review, cancellation, rerun, and failure acceptance | Source `297363aea6d44d378e67c92de16172577cd00f3e`; integrated as `2db5a2e` |
 | P3c operations worker | `codex/p3c-governed-pivot-ops` in `/workspace/scratch/a7cc4d9992b8/openledger-p3c-ops` | Governed-pivot policy, operations, rollback, cost, and release documentation | Source `e3666ca062f0ab3cb8b2c06d6ddfd4b5733b6b4d`; integrated as `5233a75` |
-| P3c reviewer | Fresh read-only review of exact committed phase tree | Policy, security, runtime, persistence, compatibility, tests, operations, and cost boundaries | Review of `6bcef56` found two blockers, resolved at `4428161`; re-review of `9ee5c2f` found one remaining actor-attribution blocker, resolved at `e2ff104` by requiring the current requester for every identity pivot; final exact-commit re-review pending; no edit authority |
+| P3c reviewer | Fresh read-only review of exact committed phase tree | Policy, security, runtime, persistence, compatibility, tests, operations, and cost boundaries | Review of `6bcef56` found two blockers, resolved at `4428161`; re-review of `9ee5c2f` found one actor-attribution blocker, resolved at `e2ff104`; final review of `aae6891` found no actionable findings and passed 386 focused tests; no edit authority |
 
 P3a froze the provider-neutral, case-scoped evidence contract. P3b now adds a
 bounded deterministic correlation engine and a strict adapter for immutable P2
@@ -180,15 +180,17 @@ offline repository sweep passed 1,575 tests with 11 skips and those three
 network probes explicitly deselected. Critical Flake8 checks, Python
 compilation, `git diff --check`, and Black checks for new P3-owned policy and
 acceptance files passed. No test compatibility plugin or repository workaround
-was required in the dependency-complete environment.
+was required in the dependency-complete environment. The final independent
+review of exact commit `aae6891` passed 386 focused tests, found no actionable
+issues, and left the worktree unchanged.
 
 P3c adds no migration, dependency, lockfile, service, paid API, managed
 infrastructure, or production-data change. It reuses the single Droplet,
 PostgreSQL worker queue, existing public-source adapters, and private SearXNG.
 No Brave credential or subscription is required. At this checkpoint nothing
 has been pushed, no P3 pull request exists, and no production action has
-occurred. The next original-P3 actions are fresh read-only review, the final
-state commit, consolidated branch push, PR creation, CI resolution, and
+occurred. The next original-P3 actions are the final state commit, consolidated
+branch push, PR creation, CI resolution, and
 pre-merge checkpoint verification. Only after that checkpoint may the mandated
 read-only programme-wide P3-extension assessment begin. Extension
 implementation still requires separate activity-code authorization; squash,
