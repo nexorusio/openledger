@@ -213,6 +213,12 @@ PERSISTENT_CANCEL_POLL_SECONDS = 0.25
 PERSISTENT_CANCEL_COMPLETION_SECONDS = 15.0
 PERSISTENT_BUDGET_CLEANUP_SECONDS = 5.0
 COMBINED_AI_HEARTBEAT_SECONDS = 5.0
+UNIFIED_INVESTIGATION_INPUT_FLAG = (
+    "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED"
+)
+UNIFIED_INVESTIGATION_INPUT_TRUE_VALUES = frozenset(
+    {"1", "true", "yes", "on"}
+)
 
 
 def resolve_selected_site(sites, result_site_name):
@@ -1671,7 +1677,7 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
     return {
         'status': str(source.get('status') or 'queued'),
         'mode': mode,
-        'mode_label': 'Exhaustive' if mode == 'exhaustive' else 'Focused',
+        'mode_label': 'Full Scan' if mode == 'exhaustive' else 'Quick Scan',
         'budget_recorded': budget_recorded,
         'budget_seconds': budget_seconds,
         'deadline_at': source.get('deadline_at') or budget.get('deadline_at'),
@@ -2835,6 +2841,10 @@ def resolve_profile_url_identifiers(url):
 def parse_investigation_submission(form):
     """Return scan targets plus a bounded, persisted investigation plan."""
     if form.getlist('investigation_token'):
+        if not unified_investigation_input_enabled():
+            raise InvestigationInputError(
+                'Unified investigation input is disabled by server policy.'
+            )
         plan = build_unified_investigation_plan(
             form,
             profile_url_resolver=resolve_profile_url_identifiers,
@@ -5847,9 +5857,31 @@ def investigation_builder_context(persona=None):
     }
 
 
+def unified_investigation_input_enabled(environ=None) -> bool:
+    """Return the strict, app-only rollout state for the unified builder."""
+    source = os.environ if environ is None else environ
+    raw_value = source.get(UNIFIED_INVESTIGATION_INPUT_FLAG, "")
+    return (
+        str(raw_value).strip().casefold()
+        in UNIFIED_INVESTIGATION_INPUT_TRUE_VALUES
+    )
+
+
+def investigation_builder_template() -> str:
+    """Select the reversible presentation without changing stored contracts."""
+    return (
+        'index.html'
+        if unified_investigation_input_enabled()
+        else 'index_legacy.html'
+    )
+
+
 @app.route('/')
 def index():
-    return render_template('index.html', **investigation_builder_context())
+    return render_template(
+        investigation_builder_template(),
+        **investigation_builder_context(),
+    )
 
 
 @app.route('/healthz')
@@ -6012,6 +6044,13 @@ def public_investigation_preview_error(error):
 @app.route("/api/investigation-plan-preview", methods=["POST"])
 def api_investigation_plan_preview():
     """Return the bounded, server-authoritative plan for the token editor."""
+    if not unified_investigation_input_enabled():
+        response = jsonify(
+            {"error": "Unified investigation input is disabled by server policy."}
+        )
+        response.status_code = 404
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        return response
     if not is_valid_csrf(request.headers.get("X-OpenLedger-CSRF", "")):
         return {"error": "Invalid CSRF token."}, 403
     payload = request.get_json(silent=True)
@@ -7618,7 +7657,7 @@ def configure_persona_investigation(persona_id):
         return redirect(url_for('cases_workspace'))
     if request.method == 'GET':
         return render_template(
-            'index.html',
+            investigation_builder_template(),
             **investigation_builder_context(persona),
         )
     if not is_valid_csrf(request.form.get('csrf_token')):

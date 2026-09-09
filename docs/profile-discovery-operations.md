@@ -12,10 +12,10 @@ evidence or merge identity conclusions.
 The server owns the mode, duration, and deadline. Client-supplied durations or
 policy documents are ignored.
 
-| UI mode | Legacy API alias | Runtime budget | Maigret coverage |
-|---|---|---:|---|
-| Focused | `fast` | 10 minutes | The configured top-ranked eligible sites; the supported deployment currently defaults to 500. |
-| Exhaustive | `full` | 30 minutes | Every eligible enabled site matching the case filters. |
+| UI mode | Canonical value | Legacy API alias | Runtime budget | Maigret coverage |
+|---|---|---|---:|---|
+| Quick Scan | `focused` | `fast` | 10 minutes | The configured top-ranked eligible sites; the supported deployment currently defaults to 500. |
+| Full Scan | `exhaustive` | `full` | 30 minutes | Every eligible enabled site matching the case filters. |
 
 `focused` and `exhaustive` are the canonical request values. The legacy
 `fast` and `full` values remain accepted so existing integrations do not
@@ -28,7 +28,7 @@ work, retains evidence already collected, and records a distinct
 `budget_exhausted` outcome.
 
 Eligible coverage still respects source enablement, detector-health controls,
-case category/country filters, and provider-specific policy. Exhaustive means
+case category/country filters, and provider-specific policy. Full Scan means
 all eligible sources, not disabled or quarantined sources.
 
 ## Durable lifecycle
@@ -105,7 +105,7 @@ phone numbers. It creates no more than 25 exact-phrase, platform-scoped queries
 across Facebook, Instagram, Threads, TikTok, and X. Each query returns five
 results by default and can be configured from one to ten. The request timeout
 defaults to ten seconds and can be configured from one to 30 seconds. Every
-request remains inside the investigation's Focused or Exhaustive deadline.
+request remains inside the investigation's Quick Scan or Full Scan deadline.
 
 Only canonical public HTTPS profile URLs for the requested platform become
 candidates. The case page displays the immutable audit identifier, retained
@@ -154,23 +154,53 @@ The seven P1 flags default to enabled. Only the exact case-insensitive values
 `0`, `false`, `no`, or `off` disable one of those flags. Missing, empty, or
 malformed P1 values retain the documented default. The P2 search-first flag is
 different: it defaults off and only an explicit true value enables new outbound
-search access.
+search access. The P3 unified-input presentation flag also defaults off and is
+app-only; it does not alter worker policy.
 
 | Environment variable | When disabled |
 |---|---|
 | `OPENLEDGER_PROFILE_DISCOVERY_ENABLED` | Refuses all new live and refresh profile-discovery jobs. |
-| `OPENLEDGER_FOCUSED_DISCOVERY_ENABLED` | Refuses new Focused jobs. |
-| `OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED` | Refuses new Exhaustive jobs. |
+| `OPENLEDGER_FOCUSED_DISCOVERY_ENABLED` | Refuses new Quick Scan jobs. |
+| `OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED` | Refuses new Full Scan jobs. |
 | `OPENLEDGER_MAIGRET_DISCOVERY_ENABLED` | Refuses profile discovery because the required long-tail engine is unavailable. |
 | `OPENLEDGER_USER_SCANNER_DISCOVERY_ENABLED` | Refuses plans that request User Scanner; plans without it remain eligible. |
 | `OPENLEDGER_ENRICHMENT_PROVIDERS_ENABLED` | Blocks governed enrichment adapters, including shared organization and public-record adapters. |
 | `OPENLEDGER_PROVIDER_CIRCUIT_BREAKERS_ENABLED` | Bypasses breaker state while retaining one bounded call with no retry. |
 | `OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED` | Skips native major-platform search; Maigret and any authorized User Scanner work continue. |
+| `OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED` | Restores the legacy typed investigation builder. Existing jobs, stored plans, worker execution, evidence, reviews, and reports are unchanged. |
 
 The web application checks policy when a job is submitted. The worker checks
 again when claiming queued work. If policy changed while a job waited, the job
 fails before its first attempt and is not retried. Each accepted job stores the
 server policy snapshot used for its execution.
+
+### Unified investigation builder rollout and rollback
+
+`OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED` controls only the web
+application's new-investigation and Persona-rerun builder. It is absent from
+the worker environment by design. Only `1`, `true`, `yes`, or `on`, matched
+case-insensitively, enables the unified token editor and its preview endpoint.
+A missing, false, empty, or malformed value fails closed to the legacy typed
+builder; direct unified submissions and preview requests are refused.
+
+Both builders create the same bounded persisted investigation contracts. The
+flag does not cancel or reinterpret queued or completed jobs, change Quick
+Scan or Full Scan coverage, alter graph projection, approve evidence, or hide
+retained state. To stage the unified builder, set the flag to `true`, validate
+Compose, and recreate only `app`:
+
+```bash
+cd /opt/openledger
+sudo docker compose --env-file deploy/.env -f deploy/compose.yaml config --quiet
+sudo docker compose --env-file deploy/.env -f deploy/compose.yaml up -d --no-deps --force-recreate app
+sudo docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T app env | grep '^OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED='
+curl -fsS https://openledger.nexorus.io/healthz
+```
+
+For immediate presentation rollback, set the flag to `false`, repeat those
+app-only validation and recreation commands, and confirm the typed builder is
+shown. Do not recreate the worker for this flag. Existing jobs continue under
+their persisted server-owned route plans.
 
 ## Change flags on the supported Docker deployment
 
@@ -199,7 +229,9 @@ They are for a flag-only operational change; they do not pull or rebuild code.
    sudo docker compose --env-file deploy/.env -f deploy/compose.yaml config --quiet
    ```
 
-4. Recreate only the app and worker so both receive the same flag snapshot:
+4. For execution-policy flags, recreate the app and worker so both receive the
+   same flag snapshot. For the unified-input presentation flag, follow the
+   preceding app-only procedure instead:
 
    ```bash
    cd /opt/openledger
@@ -291,7 +323,7 @@ per-request billing relationship.
    sudo bash deploy/self-hosted-search.sh enable
    ```
 
-5. Run one authorized Focused smoke investigation. Confirm that native search
+5. Run one authorized Quick Scan smoke investigation. Confirm that native search
    starts before Maigret, the case shows only canonical candidates for the five
    supported platforms, proposed candidates remain pending in Persona, and no
    credential or raw query appears in container logs. Confirm the app and worker

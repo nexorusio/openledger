@@ -15,7 +15,10 @@ from maigret.web import app as web_app_module
 
 
 @pytest.fixture
-def web_app(tmp_path):
+def web_app(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED", "true"
+    )
     web_app_module.app.config["TESTING"] = True
     web_app_module.app.config["REPORTS_FOLDER"] = str(tmp_path / "reports")
     web_app_module.app.config["SETTINGS_FILE"] = str(tmp_path / "settings.json")
@@ -137,7 +140,7 @@ def test_runtime_endpoint_distinguishes_queue_time_from_running_budget(
     assert queued == {
         "status": "queued",
         "mode": "focused",
-        "mode_label": "Focused",
+        "mode_label": "Quick Scan",
         "budget_recorded": True,
         "budget_seconds": 600,
         "deadline_at": None,
@@ -154,6 +157,42 @@ def test_runtime_endpoint_distinguishes_queue_time_from_running_budget(
     assert running["deadline_at"] is not None
     assert running["heartbeat_at"] is not None
     assert running["budget_seconds"] == 600
+
+
+@pytest.mark.parametrize(
+    ("execution_mode", "mode_label"),
+    (("focused", "Quick Scan"), ("exhaustive", "Full Scan")),
+)
+def test_discovery_mode_labels_match_across_live_results_and_history(
+    client, persistent_store, execution_mode, mode_label
+):
+    job_id = persistent_store.create_investigation(
+        ["alice"], {"execution_mode": execution_mode}
+    )
+    persistent_store.claim_next("worker:mode-label")
+
+    live_body = client.get(f"/live/{job_id}").get_data(as_text=True)
+    assert f'<strong id="stat-mode">{mode_label}</strong>' in live_body
+
+    persistent_store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": ["alice"],
+            "individual_reports": [],
+            "graph_file": f"search_{job_id}/graph.html",
+            "found_count": 0,
+            "candidate_count": 0,
+            "suppressed_count": 0,
+            "profile_reliability_version": 1,
+        },
+    )
+
+    results_body = client.get(f"/results/search_{job_id}").get_data(as_text=True)
+    history_body = client.get("/history").get_data(as_text=True)
+    assert f'<strong class="metric-value">{mode_label}</strong>' in results_body
+    assert f"{mode_label} · " in history_body
 
 
 def test_terminal_stream_maps_budget_limited_report_to_partial(
@@ -1679,7 +1718,7 @@ def test_legacy_persona_refresh_requires_configuration_before_queueing(
 
 
 def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
-    client, persistent_store
+    client, persistent_store, monkeypatch
 ):
     subject = "Ferdinata Suryanto"
     job_id = persistent_store.create_investigation(
@@ -1715,6 +1754,16 @@ def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
     assert "Authoritative plan" in body
     assert "Full Scan" in body
     assert "Pending, uncertain, rejected, or deferred evidence is not silently reused" in body
+
+    monkeypatch.setenv(
+        web_app_module.UNIFIED_INVESTIGATION_INPUT_FLAG, "false"
+    )
+    legacy_builder = client.get(f"/personas/{persona_id}/investigate")
+    legacy_body = legacy_builder.get_data(as_text=True)
+    assert legacy_builder.status_code == 200
+    assert f'value="{subject}"' in legacy_body
+    assert 'name="identifier_type"' in legacy_body
+    assert 'id="investigation-token-input"' not in legacy_body
 
     with client.session_transaction() as browser_session:
         browser_session["csrf_token"] = "configured-persona-csrf"

@@ -39,7 +39,10 @@ class _SyncThread:
 
 
 @pytest.fixture
-def web_app(tmp_path):
+def web_app(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED", "true"
+    )
     web_app_module.app.config['TESTING'] = True
     web_app_module.app.config['REPORTS_FOLDER'] = str(tmp_path)
     web_app_module.app.config['MAIGRET_DB_FILE'] = TEST_DB
@@ -93,6 +96,66 @@ def test_index_renders(client):
     assert 'name="enable_archived_url_evidence"' not in body
     assert "Jati Pratomo" not in body
     assert "Nexorus, urban planning" not in body
+
+
+@pytest.mark.parametrize("value", [None, "", "0", "false", "typo"])
+def test_unified_investigation_input_flag_fails_closed_to_legacy_builder(
+    client, web_app, monkeypatch, value
+):
+    if value is None:
+        monkeypatch.delenv(
+            web_app.UNIFIED_INVESTIGATION_INPUT_FLAG, raising=False
+        )
+    else:
+        monkeypatch.setenv(web_app.UNIFIED_INVESTIGATION_INPUT_FLAG, value)
+
+    body = client.get("/").get_data(as_text=True)
+
+    assert 'name="identifier_type"' in body
+    assert 'id="investigation-token-input"' not in body
+    assert "Quick Scan" in body
+    assert "Full Scan" in body
+    assert not web_app.unified_investigation_input_enabled()
+
+
+def test_unified_investigation_input_flag_enables_builder_and_preview(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setenv(web_app.UNIFIED_INVESTIGATION_INPUT_FLAG, " YES ")
+
+    body = client.get("/").get_data(as_text=True)
+
+    assert 'id="investigation-token-input"' in body
+    assert 'name="identifier_type"' not in body
+    assert web_app.unified_investigation_input_enabled()
+
+
+def test_unified_input_preview_and_submission_are_disabled_with_rollout_off(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setenv(web_app.UNIFIED_INVESTIGATION_INPUT_FLAG, "false")
+    csrf_token = _csrf_token(client)
+
+    preview = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json={"tokens": ["alice"], "mode": "quick"},
+    )
+    submission = client.post(
+        "/api/scan",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        data={"investigation_token": ["alice"], "mode": "quick"},
+    )
+
+    assert preview.status_code == 404
+    assert preview.headers["Cache-Control"] == "private, no-store, max-age=0"
+    assert preview.get_json() == {
+        "error": "Unified investigation input is disabled by server policy."
+    }
+    assert submission.status_code == 400
+    assert submission.get_json() == {
+        "error": "Unified investigation input is disabled by server policy."
+    }
 
 
 def test_alias_preview_uses_authoritative_unicode_casefolding(client):

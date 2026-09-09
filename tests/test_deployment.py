@@ -81,6 +81,29 @@ def test_profile_search_deployment_is_fail_closed_with_runtime_parity():
     ).read_text(encoding="utf-8")
 
 
+def test_unified_investigation_rollout_is_app_only_and_defaults_off():
+    setting = (
+        "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED: "
+        '"${OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED:-false}"'
+    )
+    app = _compose_service("app")
+    worker = _compose_service("worker")
+    example = (REPOSITORY_ROOT / "deploy" / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    install_script = (REPOSITORY_ROOT / "deploy" / "install.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert setting in app
+    assert "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED" not in worker
+    assert "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED=false" in example
+    assert (
+        "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED='false'"
+        in install_script
+    )
+
+
 def test_self_hosted_search_is_private_optional_and_resource_bounded():
     service = _compose_service("searxng")
     settings = (REPOSITORY_ROOT / "deploy" / "searxng-settings.yml").read_text(

@@ -211,6 +211,29 @@ No Brave Search key, payment card, subscription, or new service is requested;
 the existing private SearXNG route remains the search provider when its
 capability flag and provider configuration permit it.
 
+## P3 extension presentation boundary
+
+The separate P3 extension presents the existing `focused` and `exhaustive`
+execution modes consistently as **Quick Scan** and **Full Scan** in the
+builder, live progress, results, and history. The labels do not change source
+eligibility, runtime budgets, persisted values, route planning, or worker
+behavior.
+
+`OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED` is a separate app-only
+presentation rollout flag. It defaults off and enables the unified token
+editor only for exact case-insensitive `1`, `true`, `yes`, or `on` values.
+Missing, empty, false, or malformed values restore the legacy typed builder and
+refuse the unified preview/submission contract. The flag is intentionally not
+in the worker environment: queued and completed jobs retain their persisted
+plans and continue unchanged during builder rollout or rollback.
+
+This presentation flag is independent of
+`OPENLEDGER_GOVERNED_PIVOTS_ENABLED`. It cannot enable a governed pivot, widen
+a route, create a relationship, approve evidence, change review state, or
+bypass any capability flag. Operators may recreate only the app to roll the
+builder forward or back; governed-pivot flag changes still require app/worker
+parity.
+
 ## Rollback
 
 The first rollback action is to set
@@ -293,8 +316,8 @@ checkpoint above, and before any P3 merge, the coordinator must:
 
 The extension includes the unified token-entry investigation input, Quick Scan
 and Full Scan ordinary modes, a minimal alias option, deterministic server-side
-planning, and clear no-relationship/degraded states. None of those changes is
-authorized by P3c. The extension assessment itself does not authorize
-implementation. Original P3 must not be merged first, and P4 must not begin
-until the combined P3 release is human-authorized, deployed, and
+planning, and clear no-relationship/degraded states. Those changes are not
+authorized by P3c; they are implemented only through the separately authorized
+P3X1--P3X4 activities. Original P3 must not be merged first, and P4 must not
+begin until the combined P3 release is human-authorized, deployed, and
 production-verified.
