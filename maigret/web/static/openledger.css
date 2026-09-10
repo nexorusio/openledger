@@ -1141,6 +1141,31 @@ textarea.form-control {
     padding-bottom: 20px;
 }
 
+.additional-checks > summary {
+    color: var(--ol-text);
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.additional-checks > .form-text {
+    margin: 9px 0 0;
+}
+
+.additional-check-platforms {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 18px;
+    margin: 10px 0 0;
+    padding: 0;
+    border: 0;
+}
+
+.additional-check-platforms .form-check-label {
+    color: var(--ol-muted);
+    font-size: 0.72rem;
+}
+
 .alias-review-heading {
     display: flex;
     align-items: flex-start;
@@ -1286,6 +1311,7 @@ textarea.form-control {
 .investigation-route-item.is-conditional,
 .investigation-route-item.is-unavailable,
 .investigation-route-item.is-context,
+.investigation-route-item.is-needs-input,
 .investigation-route-item.is-excluded {
     opacity: 0.72;
 }
@@ -1307,6 +1333,11 @@ textarea.form-control {
 }
 
 .investigation-route-item.is-conditional .route-status {
+    border-color: color-mix(in srgb, var(--ol-warning) 38%, var(--ol-border));
+    color: var(--ol-warning);
+}
+
+.investigation-route-item.is-needs-input .route-status {
     border-color: color-mix(in srgb, var(--ol-warning) 38%, var(--ol-border));
     color: var(--ol-warning);
 }

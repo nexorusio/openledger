@@ -114,9 +114,9 @@
                 <fieldset class="investigation-section compact-option-section">
                     <legend class="visually-hidden">Optional username aliases</legend>
                     <div class="form-check investigation-check mt-0">
-                        <input class="form-check-input" type="checkbox" id="search-likely-username-aliases" name="search_likely_username_aliases">
+                        <input class="form-check-input" type="checkbox" id="search-likely-username-aliases" name="search_likely_username_aliases" checked>
                         <label class="form-check-label" for="search-likely-username-aliases">Search likely username aliases</label>
-                        <div class="form-text">For a full name, generates bounded, server-ranked account variants for you to review. Only aliases you select will be searched.</div>
+                        <div class="form-text">Enabled by default to preserve public-account discovery for full names. It generates server-ranked account variants, and only the visible aliases you keep selected will be searched.</div>
                     </div>
                 </fieldset>
 
@@ -131,6 +131,37 @@
                     <input type="hidden" id="alias-candidates-present" name="alias_candidates_present" value="1" disabled>
                     <div class="alias-candidate-list" id="username-alias-list"></div>
                 </section>
+
+                <details class="investigation-section additional-checks">
+                    <summary>Additional existing checks</summary>
+                    <p class="form-text">These established collectors remain optional and off by default. Selected checks appear in the authoritative plan before collection.</p>
+                    {% if user_scanner_available %}
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="enable-user-scanner-username" name="enable_user_scanner_username">
+                        <label class="form-check-label" for="enable-user-scanner-username">Verify selected usernames on major social platforms</label>
+                    </div>
+                    <input type="hidden" name="user_scanner_platforms_present" value="1">
+                    <fieldset class="additional-check-platforms">
+                        <legend class="visually-hidden">Username verification platforms</legend>
+                        {% for platform, label in [('facebook', 'Facebook'), ('instagram', 'Instagram'), ('threads', 'Threads'), ('tiktok', 'TikTok'), ('x', 'X')] %}
+                        <label class="form-check-label"><input class="form-check-input" type="checkbox" name="user_scanner_platform" value="{{ platform }}" checked> {{ label }}</label>
+                        {% endfor %}
+                    </fieldset>
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="allow-user-scanner-vxtwitter" name="allow_user_scanner_vxtwitter">
+                        <label class="form-check-label" for="allow-user-scanner-vxtwitter">Allow the third-party X lookup through api.vxtwitter.com</label>
+                        <div class="form-text">Requires explicit selection. When off, the X third-party request remains blocked.</div>
+                    </div>
+                    {% endif %}
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="enable-github-profile-enrichment" name="enable_github_profile_enrichment">
+                        <label class="form-check-label" for="enable-github-profile-enrichment">Enrich supported GitHub profiles</label>
+                    </div>
+                    <div class="form-check investigation-check">
+                        <input class="form-check-input" type="checkbox" id="enable-archived-url-evidence" name="enable_archived_url_evidence">
+                        <label class="form-check-label" for="enable-archived-url-evidence">Check supported profile URLs for archive evidence</label>
+                    </div>
+                </details>
 
                 <fieldset class="investigation-section email-confirmation" id="email-route-confirmation" hidden>
                     <legend class="visually-hidden">Email route confirmation</legend>

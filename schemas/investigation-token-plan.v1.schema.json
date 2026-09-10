@@ -122,10 +122,13 @@
         "route": {
           "enum": [
             "context_only",
+            "archived_profile_evidence",
+            "github_profile_enrichment",
             "likely_username_aliases",
             "maigret",
             "native_profile_search",
-            "user_scanner_email"
+            "user_scanner_email",
+            "user_scanner_username"
           ]
         },
         "label": {"type": "string", "minLength": 1, "maxLength": 120},
@@ -138,6 +141,7 @@
           "items": {"type": "string", "minLength": 1, "maxLength": 40}
         },
         "requires_confirmation": {"type": "boolean"},
+        "conditional_on_supported_profile": {"type": "boolean"},
         "coverage": {
           "enum": [
             "all_eligible_enabled_non_quarantined",
@@ -153,6 +157,7 @@
           "enum": [
             "confirmation_required",
             "context_only_no_outbound",
+            "no_username_targets",
             "server_disabled"
           ]
         }
@@ -176,7 +181,9 @@
       ],
       "properties": {
         "schema_version": {"const": 1},
-        "policy_version": {"const": "investigation-routes-v1"},
+        "policy_version": {
+          "enum": ["investigation-routes-v1", "investigation-routes-v2"]
+        },
         "server_authoritative": {"const": true},
         "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "requested_mode": {"enum": ["quick", "full"]},

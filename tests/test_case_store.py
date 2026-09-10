@@ -185,7 +185,7 @@ def test_relationship_state_precedence_and_effective_route_summary(
         "mode_label": "Quick Scan",
         "effective_routes": ["native_profile_search"],
         "effective_route_count": 1,
-        "skipped_route_count": 0,
+        "skipped_route_count": 1,
         "budget_seconds": 600,
     }
 

@@ -6,7 +6,7 @@ SCRIPT_PATH = ROOT / "maigret" / "web" / "static" / "investigation-builder.js"
 STYLE_PATH = ROOT / "maigret" / "web" / "static" / "openledger.css"
 
 
-def test_unified_builder_replaces_typed_rows_and_legacy_advanced_controls():
+def test_unified_builder_replaces_typed_rows_and_preserves_optional_collectors():
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
 
     assert 'id="investigation-token-input"' in template
@@ -20,7 +20,11 @@ def test_unified_builder_replaces_typed_rows_and_legacy_advanced_controls():
     assert 'name="tags"' not in template
     assert 'name="excluded_tags"' not in template
     assert 'name="allow_ai_context"' not in template
-    assert 'name="enable_archived_url_evidence"' not in template
+    assert "Additional existing checks" in template
+    assert 'name="enable_user_scanner_username"' in template
+    assert 'name="enable_github_profile_enrichment"' in template
+    assert 'name="enable_archived_url_evidence"' in template
+    assert 'name="allow_user_scanner_vxtwitter"' in template
 
 
 def test_browser_commits_whole_nonempty_values_and_preserves_empty_tab_navigation():
@@ -90,11 +94,14 @@ def test_plan_presents_conditional_unavailable_and_context_states_truthfully():
     assert "server_disabled: {" in script
     assert "state: 'unavailable'" in script
     assert "badge: 'Unavailable'" in script
+    assert "no_username_targets: {" in script
+    assert "badge: 'Needs username'" in script
     assert "`${contextCount} context ${contextCount === 1 ? 'value' : 'values'}`" in script
     assert "`${skippedRoutes.length} skipped`" not in script
     assert ".investigation-route-item.is-conditional" in styles
     assert ".investigation-route-item.is-context" in styles
     assert ".investigation-route-item.is-unavailable" in styles
+    assert ".investigation-route-item.is-needs-input" in styles
 
 
 def test_builder_has_reviewable_alias_selection_and_quick_full_controls():
@@ -103,6 +110,10 @@ def test_builder_has_reviewable_alias_selection_and_quick_full_controls():
 
     assert template.count('name="search_likely_username_aliases"') == 1
     assert "Search likely username aliases" in template
+    assert (
+        'id="search-likely-username-aliases" '
+        'name="search_likely_username_aliases" checked'
+    ) in template
     assert 'id="username-alias-review"' in template
     assert 'name="alias_candidates_present"' in template
     assert "renderAliasCandidates" in script
@@ -110,5 +121,7 @@ def test_builder_has_reviewable_alias_selection_and_quick_full_controls():
     assert "maximumSelectedAliases = 16" in script
     assert 'name="alias_nicknames"' not in template
     assert 'name="alias_context_numbers"' not in template
+    assert "Additional existing checks" in template
+    assert "syncUsernameScannerControls" in script
     assert 'name="mode" id="mode-quick" value="quick"' in template
     assert 'name="mode" id="mode-full" value="full"' in template

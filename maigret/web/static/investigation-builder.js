@@ -16,6 +16,13 @@
     const aliasList = document.getElementById('username-alias-list');
     const aliasSummary = document.getElementById('username-alias-summary');
     const aliasCandidatesPresent = document.getElementById('alias-candidates-present');
+    const usernameScannerToggle = document.getElementById('enable-user-scanner-username');
+    const usernamePlatformControls = Array.from(
+        form.querySelectorAll('input[name="user_scanner_platform"]')
+    );
+    const vxTwitterToggle = document.getElementById('allow-user-scanner-vxtwitter');
+    const githubEnrichmentToggle = document.getElementById('enable-github-profile-enrichment');
+    const archiveEvidenceToggle = document.getElementById('enable-archived-url-evidence');
     const emailSection = document.getElementById('email-route-confirmation');
     const emailConfirmation = document.getElementById('confirm-email-route');
     const preview = document.getElementById('investigation-plan-preview');
@@ -56,6 +63,11 @@
             badge: 'Context only',
             detail: 'No outbound request'
         },
+        no_username_targets: {
+            state: 'needs-input',
+            badge: 'Needs username',
+            detail: 'Select an alias or add an account identifier'
+        },
         server_disabled: {
             state: 'unavailable',
             badge: 'Unavailable',
@@ -90,6 +102,20 @@
     function selectedMode() {
         const selected = form.querySelector('input[name="mode"]:checked');
         return selected ? selected.value : 'quick';
+    }
+
+    function syncUsernameScannerControls() {
+        const scannerEnabled = Boolean(usernameScannerToggle && usernameScannerToggle.checked);
+        usernamePlatformControls.forEach(control => {
+            control.disabled = !scannerEnabled;
+        });
+        if (vxTwitterToggle) {
+            const xSelected = usernamePlatformControls.some(
+                control => control.value === 'x' && control.checked
+            );
+            vxTwitterToggle.disabled = !scannerEnabled || !xSelected;
+            if (vxTwitterToggle.disabled) vxTwitterToggle.checked = false;
+        }
     }
 
     function setError(message, { focus = false } = {}) {
@@ -355,9 +381,13 @@
         const count = Number(route.target_count || 0);
         const requestCount = Number(route.planned_request_count || 0);
         if (state === 'active') {
-            detail.textContent = requestCount
-                ? `${requestCount} planned request${requestCount === 1 ? '' : 's'}`
-                : `${count} target${count === 1 ? '' : 's'}`;
+            if (route.conditional_on_supported_profile) {
+                detail.textContent = 'Runs only after a supported profile is found';
+            } else {
+                detail.textContent = requestCount
+                    ? `${requestCount} planned request${requestCount === 1 ? '' : 's'}`
+                    : `${count} target${count === 1 ? '' : 's'}`;
+            }
         } else {
             const presentation = routePresentations[route.reason_code];
             detail.textContent = presentation ? presentation.detail : 'Not included in this run';
@@ -396,6 +426,9 @@
         const excludedCount = inactiveRoutes.filter(
             item => item.presentation.state === 'excluded'
         ).length;
+        const needsInputCount = inactiveRoutes.filter(
+            item => item.presentation.state === 'needs-input'
+        ).length;
         const minutes = Math.round(Number(routePlan.budget_seconds || 0) / 60);
         const modeLabel = routePlan.requested_mode === 'full' ? 'Full Scan' : 'Quick Scan';
         previewMode.textContent = `${modeLabel} · ${minutes} min`;
@@ -411,6 +444,9 @@
         }
         if (contextCount) {
             summaryParts.push(`${contextCount} context ${contextCount === 1 ? 'value' : 'values'}`);
+        }
+        if (needsInputCount) {
+            summaryParts.push(`${needsInputCount} ${needsInputCount === 1 ? 'route needs' : 'routes need'} a username`);
         }
         if (excludedCount) summaryParts.push(`${excludedCount} not included`);
         previewSummary.textContent = `${summaryParts.join(' · ')}.`;
@@ -444,6 +480,20 @@
                 })),
                 mode: selectedMode(),
                 search_likely_username_aliases: aliasToggle.checked,
+                enable_user_scanner_username: Boolean(usernameScannerToggle && usernameScannerToggle.checked),
+                user_scanner_username_platforms: usernameScannerToggle && usernameScannerToggle.checked
+                    ? usernamePlatformControls.filter(control => control.checked).map(control => control.value)
+                    : [],
+                allow_user_scanner_vxtwitter: Boolean(
+                    usernameScannerToggle && usernameScannerToggle.checked
+                    && vxTwitterToggle && vxTwitterToggle.checked
+                ),
+                enable_github_profile_enrichment: Boolean(
+                    githubEnrichmentToggle && githubEnrichmentToggle.checked
+                ),
+                enable_archived_url_evidence: Boolean(
+                    archiveEvidenceToggle && archiveEvidenceToggle.checked
+                ),
                 confirm_email_route: emailConfirmation.checked,
                 alias_selection_present: aliasToggle.checked && aliasSelectionExplicit,
                 selected_aliases: aliasToggle.checked && aliasSelectionExplicit
@@ -562,6 +612,18 @@
         clearAliasReview();
         refreshPreview();
     });
+    [
+        usernameScannerToggle,
+        vxTwitterToggle,
+        githubEnrichmentToggle,
+        archiveEvidenceToggle,
+        ...usernamePlatformControls
+    ].filter(Boolean).forEach(control => {
+        control.addEventListener('change', () => {
+            syncUsernameScannerControls();
+            refreshPreview();
+        });
+    });
     emailConfirmation.addEventListener('change', refreshPreview);
     form.querySelectorAll('input[name="mode"]').forEach(control => {
         control.addEventListener('change', refreshPreview);
@@ -588,6 +650,7 @@
         HTMLFormElement.prototype.submit.call(form);
     });
 
+    syncUsernameScannerControls();
     renderTokens();
     if (tokens.length) refreshPreview();
     else resetPreview();

@@ -93,8 +93,9 @@ def test_index_renders(client):
     assert "Full Scan" in body
     assert 'name="identifier_type"' not in body
     assert "Case source filters" not in body
-    assert 'name="enable_github_profile_enrichment"' not in body
-    assert 'name="enable_archived_url_evidence"' not in body
+    assert "Additional existing checks" in body
+    assert 'name="enable_github_profile_enrichment"' in body
+    assert 'name="enable_archived_url_evidence"' in body
     assert "Jati Pratomo" not in body
     assert "Nexorus, urban planning" not in body
 
@@ -341,6 +342,124 @@ def test_investigation_plan_preview_classifies_tokens_and_exposes_server_plan(
     assert payload["requires_email_confirmation"] is False
 
 
+def test_production_failure_input_plans_maigret_targets_when_alias_search_is_enabled(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
+    monkeypatch.setattr(web_app, "resolve_profile_url_identifiers", lambda _url: {})
+
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={
+            "tokens": [
+                "jati pratomo",
+                "jati.pratomo@gmail.com",
+                "+6281325104331",
+                "https://www.linkedin.com/in/jati-pratomo/",
+            ],
+            "mode": "full",
+            "search_likely_username_aliases": True,
+            "confirm_email_route": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["can_start"] is True
+    assert payload["route_plan"]["requested_mode"] == "full"
+    maigret_route = next(
+        route
+        for route in payload["route_plan"]["effective_routes"]
+        if route["route"] == "maigret"
+    )
+    assert maigret_route["target_count"] > 0
+    assert any(candidate["selected"] for candidate in payload["alias_candidates"])
+
+
+def test_full_scan_without_a_maigret_target_is_blocked_as_misleading(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
+
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={
+            "tokens": ["Alice Example", "alice@example.com"],
+            "mode": "full",
+            "confirm_email_route": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["can_start"] is False
+    assert payload["blocking_error"] == (
+        "Full Scan requires at least one username, social handle, supported "
+        "profile URL, or selected username alias."
+    )
+    assert any(
+        route["route"] == "maigret"
+        and route["reason_code"] == "no_username_targets"
+        for route in payload["route_plan"]["skipped_routes"]
+    )
+    submission = client.post(
+        "/api/scan",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        data={
+            "investigation_token": ["Alice Example", "alice@example.com"],
+            "mode": "full",
+            "confirm_email_route": "on",
+        },
+    )
+    assert submission.status_code == 400
+    assert submission.get_json()["error"] == payload["blocking_error"]
+
+
+def test_quick_scan_can_degrade_to_native_search_when_maigret_is_unavailable(
+    client, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_MAIGRET_DISCOVERY_ENABLED", "false")
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={"tokens": ["alice"], "mode": "quick"},
+    )
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["can_start"] is True
+    assert any(
+        route["route"] == "maigret" and route["reason_code"] == "server_disabled"
+        for route in payload["route_plan"]["skipped_routes"]
+    )
+    assert any(
+        route["route"] == "native_profile_search"
+        for route in payload["route_plan"]["effective_routes"]
+    )
+
+
+def test_full_scan_is_blocked_when_maigret_is_unavailable(client, monkeypatch):
+    monkeypatch.setenv("OPENLEDGER_MAIGRET_DISCOVERY_ENABLED", "false")
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={"tokens": ["alice"], "mode": "full"},
+    )
+
+    payload = response.get_json()
+    assert payload["can_start"] is False
+    assert payload["blocking_error"] == (
+        "Public account discovery is unavailable because Maigret is disabled "
+        "by server policy."
+    )
+
+
 def test_investigation_preview_accepts_validated_type_overrides_and_keeps_raw_handle(
     client, monkeypatch
 ):
@@ -443,6 +562,99 @@ def test_final_unified_submission_preserves_type_override_and_alias_selection(
     ] == ["ferry.irwandi"]
     assert "0822335763" in usernames
     assert "ferry.irwandi" in usernames
+
+
+def test_unified_submission_preserves_explicit_existing_optional_collectors(
+    web_app, monkeypatch
+):
+    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
+    usernames, plan = web_app.parse_investigation_submission(
+        MultiDict(
+            [
+                ("investigation_token", "alice"),
+                ("investigation_token_type", ""),
+                ("mode", "quick"),
+                ("enable_user_scanner_username", "on"),
+                ("user_scanner_platforms_present", "1"),
+                ("user_scanner_platform", "instagram"),
+                ("user_scanner_platform", "x"),
+                ("allow_user_scanner_vxtwitter", "on"),
+                ("enable_github_profile_enrichment", "on"),
+                ("enable_archived_url_evidence", "on"),
+            ]
+        )
+    )
+
+    assert usernames == ["alice"]
+    assert plan["enable_user_scanner_username"] is True
+    assert plan["user_scanner_username_platforms"] == ["instagram", "x"]
+    assert plan["allow_user_scanner_vxtwitter"] is True
+    assert plan["enable_github_profile_enrichment"] is True
+    assert plan["enable_archived_url_evidence"] is True
+    planned = web_app.finalize_investigation_route_plan(
+        plan,
+        flags={
+            "maigret_enabled": True,
+            "search_first_enabled": True,
+            "user_scanner_enabled": True,
+            "enrichment_providers_enabled": True,
+        },
+    )
+    assert {
+        route["route"] for route in planned["route_plan"]["effective_routes"]
+    }.issuperset(
+        {
+            "maigret",
+            "user_scanner_username",
+            "github_profile_enrichment",
+            "archived_profile_evidence",
+        }
+    )
+
+
+def test_preview_exposes_explicit_existing_optional_collectors(
+    client, web_app, monkeypatch
+):
+    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
+    payload = {
+        "tokens": ["alice"],
+        "mode": "quick",
+        "enable_user_scanner_username": True,
+        "user_scanner_username_platforms": ["instagram", "x"],
+        "allow_user_scanner_vxtwitter": True,
+        "enable_github_profile_enrichment": True,
+        "enable_archived_url_evidence": True,
+    }
+
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    effective = {
+        route["route"]: route
+        for route in response.get_json()["route_plan"]["effective_routes"]
+    }
+    assert effective["user_scanner_username"]["platforms"] == ["instagram", "x"]
+    assert effective["user_scanner_username"]["third_party_x_enabled"] is True
+    assert effective["github_profile_enrichment"][
+        "conditional_on_supported_profile"
+    ] is True
+    assert effective["archived_profile_evidence"][
+        "conditional_on_supported_profile"
+    ] is True
+
+    invalid = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={**payload, "user_scanner_username_platforms": ["not-a-platform"]},
+    )
+    assert invalid.status_code == 400
+    assert invalid.get_json() == {
+        "error": "Investigation preview inputs are invalid."
+    }
 
 
 def test_investigation_plan_preview_requires_email_confirmation_and_availability(
@@ -584,14 +796,17 @@ def test_investigation_plan_preview_reflects_global_and_mode_kill_switches(
     )
 
 
-def test_unified_browser_does_not_silently_enable_legacy_username_verification(
-    client,
+def test_unified_browser_preserves_username_verification_as_explicit_opt_in(
+    client, web_app, monkeypatch
 ):
+    monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
     body = client.get('/').get_data(as_text=True)
 
-    assert 'name="enable_user_scanner_username"' not in body
-    assert 'name="user_scanner_platform"' not in body
-    assert 'name="allow_user_scanner_vxtwitter"' not in body
+    assert 'name="enable_user_scanner_username"' in body
+    assert 'name="user_scanner_platform"' in body
+    assert 'name="allow_user_scanner_vxtwitter"' in body
+    assert 'id="enable-user-scanner-username" name="enable_user_scanner_username">' in body
+    assert 'id="allow-user-scanner-vxtwitter" name="allow_user_scanner_vxtwitter">' in body
     assert body.count('name="search_likely_username_aliases"') == 1
     assert 'name="confirm_email_route"' in body
     assert 'id="email-route-confirmation" hidden' in body
@@ -887,7 +1102,8 @@ def test_unified_token_submission_uses_the_authoritative_schema_v2_route_plan(
             ],
             'search_likely_username_aliases': 'on',
             'mode': 'quick',
-            # Removed ordinary controls cannot be smuggled into schema v2.
+            # AI and source filters cannot be smuggled into schema v2. The
+            # established archive collector remains an explicit opt-in.
             'allow_ai_context': 'on',
             'enable_archived_url_evidence': 'on',
             'tags': ['social'],
@@ -900,7 +1116,7 @@ def test_unified_token_submission_uses_the_authoritative_schema_v2_route_plan(
     assert specification['schema_version'] == 2
     assert specification['processing_mode'] == 'same_subject'
     assert specification['allow_ai_context'] is False
-    assert specification['enable_archived_url_evidence'] is False
+    assert specification['enable_archived_url_evidence'] is True
     assert specification['tags'] == []
     assert captured['options']['tags'] == []
     assert captured['options']['site_list'] == []
@@ -915,6 +1131,7 @@ def test_unified_token_submission_uses_the_authoritative_schema_v2_route_plan(
     assert [item['route'] for item in route_plan['effective_routes']] == [
         'likely_username_aliases',
         'maigret',
+        'archived_profile_evidence',
     ]
     assert [item['route'] for item in route_plan['skipped_routes']] == [
         'native_profile_search',

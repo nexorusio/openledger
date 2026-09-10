@@ -26,7 +26,7 @@ UNIFIED_INVESTIGATION_SCHEMA_VERSION = 2
 TOKEN_SCHEMA_VERSION = 1
 ROUTE_PLAN_SCHEMA_VERSION = 1
 UNIFIED_INPUT_CONTRACT = "investigation-tokens-v1"
-ROUTE_PLAN_POLICY_VERSION = "investigation-routes-v1"
+ROUTE_PLAN_POLICY_VERSION = "investigation-routes-v2"
 TOKEN_FORM_FIELD = "investigation_token"
 TOKEN_TYPE_FORM_FIELD = "investigation_token_type"
 TOKEN_TYPES = {
@@ -83,7 +83,14 @@ _BLOCKED_PUBLIC_HOST_SUFFIXES = (
     ".test",
 )
 _COLLECTION_ROUTES = frozenset(
-    {"maigret", "native_profile_search", "user_scanner_email"}
+    {
+        "archived_profile_evidence",
+        "github_profile_enrichment",
+        "maigret",
+        "native_profile_search",
+        "user_scanner_email",
+        "user_scanner_username",
+    }
 )
 _GENERIC_PROFILE_SEGMENTS = {
     "account",
@@ -536,6 +543,34 @@ def build_unified_investigation_plan(
     )
     requested_mode, execution_mode = normalize_unified_scan_mode(form.get("mode"))
     search_likely_aliases = "search_likely_username_aliases" in form
+    enable_user_scanner_username = "enable_user_scanner_username" in form
+    enable_github_profile_enrichment = "enable_github_profile_enrichment" in form
+    enable_archived_url_evidence = "enable_archived_url_evidence" in form
+    requested_username_platforms = _form_list(form, "user_scanner_platform")
+    if (
+        enable_user_scanner_username
+        and not requested_username_platforms
+        and "user_scanner_platforms_present" not in form
+    ):
+        requested_username_platforms = sorted(USER_SCANNER_USERNAME_PLATFORMS)
+    username_platforms: List[str] = []
+    for raw_platform in requested_username_platforms:
+        platform = str(raw_platform or "").strip().casefold()
+        if platform not in USER_SCANNER_USERNAME_PLATFORMS:
+            raise InvestigationInputError("Select a supported username platform.")
+        if platform not in username_platforms:
+            username_platforms.append(platform)
+    if enable_user_scanner_username and not username_platforms:
+        raise InvestigationInputError(
+            "Select at least one platform for User Scanner username verification."
+        )
+    if not enable_user_scanner_username:
+        username_platforms = []
+    allow_user_scanner_vxtwitter = bool(
+        enable_user_scanner_username
+        and "x" in username_platforms
+        and "allow_user_scanner_vxtwitter" in form
+    )
     identifiers: List[Dict[str, Any]] = []
     search_targets: List[Dict[str, Any]] = []
     full_names: List[str] = []
@@ -641,6 +676,20 @@ def build_unified_investigation_plan(
             alias_score=int(candidate["score"]),
             alias_reason=str(candidate["reason"]),
         )
+    if enable_user_scanner_username and not search_targets:
+        raise InvestigationInputError(
+            "User Scanner username verification requires at least one username "
+            "target. Select a username alias or add a username, social handle, "
+            "or supported profile URL."
+        )
+    if (
+        enable_user_scanner_username
+        and len(search_targets) > MAX_USER_SCANNER_USERNAME_TARGETS
+    ):
+        raise InvestigationInputError(
+            "User Scanner username verification accepts no more than "
+            f"{MAX_USER_SCANNER_USERNAME_TARGETS} total account targets."
+        )
 
     has_potential_route = bool(search_targets or full_names or email_count)
     if not has_potential_route:
@@ -668,16 +717,16 @@ def build_unified_investigation_plan(
         "execution_mode": execution_mode,
         "search_likely_username_aliases": search_likely_aliases,
         # Preserve the established internal keys while the schema-v2 contract
-        # removes the legacy controls from the ordinary browser journey.
+        # keeps route selection bounded and server-authoritative.
         "generate_name_variants": search_likely_aliases,
         "allow_ai_context": False,
         "enable_user_scanner_email": bool(email_count),
         "email_route_confirmed": email_route_confirmed,
-        "enable_user_scanner_username": False,
-        "user_scanner_username_platforms": [],
-        "allow_user_scanner_vxtwitter": False,
-        "enable_github_profile_enrichment": False,
-        "enable_archived_url_evidence": False,
+        "enable_user_scanner_username": enable_user_scanner_username,
+        "user_scanner_username_platforms": username_platforms,
+        "allow_user_scanner_vxtwitter": allow_user_scanner_vxtwitter,
+        "enable_github_profile_enrichment": enable_github_profile_enrichment,
+        "enable_archived_url_evidence": enable_archived_url_evidence,
         "subject_label": subject_label[:500],
         "tokens": tokens,
         "identifiers": identifiers,
@@ -783,6 +832,69 @@ def finalize_investigation_route_plan(
             effective_routes.append(dict(maigret_route))
         else:
             skipped_routes.append({**maigret_route, "reason_code": "server_disabled"})
+    elif full_name_count:
+        skipped_routes.append(
+            _route(
+                "maigret",
+                "Public account discovery",
+                kind="collection",
+                target_count=0,
+                token_types=["full_name"],
+            )
+            | {"reason_code": "no_username_targets"}
+        )
+
+    if normalized.get("enable_user_scanner_username"):
+        scanner_route = _route(
+            "user_scanner_username",
+            "Major-platform username verification",
+            kind="collection",
+            target_count=len(search_targets),
+            token_types=["username"],
+        ) | {
+            "platforms": list(
+                normalized.get("user_scanner_username_platforms") or []
+            ),
+            "third_party_x_enabled": bool(
+                normalized.get("allow_user_scanner_vxtwitter")
+            ),
+        }
+        requested_routes.append(scanner_route)
+        if flags.get("user_scanner_enabled"):
+            effective_routes.append(dict(scanner_route))
+        else:
+            skipped_routes.append(
+                {**scanner_route, "reason_code": "server_disabled"}
+            )
+
+    for capability, route_name, label in (
+        (
+            "enable_github_profile_enrichment",
+            "github_profile_enrichment",
+            "GitHub profile enrichment",
+        ),
+        (
+            "enable_archived_url_evidence",
+            "archived_profile_evidence",
+            "Supported-profile archive evidence",
+        ),
+    ):
+        if not normalized.get(capability):
+            continue
+        follow_up_route = _route(
+            route_name,
+            label,
+            kind="collection",
+            target_count=len(search_targets),
+            token_types=["supported_profile"],
+        ) | {"conditional_on_supported_profile": True}
+        requested_routes.append(follow_up_route)
+        if flags.get("enrichment_providers_enabled"):
+            effective_routes.append(dict(follow_up_route))
+        else:
+            skipped_routes.append(
+                {**follow_up_route, "reason_code": "server_disabled"}
+            )
 
     if search_targets or full_name_count:
         native_queries = plan_profile_search_queries(normalized)
@@ -846,6 +958,26 @@ def finalize_investigation_route_plan(
                 "tokens": tokens,
                 "search_targets": search_targets,
                 "alias_candidates": list(normalized.get("alias_candidates") or []),
+                "requested_capabilities": {
+                    "search_likely_username_aliases": bool(
+                        normalized.get("search_likely_username_aliases")
+                    ),
+                    "enable_user_scanner_username": bool(
+                        normalized.get("enable_user_scanner_username")
+                    ),
+                    "user_scanner_username_platforms": list(
+                        normalized.get("user_scanner_username_platforms") or []
+                    ),
+                    "allow_user_scanner_vxtwitter": bool(
+                        normalized.get("allow_user_scanner_vxtwitter")
+                    ),
+                    "enable_github_profile_enrichment": bool(
+                        normalized.get("enable_github_profile_enrichment")
+                    ),
+                    "enable_archived_url_evidence": bool(
+                        normalized.get("enable_archived_url_evidence")
+                    ),
+                },
             },
             ensure_ascii=False,
             separators=(",", ":"),
