@@ -151,6 +151,9 @@ def _require_browser():
 @pytest.fixture
 def p3r_browser_app(tmp_path, monkeypatch) -> Iterator[tuple[str, CaseStore, str]]:
     """Serve the real Flask app against a disposable job/event store."""
+    # The default is the legacy builder.  Exercise the current visible form
+    # whose server-owned preview enables the real submission control.
+    monkeypatch.setenv("OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED", "1")
     if POSTGRES_URL:
         store = CaseStore(POSTGRES_URL)
         with store.engine.begin() as connection:
@@ -310,7 +313,21 @@ def _visible_claim_record(page, claim_id: str):
 
 def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_browser_app):
     sync_playwright = _require_browser()
-    base_url, store, _job_id = p3r_browser_app
+    base_url, store, job_id = p3r_browser_app
+    # The first journey starts a claimed job for its live SSE path.  Complete
+    # it here so relationship state reflects the two pending Persona claims,
+    # rather than correctly prioritizing an unrelated active collection.
+    assert store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "session_folder": f"search_{job_id}",
+            "usernames": ["alice"],
+            "graph_file": f"search_{job_id}/graph.html",
+            "individual_reports": [],
+        },
+        worker_id="worker:p3r-browser",
+    )
     _first_persona, first_claim = _seed_persona_with_many_citations(store, "alice")
     _second_persona, second_claim = _seed_persona_with_many_citations(store, "bob")
 

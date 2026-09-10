@@ -90,6 +90,11 @@ RAW_KEYS = {
     'proxyauthorization',
     'cookie',
     'setcookie',
+    'rawpayload',
+    'providerpayload',
+    'responsepayload',
+    'payload',
+    'body',
 }
 
 
@@ -125,6 +130,17 @@ def reject_private_checkpoint_fields(value, depth=0, engine=None):
         engine = value.get('source_engine', engine)
         for key, child in value.items():
             compact = ''.join(char for char in str(key).casefold() if char.isalnum())
+            raw_payload_key = compact in RAW_KEYS or any(
+                marker in compact
+                for marker in (
+                    'payload',
+                    'responsebody',
+                    'requestbody',
+                    'rawresponse',
+                    'rawdata',
+                    'rawcontent',
+                )
+            )
             structural_key = (
                 (depth == 0 and key == 'session_folder')
                 or (
@@ -141,7 +157,7 @@ def reject_private_checkpoint_fields(value, depth=0, engine=None):
                 not isinstance(key, str)
                 or len(key) > 100
                 or (_is_sensitive_url_key(key) and not structural_key)
-                or compact in RAW_KEYS
+                or raw_payload_key
             ):
                 _reject('credential or provider-response field')
             reject_private_checkpoint_fields(child, depth + 1, engine)

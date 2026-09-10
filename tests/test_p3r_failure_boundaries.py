@@ -311,6 +311,7 @@ def test_terminal_persistence_failure_freezes_admission_and_finalization(
     assert maigret["planned"] == 2
     assert maigret["started"] is None
     assert maigret["unknown"] == 2
+    assert maigret["cleanup_complete"] is False
     assert maigret["unattempted"] == 0
     assert [row["event"]["type"] for row in store.get_events(job_id)[-1:]] == ["done"]
 
@@ -363,3 +364,30 @@ def test_cancelled_sink_only_quietly_discards_display_events(store, monkeypatch)
                 "tasks": [_terminal(task)],
             }
         )
+
+
+def test_outer_worker_exception_remains_reconcilable_before_first_checkpoint(
+    store, monkeypatch
+):
+    from maigret.web import worker
+
+    job_id = store.create_investigation(
+        ['alicefixture'], _options(['alicefixture']), kind='live'
+    )
+    claimed = store.claim_next('worker:p3r:outer-failure')
+
+    def crash(*_args, **_kwargs):
+        raise RuntimeError('outer worker failure before accounting')
+
+    monkeypatch.setattr(worker, 'run_persistent_job', crash)
+    worker.execute_job(store, claimed, shutdown_check=lambda: False)
+    assert store.get_job(job_id)['status'] == 'running'
+    assert not any(row['event']['type'] == 'done' for row in store.get_events(job_id))
+    _expire_worker(store, job_id)
+    assert store.mark_stale_running() == 1
+    result = store.get_job(job_id)
+    assert result['status'] == 'interrupted'
+    assert result['collection_accounting']['known'] is False
+    assert result['collection_accounting']['stages'] == []
+    assert sum(row['event']['type'] == 'done' for row in store.get_events(job_id)) == 1
+    assert store.mark_stale_running() == 0

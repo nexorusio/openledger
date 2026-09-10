@@ -168,6 +168,40 @@ async def test_expired_inflight_checkpoint_promotes_once_without_replay(store):
 
     job_id, worker_id = _claimed_job(store)
     assert store.save_native_profile_checkpoint(job_id, checkpoint, worker_id=worker_id)
+    store.append_event(
+        job_id,
+        {
+            'type': 'collection_accounting',
+            'collection_accounting': {
+                'schema_version': 1,
+                'revision': 1,
+                'state': 'running',
+                'known': True,
+                'stages': [
+                    {
+                        'stage_id': 'native',
+                        'engine_id': 'native-profile-search',
+                        'unit': 'queries',
+                        'status': 'running',
+                        'reason': None,
+                        'planned': 3,
+                        'started': 3,
+                        'terminal': 2,
+                        'completed': 1,
+                        'errors': 1,
+                        'timeouts': 0,
+                        'cancelled': 0,
+                        'interrupted': 0,
+                        'unattempted': 0,
+                        'unknown': 1,
+                        'observations': len(checkpoint.candidates),
+                    }
+                ],
+            },
+        },
+        runtime_guard=True,
+        worker_id=worker_id,
+    )
     assert (
         store.save_native_profile_checkpoint(
             job_id, checkpoint, worker_id="worker:wrong-owner"
@@ -188,6 +222,9 @@ async def test_expired_inflight_checkpoint_promotes_once_without_replay(store):
     assert store.mark_stale_running(30) == 1
     interrupted = store.get_job(job_id)
     assert interrupted["status"] == "interrupted"
+    assert (
+        interrupted['collection_accounting']['stages'][0]['cleanup_complete'] is False
+    )
     assert "native_profile_checkpoint" not in interrupted["progress"]
     audits = store.list_profile_search_audits(job_id, limit=100)
     assert len(audits) == 1

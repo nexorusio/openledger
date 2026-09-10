@@ -270,11 +270,13 @@ def interrupted_collection_accounting(value, events, native_document=None):
             if missing:
                 counts['started'] = None
             row.update(counts)
-            row['cleanup_complete'] = not any(
+            row['cleanup_complete'] = not missing and not any(
                 cleanup.get(key) in {'pending', 'incomplete'} for key in planned
             )
         elif stage == 'native' and native_document:
             doc = native_document
+            if doc.get('active_query_count', 0):
+                row['cleanup_complete'] = False
             executed = doc['executed_query_count']
             interrupted = doc.get('interrupted_query_count', 0) + doc.get(
                 'active_query_count', 0
@@ -294,9 +296,20 @@ def interrupted_collection_accounting(value, events, native_document=None):
                 observations=doc['candidate_count'],
             )
         if (
-            row['status'] not in {'not_selected', 'skipped_no_targets', 'completed'}
+            row['status']
+            not in {
+                'not_selected',
+                'skipped_no_targets',
+                'completed',
+                'failed',
+                'timed_out',
+                'cancelled',
+                'blocked_dependency',
+                'not_started_budget',
+                'interrupted',
+                'cleanup_incomplete',
+            }
             or row['unknown']
-            or row['interrupted']
         ):
             row.update(status='interrupted', reason='worker_lease_lost')
     snapshot.update(

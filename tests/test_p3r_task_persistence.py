@@ -16,6 +16,7 @@ from maigret.web.case_store import (
     WORKER_STALE_AFTER_SECONDS,
 )
 from maigret.web.collection_accounting import public_collection_accounting
+from maigret.web.collection_accounting import interrupted_collection_accounting
 
 
 @pytest.fixture
@@ -241,6 +242,70 @@ def test_checkpoint_rejects_nested_credentials_raw_payloads_and_unbounded_values
 
 
 @pytest.mark.parametrize(
+    'key', ['provider_payload', 'raw_payload', 'response_payload', 'payload', 'body']
+)
+def test_checkpoint_rejects_raw_maigret_evidence_fields(job_store, key):
+    store, job_id = job_store
+    result = {
+        'individual_reports': [{'claimed_profiles': [{'evidence': {key: 'x' * 10000}}]}]
+    }
+    with pytest.raises(ValueError, match='provider-response'):
+        store.save_collection_checkpoint(job_id, result, worker_id='worker:fixture')
+    assert store.get_collection_checkpoint(job_id) == {}
+
+
+@pytest.mark.parametrize(
+    'status,disposition', [('failed', 'error'), ('timed_out', 'timeout')]
+)
+def test_stale_recovery_preserves_completed_source_failure(status, disposition):
+    first = task('finished')
+    row = dict(
+        stage_id='maigret',
+        engine_id='maigret',
+        unit='site_checks',
+        status=status,
+        reason='source_error',
+        planned=1,
+        started=1,
+        terminal=1,
+        completed=0,
+        errors=int(disposition == 'error'),
+        timeouts=int(disposition == 'timeout'),
+        cancelled=0,
+        interrupted=0,
+        unattempted=0,
+        unknown=0,
+        observations=0,
+        cleanup_complete=True,
+    )
+    snapshot = dict(
+        schema_version=1, revision=2, state='running', known=True, stages=[row]
+    )
+    events = [
+        dict(type='collection_task_plan', tasks=[first]),
+        dict(
+            type='collection_task_terminal',
+            tasks=[
+                dict(
+                    first,
+                    disposition=disposition,
+                    attempted=True,
+                    cleanup_state='not_required',
+                )
+            ],
+        ),
+    ]
+    recovered = interrupted_collection_accounting(snapshot, events)
+    assert recovered['state'] == 'interrupted'
+    final = recovered['stages'][0]
+    assert final['status'] == status
+    assert final['reason'] == 'source_error'
+    assert final['terminal'] == 1
+    assert final['unknown'] == 0
+    assert final['cleanup_complete'] is True
+
+
+@pytest.mark.parametrize(
     'disposition,attempted,cleanup',
     [
         ('unattempted', True, 'not_required'),
@@ -355,6 +420,7 @@ def test_stale_unreturned_task_is_unknown_not_absent_or_unattempted(job_store):
         0,
     )
     assert row['started'] is None
+    assert row['cleanup_complete'] is False
     assert recovered['state'] == 'interrupted'
     assert store.mark_stale_running() == 0
     assert (
