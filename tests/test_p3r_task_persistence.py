@@ -202,6 +202,45 @@ def test_profile_checkpoint_rejects_other_source_payloads_without_writing(
 
 
 @pytest.mark.parametrize(
+    'observation',
+    [
+        {
+            'source_engine': 'github_public_profile',
+            'provider_response': {'authorization': 'Bearer retained-secret'},
+        },
+        {
+            'source_engine': 'github_public_profile',
+            'extra': {'name': {'authorization': 'Bearer retained-secret'}},
+        },
+        {
+            'source_engine': 'user_scanner_username',
+            'extra': {'authorization': 'Bearer retained-secret'},
+        },
+        {
+            'source_engine': 'user_scanner_email',
+            'extra': {'response_body': 'raw payload'},
+        },
+        {'source_engine': 'user_scanner_email', 'extra': {'description': 'x' * 2001}},
+        {
+            'source_engine': 'github_public_profile',
+            'media': {'avatar': 'https://example.org/image?access_token=secret'},
+        },
+    ],
+)
+def test_checkpoint_rejects_nested_credentials_raw_payloads_and_unbounded_values(
+    job_store, observation
+):
+    store, job_id = job_store
+    with pytest.raises(ValueError, match='unsupported'):
+        store.save_collection_checkpoint(
+            job_id,
+            {'collector_observations': [observation]},
+            worker_id='worker:fixture',
+        )
+    assert store.get_collection_checkpoint(job_id) == {}
+
+
+@pytest.mark.parametrize(
     'disposition,attempted,cleanup',
     [
         ('unattempted', True, 'not_required'),

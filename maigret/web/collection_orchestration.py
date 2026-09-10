@@ -77,9 +77,12 @@ class CollectionOrchestrationError(ValueError):
 
 
 class _ParentCancellation(asyncio.CancelledError):
-    def __init__(self, cleanup_complete: bool) -> None:
+    def __init__(
+        self, cleanup_complete: bool, result: Optional["StageResult"] = None
+    ) -> None:
         super().__init__()
         self.cleanup_complete = cleanup_complete
+        self.result = result
 
 
 @dataclass(frozen=True)
@@ -668,6 +671,17 @@ async def _stop_callback(running, *, cleanup_seconds: float) -> bool:
     return True
 
 
+def _stopped_result(running, *, cleanup_complete: bool) -> Optional[StageResult]:
+    """Return a cooperative callback result after bounded cancellation."""
+    if not cleanup_complete or running.cancelled():
+        return None
+    try:
+        result = running.result()
+    except BaseException:
+        return None
+    return result if isinstance(result, StageResult) else None
+
+
 async def _run_callback(
     spec: StageSpec,
     context: StageContext,
@@ -685,11 +699,25 @@ async def _run_callback(
                 raise _ProgressSinkFailure(progress_failures[0], cleaned)
             if cancellation_check():
                 cleaned = await _stop_callback(running, cleanup_seconds=cleanup_seconds)
-                return "cancelled", None, "cancellation_requested", cleaned
+                if progress_failures:
+                    raise _ProgressSinkFailure(progress_failures[0], cleaned)
+                return (
+                    "cancelled",
+                    _stopped_result(running, cleanup_complete=cleaned),
+                    "cancellation_requested",
+                    cleaned,
+                )
             remaining = context.deadline - clock()
             if remaining <= 0:
                 cleaned = await _stop_callback(running, cleanup_seconds=cleanup_seconds)
-                return "timed_out", None, "stage_budget_exhausted", cleaned
+                if progress_failures:
+                    raise _ProgressSinkFailure(progress_failures[0], cleaned)
+                return (
+                    "timed_out",
+                    _stopped_result(running, cleanup_complete=cleaned),
+                    "stage_budget_exhausted",
+                    cleaned,
+                )
             done, _ = await asyncio.wait({running}, timeout=min(remaining, 0.1))
             if not done:
                 continue
@@ -718,7 +746,11 @@ async def _run_callback(
             return "completed", result, None, True
     except asyncio.CancelledError:
         cleaned = await _stop_callback(running, cleanup_seconds=cleanup_seconds)
-        raise _ParentCancellation(cleaned)
+        if progress_failures:
+            raise _ProgressSinkFailure(progress_failures[0], cleaned)
+        raise _ParentCancellation(
+            cleaned, _stopped_result(running, cleanup_complete=cleaned)
+        )
 
 
 class _ProgressSinkFailure(Exception):
@@ -1098,20 +1130,22 @@ async def run_collection_stages(
         progress_active = True
         progress_failures: list[BaseException] = []
         reported_progress: Optional[StageCounts] = None
+        last_progress_counts: Optional[StageCounts] = None
 
         def publish_stage_progress(counts: Optional[StageCounts]) -> bool:
-            nonlocal reported_progress
+            nonlocal last_progress_counts, reported_progress
             if not progress_active:
                 return False
             if counts is not None:
                 reported_progress = counts
+            last_progress_counts = _progress_counts(reported_progress, ledger, planned)
             _replace(
                 outcomes,
                 index,
                 _outcome(
                     spec,
                     "running",
-                    counts=_progress_counts(reported_progress, ledger, planned),
+                    counts=last_progress_counts,
                 ),
                 by_stage,
             )
@@ -1149,7 +1183,14 @@ async def run_collection_stages(
             )
         except asyncio.CancelledError as error:
             progress_active = False
-            counts = _merge_counts(None, ledger, planned, interrupted=True)
+            stopped_result = getattr(error, "result", None)
+            if (
+                stopped_result is None
+                and getattr(error, "cleanup_complete", True)
+                and last_progress_counts is not None
+            ):
+                stopped_result = StageResult(counts=last_progress_counts)
+            counts = _merge_counts(stopped_result, ledger, planned, interrupted=True)
             _replace(
                 outcomes,
                 index,

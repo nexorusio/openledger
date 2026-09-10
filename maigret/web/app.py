@@ -3834,6 +3834,14 @@ class PersistentEventSink:
             worker_id=self.worker_id,
         )
         if not result and event.get('type') != 'done' and self.worker_id is not None:
+            if (event.get('type') in {
+                    'start', 'progress', 'found', 'candidate', 'suppressed',
+                    'collector_started', 'collector_completed', 'collector_error',
+                    'phase', 'heartbeat', 'error',
+                } and self.store.is_cancel_requested(self.job_id)):
+                # Stop suppresses late display updates. Task/accounting writes
+                # still fail closed; those are required durable evidence.
+                return 0
             raise RuntimeError('Collection event ownership lost or finalized')
         return result
 

@@ -347,6 +347,83 @@ async def test_job_cancellation_is_distinct_from_budget_timeout():
     assert summary.outcomes[2].reason == "cancellation_requested"
 
 
+def stopped_native_counts():
+    return StageCounts(
+        planned=3,
+        started=1,
+        terminal=0,
+        completed=0,
+        errors=0,
+        timeouts=0,
+        cancelled=0,
+        interrupted=1,
+        unattempted=2,
+        unknown=0,
+        observations=0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_stop_request_preserves_bounded_stopped_callback_counts():
+    entered = asyncio.Event()
+
+    async def native_like(_context):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return StageResult(counts=stopped_native_counts())
+
+    summary = await run_collection_stages(
+        [
+            StageSpec(
+                "native",
+                "native-profile-search",
+                "Native",
+                "query",
+                native_like,
+                planned_units=None,
+            )
+        ],
+        remaining_seconds=1,
+        cancellation_check=entered.is_set,
+    )
+
+    counts = summary.outcomes[0].counts
+    assert summary.outcomes[0].status == "cancelled"
+    assert (counts.planned, counts.started, counts.terminal) == (3, 1, 0)
+    assert (counts.interrupted, counts.unattempted, counts.unknown) == (1, 2, 0)
+
+
+@pytest.mark.asyncio
+async def test_stage_timeout_preserves_bounded_stopped_callback_counts():
+    async def native_like(_context):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return StageResult(counts=stopped_native_counts())
+
+    summary = await run_collection_stages(
+        [
+            StageSpec(
+                "native",
+                "native-profile-search",
+                "Native",
+                "query",
+                native_like,
+                planned_units=None,
+            )
+        ],
+        remaining_seconds=0.01,
+    )
+
+    counts = summary.outcomes[0].counts
+    assert summary.outcomes[0].status == "timed_out"
+    assert summary.outcomes[0].reason == "stage_budget_exhausted"
+    assert (counts.planned, counts.started, counts.terminal) == (3, 1, 0)
+    assert (counts.interrupted, counts.unattempted, counts.unknown) == (1, 2, 0)
+
+
 @pytest.mark.asyncio
 async def test_parent_cancellation_accounts_for_later_stages_then_reraises():
     events = []
@@ -377,6 +454,65 @@ async def test_parent_cancellation_accounts_for_later_stages_then_reraises():
     assert final["state"] == "interrupted"
     assert [row["status"] for row in final["stages"]] == ["interrupted", "interrupted"]
     assert final["stages"][1]["unattempted"] == 3
+
+
+@pytest.mark.asyncio
+async def test_parent_cancellation_preserves_bounded_stopped_callback_counts():
+    events = []
+    entered = asyncio.Event()
+
+    async def native_like(context):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            return StageResult(
+                counts=StageCounts(
+                    planned=3,
+                    started=1,
+                    terminal=0,
+                    completed=0,
+                    errors=0,
+                    timeouts=0,
+                    cancelled=0,
+                    interrupted=1,
+                    unattempted=2,
+                    unknown=0,
+                    observations=0,
+                )
+            )
+
+    task = asyncio.create_task(
+        run_collection_stages(
+            [
+                StageSpec(
+                    "native",
+                    "native-profile-search",
+                    "Native",
+                    "query",
+                    native_like,
+                    planned_units=None,
+                )
+            ],
+            remaining_seconds=1,
+            event_sink=events.append,
+        )
+    )
+    await entered.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    final = events[-1]["collection_accounting"]["stages"][0]
+    assert final["status"] == "interrupted"
+    assert {field: final[field] for field in ("planned", "started", "terminal")} == {
+        "planned": 3,
+        "started": 1,
+        "terminal": 0,
+    }
+    assert final["interrupted"] == 1
+    assert final["unattempted"] == 2
+    assert final["unknown"] == 0
 
 
 @pytest.mark.asyncio

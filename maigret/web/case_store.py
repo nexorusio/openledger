@@ -16,6 +16,9 @@ from urllib.parse import quote, urlsplit
 from maigret.web.collection_accounting import (
     public_collection_accounting, validate_task_batch, interrupted_collection_accounting,
 )
+from maigret.web.profile_checkpoint import (
+    reject_private_checkpoint_fields, validate_profile_observation,
+)
 
 from sqlalchemy import (
     JSON,
@@ -3218,6 +3221,7 @@ class CaseStore:
         }
         if not isinstance(result, dict) or set(result) - allowed_fields:
             raise ValueError('Collection checkpoint has unsupported report fields')
+        reject_private_checkpoint_fields(result)
         result = dict(result)
         if result.get('collection_accounting') is not None:
             accounting = public_collection_accounting(result['collection_accounting'])
@@ -3231,6 +3235,8 @@ class CaseStore:
                 not isinstance(item, dict) or item.get('source_engine') not in allowed_engines
                 for item in observations):
             raise ValueError('Collection checkpoint has an unsupported evidence policy')
+        for observation in observations:
+            validate_profile_observation(observation)
         now = utcnow()
         with self.engine.begin() as connection:
             statement = select(investigation_jobs).where(investigation_jobs.c.id == job_id)

@@ -254,8 +254,8 @@ def test_postgres_rejects_wrong_and_expired_worker_event_writes(postgres_store):
     assert events[:-1] == events_before_expired_write
     assert events[-1]['event']['type'] == 'done'
     assert events[-1]['event']['status'] == 'interrupted'
-    assert interrupted['result']['collection_accounting']['known'] is False
-    assert interrupted['result']['collection_accounting']['stages'] == []
+    assert interrupted['collection_accounting']['known'] is False
+    assert interrupted['collection_accounting']['stages'] == []
     assert postgres_store.mark_stale_running(WORKER_STALE_AFTER_SECONDS) == 0
     assert postgres_store.get_events(job_id) == events
 
