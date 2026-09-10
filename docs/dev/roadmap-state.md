@@ -83,10 +83,13 @@ configuration, five-result maximum, and ten-second timeout.
 P3a, P3b, and original P3c completed local integration checkpoints on
 2026-09-09. The mandatory P3-extension assessment then completed, and the user
 separately authorized `P3X1`, `P3X2`, `P3X3`, and `P3X4` on 2026-09-09.
-P3X1--P3X3 are complete and published. P3X4 implementation, its local
-regression gate, and code-checkpoint publication CI are complete; roadmap/PR
-publication and the final review gate remain in progress. No authorization has
-been given for squash, merge, deployment, or production modification.
+P3X1--P3X4 and the first P3X4 input-control remediation are complete and
+published. Mobile acceptance then identified a misleading plan-state label:
+confirmation-gated, server-disabled, and context-only items were all presented
+as `Skipped`. The corrected code checkpoint is published; its CI,
+roadmap publication, and final review gate remain in progress. Manual
+keyboard/mobile acceptance is not yet complete. No authorization has been given
+for squash, merge, deployment, or production modification.
 All P3 work started from exact
 production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
@@ -111,7 +114,11 @@ checkpoint is
 checkpoint is `7756a9816abef2fb498e76cfeb23afe4f4978a69`, tree
 `31cb69f2445a27bd324ab5dd70041634a7fccc35`. Local code commit
 `44af93857ecf549ebbf458844ad99b174d47d9f9` has the identical tested tree and
-is superseded only as a publication identifier. The
+is superseded only as a publication identifier. The latest plan-state
+remediation is connector-published as
+`1141005495f4a19e5c6c5780deb55ecccf200d9e`, tree
+`1a25fe489bbfcee429ea688fe04c163d144a6e7d`; local commit
+`8afe93c4f0a715ddf1fff4e688c0005ad7181f53` has the identical tree. The
 independently reviewed original-P3c checkpoint is
 `aae6891a7883905424a1405bcfc672cbbad19c4e`, tree
 `e85501c0d2588722b763838b900469955d351636`. The consolidated remote branch
@@ -128,7 +135,7 @@ was remote head `b1d4734157e9818c5653f6a9b469ca15bc75014e`, tree
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | Phase branch and isolated P3X4 worktree | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a--P3c and P3X1--P3X3 are published; P3X4 code checkpoint `7756a9816abef2fb498e76cfeb23afe4f4978a69`, tree `31cb69f2445a27bd324ab5dd70041634a7fccc35`, is published, locally tested, and green in code-checkpoint CI; roadmap/PR publication and final review are in progress |
+| Coordinator | Phase branch and isolated P3X4 worktree | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a--P3c, P3X1--P3X4, and the initial input-control remediation are published; plan-state remediation code checkpoint `1141005495f4a19e5c6c5780deb55ecccf200d9e`, tree `1a25fe489bbfcee429ea688fe04c163d144a6e7d`, is published and locally tested; CI, roadmap/PR publication, final review, and manual keyboard/mobile acceptance remain in progress |
 | P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
 | P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
 | P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
@@ -466,6 +473,36 @@ Alembic head inspection (`b3e9d7c4a610`), and `git diff --check` passed. Manual
 keyboard/mobile acceptance against the refreshed UI-only preview remains the
 only expected human pre-merge check; merge, deployment, production changes, and
 P4 remain unauthorized.
+
+Mobile acceptance subsequently exposed that the plan renderer grouped three
+different server reasons under the single user-facing `Skipped` badge. The
+follow-up remediation preserves the signed `requested_routes`,
+`effective_routes`, and `skipped_routes` backend contract while presenting its
+meaning accurately: `confirmation_required` is `Conditional`,
+`server_disabled` is `Unavailable`, and `context_only_no_outbound` is `Context
+only`. Phone numbers and generic public URLs no longer inflate a skipped-route
+total; the summary counts them as context values. Confirmation changes the
+bounded email route from `Conditional` to `Active` without widening any route.
+
+The connector-published follow-up code commit is
+`1141005495f4a19e5c6c5780deb55ecccf200d9e`, tree
+`1a25fe489bbfcee429ea688fe04c163d144a6e7d`. Local commit
+`8afe93c4f0a715ddf1fff4e688c0005ad7181f53` has the identical tested tree.
+Only the investigation-plan JavaScript, minimal status styling, and its static
+browser-contract test changed. The focused contract passed 35 tests; the full
+web gate passed 184 tests plus the isolated legacy running-status case; and the
+broader input, planner, execution-budget, persistence, store, deployment, and
+browser-contract gate passed 245 tests. JavaScript syntax and
+`git diff --check` passed.
+
+The refreshed UI-only Vercel deployment
+`dpl_2cdZ26Mvq63n1bcLozfgQk8xXYyT` is `READY` at a unique preview URL with no
+production alias. Browser verification proved two context values are labelled
+`Context only`, an unconfirmed email is labelled `Conditional`, and confirming
+it changes only that route to `Active`; no application console, build, or
+runtime error was found. This preview has no database, worker, provider, or
+working scan execution. Manual mobile acceptance remains required, and no
+OpenLedger production deployment or modification occurred.
 
 #### Assessment finding and fixed mode mapping
 
