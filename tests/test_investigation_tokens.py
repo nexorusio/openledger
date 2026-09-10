@@ -395,6 +395,36 @@ def test_policy_allows_quick_native_fallback_but_requires_maigret_for_full_scan(
         )
 
 
+@pytest.mark.parametrize(
+    "follow_up_capability",
+    [
+        "enable_github_profile_enrichment",
+        "enable_archived_url_evidence",
+    ],
+)
+def test_follow_up_route_cannot_make_seedless_quick_scan_startable(
+    follow_up_capability,
+):
+    plan = build_unified_investigation_plan(
+        {
+            "investigation_token": ["Alice Example"],
+            "mode": "quick",
+            "search_likely_username_aliases": "on",
+            "alias_candidates_present": "1",
+            follow_up_capability: "on",
+        }
+    )
+
+    with pytest.raises(ProfileDiscoveryPolicyError, match="No authorized"):
+        govern_profile_discovery_options(
+            {"investigation_spec": plan},
+            environ={
+                "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": "false",
+                "OPENLEDGER_ENRICHMENT_PROVIDERS_ENABLED": "true",
+            },
+        )
+
+
 def test_policy_rebuilds_client_supplied_route_plan_from_server_flags():
     plan = build_unified_investigation_plan(
         {"investigation_token": ["alice"], "mode": "quick"}

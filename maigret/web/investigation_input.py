@@ -82,10 +82,8 @@ _BLOCKED_PUBLIC_HOST_SUFFIXES = (
     ".localhost",
     ".test",
 )
-_COLLECTION_ROUTES = frozenset(
+_SEED_COLLECTION_ROUTES = frozenset(
     {
-        "archived_profile_evidence",
-        "github_profile_enrichment",
         "maigret",
         "native_profile_search",
         "user_scanner_email",
@@ -1020,7 +1018,10 @@ def investigation_has_effective_collection_route(plan: Any) -> bool:
     if not isinstance(route_plan, Mapping):
         return False
     return any(
-        isinstance(item, Mapping) and item.get("route") in _COLLECTION_ROUTES
+        isinstance(item, Mapping)
+        and item.get("route") in _SEED_COLLECTION_ROUTES
+        and isinstance(item.get("target_count"), int)
+        and item.get("target_count") > 0
         for item in list(route_plan.get("effective_routes") or [])
     )
 

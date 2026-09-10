@@ -3152,7 +3152,10 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     )
     if profile_search_result is not None and profile_search_result.stopped:
         return general_results
-    for username in usernames:
+    policy_flags = _profile_search_policy_flags(options)
+    maigret_enabled = policy_flags.get('maigret_enabled', True) is not False
+    maigret_usernames = usernames if maigret_enabled else ()
+    for username in maigret_usernames:
         if job['cancelled'] or (cancellation_check and cancellation_check()):
             q.put({'type': 'stopped', 'username': username.strip()})
             break
