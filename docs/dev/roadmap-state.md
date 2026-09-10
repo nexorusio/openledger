@@ -432,6 +432,39 @@ validation, production-image build, and non-root image verification. Python
 also passed; upstream integrity was intentionally skipped. Squash, merge,
 deployment, and production modification remain unauthorized.
 
+#### P3X4 input-control remediation checkpoint
+
+The separately authorized P3X4 input-control remediation is implemented at
+code commit `eeff75e9831b1673b1ad8e15e6c771adf2285f79`, tree
+`a05f8fa86c48c7579b5b55b24b1a923845661de9`. Plain Indonesian mobile numbers
+such as `0822335763` are now predicted as phone context and normalized to the
+`+62` form while explicitly retaining the phone/username ambiguity for analyst
+review. Every token exposes a keyboard-accessible type selector; analyst
+overrides are validated and normalized again by the server, recorded separately
+from the server prediction, and cannot inject or bypass server-owned routes.
+Original input text, including an `@handle`, survives plan refreshes.
+
+Likely username aliases are now returned as a bounded, server-ranked review
+list. The analyst can select or clear individual candidates, only those exact
+server-generated selections become search targets, and invented candidates are
+rejected. The maximum remains 16 selected aliases. The builder, metric cards,
+scan modes, tokens, alias review, and plan now collapse within the mobile/tablet
+breakpoint at 991 pixels, addressing the horizontal clipping observed during
+preview acceptance. No migration, dependency, worker, queue, provider, rollout
+flag, evidence, graph, or production change is included.
+
+The focused input-control, browser-contract, and security regression gate passed
+44 tests. The full web suite passed 149 tests with its one legacy running-status
+case separately passing against a fresh initialized SQLite database. The web,
+input, profile-planning, execution-budget, persistent-job, case-store, and
+deployment set passed 244 tests. The complete offline repository gate passed
+1,621 tests with 9 intentional skips and 25 slow/live-network tests explicitly
+deselected. Python compilation, JavaScript syntax checking, critical Flake8,
+Alembic head inspection (`b3e9d7c4a610`), and `git diff --check` passed. Manual
+keyboard/mobile acceptance against the refreshed UI-only preview remains the
+only expected human pre-merge check; merge, deployment, production changes, and
+P4 remain unauthorized.
+
 #### Assessment finding and fixed mode mapping
 
 The current ordinary builder is materially more complex than the requested
