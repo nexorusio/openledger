@@ -1,0 +1,344 @@
+"""Playwright acceptance journey for P3R collection presentation.
+
+This test intentionally needs a CI-provisioned Chromium.  It never invokes a
+collector or external source: events and completed results are injected into a
+disposable store while the browser uses the real Flask templates and SSE
+endpoint.  When CI supplies its PostgreSQL service, the same journey uses that
+production-shaped persistence path.
+"""
+
+from __future__ import annotations
+
+import os
+from threading import Thread
+from typing import Iterator
+
+import pytest
+from sqlalchemy import text
+from werkzeug.serving import make_server
+
+from maigret.web import app as web_app_module
+from maigret.web.case_store import CaseStore
+from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
+
+
+pytestmark = pytest.mark.browser
+POSTGRES_URL = os.getenv("OPENLEDGER_TEST_POSTGRES_URL", "")
+
+
+ACCOUNTING_RUNNING = {
+    "schema_version": 1,
+    "revision": 2,
+    "known": True,
+    "state": "running",
+    "stages": [
+        {
+            "stage_id": "native",
+            "engine_id": "native-profile-search",
+            "label": "server-only label",
+            "unit": "queries",
+            "status": "completed",
+            "reason": None,
+            "planned": 1,
+            "started": 1,
+            "terminal": 1,
+            "completed": 1,
+            "errors": 0,
+            "timeouts": 0,
+            "cancelled": 0,
+            "interrupted": 0,
+            "unattempted": 0,
+            "unknown": None,
+            "observations": 1,
+        },
+        {
+            "stage_id": "maigret",
+            "engine_id": "maigret",
+            "label": "ignored by the renderer",
+            "unit": "site_checks",
+            "status": "running",
+            "reason": None,
+            "planned": 4,
+            "started": 4,
+            "terminal": 3,
+            "completed": 2,
+            "errors": 1,
+            "timeouts": 0,
+            "cancelled": 0,
+            "interrupted": 0,
+            "unattempted": 1,
+            "unknown": None,
+            "observations": 2,
+        },
+        {
+            "stage_id": "github",
+            "engine_id": "github-public-profile",
+            "label": "ignored by the renderer",
+            "unit": "queries",
+            "status": "failed",
+            "reason": "provider_unavailable",
+            "planned": 1,
+            "started": 1,
+            "terminal": 1,
+            "completed": 0,
+            "errors": 1,
+            "timeouts": 0,
+            "cancelled": 0,
+            "interrupted": 0,
+            "unattempted": 0,
+            "unknown": None,
+            "observations": 0,
+        },
+        {
+            "stage_id": "unfurl", "engine_id": "unfurl-url-analysis",
+            "label": "ignored by the renderer", "unit": "targets",
+            "status": "cancelled", "reason": "parent_cancelled", "planned": 1,
+            "started": 1, "terminal": 1, "completed": 0, "errors": 0,
+            "timeouts": 0, "cancelled": 1, "interrupted": 0, "unattempted": 0,
+            "unknown": None, "observations": 0,
+        },
+        {
+            "stage_id": "wayback", "engine_id": "wayback-cdx",
+            "label": "ignored by the renderer", "unit": "queries",
+            "status": "interrupted", "reason": "interrupted", "planned": 1,
+            "started": 1, "terminal": 1, "completed": 0, "errors": 0,
+            "timeouts": 0, "cancelled": 0, "interrupted": 1, "unattempted": 0,
+            "unknown": 1, "observations": None,
+        },
+        {
+            "stage_id": "user_scanner_username", "engine_id": "user-scanner-username",
+            "label": "ignored by the renderer", "unit": "targets",
+            "status": "unknown", "reason": "not_admitted", "planned": 1,
+            "started": 0, "terminal": 0, "completed": 0, "errors": 0,
+            "timeouts": 0, "cancelled": 0, "interrupted": 0, "unattempted": 1,
+            "unknown": None, "observations": None,
+        },
+        {
+            "stage_id": "user_scanner_email", "engine_id": "user-scanner",
+            "label": "ignored by the renderer", "unit": "targets",
+            "status": "pending", "reason": "dependency_not_ready", "planned": 1,
+            "started": 0, "terminal": 0, "completed": 0, "errors": 0,
+            "timeouts": 0, "cancelled": 0, "interrupted": 0, "unattempted": 1,
+            "unknown": None, "observations": None,
+        },
+    ],
+}
+
+ACCOUNTING_PARTIAL = {
+    **ACCOUNTING_RUNNING,
+    "revision": 3,
+    "state": "partial",
+    "stages": [
+        ACCOUNTING_RUNNING["stages"][0],
+        {**ACCOUNTING_RUNNING["stages"][1], "status": "timed_out", "reason": "timeout",
+         "terminal": 4, "completed": 2, "errors": 1, "timeouts": 1, "unattempted": 0},
+        *ACCOUNTING_RUNNING["stages"][2:],
+    ],
+}
+
+
+def _require_browser():
+    if os.getenv("OPENLEDGER_P3R_BROWSER") != "1":
+        pytest.skip("Set OPENLEDGER_P3R_BROWSER=1 after CI provisions Chromium.")
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError as error:  # CI must install this when the gate is enabled.
+        pytest.fail(f"P3R browser gate was enabled without Playwright: {error}")
+    return sync_playwright
+
+
+@pytest.fixture
+def p3r_browser_app(tmp_path, monkeypatch) -> Iterator[tuple[str, CaseStore, str]]:
+    """Serve the real Flask app against a disposable job/event store."""
+    if POSTGRES_URL:
+        store = CaseStore(POSTGRES_URL)
+        with store.engine.begin() as connection:
+            connection.execute(text("TRUNCATE TABLE cases RESTART IDENTITY CASCADE"))
+    else:
+        store = CaseStore(f"sqlite:///{tmp_path / 'browser.db'}", create_schema=True)
+    app = web_app_module.app
+    app.config.update(
+        TESTING=True,
+        AUTH_REQUIRED=False,
+        REPORTS_FOLDER=str(tmp_path / "reports"),
+        SETTINGS_FILE=str(tmp_path / "settings.json"),
+    )
+    web_app_module.job_results.clear()
+    monkeypatch.setattr(web_app_module, "case_store", store)
+    job_id = store.create_investigation(["alice"], {"execution_mode": "focused"})
+    job = store.claim_next("worker:p3r-browser")
+    assert job and job["job_id"] == job_id
+    monkeypatch.setattr(web_app_module, "start_live_job", lambda *_args, **_kwargs: job_id)
+
+    server = make_server("127.0.0.1", 0, app, threaded=True)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}", store, job_id
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+        if POSTGRES_URL:
+            with store.engine.begin() as connection:
+                connection.execute(text("TRUNCATE TABLE cases RESTART IDENTITY CASCADE"))
+        store.dispose()
+        web_app_module.job_results.clear()
+
+
+def _completed_result(job_id: str) -> dict:
+    return {
+        "status": "completed",
+        "kind": "live",
+        "session_folder": f"search_{job_id}",
+        "usernames": ["alice"],
+        "graph_file": f"search_{job_id}/graph.html",
+        "individual_reports": [],
+        "found_count": 2,
+        "candidate_count": 1,
+        "suppressed_count": 1,
+        "raw_claimed_count": 4,
+        "profile_reliability_version": PROFILE_RELIABILITY_VERSION,
+        "collection_status": "budget_exhausted",
+        "collection_message": "Partial evidence retained.",
+        "collection_accounting": ACCOUNTING_PARTIAL,
+    }
+
+
+def test_browser_submission_progress_refresh_and_partial_results(p3r_browser_app):
+    sync_playwright = _require_browser()
+    base_url, store, job_id = p3r_browser_app
+    store.append_event(job_id, {"type": "start", "username": "alice", "total": 4})
+    store.append_event(job_id, {"type": "collection_accounting", "collection_accounting": ACCOUNTING_RUNNING})
+    # A stale replay must not replace the revision-2 snapshot in the browser.
+    store.append_event(job_id, {"type": "collection_accounting", "collection_accounting": {**ACCOUNTING_RUNNING, "revision": 1, "state": "completed"}})
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        try:
+            page.goto(base_url, wait_until="domcontentloaded")
+            token_input = page.locator("#investigation-token-input")
+            token_input.fill("alice")
+            token_input.press("Enter")
+            page.wait_for_function(
+                "() => !document.getElementById('startBtn').disabled"
+            )
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                page.locator("#startBtn").click()
+            page.wait_for_url(f"**/live/{job_id}")
+            page.locator("#collection-accounting").wait_for()
+            assert page.locator("#collection-accounting-state").inner_text() == "Running"
+            rows = page.locator("#collection-accounting-body tr")
+            assert rows.count() == 7
+            assert rows.nth(0).inner_text().startswith("Native profile search")
+            assert "3 / 4" in rows.nth(1).inner_text()
+            assert "GitHub queries Failed Provider unavailable 1 / 1 1" in rows.nth(2).inner_text()
+            assert "Unfurl targets Cancelled Parent cancelled 1 / 1" in rows.nth(3).inner_text()
+            assert "Wayback queries Interrupted Interrupted 1 / 1" in rows.nth(4).inner_text()
+            assert "User Scanner usernames targets Unknown Not admitted 0 / 1" in rows.nth(5).inner_text()
+            assert "User Scanner emails targets Pending Dependency not ready 0 / 1" in rows.nth(6).inner_text()
+
+            # Refresh reconnects to persisted SSE history; it cannot inflate counters.
+            page.reload(wait_until="domcontentloaded")
+            page.locator("#collection-accounting-body tr").wait_for()
+            assert page.locator("#collection-accounting-body tr").count() == 7
+            assert "3 / 4" in page.locator("#collection-accounting-body tr").nth(1).inner_text()
+
+            result = _completed_result(job_id)
+            web_app_module.job_results[job_id] = result
+            assert store.finish(job_id, result, worker_id="worker:p3r-browser")
+            store.append_event(job_id, {
+                "type": "done", "status": "partial", "reason": "budget_exhausted",
+                "redirect": f"/results/search_{job_id}", "collection_accounting": ACCOUNTING_PARTIAL,
+            })
+            page.locator("#reportsBtn").wait_for()
+            assert page.locator("#stat-graph-status").inner_text() == "Partial evidence retained"
+            page.locator("#reportsBtn").click()
+            page.wait_for_url(f"**/results/search_{job_id}")
+            assert page.locator("#results-collection-accounting-heading").inner_text() == "Declared collection accounting"
+            rows = page.locator("#results-collection-accounting-heading").locator("xpath=../../following-sibling::div//tbody/tr")
+            assert rows.count() == 7
+            assert "Timed out" in rows.nth(1).inner_text()
+            assert "4 / 4" in rows.nth(1).inner_text()
+            assert "1" in rows.nth(1).inner_text()  # timeout remains visible
+            assert "Not admitted" in rows.nth(5).inner_text()
+        finally:
+            browser.close()
+
+
+def _seed_persona_with_many_citations(store: CaseStore, username: str) -> tuple[str, str]:
+    job_id = store.create_investigation([username], {})
+    store.claim_next(f"worker:p3r-browser-{username}")
+    profiles = [
+        {
+            "site_name": f"Source {number}",
+            "url": f"https://evidence.test/{username}/{number}",
+            "confidence": "strong",
+            "evidence": {"fullname": "Shared Exact Name"},
+        }
+        for number in range(12)
+    ]
+    result = {
+        "status": "completed", "session_folder": f"search_{job_id}",
+        "usernames": [username], "graph_file": f"search_{job_id}/graph.html",
+        "found_count": len(profiles),
+        "individual_reports": [{"username": username, "claimed_profiles": profiles}],
+        "profile_reliability_version": PROFILE_RELIABILITY_VERSION,
+    }
+    assert store.finish(job_id, result, worker_id=f"worker:p3r-browser-{username}")
+    assert store.sync_persona_claims(job_id, result)
+    persona = store.get_case(store.get_job(job_id)["case_id"])["personas"][0]
+    full_name_claim = next(
+        claim for claim in store.get_persona(persona["id"])["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    return persona["id"], full_name_claim["id"]
+
+
+def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_browser_app):
+    sync_playwright = _require_browser()
+    base_url, store, _job_id = p3r_browser_app
+    _first_persona, first_claim = _seed_persona_with_many_citations(store, "alice")
+    _second_persona, second_claim = _seed_persona_with_many_citations(store, "bob")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch()
+        page = browser.new_page()
+        try:
+            page.goto(base_url + f"/personas/{_first_persona}", wait_until="domcontentloaded")
+            assert page.locator('[data-review-status="pending"]').count() > 0
+            assert page.get_by_text("12 supporting sources").count() == 1
+            assert page.locator('a[href^="https://evidence.test/alice/"]').count() == 12
+
+            page.goto(base_url + "/relationships?mode=shared", wait_until="domcontentloaded")
+            assert page.locator('[data-relationship-state="pending_review"]').count() == 1
+            assert page.locator("#relationshipGraphData").count() == 0
+
+            page.goto(base_url + f"/personas/{_first_persona}", wait_until="domcontentloaded")
+            first_claim_record = page.locator("article.claim-record").filter(
+                has_text="Shared Exact Name"
+            )
+            assert first_claim_record.count() == 1
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                first_claim_record.get_by_role("button", name="Approve").click()
+            assert page.locator('[data-review-status="approved"]').count() > 0
+
+            page.goto(base_url + f"/personas/{_second_persona}", wait_until="domcontentloaded")
+            second_claim_record = page.locator("article.claim-record").filter(
+                has_text="Shared Exact Name"
+            )
+            assert second_claim_record.count() == 1
+            with page.expect_navigation(wait_until="domcontentloaded"):
+                second_claim_record.get_by_role("button", name="Approve").click()
+
+            page.goto(base_url + "/relationships?mode=shared", wait_until="domcontentloaded")
+            page.reload(wait_until="domcontentloaded")
+            graph_data = page.locator("#relationshipGraphData")
+            graph_data.wait_for()
+            graph = graph_data.evaluate("node => JSON.parse(node.textContent)")
+            assert any(edge.get("review_status") == "approved" for edge in graph["edges"])
+            source_nodes = [node for node in graph["nodes"] if node.get("kind") == "source"]
+            assert len(source_nodes) > 10
+            assert all(node.get("url", "").startswith("https://evidence.test/") for node in source_nodes)
+        finally:
+            browser.close()

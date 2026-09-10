@@ -9,9 +9,13 @@ import math
 import os
 import re
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, Mapping, Optional
 from urllib.parse import quote, urlsplit
+from maigret.web.collection_accounting import (
+    public_collection_accounting, validate_task_batch, interrupted_collection_accounting,
+)
 
 from sqlalchemy import (
     JSON,
@@ -1066,7 +1070,7 @@ def _profile_search_document_sha256(document: Dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _profile_search_audit_document(result: Any) -> tuple[Dict[str, Any], str]:
+def _profile_search_audit_document(result: Any, *, allow_running=False) -> tuple[Dict[str, Any], str]:
     """Validate and fingerprint one bounded, review-safe search result."""
     from maigret.web.profile_search_orchestrator import (
         PROFILE_SEARCH_TERMINAL_ERROR_CODES,
@@ -1099,14 +1103,21 @@ def _profile_search_audit_document(result: Any) -> tuple[Dict[str, Any], str]:
     ):
         raise ValueError("Profile-search audit contains an invalid candidate")
     document = result.as_dict()
-    if result.status not in {"completed", "partial", "failed", "stopped"}:
+    allowed_statuses = {"completed", "partial", "failed", "stopped"}
+    if allow_running:
+        allowed_statuses.add('running')
+    if result.status not in allowed_statuses:
         raise ValueError("Invalid profile-search audit status")
+    if result.final != (result.status != 'running'):
+        raise ValueError('Profile-search final state is inconsistent')
     if result.stopped != (result.status == "stopped"):
         raise ValueError("Profile-search stop status is inconsistent")
     if not 0 <= result.planned_query_count <= MAX_PROFILE_SEARCH_QUERIES:
         raise ValueError("Profile-search audit exceeds the query limit")
     if not 0 <= result.executed_query_count <= result.planned_query_count:
         raise ValueError("Profile-search audit query counts are inconsistent")
+    if not 0 <= result.attempted_query_count <= result.planned_query_count:
+        raise ValueError('Profile-search attempted count is inconsistent')
     if not 0 <= result.error_count <= result.executed_query_count:
         raise ValueError("Profile-search audit error count is inconsistent")
     planned_by_id = {query.query_id: query for query in result.queries}
@@ -3008,6 +3019,19 @@ class CaseStore:
         runtime_guard: bool = False,
         worker_id: Optional[str] = None,
     ) -> int:
+        event = dict(event)
+        if event.get('type') == 'collection_accounting':
+            snapshot = public_collection_accounting(event.get('collection_accounting'))
+            if snapshot is None:
+                raise ValueError('Invalid collection accounting snapshot')
+            event = {'type': 'collection_accounting', 'collection_accounting': snapshot}
+        elif event.get('type') in {
+            'collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup'
+        }:
+            event = validate_task_batch(event)
+            event['event_key'] = hashlib.sha256(
+                json.dumps(event, sort_keys=True, separators=(',', ':')).encode()
+            ).hexdigest()
         now = utcnow()
         progress_updates: Dict[str, Any] = {}
         with self.engine.begin() as connection:
@@ -3017,7 +3041,7 @@ class CaseStore:
                 investigation_jobs.c.worker_id,
                 investigation_jobs.c.heartbeat_at,
             ).where(investigation_jobs.c.id == job_id)
-            if runtime_guard and self.engine.dialect.name == "postgresql":
+            if self.engine.dialect.name == "postgresql":
                 statement = statement.with_for_update()
             row = connection.execute(statement).mappings().first()
             if row is None:
@@ -3048,9 +3072,94 @@ class CaseStore:
                 if status == "cancel_requested" and event_type not in {
                     "stopped",
                     "done",
+                    "collection_accounting",
+                    "collection_task_terminal",
+                    "collection_task_cleanup",
                 }:
                     return 0
             progress = dict(row["progress"] or {})
+            if event_type in {'collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup'}:
+                task_ids = {task['task_id'] for task in event['tasks']}
+                check_ids = {task['check_id'] for task in event['tasks']}
+                if self.engine.dialect.name == 'postgresql':
+                    prior_rows = connection.execute(text('''
+                        SELECT id, event FROM investigation_events
+                        WHERE job_id = :job_id
+                          AND event->>'type' IN ('collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup')
+                          AND EXISTS (SELECT 1 FROM jsonb_array_elements(event->'tasks') task
+                                      WHERE task->>'task_id' = ANY(:task_ids)
+                                         OR task->>'check_id' = ANY(:check_ids))
+                        ORDER BY id
+                    '''), {'job_id': job_id, 'task_ids': sorted(task_ids), 'check_ids': sorted(check_ids)}).mappings()
+                else:
+                    prior_rows = connection.execute(select(investigation_events.c.id, investigation_events.c.event).where(
+                        investigation_events.c.job_id == job_id,
+                        investigation_events.c.event['type'].as_string().in_(
+                            ['collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup']
+                        ),
+                    ).order_by(investigation_events.c.id)).mappings()
+                identities, prior_by_kind, last_id = {}, {}, 0
+                attempts, checks = {}, {}
+                identity_keys = ('schema_version', 'task_id', 'check_id', 'source_id', 'target_id', 'attempt')
+                for prior_row in prior_rows:
+                    previous = prior_row['event']
+                    for task in previous.get('tasks', []):
+                        identifier = task['task_id']
+                        if identifier not in task_ids and task['check_id'] not in check_ids:
+                            continue
+                        last_id = max(last_id, int(prior_row['id']))
+                        identities[identifier] = ({key: task[key] for key in identity_keys}, previous.get('stage_id', 'maigret'))
+                        prior_by_kind[(identifier, previous['type'])] = task
+                        attempts[(previous.get('stage_id', 'maigret'), task['check_id'], task['attempt'])] = identifier
+                        checks[task['check_id']] = (task['source_id'], task['target_id'])
+                new_tasks = []
+                for task in event['tasks']:
+                    identifier = task['task_id']
+                    identity = ({key: task[key] for key in identity_keys}, event['stage_id'])
+                    attempt_key = (event['stage_id'], task['check_id'], task['attempt'])
+                    if attempt_key in attempts and attempts[attempt_key] != identifier:
+                        raise ValueError('Duplicate logical collection attempt')
+                    if task['check_id'] in checks and checks[task['check_id']] != (task['source_id'], task['target_id']):
+                        raise ValueError('Conflicting collection check identity')
+                    attempts[attempt_key] = identifier
+                    checks[task['check_id']] = (task['source_id'], task['target_id'])
+                    if identifier in identities and identities[identifier] != identity:
+                        raise ValueError('Conflicting collection task identity')
+                    if event_type != 'collection_task_plan' and (identifier, 'collection_task_plan') not in prior_by_kind:
+                        raise ValueError('Collection task has no persisted plan')
+                    if event_type == 'collection_task_cleanup':
+                        prior_terminal = prior_by_kind.get((identifier, 'collection_task_terminal'))
+                        if prior_terminal is None or prior_terminal['cleanup_state'] not in {'pending', 'incomplete'}:
+                            raise ValueError('Collection cleanup has no pending terminal task')
+                    prior = prior_by_kind.get((identifier, event_type))
+                    if prior == task:
+                        continue
+                    if prior is not None:
+                        if event_type != 'collection_task_cleanup' or prior['cleanup_state'] == 'complete':
+                            raise ValueError('Conflicting collection terminal disposition')
+                    new_tasks.append(task)
+                if not new_tasks:
+                    return last_id
+                event['tasks'] = new_tasks
+                event.pop('event_key', None)
+                event['event_key'] = hashlib.sha256(json.dumps(
+                    event, sort_keys=True, separators=(',', ':')
+                ).encode()).hexdigest()
+            if event.get('event_key'):
+                previous = connection.execute(
+                    select(investigation_events.c.id).where(
+                        investigation_events.c.job_id == job_id,
+                        investigation_events.c.event['event_key'].as_string() == event['event_key'],
+                    ).limit(1)
+                ).scalar_one_or_none()
+                if previous is not None:
+                    return int(previous)
+            if event_type == 'collection_accounting':
+                snapshot = event['collection_accounting']
+                current = progress.get('collection_accounting') or {}
+                if current.get('revision', -1) >= snapshot['revision']:
+                    return 0
+                progress['collection_accounting'] = snapshot
             if event_type == "start":
                 progress["total"] = event.get("total")
                 progress["username"] = event.get("username")
@@ -3091,6 +3200,66 @@ class CaseStore:
                 .values(**progress_updates)
             )
         return event_id
+
+    def save_collection_checkpoint(self, job_id, result, *, worker_id):
+        """Commit permitted partial evidence and pending claims under one lease.
+
+        The checkpoint has the same reviewed evidence schema as report metadata;
+        it is never a provider response body or a Google Places live-details dump.
+        """
+        allowed_engines = {'github_public_profile', 'unfurl_url_analysis', 'wayback_cdx',
+                           'user_scanner_username', 'user_scanner_email'}
+        if any(not isinstance(item, dict) or item.get('source_engine') not in allowed_engines
+               for item in result.get('collector_observations', [])):
+            raise ValueError('Collection checkpoint has an unsupported evidence policy')
+        now = utcnow()
+        with self.engine.begin() as connection:
+            statement = select(investigation_jobs).where(investigation_jobs.c.id == job_id)
+            if self.engine.dialect.name == 'postgresql':
+                statement = statement.with_for_update()
+            row = connection.execute(statement).mappings().first()
+            if (row is None or row['kind'] not in PROFILE_DISCOVERY_JOB_KINDS or row['worker_id'] != worker_id
+                    or row['status'] not in {'running', 'cancel_requested'}
+                    or _heartbeat_expired(row['heartbeat_at'], now=now)):
+                return False
+            progress = dict(row['progress'] or {})
+            progress['collection_checkpoint'] = dict(result)
+            self.sync_persona_claims(job_id, result, connection=connection)
+            connection.execute(update(investigation_jobs).where(
+                investigation_jobs.c.id == job_id
+            ).values(progress=progress, updated_at=now))
+        return True
+
+    def get_collection_checkpoint(self, job_id):
+        """Read a committed partial report index for internal reconciliation."""
+        with self.engine.connect() as connection:
+            progress = connection.execute(select(investigation_jobs.c.progress).where(
+                investigation_jobs.c.id == job_id
+            )).scalar_one_or_none()
+        return dict((progress or {}).get('collection_checkpoint') or {})
+
+    def save_native_profile_checkpoint(self, job_id, result, *, worker_id):
+        """Replace one validated running snapshot without consuming audit history."""
+        document, digest = _profile_search_audit_document(result, allow_running=True)
+        now = utcnow()
+        with self.engine.begin() as connection:
+            statement = select(investigation_jobs).where(investigation_jobs.c.id == job_id)
+            if self.engine.dialect.name == 'postgresql':
+                statement = statement.with_for_update()
+            row = connection.execute(statement).mappings().first()
+            if (row is None or row['kind'] not in PROFILE_DISCOVERY_JOB_KINDS
+                    or row['worker_id'] != worker_id
+                    or row['status'] not in {'running', 'cancel_requested'}
+                    or _heartbeat_expired(row['heartbeat_at'], now=now)):
+                return False
+            progress = dict(row['progress'] or {})
+            progress['native_profile_checkpoint'] = {
+                'document': document, 'document_sha256': digest,
+            }
+            connection.execute(update(investigation_jobs).where(
+                investigation_jobs.c.id == job_id
+            ).values(progress=progress, updated_at=now))
+        return True
 
     def publish_case_fusion_snapshot(
         self,
@@ -6056,7 +6225,7 @@ class CaseStore:
                 )
         return {"wikipedia_claims": wikipedia_count, "offshore_alerts": offshore_count}
 
-    def sync_persona_claims(self, job_id: str, result: Dict[str, Any]) -> int:
+    def sync_persona_claims(self, job_id: str, result: Dict[str, Any], *, connection=None) -> int:
         """Upsert deterministic claims while preserving every human decision."""
         from maigret.web.collector_adapters import (
             extract_github_profile_claims,
@@ -6075,7 +6244,7 @@ class CaseStore:
             result.get("profile_reliability_version")
             == PROFILE_RELIABILITY_VERSION
         )
-        with self.engine.begin() as connection:
+        with (nullcontext(connection) if connection is not None else self.engine.begin()) as connection:
             job_row = (
                 connection.execute(
                     select(
@@ -7870,6 +8039,8 @@ class CaseStore:
                         "confidence": int(row["confidence"]),
                         "claim_id": str(row["claim_id"]),
                         "sources": evidence_by_claim.get(str(row["claim_id"]), [])[:10],
+                        "source_count": len(evidence_by_claim.get(str(row['claim_id']), [])),
+                        "provenance_url": f"/personas/{persona_id}#claim-{row['claim_id']}",
                     }
                 )
         nodes = list(persona_nodes.values()) + nodes
@@ -8660,6 +8831,9 @@ class CaseStore:
         result: Dict[str, Any],
         *,
         worker_id: Optional[str] = None,
+        synchronize_claims: bool = False,
+        publication=None,
+        terminal_event=None,
     ) -> bool:
         """Publish a terminal result once, optionally enforcing worker ownership."""
         status = str(result.get("status", "failed"))
@@ -8671,6 +8845,8 @@ class CaseStore:
                 investigation_jobs.c.id == job_id,
                 investigation_jobs.c.status.in_(("running", "cancel_requested")),
             ]
+            if status == 'completed' and result.get('collection_status') != 'cancelled':
+                conditions.append(investigation_jobs.c.status == 'running')
             if worker_id is not None:
                 conditions.extend(
                     (
@@ -8680,6 +8856,16 @@ class CaseStore:
                         >= now - timedelta(seconds=WORKER_STALE_AFTER_SECONDS),
                     )
                 )
+            if synchronize_claims or publication is not None or terminal_event is not None:
+                guard = select(investigation_jobs.c.id).where(*conditions)
+                if self.engine.dialect.name == 'postgresql':
+                    guard = guard.with_for_update()
+                if connection.execute(guard).scalar_one_or_none() is None:
+                    return False
+                if synchronize_claims:
+                    self.sync_persona_claims(job_id, result, connection=connection)
+                if publication is not None:
+                    publication()
             updated = connection.execute(
                 update(investigation_jobs)
                 .where(*conditions)
@@ -8692,6 +8878,10 @@ class CaseStore:
                     updated_at=now,
                 )
             )
+            if updated.rowcount and terminal_event is not None:
+                connection.execute(insert(investigation_events).values(
+                    job_id=job_id, event=dict(terminal_event), created_at=now,
+                ))
         return bool(updated.rowcount)
 
     def mark_stale_running(
@@ -8700,26 +8890,22 @@ class CaseStore:
         cutoff = utcnow() - timedelta(seconds=max(0, stale_after_seconds))
         now = utcnow()
         with self.engine.begin() as connection:
-            stale_rows = list(
-                connection.execute(
-                    select(
-                        investigation_jobs.c.id,
-                        investigation_jobs.c.kind,
-                        investigation_jobs.c.options,
-                    ).where(
-                        investigation_jobs.c.status.in_(
-                            ("running", "cancel_requested")
-                        ),
-                        or_(
-                            investigation_jobs.c.heartbeat_at.is_(None),
-                            investigation_jobs.c.heartbeat_at < cutoff,
-                        ),
-                    )
-                ).mappings()
+            stale_statement = select(
+                investigation_jobs.c.id, investigation_jobs.c.kind,
+                investigation_jobs.c.options, investigation_jobs.c.progress,
+            ).where(
+                investigation_jobs.c.status.in_(("running", "cancel_requested")),
+                or_(investigation_jobs.c.heartbeat_at.is_(None),
+                    investigation_jobs.c.heartbeat_at < cutoff),
             )
+            if self.engine.dialect.name == 'postgresql':
+                stale_statement = stale_statement.with_for_update(skip_locked=True)
+            stale_rows = list(connection.execute(stale_statement).mappings())
+            stale_ids = [row['id'] for row in stale_rows]
             result = connection.execute(
                 update(investigation_jobs)
                 .where(
+                    investigation_jobs.c.id.in_(stale_ids),
                     investigation_jobs.c.status.in_(("running", "cancel_requested")),
                     or_(
                         investigation_jobs.c.heartbeat_at.is_(None),
@@ -8739,6 +8925,57 @@ class CaseStore:
                 for row in stale_rows
                 if str(row["kind"]) == "case_fusion"
             }
+            for row in stale_rows:
+                if row['kind'] not in PROFILE_DISCOVERY_JOB_KINDS:
+                    continue
+                progress = dict(row['progress'] or {})
+                native = dict((progress.get('native_profile_checkpoint') or {}).get('document') or {})
+                task_events = connection.scalars(select(investigation_events.c.event).where(
+                    investigation_events.c.job_id == row['id'],
+                    investigation_events.c.event['type'].as_string().in_(
+                        ['collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup']
+                    ),
+                ).order_by(investigation_events.c.id))
+                accounting = interrupted_collection_accounting(
+                    progress.get('collection_accounting'), task_events, native,
+                )
+                retained = dict(progress.get('collection_checkpoint') or {})
+                if accounting is not None:
+                    progress['collection_accounting'] = accounting
+                    retained.update(status='interrupted', collection_status='interrupted',
+                                    collection_accounting=accounting,
+                                    collection_message='The worker stopped; committed evidence remains available for review.')
+                    connection.execute(update(investigation_jobs).where(
+                        investigation_jobs.c.id == row['id'],
+                        investigation_jobs.c.status == 'interrupted',
+                        investigation_jobs.c.worker_id.is_(None),
+                    ).values(progress=progress, result=retained))
+                    connection.execute(insert(investigation_events).values(
+                        job_id=row['id'], created_at=now,
+                        event={'type': 'done', 'status': 'interrupted',
+                               'reason': 'worker_lease_lost', 'collection_accounting': accounting},
+                    ))
+                if native and not connection.scalar(select(profile_search_audits.c.id).where(
+                    profile_search_audits.c.job_id == row['id']
+                ).limit(1)):
+                    # Promote the last validated checkpoint into one immutable
+                    # review audit. No provider is invoked during reconciliation.
+                    native['interrupted_query_count'] = native.get('interrupted_query_count', 0) + native.get('active_query_count', 0)
+                    native.update(active_query_count=0, final=True)
+                    stopped = native['executed_query_count'] < native['planned_query_count']
+                    status = ('stopped' if stopped else 'completed' if not native['error_count'] else
+                              'failed' if native['error_count'] == native['executed_query_count'] else 'partial')
+                    native.update(status=status, stopped=stopped)
+                    digest = hashlib.sha256(json.dumps(native, ensure_ascii=False, sort_keys=True,
+                                                       separators=(',', ':')).encode()).hexdigest()
+                    connection.execute(insert(profile_search_audits).values(
+                        id=str(uuid.uuid4()), job_id=row['id'], status=status, stopped=stopped,
+                        orchestration_version=native['orchestration_version'],
+                        planned_query_count=native['planned_query_count'],
+                        executed_query_count=native['executed_query_count'],
+                        error_count=native['error_count'], candidate_count=native['candidate_count'],
+                        document_sha256=digest, document=native, created_at=now,
+                    ))
             for row in stale_rows:
                 if str(row["kind"]) != "case_fusion_ai":
                     continue
@@ -9121,6 +9358,12 @@ class CaseStore:
         payload["deadline_at"] = _as_iso(row.get("deadline_at"))
         payload["usernames"] = list(row["usernames"] or result.get("usernames") or [])
         payload["progress"] = dict(row["progress"] or {})
+        payload["progress"].pop('collection_checkpoint', None)
+        payload["progress"].pop('native_profile_checkpoint', None)
+        if not payload.get('collection_accounting'):
+            accounting = public_collection_accounting(payload['progress'].get('collection_accounting'))
+            if accounting is not None:
+                payload['collection_accounting'] = accounting
         payload["session_folder"] = result.get("session_folder", f"search_{row['id']}")
         payload["started_at"] = result.get("started_at") or payload["started_at"]
         return payload

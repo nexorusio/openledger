@@ -259,8 +259,17 @@
         if (graph.mode === 'shared') {
             addLine('Evidence rule', edge.relationship_rule || 'Exact normalized value · approved claim');
             addLine('Evidence confidence', `${edge.confidence}%`);
-            const list = addList(`Attached sources (${(edge.sources || []).length})`);
+            const shown = (edge.sources || []).length;
+            const total = Number.isSafeInteger(edge.source_count) && edge.source_count >= shown ? edge.source_count : null;
+            const list = addList(total === null ? `Attached sources (${shown} shown)` : `Attached sources (${shown} of ${total})`);
             ((edge.sources || []).length ? edge.sources : [{name: 'No source URL attached'}]).forEach((source) => appendSource(list, source));
+            if (typeof edge.provenance_url === 'string' && /^\/personas\/[a-f0-9-]+#claim-[a-f0-9-]+$/.test(edge.provenance_url)) {
+                const link = document.createElement('a');
+                link.href = edge.provenance_url;
+                link.className = 'btn btn-outline-secondary inspector-link';
+                link.textContent = `View all ${total} supporting sources`;
+                inspector.append(link);
+            }
             if (from?.kind === 'persona') addPersonaLink(from);
         } else {
             const claim = from?.kind === 'claim' ? from : to?.kind === 'claim' ? to : null;

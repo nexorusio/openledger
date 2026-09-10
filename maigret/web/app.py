@@ -26,12 +26,13 @@ import re
 import secrets
 import shutil
 import time
+import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from threading import Lock, Thread
 from typing import Any, Dict, Optional
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, urlsplit, urlunsplit
 import maigret
 import maigret.settings
 from maigret.ai import (
@@ -109,6 +110,10 @@ from maigret.web.combined_intelligence import (
 )
 from maigret.web.geocoding import GeocodingError, geocode_place_center
 from maigret.web.execution_budget import ExecutionBudget
+from maigret.web.collection_accounting import public_collection_accounting
+from maigret.web.collection_orchestration import (
+    StageSpec, StageResult, StageCounts, run_collection_stages, profile_stage_weights,
+)
 from maigret.web.profile_discovery_policy import (
     ProfileDiscoveryPolicyError,
     govern_profile_discovery_options,
@@ -242,7 +247,8 @@ class StreamNotify:
     exactly the granularity we want to stream to the browser.
     """
 
-    def __init__(self, event_queue, username, cancellation_check=None):
+    def __init__(self, event_queue, username, cancellation_check=None, *,
+                 stage_context=None, checkpoint=None):
         self.q = event_queue
         self.username = username
         self.cancellation_check = cancellation_check
@@ -250,6 +256,11 @@ class StreamNotify:
         self.checked = 0
         self.sites = {}
         self.cancel_requested = False
+        self.stage_context = stage_context
+        self.checkpoint = checkpoint
+        self.closed = False
+        self.cleanup_incomplete = False
+        self._terminal_batch = []
         # Per-site results collected so far, in the shape build_reports()
         # expects. If the scan gets cancelled mid-way (Stop button), this is
         # what's left to report on — otherwise every already-streamed
@@ -265,6 +276,8 @@ class StreamNotify:
         self.sites = sites
 
     def update(self, result, is_similar=False):
+        if self.closed:
+            return
         if self.cancellation_check and self.cancellation_check():
             # This exception may be consumed by an individual executor worker.
             # Keep an explicit signal so the outer search still records the
@@ -325,8 +338,64 @@ class StreamNotify:
                 'checked': self.checked,
                 'total': self.total,
                 'site': result.site_name,
+                'username': self.username,
             }
         )
+
+    def task_plan(self, events):
+        if self.closed:
+            raise RuntimeError('Collection notifier is finalized')
+        for offset in range(0, len(events), 250):
+            batch = events[offset:offset + 250]
+            self.q.put({'type': 'collection_task_plan', 'tasks': batch})
+            if self.stage_context is not None:
+                for event in batch:
+                    self.stage_context.operation_ledger.record_planned(event['task_id'])
+
+    def task_planned(self, event):
+        self.task_plan([event])
+
+    def task_terminal(self, event):
+        if self.closed:
+            raise RuntimeError('Collection notifier is finalized')
+        self._terminal_batch.append(dict(event))
+        if self.stage_context is not None:
+            self.stage_context.operation_ledger.record_terminal(
+                event['task_id'], event['disposition'],
+                attempted=event['attempted'],
+            )
+        self.cleanup_incomplete |= event.get('cleanup_state') in {'pending', 'incomplete'}
+        if len(self._terminal_batch) >= 100:
+            self.flush_accounting()
+
+    def flush_accounting(self):
+        if self._terminal_batch:
+            self.q.put({'type': 'collection_task_terminal', 'tasks': self._terminal_batch})
+            self._terminal_batch = []
+        if self.stage_context is not None:
+            snapshot = self.stage_context.counts_snapshot().as_dict()
+            # No start notification exists for native per-site queries. Keep
+            # their in-flight admission counts unknown until terminal accounting.
+            snapshot.update(started=None, unattempted=None, unknown=None,
+                            interrupted=None, observations=len(self.results))
+            self.stage_context.publish_progress(StageCounts(**snapshot))
+        if self.checkpoint is not None:
+            self.checkpoint()
+
+    def close(self):
+        try:
+            self.flush_accounting()
+        finally:
+            self.closed = True
+
+    def task_cleanup_event(self, event):
+        # Cleanup is a transition of an already persisted terminal task.
+        # A short batch must be flushed before its cleanup can be committed.
+        self.flush_accounting()
+        self.q.put({'type': 'collection_task_cleanup', 'tasks': [event]})
+
+    def task_cleanup(self, summary):
+        self.cleanup_incomplete = not summary.get('cleanup_complete', False)
 
     # No-op sinks for the rest of the notifier surface the search loop touches.
     def start(self, message=None, id_type="username"):
@@ -1270,6 +1339,7 @@ async def maigret_search(username, options, query_notify=None):
             tor_proxy=options.get('tor_proxy', None),
             i2p_proxy=options.get('i2p_proxy', None),
             cloudflare_bypass=cf_bypass_config,
+            execution_id=options.get('_collection_execution_id'),
         )
         return results
     except Exception as error:
@@ -1677,7 +1747,8 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
     if budget_seconds not in {600, 1800}:
         budget_seconds = 1800 if mode == 'exhaustive' else 600
     collection_status = str(source.get('collection_status') or '').strip()
-    return {
+    progress = source.get('progress') if isinstance(source.get('progress'), dict) else {}
+    runtime = {
         'status': str(source.get('status') or 'queued'),
         'mode': mode,
         'mode_label': 'Full Scan' if mode == 'exhaustive' else 'Quick Scan',
@@ -1689,7 +1760,13 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
         'collection_status': collection_status or None,
         'collection_message': str(source.get('collection_message') or '')[:1000],
         'error': str(source.get('error') or '')[:1000],
+        'collection_accounting': public_collection_accounting(
+            source.get('collection_accounting') or progress.get('collection_accounting')
+        ),
     }
+    if runtime['collection_accounting'] is None:
+        runtime.pop('collection_accounting')
+    return runtime
 
 
 def provider_circuit_event(error: Exception, collector: str) -> Optional[Dict[str, Any]]:
@@ -1757,10 +1834,21 @@ def record_job_result(
     result: Dict[str, Any],
     *,
     worker_id: Optional[str] = None,
+    publication=None,
+    terminal_event=None,
 ):
     """Publish a terminal result in memory and durably when storage is available."""
     normalized = normalize_persisted_result(session_key, result)
     if case_store is not None and case_store.get_job(session_key):
+        if normalized.get('collection_accounting') is not None:
+            if not case_store.finish(
+                session_key, normalized, worker_id=worker_id,
+                synchronize_claims=True, publication=publication,
+                terminal_event=terminal_event,
+            ):
+                return None
+            job_results[session_key] = normalized
+            return normalized
         # PostgreSQL is authoritative for worker-owned jobs. Do not publish a
         # terminal SSE event if the database transition itself did not commit.
         if not case_store.finish(session_key, normalized, worker_id=worker_id):
@@ -2632,25 +2720,25 @@ def build_reports(
     session_key,
     *,
     collector_observations=None,
+    write_files=True,
+    reports_root=None,
 ):
     """Write per-username CSV/JSON/PDF/HTML reports + combined graph to disk.
 
     Shared by the background /search job and the live SSE /api/scan job, so
     both flows land on the same results.html (report buttons + profile list).
     """
-    os.makedirs(app.config["REPORTS_FOLDER"], exist_ok=True)
-    session_folder = os.path.join(
-        app.config["REPORTS_FOLDER"], f"search_{session_key}"
-    )
-    os.makedirs(session_folder, exist_ok=True)
-
-    graph_path = os.path.join(session_folder, "combined_graph.html")
+    root = reports_root or app.config["REPORTS_FOLDER"]
+    session_folder = os.path.join(root, f"search_{session_key}")
     detector_health_registry = get_detector_health_registry()
-    maigret.report.save_graph_report(
-        graph_path,
-        supported_general_results(general_results, detector_health_registry),
-        MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"]),
-    )
+    if write_files:
+        os.makedirs(session_folder, mode=0o700, exist_ok=True)
+        graph_path = os.path.join(session_folder, "combined_graph.html")
+        maigret.report.save_graph_report(
+            graph_path,
+            supported_general_results(general_results, detector_health_registry),
+            MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"]),
+        )
 
     individual_reports = []
     found_count = 0
@@ -2666,14 +2754,15 @@ def build_reports(
         pdf_path = f"{report_base}.pdf"
         html_path = f"{report_base}.html"
 
-        context = generate_report_context(general_results)
+        if write_files:
+            context = generate_report_context(general_results)
 
-        maigret.report.save_csv_report(csv_path, username, results)
-        maigret.report.save_json_report(
-            json_path, username, results, report_type='ndjson'
-        )
-        maigret.report.save_pdf_report(pdf_path, context)
-        maigret.report.save_html_report(html_path, context)
+            maigret.report.save_csv_report(csv_path, username, results)
+            maigret.report.save_json_report(
+                json_path, username, results, report_type='ndjson'
+            )
+            maigret.report.save_pdf_report(pdf_path, context)
+            maigret.report.save_html_report(html_path, context)
 
         claimed_profiles = []
         candidate_profiles = []
@@ -2838,7 +2927,31 @@ def parse_usernames(form):
 def resolve_profile_url_identifiers(url):
     """Resolve profile URLs without fetching them or trusting URL text as a handle."""
     database = MaigretDatabase().load_from_path(app.config['MAIGRET_DB_FILE'])
-    return database.extract_ids_from_url(url)
+    identifiers = database.extract_ids_from_url(url)
+    if identifiers:
+        return identifiers
+    parts = urlsplit(url)
+    # Route only an existing database profile template. A trailing path slash
+    # is presentation syntax; it must not turn a known profile into context.
+    if parts.scheme in {'http', 'https'} and parts.path.endswith('/'):
+        normalized = urlunsplit(parts._replace(path=parts.path.rstrip('/')))
+        # Database templates alone accept reserved landing-page names. Reuse
+        # native platform parsers before adding slash compatibility for them.
+        from maigret.web.profile_search_facebook import parse_facebook_profile_url
+        from maigret.web.profile_search_instagram import parse_instagram_profile_url
+        from maigret.web.profile_search_x import parse_x_profile_url
+        hostname = (parts.hostname or '').casefold()
+        parsers = {
+            'facebook.com': parse_facebook_profile_url, 'www.facebook.com': parse_facebook_profile_url,
+            'instagram.com': parse_instagram_profile_url, 'www.instagram.com': parse_instagram_profile_url,
+            'x.com': parse_x_profile_url, 'www.x.com': parse_x_profile_url,
+            'twitter.com': parse_x_profile_url, 'www.twitter.com': parse_x_profile_url,
+        }
+        parser = parsers.get(hostname)
+        if parser and parser(urlunsplit(urlsplit(normalized)._replace(scheme='https'))) is None:
+            return {}
+        return database.extract_ids_from_url(normalized)
+    return identifiers
 
 
 def parse_investigation_submission(form):
@@ -3060,6 +3173,7 @@ async def run_native_profile_search_phase(
                     'profile_search_existing_evidence', ()
                 ),
                 max_results=config.max_results,
+                progress_sink=job.get('native_profile_progress_sink'),
                 cancellation_check=lambda: (
                     bool(job.get('cancelled'))
                     or bool(cancellation_check and cancellation_check())
@@ -3111,6 +3225,8 @@ async def run_native_profile_search_phase(
                     'message': public_error,
                 }
             )
+            job['persistence_failed'] = True
+            raise
 
     if client.last_circuit_open is not None:
         q.put(
@@ -3141,389 +3257,283 @@ async def run_native_profile_search_phase(
 
 
 async def _stream_search(job, usernames, options, cancellation_check=None):
-    """Orchestrate case-scoped collectors while retaining native evidence."""
+    """Run existing adapters through the bounded, persisted stage contract."""
     q = job['queue']
-    general_results = []
-    # Keep the partial collection reachable by the worker even if cancellation
-    # lands between collector-specific exception handlers.
-    job['general_results'] = general_results
-    profile_search_result = await run_native_profile_search_phase(
-        job, options, cancellation_check=cancellation_check
-    )
-    if profile_search_result is not None and profile_search_result.stopped:
-        return general_results
-    policy_flags = _profile_search_policy_flags(options)
-    maigret_enabled = policy_flags.get('maigret_enabled', True) is not False
-    maigret_usernames = usernames if maigret_enabled else ()
-    for username in maigret_usernames:
-        if job['cancelled'] or (cancellation_check and cancellation_check()):
-            q.put({'type': 'stopped', 'username': username.strip()})
-            break
-        notify = StreamNotify(
-            q,
-            username.strip(),
-            cancellation_check=cancellation_check,
-        )
-        task = asyncio.ensure_future(
-            maigret_search(username.strip(), options, query_notify=notify)
-        )
-        job['task'] = task
-        try:
-            results = await task
-            if (
-                notify.cancel_requested
-                or job['cancelled']
-                or (cancellation_check and cancellation_check())
-            ):
-                if notify.results:
-                    general_results.append(
-                        (username.strip(), 'username', notify.results)
-                    )
-                q.put({'type': 'stopped', 'username': username.strip()})
-                break
-            general_results.append((username.strip(), 'username', results))
-        except asyncio.CancelledError:
-            # The task never got to return its own results dict, but every
-            # site checked before cancellation already streamed a 'found' /
-            # 'progress' event and was captured by the notifier — report on
-            # that instead of throwing it away.
-            if notify.results:
-                general_results.append((username.strip(), 'username', notify.results))
-            q.put({'type': 'stopped', 'username': username.strip()})
-            break
-        except Exception as error:
-            if notify.results:
-                general_results.append((username.strip(), 'username', notify.results))
-            circuit_event = provider_circuit_event(error, 'maigret')
-            if circuit_event:
-                q.put(circuit_event)
-                break
-            public_error = record_internal_error(
-                'Username collection failed', error, username=username
+    general_results = job['general_results'] = []
+    observations = job['collector_observations'] = []
+    options = dict(options)
+    scope = str(job.get('job_id') or uuid.uuid4().hex)
+    options['_collection_execution_id'] = scope
+    plan = options.get('investigation_spec') or {}
+    flags = _profile_search_policy_flags(options)
+    weights = profile_stage_weights()
+
+    def stopped():
+        return (bool(job.get('cancelled')) or bool(job.get('cleanup_incomplete'))
+                or bool(job.get('persistence_failed'))
+                or bool(cancellation_check and cancellation_check()))
+
+    def checkpoint():
+        sink = job.get('collection_checkpoint_sink')
+        if callable(sink):
+            snapshot = build_reports(
+                general_results, list(usernames), scope,
+                collector_observations=observations, write_files=False,
             )
-            q.put(
-                {
-                    'type': 'error',
-                    'message': public_error,
-                    'username': username.strip(),
-                }
+            snapshot['collection_accounting'] = job.get('collection_accounting')
+            try:
+                if not sink(snapshot):
+                    raise RuntimeError('Collection checkpoint ownership lost')
+            except Exception:
+                job['persistence_failed'] = True
+                raise
+
+    def accounting_event(event):
+        snapshot = public_collection_accounting(event.get('collection_accounting'))
+        if snapshot is None:
+            raise ValueError('Invalid collection accounting event')
+        if job.get('maigret_cleanup_incomplete'):
+            for row in snapshot['stages']:
+                if row['stage_id'] == 'maigret':
+                    row.update(cleanup_complete=False, reason='cleanup_incomplete', status='interrupted')
+            if snapshot['state'] != 'running':
+                snapshot['state'] = 'interrupted'
+        q.put({'type': 'collection_accounting', 'collection_accounting': snapshot})
+        job['collection_accounting'] = snapshot
+        if any(not row.get('cleanup_complete', True) for row in snapshot['stages']):
+            job['cleanup_incomplete'] = True
+
+    def metadata(stage_id, target, attempt=0):
+        def digest(*parts):
+            return hashlib.sha256('\x1f'.join(map(str, parts)).encode()).hexdigest()
+        target_id = digest(scope, 'target', json.dumps(target, sort_keys=True))
+        source_id = digest(scope, 'source', stage_id)
+        check_id = digest(scope, 'check', source_id, target_id)
+        return {'schema_version': 1, 'source_id': source_id, 'target_id': target_id,
+                'check_id': check_id, 'task_id': digest(scope, 'task', check_id, attempt),
+                'attempt': attempt}
+
+    async def native_stage(context):
+        def counts_for(result):
+            executed = result.executed_query_count
+            errors = result.error_count
+            return StageCounts(
+                planned=result.planned_query_count,
+                started=result.attempted_query_count, terminal=executed,
+                completed=executed-errors, errors=errors, timeouts=0, cancelled=0,
+                interrupted=result.interrupted_query_count,
+                unattempted=result.unattempted_query_count,
+                unknown=None if result.active_query_count else 0,
+                observations=len(result.candidates),
             )
 
-    observations = []
-    job['collector_observations'] = observations
-    investigation_plan = options.get('investigation_spec') or {}
-    corroboration_results = actionable_general_results(general_results)
-    github_targets = github_profile_targets(
-        corroboration_results, investigation_plan
-    )
-    if github_targets and not (
-        job['cancelled'] or (cancellation_check and cancellation_check())
-    ):
-        q.put(
-            {
-                'type': 'collector_started',
-                'collector': 'github-public-profile',
-                'target_type': 'claimed_profile',
-                'targets': len(github_targets),
-            }
-        )
-        github_observation_count = 0
-        github_collection_stopped = False
-        for target in github_targets:
-            if job['cancelled'] or (cancellation_check and cancellation_check()):
-                q.put({'type': 'stopped', 'collector': 'github-public-profile'})
-                github_collection_stopped = True
-                break
-            try:
-                observation = await run_github_public_profile(target)
-                observations.append(observation)
-                if str(observation.get('status') or '').casefold() == 'observed':
-                    github_observation_count += 1
-                if str(observation.get('status') or '').casefold() == 'rate_limited':
-                    break
-            except asyncio.CancelledError:
-                q.put({'type': 'stopped', 'collector': 'github-public-profile'})
-                github_collection_stopped = True
-                break
-            except Exception as error:
-                circuit_event = provider_circuit_event(
-                    error, 'github-public-profile'
-                )
-                if circuit_event:
-                    q.put(circuit_event)
-                    github_collection_stopped = True
-                    break
-                public_error = record_internal_error(
-                    'GitHub public-profile enrichment failed',
-                    error,
-                    username=target.get('investigated_username'),
-                )
-                q.put(
-                    {
-                        'type': 'collector_error',
-                        'collector': 'github-public-profile',
-                        'message': public_error,
-                    }
-                )
-        if not github_collection_stopped:
-            q.put(
-                {
-                    'type': 'collector_completed',
-                    'collector': 'github-public-profile',
-                    'observations': len(
-                        [
-                            item
-                            for item in observations
-                            if item.get('source_engine') == 'github_public_profile'
-                        ]
-                    ),
-                    'found': github_observation_count,
-                }
-            )
-    # URL decomposition and archive presence cannot prove that a candidate
-    # account exists.  Keep candidates eligible for a profile-specific GitHub
-    # lookup above, but send only already-supported detections to URL-only
-    # collectors so they cannot create Persona proposals from weak hits.
-    profile_url_targets = claimed_profile_url_targets(
-        supported_general_results(general_results), investigation_plan
-    )
-    if profile_url_targets and not (
-        job['cancelled'] or (cancellation_check and cancellation_check())
-    ):
-        q.put(
-            {
-                'type': 'collector_started',
-                'collector': 'unfurl-url-analysis',
-                'target_type': 'claimed_profile',
-                'targets': len(profile_url_targets),
-            }
-        )
-        unfurl_observation_count = 0
-        unfurl_collection_stopped = False
-        for target in profile_url_targets:
-            if job['cancelled'] or (cancellation_check and cancellation_check()):
-                q.put({'type': 'stopped', 'collector': 'unfurl-url-analysis'})
-                unfurl_collection_stopped = True
-                break
-            try:
-                observation = await run_unfurl_url_analysis(target)
-                observations.append(observation)
-                if str(observation.get('status') or '').casefold() == 'analyzed':
-                    unfurl_observation_count += 1
-            except asyncio.CancelledError:
-                q.put({'type': 'stopped', 'collector': 'unfurl-url-analysis'})
-                unfurl_collection_stopped = True
-                break
-            except Exception as error:
-                circuit_event = provider_circuit_event(
-                    error, 'unfurl-url-analysis'
-                )
-                if circuit_event:
-                    q.put(circuit_event)
-                    unfurl_collection_stopped = True
-                    break
-                public_error = record_internal_error(
-                    'Offline Unfurl URL analysis failed',
-                    error,
-                    username=target.get('investigated_username'),
-                )
-                q.put(
-                    {
-                        'type': 'collector_error',
-                        'collector': 'unfurl-url-analysis',
-                        'message': public_error,
-                    }
-                )
-        if not unfurl_collection_stopped:
-            q.put(
-                {
-                    'type': 'collector_completed',
-                    'collector': 'unfurl-url-analysis',
-                    'observations': unfurl_observation_count,
-                    'found': unfurl_observation_count,
-                }
-            )
-
-        if not (
-            unfurl_collection_stopped
-            or job['cancelled']
-            or (cancellation_check and cancellation_check())
-        ):
-            q.put(
-                {
-                    'type': 'collector_started',
-                    'collector': 'wayback-cdx',
-                    'target_type': 'claimed_profile',
-                    'targets': len(profile_url_targets),
-                }
-            )
-            archived_profile_count = 0
-            wayback_collection_stopped = False
-            for target in profile_url_targets:
-                if job['cancelled'] or (
-                    cancellation_check and cancellation_check()
-                ):
-                    q.put({'type': 'stopped', 'collector': 'wayback-cdx'})
-                    wayback_collection_stopped = True
-                    break
+        def progress(result):
+            job['profile_search_result'] = result
+            sink = job.get('native_profile_checkpoint_sink')
+            if callable(sink):
                 try:
-                    observation = await run_wayback_capture_index(target)
-                    observations.append(observation)
-                    status = str(observation.get('status') or '').casefold()
-                    if status == 'archived':
-                        archived_profile_count += 1
-                    if status == 'rate_limited':
-                        break
-                except asyncio.CancelledError:
-                    q.put({'type': 'stopped', 'collector': 'wayback-cdx'})
-                    wayback_collection_stopped = True
-                    break
-                except Exception as error:
-                    circuit_event = provider_circuit_event(error, 'wayback-cdx')
-                    if circuit_event:
-                        q.put(circuit_event)
-                        wayback_collection_stopped = True
-                        break
-                    public_error = record_internal_error(
-                        'Wayback CDX archival metadata collection failed',
-                        error,
-                        username=target.get('investigated_username'),
-                    )
-                    q.put(
-                        {
-                            'type': 'collector_error',
-                            'collector': 'wayback-cdx',
-                            'message': public_error,
-                        }
-                    )
-            if not wayback_collection_stopped:
-                q.put(
-                    {
-                        'type': 'collector_completed',
-                        'collector': 'wayback-cdx',
-                        'observations': len(
-                            [
-                                item
-                                for item in observations
-                                if item.get('source_engine') == 'wayback_cdx'
-                            ]
-                        ),
-                        'found': archived_profile_count,
-                    }
-                )
-    username_verification_targets = user_scanner_username_targets(
-        investigation_plan
-    )
-    if username_verification_targets and not (
-        job['cancelled'] or (cancellation_check and cancellation_check())
-    ):
-        username_policy = user_scanner_username_policy(investigation_plan)
-        q.put(
-            {
-                'type': 'collector_started',
-                'collector': 'user-scanner-username',
-                'target_type': 'username',
-                'targets': len(username_verification_targets),
-            }
-        )
-        try:
-            collected = await run_user_scanner_usernames(
-                username_verification_targets,
-                platforms=username_policy['platforms'],
-                allow_vxtwitter=username_policy['allow_vxtwitter'],
-                observation_sink=observations.extend,
-                cancellation_check=lambda: (
-                    bool(job.get('cancelled'))
-                    or bool(cancellation_check and cancellation_check())
-                ),
-            )
-            q.put(
-                {
-                    'type': 'collector_completed',
-                    'collector': 'user-scanner-username',
-                    'observations': len(collected),
-                    'found': count_user_scanner_username_accounts(collected),
-                }
-            )
-        except asyncio.CancelledError:
-            q.put(
-                {
-                    'type': 'stopped',
-                    'collector': 'user-scanner-username',
-                }
-            )
-        except Exception as error:
-            circuit_event = provider_circuit_event(
-                error, 'user-scanner-username'
-            )
-            if circuit_event:
-                q.put(circuit_event)
-            else:
-                public_error = record_internal_error(
-                    'User Scanner username collection failed',
-                    error,
-                    target_type='username',
-                )
-                q.put(
-                    {
-                        'type': 'collector_error',
-                        'collector': 'user-scanner-username',
-                        'message': public_error,
-                    }
-                )
+                    if not sink(result):
+                        raise RuntimeError('Native profile checkpoint ownership lost')
+                except Exception:
+                    job['persistence_failed'] = True
+                    raise
+            context.publish_progress(counts_for(result))
 
-    for email in user_scanner_email_targets(investigation_plan):
-        if job['cancelled'] or (cancellation_check and cancellation_check()):
-            break
-        q.put(
-            {
-                'type': 'collector_started',
-                'collector': 'user-scanner',
-                'target_type': 'email',
-            }
+        job['native_profile_progress_sink'] = progress
+        result = await run_native_profile_search_phase(
+            job, options, cancellation_check=context.is_cancelled,
         )
+        if result is None:
+            raise RuntimeError('Native profile search unavailable')
+        return StageResult(value=result, counts=counts_for(result))
+
+    async def maigret_stage(context):
+        failures = 0
+        for username in usernames:
+            if context.is_cancelled():
+                raise asyncio.CancelledError()
+            notify = StreamNotify(q, username.strip(),
+                                  cancellation_check=context.is_cancelled,
+                                  stage_context=context, checkpoint=checkpoint)
+            # The notifier dictionary remains reachable while the source is
+            # running, so a checkpoint/cancellation retains partial outcomes.
+            item = (username.strip(), 'username', notify.results)
+            general_results.append(item)
+            task = asyncio.create_task(maigret_search(username.strip(), options, query_notify=notify))
+            job['task'] = task
+            completed = False
+            try:
+                results = await task
+                notify.results.update(results or {})
+                completed = True
+            except asyncio.CancelledError:
+                q.put({'type': 'stopped', 'collector': 'maigret', 'username': username.strip()})
+                raise
+            except Exception as error:
+                failures += 1
+                circuit = provider_circuit_event(error, 'maigret')
+                q.put(circuit or {'type': 'collector_error', 'collector': 'maigret',
+                                 'message': record_internal_error('Username collection failed', error)})
+            finally:
+                notify.close()
+                if not notify.results and (not completed or context.is_cancelled()):
+                    general_results.remove(item)
+                if notify.cleanup_incomplete:
+                    job['cleanup_incomplete'] = True
+                    job['maigret_cleanup_incomplete'] = True
+            if job.get('cleanup_incomplete'):
+                raise asyncio.CancelledError()
+        if failures:
+            raise RuntimeError('One or more username collections failed')
+        return StageResult(counts=StageCounts(observations=sum(len(item[2]) for item in general_results)))
+
+    def github_targets():
+        return github_profile_targets(actionable_general_results(general_results), plan)
+
+    def url_targets():
+        # URL decomposition/archive presence cannot promote a weak candidate.
+        return claimed_profile_url_targets(supported_general_results(general_results), plan)
+
+    async def targets_stage(context, targets, callback, found_statuses):
+        targets = list(targets)
+        task_plan = [metadata(context.stage_id, target) for target in targets]
+        if task_plan:
+            q.put({'type': 'collection_task_plan', 'stage_id': context.stage_id, 'tasks': task_plan})
+        for event in task_plan:
+            context.operation_ledger.record_planned(event['task_id'])
+        q.put({'type': 'collector_started', 'collector': context.engine_id,
+               'targets': len(targets), 'target_type': 'targets'})
+        collected_count = found_count = 0
+        terminal_ids = set()
         try:
-            collected = await run_user_scanner_email(
-                email,
-                cancellation_check=lambda: (
-                    bool(job.get('cancelled'))
-                    or bool(cancellation_check and cancellation_check())
-                ),
-            )
-            observations.extend(collected)
-            q.put(
-                {
-                    'type': 'collector_completed',
-                    'collector': 'user-scanner',
-                    'observations': len(collected),
-                    'found': sum(
-                        1
-                        for item in collected
-                        if str(item.get('status') or '').casefold() == 'registered'
-                    ),
-                }
-            )
-        except asyncio.CancelledError:
-            q.put({'type': 'stopped', 'collector': 'user-scanner'})
-            break
-        except Exception as error:
-            circuit_event = provider_circuit_event(error, 'user-scanner')
-            if circuit_event:
-                q.put(circuit_event)
-                break
-            public_error = record_internal_error(
-                'User Scanner email collection failed',
-                error,
-                target_type='email',
-            )
-            q.put(
-                {
-                    'type': 'collector_error',
-                    'collector': 'user-scanner',
-                    'message': public_error,
-                }
-            )
-    job['collector_observations'] = observations
+            for target, identity in zip(targets, task_plan):
+                if context.is_cancelled():
+                    break
+                context.operation_ledger.record_started(identity['task_id'])
+                disposition = 'unknown'
+                collected = []
+                try:
+                    collected = await callback(target, context)
+                    collected = collected if isinstance(collected, list) else [collected]
+                    observations.extend(collected)
+                    statuses = {str(item.get('status') or '').casefold() for item in collected}
+                    disposition = ('timeout' if 'timeout' in statuses else
+                                   'error' if statuses & {'error', 'blocked', 'rate_limited'} else 'completed')
+                    collected_count += len(collected)
+                    found_count += sum(str(item.get('status') or '').casefold() in found_statuses for item in collected)
+                    checkpoint()
+                except asyncio.CancelledError:
+                    disposition = 'interrupted'
+                    raise
+                except Exception as error:
+                    disposition = 'error'
+                    circuit = provider_circuit_event(error, context.engine_id)
+                    q.put(circuit or {'type': 'collector_error', 'collector': context.engine_id,
+                                     'message': record_internal_error('Source collection failed', error)})
+                finally:
+                    terminal = {**identity, 'disposition': disposition, 'attempted': True,
+                                'cleanup_state': 'not_required'}
+                    q.put({'type': 'collection_task_terminal', 'stage_id': context.stage_id, 'tasks': [terminal]})
+                    terminal_ids.add(identity['task_id'])
+                    context.operation_ledger.record_terminal(identity['task_id'], disposition,
+                                                             attempted=True, observations=len(collected))
+                if 'rate_limited' in {str(item.get('status') or '').casefold() for item in collected}:
+                    break
+        finally:
+            for identity in task_plan:
+                if identity['task_id'] in terminal_ids:
+                    continue
+                terminal = {**identity, 'disposition': 'unattempted', 'attempted': False,
+                            'cleanup_state': 'not_required', 'reason': 'source_admission_stopped'}
+                q.put({'type': 'collection_task_terminal', 'stage_id': context.stage_id, 'tasks': [terminal]})
+                context.operation_ledger.record_terminal(identity['task_id'], 'unattempted',
+                                                         attempted=False, observations=0)
+        # Every target admitted to this plan has a disposition, including
+        # targets left by a provider stop or stage deadline.
+        q.put({'type': 'collector_completed', 'collector': context.engine_id,
+               'observations': collected_count, 'found': found_count})
+        return StageResult(counts=StageCounts(observations=collected_count))
+
+    async def github_stage(context):
+        async def collect(target, _context):
+            return await run_github_public_profile(target)
+        return await targets_stage(context, github_targets(), collect, {'observed'})
+
+    async def unfurl_stage(context):
+        async def collect(target, _context):
+            return await run_unfurl_url_analysis(target)
+        return await targets_stage(context, url_targets(), collect, {'analyzed'})
+
+    async def wayback_stage(context):
+        async def collect(target, _context):
+            return await run_wayback_capture_index(target)
+        return await targets_stage(context, url_targets(), collect, {'archived'})
+
+    async def username_stage(context):
+        policy = user_scanner_username_policy(plan)
+        async def collect(target, ctx):
+            partial = []
+            try:
+                return await run_user_scanner_usernames(
+                    [target], platforms=policy['platforms'],
+                    allow_vxtwitter=policy['allow_vxtwitter'],
+                    observation_sink=partial.extend, cancellation_check=ctx.is_cancelled,
+                )
+            except BaseException:
+                observations.extend(partial)
+                checkpoint()
+                raise
+        return await targets_stage(context, user_scanner_username_targets(plan), collect, {'registered', 'found'})
+
+    async def email_stage(context):
+        async def collect(target, ctx):
+            return await run_user_scanner_email(target, cancellation_check=ctx.is_cancelled)
+        return await targets_stage(context, user_scanner_email_targets(plan), collect, {'registered'})
+
+    def spec(name, engine, callback, planned, selected, dependencies=()):
+        if is_unified_investigation_plan(plan):
+            route_name = {
+                'native': 'native_profile_search', 'maigret': 'maigret',
+                'github': 'github_profile_enrichment',
+                'unfurl': 'archived_profile_evidence', 'wayback': 'archived_profile_evidence',
+                'user_scanner_username': 'user_scanner_username',
+                'user_scanner_email': 'user_scanner_email',
+            }[name]
+            authoritative = plan.get('route_plan')
+            if isinstance(authoritative, dict):
+                selected = selected and any(route.get('route') == route_name
+                                            for route in authoritative.get('effective_routes', []))
+            if name == 'user_scanner_email':
+                selected = selected and bool(plan.get('email_route_confirmed'))
+        return StageSpec(name, engine, engine, 'site_checks' if name == 'maigret' else
+                         'queries' if name == 'native' else 'targets', callback,
+                         planned_units=planned, selected=selected, weight=weights[name],
+                         dependencies=dependencies,
+                         readiness=(lambda _outcomes: True) if dependencies else None)
+
+    stages = [
+        spec('native', 'native-profile-search', native_stage, None, flags.get('search_first_enabled', False)),
+        spec('maigret', 'maigret', maigret_stage, None if usernames else 0, flags.get('maigret_enabled', True)),
+        spec('github', 'github-public-profile', github_stage, lambda: len(github_targets()),
+             bool(plan.get('enable_github_profile_enrichment')), ('maigret',)),
+        spec('unfurl', 'unfurl-url-analysis', unfurl_stage, lambda: len(url_targets()),
+             bool(plan.get('enable_archived_url_evidence')), ('maigret',)),
+        spec('wayback', 'wayback-cdx', wayback_stage, lambda: len(url_targets()),
+             bool(plan.get('enable_archived_url_evidence')), ('maigret',)),
+        spec('user_scanner_username', 'user-scanner-username', username_stage,
+             lambda: len(user_scanner_username_targets(plan)), bool(plan.get('enable_user_scanner_username'))),
+        spec('user_scanner_email', 'user-scanner', email_stage,
+             lambda: len(user_scanner_email_targets(plan)), bool(plan.get('enable_user_scanner_email'))),
+    ]
+    budget = job.get('execution_budget_object') or ExecutionBudget.from_options(options)
+    summary = await run_collection_stages(
+        stages, deadline=time.monotonic()+budget.remaining_seconds(),
+        cancellation_check=stopped, event_sink=accounting_event,
+        cleanup_seconds=PERSISTENT_BUDGET_CLEANUP_SECONDS,
+    )
+    # The sink retains the canonical persisted snapshot, including adapter
+    # cleanup state that cannot be inferred from callback task completion.
+    checkpoint()
     return general_results
 
 
@@ -3557,9 +3567,15 @@ def finalize_stream_job(
     budget_exhausted=False,
     execution_budget=None,
     worker_id=None,
+    collection_accounting=None,
 ):
     """Persist one terminal scan result and publish its final progress event."""
     collector_observations = list(collector_observations or [])
+    collection_accounting = public_collection_accounting(collection_accounting)
+    durable_collection = bool(collection_accounting is not None and
+                              isinstance(event_sink, PersistentEventSink))
+    staging_root = None
+    published_folder = None
     done_event = {'type': 'done'}
     terminal_status = 'failed'
     partial_status = None
@@ -3576,8 +3592,53 @@ def finalize_stream_job(
             'The execution budget ended collection; all evidence gathered before '
             'the deadline was retained.'
         )
+    elif collection_accounting and collection_accounting['state'] != 'completed':
+        partial_status = 'partial'
+        partial_message = 'Some collection work did not complete; see the recorded source outcomes.'
 
     def persist_terminal_result(result):
+        nonlocal published_folder
+        if collection_accounting is not None:
+            result['collection_accounting'] = collection_accounting
+        if durable_collection:
+            terminal = {'type': 'done', 'status': 'partial' if partial_status and result['status'] == 'completed' else result['status'],
+                        'reason': partial_status, 'collection_accounting': collection_accounting}
+            if result['status'] == 'completed':
+                terminal['redirect'] = f'/results/search_{job_id}'
+
+            def publish():
+                nonlocal published_folder
+                if staging_root and result['status'] == 'completed':
+                    staged_folder = os.path.join(staging_root, f'search_{job_id}')
+                    destination = os.path.join(app.config['REPORTS_FOLDER'], f'search_{job_id}')
+                    os.rename(staged_folder, destination)
+                    published_folder = destination
+                persist_job_result(job_id, result)
+
+            try:
+                persisted = record_job_result(
+                    job_id, result, worker_id=worker_id,
+                    publication=publish, terminal_event=terminal,
+                )
+                if persisted is None and event_sink.store.is_cancel_requested(job_id):
+                    result.update(collection_status='cancelled',
+                                  collection_message='The operator stopped collection before publication.')
+                    cancelled_accounting = dict(collection_accounting)
+                    cancelled_accounting.update(state='cancelled', revision=collection_accounting['revision'] + 1)
+                    result['collection_accounting'] = cancelled_accounting
+                    terminal.update(status='partial' if result['status'] == 'completed' else result['status'],
+                                    reason='cancelled', collection_accounting=cancelled_accounting)
+                    persisted = record_job_result(job_id, result, worker_id=worker_id,
+                                                  publication=publish, terminal_event=terminal)
+            except BaseException:
+                if published_folder:
+                    shutil.rmtree(published_folder, ignore_errors=True)
+                    published_folder = None
+                raise
+            finally:
+                if staging_root:
+                    shutil.rmtree(staging_root, ignore_errors=True)
+            return persisted
         # Keep the legacy/in-memory call shape compatible with simple test and
         # extension doubles. Durable workers still supply their lease token.
         if worker_id is None:
@@ -3593,6 +3654,10 @@ def finalize_stream_job(
                 if collector_observations
                 else {}
             )
+            if durable_collection:
+                os.makedirs(app.config['REPORTS_FOLDER'], mode=0o700, exist_ok=True)
+                staging_root = tempfile.mkdtemp(prefix=f'p3r-{job_id}-', dir=app.config['REPORTS_FOLDER'])
+                report_kwargs['reports_root'] = staging_root
             result = build_reports(
                 general_results, usernames, job_id, **report_kwargs
             )
@@ -3623,7 +3688,7 @@ def finalize_stream_job(
             ) is None:
                 return False
     elif partial_status:
-        terminal_status = partial_status
+        terminal_status = 'failed' if partial_status == 'partial' else partial_status
         terminal_result = {
             'status': terminal_status,
             'error': (
@@ -3656,6 +3721,8 @@ def finalize_stream_job(
         ) is None:
             return False
     done_event.setdefault('status', terminal_status)
+    if collection_accounting is not None:
+        done_event['collection_accounting'] = collection_accounting
     event_sink.put(done_event)
     return True
 
@@ -3667,6 +3734,8 @@ def run_stream_job(job_id, usernames, options):
         options, started_at=started_datetime
     )
     job = live_jobs[job_id]
+    job['job_id'] = job_id
+    job['execution_budget_object'] = execution_budget
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     job['loop'] = loop
@@ -3716,6 +3785,7 @@ def run_stream_job(job_id, usernames, options):
         cancelled=bool(job.get('cancelled')),
         budget_exhausted=budget_exhausted and not bool(job.get('cancelled')),
         execution_budget=execution_budget.as_dict(),
+        collection_accounting=job.get('collection_accounting'),
     )
 
 
@@ -3734,12 +3804,15 @@ class PersistentEventSink:
         self.worker_id = worker_id
 
     def put(self, event):
-        return self.store.append_event(
+        result = self.store.append_event(
             self.job_id,
             event,
             runtime_guard=True,
             worker_id=self.worker_id,
         )
+        if not result and event.get('type') != 'done' and self.worker_id is not None:
+            raise RuntimeError('Collection event ownership lost or finalized')
+        return result
 
 
 async def watch_persistent_job_stop(
@@ -5407,6 +5480,8 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
     worker_id = job.get("worker_id")
     sink = PersistentEventSink(store, job_id, worker_id=worker_id)
     runtime_job = {
+        "job_id": job_id,
+        "execution_budget_object": execution_budget,
         "queue": sink,
         "cancelled": False,
         "loop": None,
@@ -5418,6 +5493,12 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
             store.record_profile_search_result(
                 job_id, result, worker_id=worker_id
             )
+        ),
+        "collection_checkpoint_sink": lambda result: store.save_collection_checkpoint(
+            job_id, result, worker_id=worker_id,
+        ),
+        "native_profile_checkpoint_sink": lambda result: store.save_native_profile_checkpoint(
+            job_id, result, worker_id=worker_id,
         ),
     }
     loop = asyncio.new_event_loop()
@@ -5512,6 +5593,7 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         budget_exhausted=budget_exhausted,
         execution_budget=execution_budget.as_dict(),
         worker_id=worker_id,
+        collection_accounting=runtime_job.get("collection_accounting"),
     )
 
 
@@ -5579,6 +5661,10 @@ def scan_stream(job_id):
                 events = case_store.get_events(job_id, after_id=cursor)
                 for stored_event in events:
                     cursor = stored_event["id"]
+                    # Opaque task ledgers are persisted for reconciliation; the
+                    # browser consumes bounded aggregate snapshots only.
+                    if stored_event['event'].get('type', '').startswith('collection_task_'):
+                        continue
                     saw_done = saw_done or stored_event["event"].get("type") == "done"
                     yield (
                         f"id: {cursor}\n"
@@ -5606,6 +5692,7 @@ def scan_stream(job_id):
                                     "type": "done",
                                     "status": displayed_status,
                                     "reason": collection_status or None,
+                                    "collection_accounting": current.get('collection_accounting'),
                                     "redirect": (
                                         f"/cases/{current['case_id']}"
                                         if current.get("kind")
@@ -5675,6 +5762,7 @@ def scan_runtime(job_id):
                     'cancel_requested' if in_memory.get('cancelled') else 'running'
                 ),
                 'options': in_memory.get('options') or {},
+                'collection_accounting': in_memory.get('collection_accounting'),
             }
     if current is None:
         return {'error': 'unknown job'}, 404

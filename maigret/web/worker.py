@@ -50,6 +50,10 @@ def maintain_job_heartbeat(store, job, stop_event, lease_lost) -> None:
                 error,
                 session=job_id,
             )
+            # A worker unable to verify its lease stops collection. It never
+            # assumes that a failed renewal still authorizes later writes.
+            lease_lost.set()
+            return
 
 
 def monitor_stale_jobs(store, stop_event) -> None:

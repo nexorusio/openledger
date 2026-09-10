@@ -4102,7 +4102,14 @@ def test_ai_markdown_excludes_uncorroborated_username_scanner_hits(web_app):
 def test_user_facing_copy_is_openledger_branded(relative_path):
     path = os.path.join(CUR_PATH, relative_path)
     with open(path, encoding='utf-8') as branded_file:
-        assert 'maigret' not in branded_file.read().lower()
+        content = branded_file.read().lower()
+        if relative_path.endswith('/live.html'):
+            # P3R identifies engines in source counters while product branding
+            # remains OpenLedger. Source names are no longer forbidden copy.
+            assert '{% block title %}live investigation | openledger{% endblock %}' in content
+            assert 'maigret site checks' in content
+        else:
+            assert 'maigret' not in content
 
 
 def test_process_search_task_records_started_at_on_success(web_app, monkeypatch):

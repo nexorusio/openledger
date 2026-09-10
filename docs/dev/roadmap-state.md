@@ -12,6 +12,18 @@ phase or test as complete until its evidence exists.
 
 ## Programme summary
 
+### P3R authorized remediation checkpoint
+
+P3R implementation is authorized through a tested, independently reviewed PR;
+the user retains squash-and-merge and Docker deployment. PR #52 is already
+merged at `77408090946015064ed8df99e9d7b44365d54838` (tree
+`3380ef19af74050d29462b195e0694584b050737`). Pre-merge entries below are historical.
+The original production incident remains unverified pending saved-run
+reconciliation and later human deployment acceptance. No P4 or new source is
+authorized. See [P3R acceptance](p3r-acceptance.md) and the
+[source adapter contract](p3r-source-contract.md). Integration and mandatory
+PostgreSQL/browser/final review gates are in progress, not released.
+
 - Scope: P3 through P18, 42 consolidated authorization activities.
 - Conservative planned effort: approximately 54.5 hours.
 - Expected critical path with safe dynamic concurrency: approximately 42--50
