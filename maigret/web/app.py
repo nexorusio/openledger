@@ -141,6 +141,7 @@ from maigret.web.investigation_input import (
     search_usernames,
 )
 from maigret.web.username_aliases import (
+    MAX_SELECTED_ALIASES,
     normalize_context_numbers,
     normalize_nicknames,
     rank_username_aliases,
@@ -6021,6 +6022,24 @@ INVESTIGATION_PREVIEW_PUBLIC_ERRORS = {
         "Add at least one investigation token."
     ),
     "Select Quick Scan or Full Scan.": "Select Quick Scan or Full Scan.",
+    "Select a supported investigation value type.": (
+        "Select a supported investigation value type."
+    ),
+    "Investigation values and type selections must remain aligned.": (
+        "Investigation values and type selections must remain aligned."
+    ),
+    "Select Profile URL only for a supported public account URL.": (
+        "Select Profile URL only for a supported public account URL."
+    ),
+    "Enable likely username aliases before selecting aliases.": (
+        "Enable likely username aliases before selecting aliases."
+    ),
+    "Select aliases from the displayed server-ranked plan.": (
+        "Select aliases from the displayed server-ranked plan."
+    ),
+    f"Select no more than {MAX_SELECTED_ALIASES} username aliases.": (
+        f"Select no more than {MAX_SELECTED_ALIASES} username aliases."
+    ),
     "The current bounded email route accepts one email per investigation.": (
         "The current bounded email route accepts one email per investigation."
     ),
@@ -6057,26 +6076,54 @@ def api_investigation_plan_preview():
     if not isinstance(payload, dict):
         return {"error": "A JSON investigation preview is required."}, 400
 
-    raw_tokens = payload.get("tokens", [])
-    if (
-        not isinstance(raw_tokens, list)
-        or len(raw_tokens) > MAX_IDENTIFIERS
-        or any(
-            not isinstance(value, str) or len(value) > MAX_TOKEN_LENGTH
-            for value in raw_tokens
-        )
-    ):
+    raw_token_items = payload.get("tokens", [])
+    if not isinstance(raw_token_items, list) or len(raw_token_items) > MAX_IDENTIFIERS:
         return {"error": "Investigation preview inputs are invalid."}, 400
+    raw_tokens = []
+    raw_token_types = []
+    for item in raw_token_items:
+        if isinstance(item, str):
+            value = item
+            token_type = ""
+        elif isinstance(item, dict) and set(item).issubset({"value", "type"}):
+            value = item.get("value")
+            token_type = item.get("type") or ""
+        else:
+            return {"error": "Investigation preview inputs are invalid."}, 400
+        if (
+            not isinstance(value, str)
+            or len(value) > MAX_TOKEN_LENGTH
+            or not isinstance(token_type, str)
+        ):
+            return {"error": "Investigation preview inputs are invalid."}, 400
+        raw_tokens.append(value)
+        raw_token_types.append(token_type)
     mode = payload.get("mode", "quick")
     if not isinstance(mode, str):
         return {"error": "Select Quick Scan or Full Scan."}, 400
 
     preview_form = {
         "investigation_token": raw_tokens,
+        "investigation_token_type": raw_token_types,
         "mode": mode,
     }
     if payload.get("search_likely_username_aliases") is True:
         preview_form["search_likely_username_aliases"] = "on"
+    selected_aliases = payload.get("selected_aliases", [])
+    alias_selection_present = payload.get("alias_selection_present") is True
+    if (
+        not isinstance(selected_aliases, list)
+        or len(selected_aliases) > MAX_SELECTED_ALIASES
+        or any(
+            not isinstance(value, str) or len(value) > MAX_USERNAME_LENGTH
+            for value in selected_aliases
+        )
+        or (selected_aliases and not alias_selection_present)
+    ):
+        return {"error": "Investigation preview inputs are invalid."}, 400
+    if alias_selection_present:
+        preview_form["alias_candidates_present"] = "1"
+        preview_form["selected_alias"] = selected_aliases
     if payload.get("confirm_email_route") is True:
         preview_form["confirm_email_route"] = "on"
 
@@ -6132,6 +6179,7 @@ def api_investigation_plan_preview():
             "schema_version": plan["schema_version"],
             "input_contract": plan["input_contract"],
             "tokens": tokens,
+            "alias_candidates": list(plan.get("alias_candidates") or []),
             "route_plan": plan["route_plan"],
             "requires_email_confirmation": confirmation_required,
             "can_start": bool(has_collection_route and not confirmation_required),

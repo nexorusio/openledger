@@ -28,6 +28,16 @@ ROUTE_PLAN_SCHEMA_VERSION = 1
 UNIFIED_INPUT_CONTRACT = "investigation-tokens-v1"
 ROUTE_PLAN_POLICY_VERSION = "investigation-routes-v1"
 TOKEN_FORM_FIELD = "investigation_token"
+TOKEN_TYPE_FORM_FIELD = "investigation_token_type"
+TOKEN_TYPES = {
+    "email",
+    "full_name",
+    "phone",
+    "profile_url",
+    "public_url",
+    "social_handle",
+    "username",
+}
 IDENTIFIER_TYPES = {
     "username",
     "social_handle",
@@ -60,6 +70,8 @@ _EMAIL_PATTERN = re.compile(
 _TERM_SPLIT_PATTERN = re.compile(r"[,\n\r]+")
 _SOURCE_TAG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 _SCHEME_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_INDONESIAN_LOCAL_MOBILE_PATTERN = re.compile(r"^08[1-9][0-9]{7,10}$")
+_INDONESIAN_COUNTRY_MOBILE_PATTERN = re.compile(r"^628[1-9][0-9]{7,10}$")
 _DOMAIN_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 _BLOCKED_PUBLIC_HOST_SUFFIXES = (
     ".example",
@@ -171,10 +183,29 @@ def normalize_public_url(value: Any) -> str:
 
 
 def _explicit_phone_token(value: str) -> bool:
-    candidate = value[4:].strip() if value.casefold().startswith("tel:") else value
+    has_tel_prefix = value.casefold().startswith("tel:")
+    candidate = value[4:].strip() if has_tel_prefix else value
     if not candidate or not re.fullmatch(r"[0-9+().\-\s]+", candidate):
         return False
-    return candidate.startswith("+") or bool(re.search(r"[().\-\s]", candidate))
+    digits = re.sub(r"\D", "", candidate)
+    indonesian_mobile = bool(
+        _INDONESIAN_LOCAL_MOBILE_PATTERN.fullmatch(digits)
+        or _INDONESIAN_COUNTRY_MOBILE_PATTERN.fullmatch(digits)
+    )
+    return bool(
+        has_tel_prefix
+        or candidate.startswith("+")
+        or re.search(r"[().\-\s]", candidate)
+        or indonesian_mobile
+    )
+
+
+def _ambiguous_token_types(value: str) -> List[str]:
+    """Expose numeric account/phone ambiguity without changing route authority."""
+    candidate = value[4:].strip() if value.casefold().startswith("tel:") else value
+    if re.fullmatch(r"[0-9]{7,15}", candidate):
+        return ["phone", "username"]
+    return []
 
 
 def _resolved_profile_accounts(
@@ -199,10 +230,12 @@ def _resolved_profile_accounts(
 def classify_investigation_token(
     value: Any,
     *,
+    type_override: Any = None,
     profile_url_resolver: Optional[Callable[[str], Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     """Classify one bounded token in the fixed, server-owned precedence order."""
     token = _token_text(value)
+    account_targets: List[str] = []
     if _EMAIL_PATTERN.fullmatch(token):
         token_type = "email"
         normalized = normalize_email(token)
@@ -210,16 +243,6 @@ def classify_investigation_token(
         normalized = normalize_public_url(token)
         account_targets = _resolved_profile_accounts(normalized, profile_url_resolver)
         token_type = "profile_url" if account_targets else "public_url"
-        classified = {
-            "schema_version": TOKEN_SCHEMA_VERSION,
-            "type": token_type,
-            "value": normalized,
-            "duplicate_key": _duplicate_key(token_type, normalized),
-            "context_only": not bool(account_targets),
-        }
-        if account_targets:
-            classified["account_targets"] = account_targets
-        return classified
     elif _explicit_phone_token(token):
         token_type = "phone"
         phone_value = (
@@ -239,29 +262,77 @@ def classify_investigation_token(
     else:
         token_type = "username"
         normalized = normalize_username(token)
-    return {
+
+    predicted_type = token_type
+    requested_type = str(type_override or "").strip().casefold()
+    if requested_type:
+        if requested_type not in TOKEN_TYPES:
+            raise InvestigationInputError(
+                "Select a supported investigation value type."
+            )
+        token_type = requested_type
+        account_targets = []
+        if token_type == "email":
+            normalized = normalize_email(token)
+        elif token_type == "phone":
+            phone_value = (
+                token[4:].strip() if token.casefold().startswith("tel:") else token
+            )
+            normalized = normalize_phone(phone_value)
+        elif token_type in {"username", "social_handle"}:
+            normalized = normalize_username(token)
+        elif token_type == "full_name":
+            normalized = token
+            if len(normalized) < 2 or len(normalized) > 300:
+                raise InvestigationInputError(
+                    "Enter a complete name of 300 characters or fewer."
+                )
+        elif token_type in {"profile_url", "public_url"}:
+            normalized = normalize_public_url(token)
+            account_targets = _resolved_profile_accounts(
+                normalized, profile_url_resolver
+            )
+            if token_type == "profile_url" and not account_targets:
+                raise InvestigationInputError(
+                    "Select Profile URL only for a supported public account URL."
+                )
+
+    classified = {
         "schema_version": TOKEN_SCHEMA_VERSION,
         "type": token_type,
         "value": normalized,
         "duplicate_key": _duplicate_key(token_type, normalized),
-        "context_only": token_type in {"phone"},
+        "context_only": token_type in {"phone", "public_url"},
+        "input": token,
+        "predicted_type": predicted_type,
+        "type_source": "analyst_override" if requested_type else "automatic",
+        "ambiguous_types": _ambiguous_token_types(token),
     }
+    if token_type == "profile_url" and account_targets:
+        classified["account_targets"] = account_targets
+    return classified
 
 
 def classify_investigation_tokens(
     values: List[Any],
     *,
+    type_overrides: Optional[List[Any]] = None,
     profile_url_resolver: Optional[Callable[[str], Dict[str, str]]] = None,
 ) -> List[Dict[str, Any]]:
     if len(values) > MAX_IDENTIFIERS:
         raise InvestigationInputError(
             f"Use no more than {MAX_IDENTIFIERS} investigation tokens."
         )
+    if type_overrides is not None and len(type_overrides) != len(values):
+        raise InvestigationInputError(
+            "Investigation values and type selections must remain aligned."
+        )
     classified: List[Dict[str, Any]] = []
     seen = set()
-    for value in values:
+    for index, value in enumerate(values):
         token = classify_investigation_token(
             value,
+            type_override=(type_overrides or [])[index] if type_overrides else None,
             profile_url_resolver=profile_url_resolver,
         )
         duplicate_key = token["duplicate_key"]
@@ -312,6 +383,10 @@ def normalize_phone(value: Any) -> str:
         raise InvestigationInputError(
             "Phone numbers must contain between 7 and 15 digits."
         )
+    if _INDONESIAN_LOCAL_MOBILE_PATTERN.fullmatch(digits):
+        return f"+62{digits[1:]}"
+    if _INDONESIAN_COUNTRY_MOBILE_PATTERN.fullmatch(digits):
+        return f"+{digits}"
     return f"+{digits}" if raw.startswith("+") else digits
 
 
@@ -449,8 +524,14 @@ def build_unified_investigation_plan(
         for value in _form_list(form, TOKEN_FORM_FIELD)
         if str(value or "").strip()
     ]
+    raw_type_overrides = _form_list(form, TOKEN_TYPE_FORM_FIELD)
+    if raw_type_overrides and len(raw_type_overrides) != len(raw_tokens):
+        raise InvestigationInputError(
+            "Investigation values and type selections must remain aligned."
+        )
     tokens = classify_investigation_tokens(
         raw_tokens,
+        type_overrides=raw_type_overrides or None,
         profile_url_resolver=profile_url_resolver,
     )
     requested_mode, execution_mode = normalize_unified_scan_mode(form.get("mode"))
@@ -517,9 +598,36 @@ def build_unified_investigation_plan(
         if search_likely_aliases and full_names
         else []
     )
+    submitted_alias_values = _form_list(form, "selected_alias")
+    alias_selection_present = bool(
+        search_likely_aliases and "alias_candidates_present" in form
+    )
+    if submitted_alias_values and not search_likely_aliases:
+        raise InvestigationInputError(
+            "Enable likely username aliases before selecting aliases."
+        )
+    if alias_selection_present:
+        selected_keys = {
+            normalize_username(value).casefold()
+            for value in submitted_alias_values
+            if str(value or "").strip()
+        }
+        candidate_keys = {
+            str(candidate["value"]).casefold() for candidate in alias_candidates
+        }
+        if selected_keys.difference(candidate_keys):
+            raise InvestigationInputError(
+                "Select aliases from the displayed server-ranked plan."
+            )
+        for candidate in alias_candidates:
+            candidate["selected"] = str(candidate["value"]).casefold() in selected_keys
     selected_aliases = [
         candidate for candidate in alias_candidates if candidate.get("selected")
-    ][:MAX_SELECTED_ALIASES]
+    ]
+    if len(selected_aliases) > MAX_SELECTED_ALIASES:
+        raise InvestigationInputError(
+            f"Select no more than {MAX_SELECTED_ALIASES} username aliases."
+        )
     selected_keys = {
         str(candidate["value"]).casefold() for candidate in selected_aliases
     }

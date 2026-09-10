@@ -82,7 +82,7 @@
                     <div class="token-editor" id="investigation-token-editor">
                         <div class="investigation-token-list" id="investigation-token-list" aria-live="polite">
                             {% for identifier in initial_identifiers if identifier.value %}
-                            <span class="investigation-token-chip" data-token-value="{{ identifier.value }}" data-token-type="{{ identifier.type }}">
+                            <span class="investigation-token-chip" data-token-value="{{ identifier.value }}" data-token-type="{{ identifier.type }}" data-token-override-type="{{ identifier.type }}">
                                 <button type="button" class="token-chip-edit" aria-label="Edit {{ identifier.value }}">
                                     <span class="token-chip-type">{{ identifier.type | replace('_', ' ') | title }}</span>
                                     <span class="token-chip-value">{{ identifier.value }}</span>
@@ -116,9 +116,21 @@
                     <div class="form-check investigation-check mt-0">
                         <input class="form-check-input" type="checkbox" id="search-likely-username-aliases" name="search_likely_username_aliases">
                         <label class="form-check-label" for="search-likely-username-aliases">Search likely username aliases</label>
-                        <div class="form-text">For a full name, adds a bounded set of server-ranked account variants. It never sprays numeric combinations.</div>
+                        <div class="form-text">For a full name, generates bounded, server-ranked account variants for you to review. Only aliases you select will be searched.</div>
                     </div>
                 </fieldset>
+
+                <section class="investigation-section alias-review" id="username-alias-review" aria-labelledby="username-alias-title" hidden>
+                    <div class="alias-review-heading">
+                        <div>
+                            <h3 id="username-alias-title">Review username aliases</h3>
+                            <p class="form-text">Select only the account-name variants relevant to this person. Scores rank patterns; they are not identity evidence.</p>
+                        </div>
+                        <span class="badge-soft" id="username-alias-summary">0 selected</span>
+                    </div>
+                    <input type="hidden" id="alias-candidates-present" name="alias_candidates_present" value="1" disabled>
+                    <div class="alias-candidate-list" id="username-alias-list"></div>
+                </section>
 
                 <fieldset class="investigation-section email-confirmation" id="email-route-confirmation" hidden>
                     <legend class="visually-hidden">Email route confirmation</legend>

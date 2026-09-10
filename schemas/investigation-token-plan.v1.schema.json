@@ -68,6 +68,15 @@
         "schema_version": {"const": 1},
         "type": {"$ref": "#/$defs/tokenType"},
         "value": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "input": {"type": "string", "minLength": 1, "maxLength": 2000},
+        "predicted_type": {"$ref": "#/$defs/tokenType"},
+        "type_source": {"enum": ["automatic", "analyst_override"]},
+        "ambiguous_types": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/tokenType"}
+        },
         "duplicate_key": {
           "type": "string",
           "pattern": "^[a-z_]+:[0-9a-f]{64}$"

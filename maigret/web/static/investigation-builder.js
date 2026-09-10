@@ -12,6 +12,10 @@
     const input = document.getElementById('investigation-token-input');
     const status = document.getElementById('token-editor-status');
     const aliasToggle = document.getElementById('search-likely-username-aliases');
+    const aliasReview = document.getElementById('username-alias-review');
+    const aliasList = document.getElementById('username-alias-list');
+    const aliasSummary = document.getElementById('username-alias-summary');
+    const aliasCandidatesPresent = document.getElementById('alias-candidates-present');
     const emailSection = document.getElementById('email-route-confirmation');
     const emailConfirmation = document.getElementById('confirm-email-route');
     const preview = document.getElementById('investigation-plan-preview');
@@ -22,6 +26,7 @@
     const startButton = document.getElementById('startBtn');
     const csrfToken = form.querySelector('input[name="csrf_token"]').value;
     const maximumTokens = 24;
+    const maximumSelectedAliases = 16;
     const typeLabels = {
         email: 'Email',
         full_name: 'Full name',
@@ -31,6 +36,15 @@
         social_handle: 'Social handle',
         username: 'Username'
     };
+    const typeOrder = [
+        'full_name',
+        'username',
+        'social_handle',
+        'email',
+        'phone',
+        'profile_url',
+        'public_url'
+    ];
     const routeReasons = {
         confirmation_required: 'Confirmation required',
         context_only_no_outbound: 'Context only · no outbound request',
@@ -39,10 +53,16 @@
 
     let tokens = Array.from(list.querySelectorAll('.investigation-token-chip'))
         .map(chip => ({
+            input: chip.dataset.tokenValue || '',
             type: chip.dataset.tokenType || 'pending',
-            value: chip.dataset.tokenValue || ''
+            value: chip.dataset.tokenValue || '',
+            predictedType: chip.dataset.tokenType || 'pending',
+            overrideType: chip.dataset.tokenOverrideType || null,
+            ambiguousTypes: []
         }))
-        .filter(token => token.value);
+        .filter(token => token.input);
+    let aliasCandidates = [];
+    let aliasSelectionExplicit = false;
     let editing = null;
     let previewController = null;
     let previewSequence = 0;
@@ -83,29 +103,45 @@
         const chip = document.createElement('span');
         chip.className = 'investigation-token-chip';
         if (token.invalid) chip.classList.add('is-invalid');
-        chip.dataset.tokenValue = token.value;
+        if (Array.isArray(token.ambiguousTypes) && token.ambiguousTypes.length > 1) {
+            chip.classList.add('is-ambiguous');
+        }
+        chip.dataset.tokenValue = token.input;
         chip.dataset.tokenType = token.type || 'pending';
+
+        const typeControl = document.createElement('select');
+        typeControl.className = 'token-chip-type-control';
+        typeControl.setAttribute('aria-label', `Type for ${token.input}`);
+        typeOrder.forEach(typeName => {
+            const option = document.createElement('option');
+            option.value = typeName;
+            option.textContent = typeLabels[typeName];
+            typeControl.appendChild(option);
+        });
+        typeControl.value = token.type === 'pending' ? 'username' : token.type;
+        typeControl.disabled = token.type === 'pending' || Boolean(token.invalid);
+        typeControl.title = token.overrideType
+            ? `Server suggested ${typeLabels[token.predictedType] || token.predictedType}; analyst selected ${typeLabels[token.type] || token.type}.`
+            : (Array.isArray(token.ambiguousTypes) && token.ambiguousTypes.length > 1
+                ? 'This numeric value may be a phone number or username. Confirm the type before collection.'
+                : 'Server-predicted type. Change it if the context is different.');
+        typeControl.addEventListener('change', () => changeTokenType(index, typeControl.value));
 
         const editButton = document.createElement('button');
         editButton.type = 'button';
         editButton.className = 'token-chip-edit';
-        editButton.setAttribute('aria-label', `Edit ${token.value}`);
+        editButton.setAttribute('aria-label', `Edit ${token.input}`);
 
-        const type = document.createElement('span');
-        type.className = 'token-chip-type';
-        type.textContent = token.invalid
-            ? 'Needs correction'
-            : (typeLabels[token.type] || 'Checking…');
         const value = document.createElement('span');
         value.className = 'token-chip-value';
-        value.textContent = token.value;
-        editButton.append(type, value);
+        value.textContent = token.input;
+        editButton.append(value);
         editButton.addEventListener('click', () => beginEdit(index));
 
         const removeButton = document.createElement('button');
         removeButton.type = 'button';
         removeButton.className = 'token-chip-remove';
-        removeButton.setAttribute('aria-label', `Remove ${token.value}`);
+        removeButton.setAttribute('aria-label', `Remove ${token.input}`);
         const removeIcon = document.createElement('i');
         removeIcon.dataset.lucide = 'x';
         removeIcon.setAttribute('aria-hidden', 'true');
@@ -115,9 +151,24 @@
         const hidden = document.createElement('input');
         hidden.type = 'hidden';
         hidden.name = 'investigation_token';
-        hidden.value = token.value;
-        chip.append(editButton, removeButton, hidden);
+        hidden.value = token.input;
+        const hiddenType = document.createElement('input');
+        hiddenType.type = 'hidden';
+        hiddenType.name = 'investigation_token_type';
+        hiddenType.value = token.overrideType || '';
+        chip.append(typeControl, editButton, removeButton, hidden, hiddenType);
         return chip;
+    }
+
+    function changeTokenType(index, selectedType) {
+        const token = tokens[index];
+        if (!token || !typeOrder.includes(selectedType)) return;
+        token.type = selectedType;
+        token.overrideType = selectedType === token.predictedType ? null : selectedType;
+        aliasSelectionExplicit = false;
+        clearAliasReview();
+        renderTokens();
+        refreshPreview({ invalidIndex: index });
     }
 
     function renderTokens() {
@@ -128,6 +179,78 @@
         }
     }
 
+    function clearAliasReview() {
+        aliasCandidates = [];
+        aliasReview.hidden = true;
+        aliasCandidatesPresent.disabled = true;
+        aliasList.replaceChildren();
+        aliasSummary.textContent = '0 selected';
+    }
+
+    function updateAliasSummary() {
+        const selectedCount = aliasCandidates.filter(candidate => candidate.selected).length;
+        aliasSummary.textContent = `${selectedCount} of ${aliasCandidates.length} selected`;
+    }
+
+    function renderAliasCandidates(candidates) {
+        aliasCandidates = Array.isArray(candidates)
+            ? candidates.map(candidate => ({
+                value: String(candidate.value || ''),
+                score: Number(candidate.score || 0),
+                reason: String(candidate.reason || ''),
+                selected: Boolean(candidate.selected)
+            })).filter(candidate => candidate.value)
+            : [];
+        if (!aliasToggle.checked || !aliasCandidates.length) {
+            clearAliasReview();
+            return;
+        }
+
+        const rows = aliasCandidates.map((candidate, index) => {
+            const row = document.createElement('label');
+            row.className = 'alias-candidate-control';
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.name = 'selected_alias';
+            checkbox.value = candidate.value;
+            checkbox.checked = candidate.selected;
+            checkbox.className = 'form-check-input';
+            checkbox.addEventListener('change', () => {
+                const selectedCount = aliasCandidates.filter(item => item.selected).length;
+                if (checkbox.checked && selectedCount >= maximumSelectedAliases) {
+                    checkbox.checked = false;
+                    setError(`Select no more than ${maximumSelectedAliases} username aliases.`, { focus: true });
+                    return;
+                }
+                aliasCandidates[index].selected = checkbox.checked;
+                aliasSelectionExplicit = true;
+                setError('');
+                updateAliasSummary();
+                refreshPreview();
+            });
+
+            const copy = document.createElement('span');
+            copy.className = 'alias-candidate-copy';
+            const value = document.createElement('strong');
+            value.textContent = candidate.value;
+            const reason = document.createElement('small');
+            reason.textContent = candidate.reason || 'Server-ranked account-name pattern';
+            copy.append(value, reason);
+
+            const score = document.createElement('span');
+            score.className = 'alias-candidate-score';
+            score.textContent = `Score ${candidate.score}`;
+            row.append(checkbox, copy, score);
+            return row;
+        });
+        aliasList.replaceChildren(...rows);
+        aliasReview.hidden = false;
+        aliasCandidatesPresent.disabled = false;
+        aliasSelectionExplicit = true;
+        updateAliasSummary();
+    }
+
     function beginEdit(index) {
         if (editing) {
             setError('Finish or cancel the current edit before editing another value.');
@@ -136,13 +259,15 @@
         }
         const [token] = tokens.splice(index, 1);
         editing = { index, token };
-        input.value = token.value;
+        input.value = token.input;
+        aliasSelectionExplicit = false;
+        clearAliasReview();
         renderTokens();
         refreshPreview();
         setError('');
         input.focus();
         input.select();
-        updateEditorStatus(`Editing ${token.value}. Press Escape to cancel.`);
+        updateEditorStatus(`Editing ${token.input}. Press Escape to cancel.`);
     }
 
     function cancelEdit() {
@@ -153,6 +278,8 @@
         tokens.splice(Math.min(editing.index, tokens.length), 0, editing.token);
         editing = null;
         input.value = '';
+        aliasSelectionExplicit = false;
+        clearAliasReview();
         renderTokens();
         refreshPreview();
         setError('');
@@ -161,10 +288,12 @@
 
     function removeToken(index) {
         const [removed] = tokens.splice(index, 1);
+        aliasSelectionExplicit = false;
+        clearAliasReview();
         renderTokens();
         refreshPreview();
         input.focus();
-        updateEditorStatus(`${removed.value} removed. ${tokens.length} ${tokens.length === 1 ? 'value remains' : 'values remain'}.`);
+        updateEditorStatus(`${removed.input} removed. ${tokens.length} ${tokens.length === 1 ? 'value remains' : 'values remain'}.`);
     }
 
     async function commitDraft() {
@@ -175,7 +304,7 @@
             input.focus();
             return false;
         }
-        const duplicate = tokens.some(token => comparisonKey(token.value) === comparisonKey(draft));
+        const duplicate = tokens.some(token => comparisonKey(token.input) === comparisonKey(draft));
         if (duplicate) {
             setError('That value is already included. Edit the existing value or enter a different one.');
             input.focus();
@@ -184,9 +313,19 @@
         }
 
         const insertionIndex = editing ? Math.min(editing.index, tokens.length) : tokens.length;
-        tokens.splice(insertionIndex, 0, { type: 'pending', value: draft });
+        const preservedOverride = editing ? editing.token.overrideType : null;
+        tokens.splice(insertionIndex, 0, {
+            input: draft,
+            type: preservedOverride || 'pending',
+            value: draft,
+            predictedType: 'pending',
+            overrideType: preservedOverride,
+            ambiguousTypes: []
+        });
         editing = null;
         input.value = '';
+        aliasSelectionExplicit = false;
+        clearAliasReview();
         setError('');
         renderTokens();
         const accepted = await refreshPreview({ invalidIndex: insertionIndex });
@@ -248,10 +387,17 @@
                 'X-OpenLedger-CSRF': csrfToken
             },
             body: JSON.stringify({
-                tokens: tokens.map(token => token.value),
+                tokens: tokens.map(token => ({
+                    value: token.input,
+                    type: token.overrideType
+                })),
                 mode: selectedMode(),
                 search_likely_username_aliases: aliasToggle.checked,
-                confirm_email_route: emailConfirmation.checked
+                confirm_email_route: emailConfirmation.checked,
+                alias_selection_present: aliasToggle.checked && aliasSelectionExplicit,
+                selected_aliases: aliasToggle.checked && aliasSelectionExplicit
+                    ? aliasCandidates.filter(candidate => candidate.selected).map(candidate => candidate.value)
+                    : []
             }),
             signal
         });
@@ -272,6 +418,7 @@
         previewMode.textContent = 'Waiting for input';
         previewSummary.textContent = 'Add at least one value to preview the server-owned routes and limits.';
         routeList.replaceChildren();
+        clearAliasReview();
         emailSection.hidden = true;
         emailConfirmation.checked = false;
         preview.setAttribute('aria-busy', 'false');
@@ -295,13 +442,18 @@
             .then(payload => {
                 if (sequence !== previewSequence) return false;
                 tokens = (payload.tokens || []).map(token => ({
+                    input: token.input || token.value,
                     type: token.type,
-                    value: token.value
+                    value: token.value,
+                    predictedType: token.predicted_type || token.type,
+                    overrideType: token.type_source === 'analyst_override' ? token.type : null,
+                    ambiguousTypes: Array.isArray(token.ambiguous_types) ? token.ambiguous_types : []
                 }));
                 renderTokens();
                 const hasEmail = tokens.some(token => token.type === 'email');
                 emailSection.hidden = !hasEmail;
                 if (!hasEmail) emailConfirmation.checked = false;
+                renderAliasCandidates(payload.alias_candidates || []);
                 renderPlan(payload);
                 canStart = Boolean(payload.can_start);
                 lastBlockingMessage = payload.blocking_error || '';
@@ -354,7 +506,11 @@
     editor.addEventListener('click', event => {
         if (event.target === editor || event.target === list) input.focus();
     });
-    aliasToggle.addEventListener('change', refreshPreview);
+    aliasToggle.addEventListener('change', () => {
+        aliasSelectionExplicit = false;
+        clearAliasReview();
+        refreshPreview();
+    });
     emailConfirmation.addEventListener('change', refreshPreview);
     form.querySelectorAll('input[name="mode"]').forEach(control => {
         control.addEventListener('change', refreshPreview);

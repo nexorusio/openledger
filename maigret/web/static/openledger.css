@@ -1025,6 +1025,32 @@ textarea.form-control {
     border-color: var(--ol-danger);
 }
 
+.investigation-token-chip.is-ambiguous {
+    border-color: color-mix(in srgb, var(--ol-warning) 62%, var(--ol-border));
+}
+
+.token-chip-type-control {
+    min-width: 118px;
+    max-width: 150px;
+    padding: 6px 24px 6px 9px;
+    border: 0;
+    border-right: 1px solid var(--ol-border);
+    outline: 0;
+    background: var(--ol-surface-muted);
+    color: var(--ol-accent-strong);
+    font: inherit;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.token-chip-type-control option {
+    background: var(--ol-surface);
+    color: var(--ol-text);
+    text-transform: none;
+}
+
 .token-chip-edit,
 .token-chip-remove {
     border: 0;
@@ -1048,6 +1074,7 @@ textarea.form-control {
 
 .token-chip-edit:focus-visible,
 .token-chip-remove:focus-visible,
+.token-chip-type-control:focus-visible,
 .token-editor-input:focus-visible {
     position: relative;
     z-index: 1;
@@ -1112,6 +1139,79 @@ textarea.form-control {
 .compact-option-section,
 .email-confirmation {
     padding-bottom: 20px;
+}
+
+.alias-review-heading {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 12px;
+}
+
+.alias-review-heading h3 {
+    margin: 0;
+    color: var(--ol-text);
+    font-size: 0.86rem;
+    font-weight: 700;
+}
+
+.alias-review-heading .form-text {
+    max-width: 720px;
+    margin: 5px 0 0;
+}
+
+.alias-review .alias-candidate-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.alias-candidate-control {
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 9px;
+    margin: 0;
+    padding: 10px;
+    border: 1px solid var(--ol-border);
+    border-radius: 6px;
+    background: var(--ol-surface-muted);
+    color: var(--ol-text);
+    cursor: pointer;
+}
+
+.alias-candidate-control:focus-within {
+    border-color: var(--ol-accent);
+    box-shadow: 0 0 0 2px var(--ol-accent-soft);
+}
+
+.alias-candidate-control .form-check-input {
+    margin: 2px 0 0;
+}
+
+.alias-candidate-copy {
+    min-width: 0;
+    display: grid;
+    gap: 3px;
+}
+
+.alias-candidate-copy strong,
+.alias-candidate-copy small {
+    overflow-wrap: anywhere;
+}
+
+.alias-candidate-copy strong {
+    font-size: 0.74rem;
+}
+
+.alias-candidate-copy small,
+.alias-candidate-score {
+    color: var(--ol-muted);
+    font-size: 0.65rem;
+}
+
+.alias-candidate-score {
+    white-space: nowrap;
 }
 
 .email-confirmation {
@@ -2368,6 +2468,21 @@ textarea.form-control.compact-textarea {
 }
 
 @media (max-width: 991px) {
+    html,
+    body,
+    .app-shell,
+    .app-workspace,
+    .app-content {
+        max-width: 100%;
+        min-width: 0;
+    }
+
+    body,
+    .app-workspace,
+    .app-content {
+        overflow-x: hidden;
+    }
+
     .app-sidebar {
         width: min(310px, calc(100vw - 48px));
         transform: translateX(-100%);
@@ -2416,6 +2531,49 @@ textarea.form-control.compact-textarea {
     .security-page-grid,
     .case-scope-grid {
         grid-template-columns: 1fr;
+    }
+
+    .page-heading {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .metric-grid,
+    .mode-selector,
+    .alias-review .alias-candidate-list {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .token-editor {
+        width: 100%;
+        min-width: 0;
+        align-items: stretch;
+    }
+
+    .investigation-token-chip {
+        width: 100%;
+        min-width: 0;
+    }
+
+    .token-chip-edit {
+        flex: 1 1 auto;
+    }
+
+    .investigation-builder-card,
+    .investigation-plan-preview,
+    .mode-option,
+    .mode-option label {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    .alias-review-heading {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .alias-review-heading .badge-soft {
+        align-self: flex-start;
     }
 
     .identifier-row {

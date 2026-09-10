@@ -13,6 +13,7 @@ import os
 import types
 
 import pytest
+from werkzeug.datastructures import MultiDict
 
 import maigret
 import maigret.report
@@ -252,6 +253,35 @@ def test_investigation_plan_preview_requires_csrf_and_bounded_json(client):
     assert too_many.status_code == 400
     assert too_many.get_json() == {"error": "Investigation preview inputs are invalid."}
 
+    invalid_token_object = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json={
+            "tokens": [{"value": "alice", "type": "username", "route": "raw"}],
+            "mode": "quick",
+        },
+    )
+    assert invalid_token_object.status_code == 400
+    assert invalid_token_object.get_json() == {
+        "error": "Investigation preview inputs are invalid."
+    }
+
+    invented_alias = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json={
+            "tokens": [{"value": "Alice Example", "type": "full_name"}],
+            "mode": "quick",
+            "search_likely_username_aliases": True,
+            "alias_selection_present": True,
+            "selected_aliases": ["not-a-server-candidate"],
+        },
+    )
+    assert invented_alias.status_code == 400
+    assert invented_alias.get_json() == {
+        "error": "Select aliases from the displayed server-ranked plan."
+    }
+
 
 def test_investigation_plan_preview_classifies_tokens_and_exposes_server_plan(
     client, web_app, monkeypatch
@@ -309,6 +339,110 @@ def test_investigation_plan_preview_classifies_tokens_and_exposes_server_plan(
     ]
     assert payload["can_start"] is True
     assert payload["requires_email_confirmation"] is False
+
+
+def test_investigation_preview_accepts_validated_type_overrides_and_keeps_raw_handle(
+    client, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    response = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
+        json={
+            "tokens": [
+                {"value": "@ferryirwandi", "type": None},
+                {"value": "0822335763", "type": "username"},
+            ],
+            "mode": "quick",
+        },
+    )
+
+    assert response.status_code == 200
+    tokens = response.get_json()["tokens"]
+    assert tokens[0]["input"] == "@ferryirwandi"
+    assert tokens[0]["type"] == "social_handle"
+    assert tokens[0]["type_source"] == "automatic"
+    assert tokens[1]["predicted_type"] == "phone"
+    assert tokens[1]["type"] == "username"
+    assert tokens[1]["type_source"] == "analyst_override"
+
+
+def test_investigation_preview_returns_and_applies_exact_alias_selection(
+    client, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    csrf_token = _csrf_token(client)
+    initial = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json={
+            "tokens": [{"value": "Ferry Irwandi", "type": None}],
+            "mode": "quick",
+            "search_likely_username_aliases": True,
+        },
+    ).get_json()
+    chosen = [
+        initial["alias_candidates"][1]["value"],
+        initial["alias_candidates"][3]["value"],
+    ]
+
+    reviewed = client.post(
+        "/api/investigation-plan-preview",
+        headers={"X-OpenLedger-CSRF": csrf_token},
+        json={
+            "tokens": [{"value": "Ferry Irwandi", "type": None}],
+            "mode": "quick",
+            "search_likely_username_aliases": True,
+            "alias_selection_present": True,
+            "selected_aliases": chosen,
+        },
+    )
+
+    assert reviewed.status_code == 200
+    payload = reviewed.get_json()
+    assert [
+        candidate["value"]
+        for candidate in payload["alias_candidates"]
+        if candidate["selected"]
+    ] == chosen
+    alias_route = next(
+        route
+        for route in payload["route_plan"]["effective_routes"]
+        if route["route"] == "likely_username_aliases"
+    )
+    assert alias_route["target_count"] == 2
+
+
+def test_final_unified_submission_preserves_type_override_and_alias_selection(
+    web_app, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    monkeypatch.setattr(web_app, "resolve_profile_url_identifiers", lambda _url: {})
+    form = MultiDict(
+        [
+            ("investigation_token", "Ferry Irwandi"),
+            ("investigation_token_type", ""),
+            ("investigation_token", "0822335763"),
+            ("investigation_token_type", "username"),
+            ("mode", "quick"),
+            ("search_likely_username_aliases", "on"),
+            ("alias_candidates_present", "1"),
+            ("selected_alias", "ferry.irwandi"),
+        ]
+    )
+
+    usernames, plan = web_app.parse_investigation_submission(form)
+
+    assert plan["tokens"][1]["predicted_type"] == "phone"
+    assert plan["tokens"][1]["type"] == "username"
+    assert plan["tokens"][1]["type_source"] == "analyst_override"
+    assert [
+        candidate["value"]
+        for candidate in plan["alias_candidates"]
+        if candidate["selected"]
+    ] == ["ferry.irwandi"]
+    assert "0822335763" in usernames
+    assert "ferry.irwandi" in usernames
 
 
 def test_investigation_plan_preview_requires_email_confirmation_and_availability(

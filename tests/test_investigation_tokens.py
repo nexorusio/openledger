@@ -58,6 +58,55 @@ def test_classifier_uses_the_fixed_server_precedence():
     assert profile["account_targets"] == ["Alice"]
 
 
+def test_indonesian_mobile_numbers_are_predicted_as_phone_with_user_override():
+    local = classify_investigation_token("0822335763")
+    country = classify_investigation_token("62822335763")
+
+    assert local["type"] == "phone"
+    assert local["value"] == "+62822335763"
+    assert local["ambiguous_types"] == ["phone", "username"]
+    assert country["type"] == "phone"
+    assert country["value"] == "+62822335763"
+
+    overridden = classify_investigation_token("0822335763", type_override="username")
+    assert overridden["predicted_type"] == "phone"
+    assert overridden["type"] == "username"
+    assert overridden["value"] == "0822335763"
+    assert overridden["type_source"] == "analyst_override"
+    assert overridden["context_only"] is False
+
+
+def test_type_override_is_server_validated_and_preserves_original_input():
+    mononym = classify_investigation_token("Madonna", type_override="full_name")
+    assert mononym["input"] == "Madonna"
+    assert mononym["predicted_type"] == "username"
+    assert mononym["type"] == "full_name"
+
+    with pytest.raises(InvestigationInputError, match="supported investigation"):
+        classify_investigation_token("alice", type_override="arbitrary_fetch")
+
+    with pytest.raises(InvestigationInputError, match="supported public account"):
+        classify_investigation_token(
+            "https://public.example.com/alice",
+            type_override="profile_url",
+            profile_url_resolver=lambda _url: {},
+        )
+
+
+def test_parallel_type_overrides_must_remain_aligned():
+    with pytest.raises(InvestigationInputError, match="remain aligned"):
+        classify_investigation_tokens(
+            ["Alice Example", "0822335763"],
+            type_overrides=["full_name"],
+        )
+
+    tokens = classify_investigation_tokens(
+        ["Alice Example", "0822335763"],
+        type_overrides=["", "username"],
+    )
+    assert [token["type"] for token in tokens] == ["full_name", "username"]
+
+
 def test_nfkc_normalization_and_type_specific_duplicate_keys_are_bounded():
     tokens = classify_investigation_tokens(["Ａlice", "Alice", "@Alice", "@alice"])
 
@@ -85,6 +134,10 @@ def test_generic_public_url_is_context_and_never_uses_a_final_path_fallback():
         "value": "https://public.example.com/people/alice?view=1",
         "duplicate_key": token["duplicate_key"],
         "context_only": True,
+        "input": "https://Public.Example.com/people/alice?view=1#bio",
+        "predicted_type": "public_url",
+        "type_source": "automatic",
+        "ambiguous_types": [],
     }
     assert "account_targets" not in token
 
@@ -145,6 +198,49 @@ def test_unified_plan_is_same_subject_and_exposes_only_the_minimal_contract():
         "phone",
         "public_url",
     }
+
+
+def test_unified_plan_applies_exact_analyst_selected_aliases():
+    automatic = build_unified_investigation_plan(
+        {
+            "investigation_token": ["Ferry Irwandi"],
+            "search_likely_username_aliases": "on",
+        }
+    )
+    candidate_values = [
+        candidate["value"] for candidate in automatic["alias_candidates"]
+    ]
+    selected = [candidate_values[1], candidate_values[3]]
+
+    reviewed = build_unified_investigation_plan(
+        {
+            "investigation_token": ["Ferry Irwandi"],
+            "search_likely_username_aliases": "on",
+            "alias_candidates_present": "1",
+            "selected_alias": selected,
+        }
+    )
+
+    assert [
+        candidate["value"]
+        for candidate in reviewed["alias_candidates"]
+        if candidate["selected"]
+    ] == selected
+    assert [
+        target["value"]
+        for target in reviewed["search_targets"]
+        if target["source_type"] == "ranked_alias"
+    ] == selected
+
+    with pytest.raises(InvestigationInputError, match="displayed server-ranked"):
+        build_unified_investigation_plan(
+            {
+                "investigation_token": ["Ferry Irwandi"],
+                "search_likely_username_aliases": "on",
+                "alias_candidates_present": "1",
+                "selected_alias": ["invented-alias"],
+            }
+        )
 
 
 @pytest.mark.parametrize(

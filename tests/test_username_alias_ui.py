@@ -54,9 +54,13 @@ def test_token_editor_exposes_edit_remove_focus_cancel_and_error_behaviour():
     assert "input.select();" in script
     assert "Use no more than ${maximumTokens} investigation values." in script
     assert "setAttribute('aria-invalid'" in script
+    assert "function changeTokenType(index, selectedType)" in script
+    assert "token-chip-type-control" in script
+    assert "investigation_token_type" in script
     assert ".token-chip-edit:focus-visible" in styles
+    assert ".token-chip-type-control:focus-visible" in styles
     assert ".token-editor:focus-within" in styles
-    assert "@media (max-width: 767px)" in styles
+    assert "@media (max-width: 991px)" in styles
 
 
 def test_browser_uses_only_the_authoritative_plan_preview_for_classification():
@@ -64,20 +68,27 @@ def test_browser_uses_only_the_authoritative_plan_preview_for_classification():
 
     assert "fetch(form.dataset.previewUrl" in script
     assert "'X-OpenLedger-CSRF': csrfToken" in script
-    assert "tokens: tokens.map(token => token.value)" in script
+    assert "tokens: tokens.map(token => ({" in script
+    assert "value: token.input" in script
+    assert "type: token.overrideType" in script
     assert "payload.tokens || []" in script
     assert "routePlan.effective_routes" in script
     assert "routePlan.skipped_routes" in script
     assert "classifyToken" not in script
 
 
-def test_builder_has_one_minimal_alias_option_and_quick_full_controls():
+def test_builder_has_reviewable_alias_selection_and_quick_full_controls():
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    script = SCRIPT_PATH.read_text(encoding="utf-8")
 
     assert template.count('name="search_likely_username_aliases"') == 1
     assert "Search likely username aliases" in template
+    assert 'id="username-alias-review"' in template
+    assert 'name="alias_candidates_present"' in template
+    assert "renderAliasCandidates" in script
+    assert "checkbox.name = 'selected_alias'" in script
+    assert "maximumSelectedAliases = 16" in script
     assert 'name="alias_nicknames"' not in template
     assert 'name="alias_context_numbers"' not in template
-    assert 'name="alias_candidate"' not in template
     assert 'name="mode" id="mode-quick" value="quick"' in template
     assert 'name="mode" id="mode-full" value="full"' in template
