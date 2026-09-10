@@ -24,6 +24,9 @@ sudo unshare --net -- /bin/bash -eu -c '
     # Prevent child processes regaining host-network privileges through sudo
     # or supplementary host-control groups. Restore the target user environment
     # too: sudo may have changed HOME to root before the UID drop.
+    # Bound this offline regression gate to ten minutes, with 15 seconds to exit
+    # after interruption; this is a CI guard, not a production runtime target.
     exec setpriv --no-new-privs --reuid="$test_uid" --regid="$test_gid" \
-        --clear-groups --reset-env -- "$@"
+        --clear-groups --reset-env -- \
+        timeout --signal=INT --kill-after=15s 600s "$@"
 ' openledger-offline-tests "$test_uid" "$test_gid" "$@"

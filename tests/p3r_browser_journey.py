@@ -281,10 +281,11 @@ def test_browser_submission_progress_refresh_and_partial_results(p3r_browser_app
 
             # Refresh reconnects to persisted SSE history; it cannot inflate counters.
             page.reload(wait_until="domcontentloaded")
-            page.locator("#collection-accounting-body tr").wait_for()
-            assert page.locator("#collection-accounting-body tr").count() == 7
+            refreshed_rows = page.locator("#collection-accounting-body tr")
+            refreshed_rows.first.wait_for()
+            assert refreshed_rows.count() == 7
             assert _accounting_cells(
-                page.locator("#collection-accounting-body tr"), 1
+                refreshed_rows, 1
             ) == ["Maigret", "site checks", "Running", "—", "3 / 4", "1", "0", "0", "1"]
 
             result = _completed_result(job_id)
@@ -319,7 +320,10 @@ def _seed_persona_with_many_citations(store: CaseStore, username: str) -> tuple[
             "site_name": f"Source {number}",
             "url": f"https://evidence.test/{username}/{number}",
             "confidence": "strong",
-            "evidence": {"fullname": "Shared Exact Name"},
+            "evidence": {
+                "fullname": "Shared Exact Name",
+                "email": "shared@example.test",
+            },
         }
         for number in range(12)
     ]
@@ -333,11 +337,11 @@ def _seed_persona_with_many_citations(store: CaseStore, username: str) -> tuple[
     assert store.finish(job_id, result, worker_id=f"worker:p3r-browser-{username}")
     assert store.sync_persona_claims(job_id, result)
     persona = store.get_case(store.get_job(job_id)["case_id"])["personas"][0]
-    full_name_claim = next(
+    email_claim = next(
         claim for claim in store.get_persona(persona["id"])["claims"]
-        if claim["field_name"] == "full_name"
+        if claim["field_name"] == "email"
     )
-    return persona["id"], full_name_claim["id"]
+    return persona["id"], email_claim["id"]
 
 
 def _visible_claim_record(page, claim_id: str):
@@ -350,6 +354,13 @@ def _visible_claim_record(page, claim_id: str):
     return page.locator(
         f'article.claim-record:has(form[action="/claims/{claim_id}/review"]):visible'
     )
+
+
+def _show_contact_claim(page, claim_id: str):
+    page.locator('button[data-persona-tab="contact"]').click()
+    claim = _visible_claim_record(page, claim_id)
+    claim.wait_for()
+    return claim
 
 
 def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_browser_app):
@@ -380,7 +391,7 @@ def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_brow
         try:
             page.goto(base_url + f"/personas/{_first_persona}", wait_until="domcontentloaded")
             assert page.locator('[data-review-status="pending"]').count() > 0
-            first_claim_record = _visible_claim_record(page, first_claim)
+            first_claim_record = _show_contact_claim(page, first_claim)
             assert first_claim_record.count() == 1
             assert first_claim_record.get_by_text(
                 "12 supporting sources", exact=True
@@ -394,17 +405,18 @@ def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_brow
             assert page.locator("#relationshipGraphData").count() == 0
 
             page.goto(base_url + f"/personas/{_first_persona}", wait_until="domcontentloaded")
-            first_claim_record = _visible_claim_record(page, first_claim)
+            first_claim_record = _show_contact_claim(page, first_claim)
             assert first_claim_record.count() == 1
             with page.expect_navigation(wait_until="domcontentloaded"):
                 first_claim_record.get_by_role("button", name="Approve").click()
-            assert page.locator('[data-review-status="approved"]').count() > 0
+            assert store.get_claim(first_claim)["review_status"] == "approved"
 
             page.goto(base_url + f"/personas/{_second_persona}", wait_until="domcontentloaded")
-            second_claim_record = _visible_claim_record(page, second_claim)
+            second_claim_record = _show_contact_claim(page, second_claim)
             assert second_claim_record.count() == 1
             with page.expect_navigation(wait_until="domcontentloaded"):
                 second_claim_record.get_by_role("button", name="Approve").click()
+            assert store.get_claim(second_claim)["review_status"] == "approved"
 
             page.goto(base_url + "/relationships?mode=shared", wait_until="domcontentloaded")
             page.reload(wait_until="domcontentloaded")
@@ -413,9 +425,19 @@ def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_brow
             graph_text = graph_data.text_content()
             assert graph_text
             graph = json.loads(graph_text)
-            assert any(edge.get("review_status") == "approved" for edge in graph["edges"])
-            source_nodes = [node for node in graph["nodes"] if node.get("kind") == "source"]
-            assert len(source_nodes) > 10
-            assert all(node.get("url", "").startswith("https://evidence.test/") for node in source_nodes)
+            assert graph["stats"]["connection_count"] == 2
+            assert len(graph["edges"]) == 2
+            assert all(edge["source_count"] == 12 for edge in graph["edges"])
+            assert all(len(edge["sources"]) == 10 for edge in graph["edges"])
+            for edge in graph["edges"]:
+                assert edge["provenance_url"].startswith("/personas/")
+                claim_id = edge["claim_id"]
+                page.goto(
+                    base_url + edge["provenance_url"], wait_until="domcontentloaded"
+                )
+                provenance_claim = _show_contact_claim(page, claim_id)
+                assert provenance_claim.locator(
+                    'a[href^="https://evidence.test/"]'
+                ).count() == 12
         finally:
             browser.close()

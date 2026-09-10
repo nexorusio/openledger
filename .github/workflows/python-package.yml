@@ -39,7 +39,7 @@ jobs:
       - name: Test offline with coverage (fail if coverage is low)
         run: |
           test_python="$(poetry env info --executable)"
-          bash .github/scripts/run_offline_tests.sh "$test_python" -m coverage run --source=./maigret -m pytest -m "not slow" tests
+          bash .github/scripts/run_offline_tests.sh "$test_python" -m coverage run --source=./maigret -m pytest -o faulthandler_timeout=60 --durations=10 -m "not slow" tests
           poetry run coverage report --fail-under=60
           poetry run coverage html
 
@@ -78,4 +78,4 @@ jobs:
       - name: Run offline tests without [pdf] extra
         run: |
           test_python="$(command -v python)"
-          bash .github/scripts/run_offline_tests.sh "$test_python" -m pytest -m "not slow" tests
+          bash .github/scripts/run_offline_tests.sh "$test_python" -m pytest -o faulthandler_timeout=60 --durations=10 -m "not slow" tests

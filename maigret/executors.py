@@ -261,28 +261,25 @@ class AsyncioQueueGeneratorExecutor:
                         metadata, "timeout", attempted=True, cleanup_state="pending"
                     )
                     return self._fallback(task, "timeout")
-            result = query_task.result()
-            self._finalize_task_callback(task)
-            self._notify(metadata, "completed", attempted=True)
-            return result
-        except asyncio.CancelledError:
-            # A source coroutine may cancel itself.  That is an attempted
-            # source outcome, not a cancellation of the executor: retain its
-            # native-unknown fallback and keep admitting healthy siblings.
-            # Parent cancellation is delivered to this wrapper task, so its
-            # cancellation counter is non-zero even when the child is done.
-            wrapper_cancelled = asyncio.current_task().cancelling() > 0
-            if (
-                query_task is not None
-                and query_task.cancelled()
-                and not wrapper_cancelled
-            ):
+            # ``asyncio.wait`` returns normally when the child cancels
+            # itself.  Classify that completed child before calling
+            # ``result()``, whose CancelledError would otherwise be
+            # indistinguishable from cancellation delivered to this wrapper.
+            if query_task.cancelled():
                 self._finalize_task_callback(task)
                 self._notify(
                     metadata, "cancelled", attempted=True,
                     cleanup_state="not_required",
                 )
                 return self._fallback(task, "cancelled")
+            result = query_task.result()
+            self._finalize_task_callback(task)
+            self._notify(metadata, "completed", attempted=True)
+            return result
+        except asyncio.CancelledError:
+            # Reaching this handler means cancellation was delivered to this
+            # wrapper at an await boundary.  A self-cancelled child is
+            # handled synchronously above, after ``asyncio.wait`` completes.
             if query_task is not None and not query_task.done():
                 self._finalize_task_callback(task)
                 query_task.cancel()

@@ -729,11 +729,10 @@ async def _run_callback(
             except asyncio.CancelledError:
                 if progress_failures:
                     raise _ProgressSinkFailure(progress_failures[0], True)
-                if (
-                    asyncio.current_task() is not None
-                    and asyncio.current_task().cancelling()
-                ):
-                    raise
+                # This synchronous result read can only expose cancellation
+                # of the completed source. Parent cancellation is delivered
+                # at the await above and handled by the outer cleanup branch.
+                # Do not require Task.cancelling(), which Python 3.10 lacks.
                 if clock() >= context.deadline:
                     return "timed_out", None, "stage_budget_exhausted", True
                 return "interrupted", None, "callback_cancelled", True

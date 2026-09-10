@@ -593,30 +593,69 @@ def test_worker_deadline_stops_native_search_and_retains_audit(tmp_path, monkeyp
         kind="live",
     )
     claimed = store.claim_next("worker:profile-search-deadline")
-    claimed["deadline_at"] = (
-        datetime.now(timezone.utc) + timedelta(milliseconds=30)
-    ).isoformat()
+    deadline_reached = False
+    client_admitted = False
+    client_cancelled = False
+    maigret_calls = []
+    search_entered = asyncio.Event()
 
     class _BlockingClient(_RawClient):
         def __init__(self, _config_value):
             super().__init__(_success)
 
         async def search(self, query):
-            await asyncio.Event().wait()
-            return _success(query)
+            nonlocal client_admitted, client_cancelled, deadline_reached
+            client_admitted = True
+            deadline_reached = True
+            search_entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                client_cancelled = True
+                raise
+
+    async def maigret_search(*_args, **_kwargs):
+        maigret_calls.append(True)
+        return {}
 
     monkeypatch.setattr(web_app, "load_profile_search_config", _config)
     monkeypatch.setattr(web_app, "ProfileSearchClient", _BlockingClient)
+    monkeypatch.setattr(web_app, "maigret_search", maigret_search)
+    original_await_persistent_stream = web_app.await_persistent_stream
+    original_remaining_seconds = web_app.ExecutionBudget.remaining_seconds
+
+    async def await_persistent_stream_after_search(*args):
+        await search_entered.wait()
+        return await original_await_persistent_stream(*args)
+
+    monkeypatch.setattr(
+        web_app,
+        "await_persistent_stream",
+        await_persistent_stream_after_search,
+    )
+    monkeypatch.setattr(
+        web_app.ExecutionBudget,
+        "remaining_seconds",
+        lambda budget: 0 if deadline_reached else original_remaining_seconds(budget),
+    )
+    monkeypatch.setattr(
+        web_app.ExecutionBudget,
+        "is_exhausted",
+        lambda _budget: deadline_reached,
+    )
     monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
 
     try:
         web_app.run_persistent_job(store, claimed)
         audits = store.list_profile_search_audits(job_id)
+        assert client_admitted is True
+        assert client_cancelled is True
         assert len(audits) == 1
         assert audits[0]["status"] == "stopped"
         assert audits[0]["executed_query_count"] == 0
         completed = store.get_job(job_id)
         assert completed["status"] == "budget_exhausted"
         assert completed["collection_status"] == "budget_exhausted"
+        assert maigret_calls == []
     finally:
         store.dispose()
