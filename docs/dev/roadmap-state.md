@@ -83,13 +83,14 @@ configuration, five-result maximum, and ten-second timeout.
 P3a, P3b, and original P3c completed local integration checkpoints on
 2026-09-09. The mandatory P3-extension assessment then completed, and the user
 separately authorized `P3X1`, `P3X2`, `P3X3`, and `P3X4` on 2026-09-09.
-P3X1--P3X4 and the first P3X4 input-control remediation are complete and
-published. Mobile acceptance then identified a misleading plan-state label:
+P3X1--P3X4 and both P3X4 acceptance remediations are complete and published.
+Mobile acceptance first identified a misleading plan-state label:
 confirmation-gated, server-disabled, and context-only items were all presented
-as `Skipped`. The corrected code checkpoint is published; its CI,
-roadmap publication, and final review gate remain in progress. Manual
-keyboard/mobile acceptance is not yet complete. No authorization has been given
-for squash, merge, deployment, or production modification.
+as `Skipped`. The correction, roadmap publication, final CI, and review gate
+then completed. On 2026-09-10 the user passed the required keyboard/mobile
+acceptance against the refreshed UI-only preview. P3 is ready for a separately
+authorized squash merge, but no authorization has been given for squash,
+merge, deployment, or production modification.
 All P3 work started from exact
 production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
@@ -135,7 +136,7 @@ was remote head `b1d4734157e9818c5653f6a9b469ca15bc75014e`, tree
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | Phase branch and isolated P3X4 worktree | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a--P3c, P3X1--P3X4, and the initial input-control remediation are published; plan-state remediation code checkpoint `1141005495f4a19e5c6c5780deb55ecccf200d9e`, tree `1a25fe489bbfcee429ea688fe04c163d144a6e7d`, is published and locally tested; CI, roadmap/PR publication, final review, and manual keyboard/mobile acceptance remain in progress |
+| Coordinator | Phase branch and isolated P3X4 worktree | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a--P3c, P3X1--P3X4, and both P3X4 acceptance remediations are published; plan-state remediation code checkpoint `1141005495f4a19e5c6c5780deb55ecccf200d9e`, tree `1a25fe489bbfcee429ea688fe04c163d144a6e7d`, is published and tested; final CI and review passed, and the user passed manual keyboard/mobile acceptance on 2026-09-10; separately authorized squash merge remains pending |
 | P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
 | P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
 | P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
@@ -231,7 +232,7 @@ has been merged or deployed, and no production action has occurred. The
 consolidated branch and PR #51 are open. All applicable GitHub workflows passed
 at `2386754`, including five Python versions, minimal install, CodeQL, governed
 source audit, PostgreSQL migrations and persistence, Compose validation,
-production image build, and non-root image verification. GitHub's two review
+production image build, and non-root image verification. GitHub's three review
 threads are resolved and no unresolved thread remains. Original P3 has
 therefore reached its pre-merge checkpoint. The mandatory read-only,
 programme-wide P3-extension assessment was then completed against the exact
@@ -239,9 +240,10 @@ local tree above. `P3X1` subsequently completed at code checkpoint
 `704f499f7a28114358927786e371a3c6148f8a64`, tree
 `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`. `P3X2` and `P3X3` subsequently
 completed at separately authorized checkpoints. `P3X4` was then separately
-authorized; its implementation, local regression gate, and code-checkpoint CI
-are complete, with roadmap/PR publication and final review still in progress.
-Squash, merge, deployment, and production modification remain unauthorized.
+authorized; its implementation, both acceptance remediations, regression gate,
+roadmap/PR publication, final CI, final review, and manual keyboard/mobile
+acceptance are complete. Squash, merge, deployment, and production modification
+remain unauthorized.
 
 ## P3 -- Evidence correlation and governed pivots
 
@@ -277,7 +279,7 @@ Dependency: production-verified P2.
 | Proposed implementation activity codes | `P3X1`, `P3X2`, `P3X3`, and `P3X4`; all four are separately authorized and implemented |
 | Authorized implementation activity codes | `P3X1`, followed separately by `P3X2`, `P3X3`, and `P3X4` |
 | Implementation | `P3X1` complete at code commit `704f499f7a28114358927786e371a3c6148f8a64`, tree `79e6107e3d9f86a7ad9cf3c7034d6b69825a6ee0`; P3X2 authoritative review-fix code commit `00c01261552d3009ca03dc60f87ebdc579096fb8`, tree `8b790d6ca6fe93082c00656e9696097a4a5a9216`; P3X3 authoritative code commit `f355917ca59b21a2d2b1b0808d1b91b5be305205`, tree `cca70522e35b7931f12626775e2ffdbe5e7bae70`; P3X4 published code commit `7756a9816abef2fb498e76cfeb23afe4f4978a69`, tree `31cb69f2445a27bd324ab5dd70041634a7fccc35`, with all applicable code-checkpoint CI passed |
-| Merge effect | Original P3 and the extension are present in PR #51, but squash merge remains human-controlled and unauthorized until the P3X4 roadmap/PR publication, final review, and manual keyboard/mobile acceptance are complete |
+| Merge effect | Original P3 and the extension are present in PR #51; P3X4 roadmap/PR publication, final review, final CI, and manual keyboard/mobile acceptance are complete, but squash merge remains separately human-controlled and unauthorized |
 
 #### P3X1 completion checkpoint
 
@@ -347,11 +349,11 @@ the environment had no browser binary and the browser download failed certificat
 validation; TLS verification was not bypassed. Source-level browser acceptance
 covers whole-value Tab behavior, empty-Tab navigation, editing, removal, focus,
 errors, authoritative previewing, responsive layout, and focus-visible styling.
-The separately defined manual keyboard/mobile verification remains part of
-`P3X4`. No graph, database migration, dependency, lockfile, service, deployment,
-production data, or production change was introduced. `P3X3` is the separately
-authorized extension activity completed below; this P3X2 checkpoint was not
-repeated.
+The separately defined manual keyboard/mobile verification was deferred to
+`P3X4` and passed on 2026-09-10. No graph, database migration, dependency,
+lockfile, service, deployment, production data, or production change was
+introduced. `P3X3` is the separately authorized extension activity completed
+below; this P3X2 checkpoint was not repeated.
 
 #### P3X3 completion checkpoint
 
@@ -430,9 +432,10 @@ a fresh initialized local SQLite database. Python compilation, critical Flake8,
 Alembic head inspection (`b3e9d7c4a610`), and `git diff --check` passed.
 
 The connected browser could not reach the workspace loopback server, so manual
-keyboard and mobile acceptance remains a human pre-merge action; no TLS or
-network control was bypassed. The local environment also lacked Docker and a
-disposable PostgreSQL endpoint. Code-checkpoint CI provisioned PostgreSQL 17
+keyboard and mobile acceptance was deferred to a human pre-merge action and
+passed on 2026-09-10; no TLS or network control was bypassed. The local
+environment also lacked Docker and a disposable PostgreSQL endpoint.
+Code-checkpoint CI provisioned PostgreSQL 17
 and passed Alembic upgrade/check, all PostgreSQL integrity tests, Compose
 validation, production-image build, and non-root image verification. Python
 3.10--3.14 coverage, minimal installation, CodeQL, and the governed-source audit
@@ -470,9 +473,9 @@ deployment set passed 244 tests. The complete offline repository gate passed
 1,621 tests with 9 intentional skips and 25 slow/live-network tests explicitly
 deselected. Python compilation, JavaScript syntax checking, critical Flake8,
 Alembic head inspection (`b3e9d7c4a610`), and `git diff --check` passed. Manual
-keyboard/mobile acceptance against the refreshed UI-only preview remains the
-only expected human pre-merge check; merge, deployment, production changes, and
-P4 remain unauthorized.
+keyboard/mobile acceptance against the refreshed UI-only preview subsequently
+passed after the plan-state remediation below; merge, deployment, production
+changes, and P4 remain unauthorized.
 
 Mobile acceptance subsequently exposed that the plan renderer grouped three
 different server reasons under the single user-facing `Skipped` badge. The
@@ -501,8 +504,13 @@ production alias. Browser verification proved two context values are labelled
 `Context only`, an unconfirmed email is labelled `Conditional`, and confirming
 it changes only that route to `Active`; no application console, build, or
 runtime error was found. This preview has no database, worker, provider, or
-working scan execution. Manual mobile acceptance remains required, and no
-OpenLedger production deployment or modification occurred.
+working scan execution. On 2026-09-10 the user passed manual phone,
+keyboard/touch, and responsive acceptance against this preview: `0822335763`
+was predicted as Phone and could be changed to Username; individual aliases
+could be selected or cleared; phone and generic URL values remained `Context
+only` and never `Skipped`; unconfirmed email was `Conditional` and confirmation
+changed only that route to `Active`; and no horizontal clipping was observed.
+No OpenLedger production deployment or modification occurred.
 
 #### Assessment finding and fixed mode mapping
 
