@@ -434,12 +434,14 @@ deployment, and production modification remain unauthorized.
 
 #### P3X4 input-control remediation checkpoint
 
-The separately authorized P3X4 input-control remediation is implemented at
-code commit `eeff75e9831b1673b1ad8e15e6c771adf2285f79`, tree
-`a05f8fa86c48c7579b5b55b24b1a923845661de9`. Plain Indonesian mobile numbers
-such as `0822335763` are now predicted as phone context and normalized to the
-`+62` form while explicitly retaining the phone/username ambiguity for analyst
-review. Every token exposes a keyboard-accessible type selector; analyst
+The separately authorized P3X4 input-control remediation was locally tested at
+code commit `eeff75e9831b1673b1ad8e15e6c771adf2285f79` and connector-published
+as equivalent code commit `91479fb369345c51992661e21c17ac7d3b9c95ac`;
+both use tree `a05f8fa86c48c7579b5b55b24b1a923845661de9`. Plain Indonesian
+mobile numbers such as `0822335763` are now predicted as phone context and
+normalized to the `+62` form while explicitly retaining the phone/username
+ambiguity for analyst review. Every token exposes a keyboard-accessible type
+selector; analyst
 overrides are validated and normalized again by the server, recorded separately
 from the server prediction, and cannot inject or bypass server-owned routes.
 Original input text, including an `@handle`, survives plan refreshes.
