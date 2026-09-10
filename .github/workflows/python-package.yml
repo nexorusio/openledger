@@ -36,9 +36,10 @@ jobs:
           python -m pip install poetry
           python -m poetry install --with dev
 
-      - name: Test with Coverage and Pytest (fail if coverage is low)
+      - name: Test offline with coverage (fail if coverage is low)
         run: |
-          poetry run coverage run --source=./maigret -m pytest --reruns 3 --reruns-delay 5 tests
+          test_python="$(poetry env info --executable)"
+          bash .github/scripts/run_offline_tests.sh "$test_python" -m coverage run --source=./maigret -m pytest -m "not slow" tests
           poetry run coverage report --fail-under=60
           poetry run coverage html
 
@@ -74,5 +75,7 @@ jobs:
           python -c "import maigret; from maigret.report import save_pdf_report; print('import OK')"
           maigret --version
 
-      - name: Run tests without [pdf] extra
-        run: pytest --reruns 3 --reruns-delay 5 tests
+      - name: Run offline tests without [pdf] extra
+        run: |
+          test_python="$(command -v python)"
+          bash .github/scripts/run_offline_tests.sh "$test_python" -m pytest -m "not slow" tests

@@ -9,9 +9,11 @@ production-shaped persistence path.
 
 from __future__ import annotations
 
+import json
 import os
 from threading import Thread
 from typing import Iterator
+from urllib.parse import urlsplit
 
 import pytest
 from sqlalchemy import text
@@ -208,6 +210,25 @@ def _completed_result(job_id: str) -> dict:
     }
 
 
+def _confine_browser_to_fixture(page, base_url: str) -> None:
+    """Allow only the local Flask origin; fixture browsing never uses sources."""
+    fixture_url = urlsplit(base_url)
+    fixture_origin = (fixture_url.scheme, fixture_url.netloc)
+
+    def handle(route):
+        request = urlsplit(route.request.url)
+        if (request.scheme, request.netloc) == fixture_origin:
+            route.continue_()
+        else:
+            route.abort()
+
+    page.route("**/*", handle)
+
+
+def _accounting_cells(rows, index: int) -> list[str]:
+    return [cell.strip() for cell in rows.nth(index).locator("td").all_inner_texts()]
+
+
 def test_browser_submission_progress_refresh_and_partial_results(p3r_browser_app):
     sync_playwright = _require_browser()
     base_url, store, job_id = p3r_browser_app
@@ -219,6 +240,8 @@ def test_browser_submission_progress_refresh_and_partial_results(p3r_browser_app
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
+        page.set_default_timeout(10_000)
+        _confine_browser_to_fixture(page, base_url)
         try:
             page.goto(base_url, wait_until="domcontentloaded")
             token_input = page.locator("#investigation-token-input")
@@ -234,19 +257,35 @@ def test_browser_submission_progress_refresh_and_partial_results(p3r_browser_app
             assert page.locator("#collection-accounting-state").inner_text() == "Running"
             rows = page.locator("#collection-accounting-body tr")
             assert rows.count() == 7
-            assert rows.nth(0).inner_text().startswith("Native profile search")
-            assert "3 / 4" in rows.nth(1).inner_text()
-            assert "GitHub queries Failed Provider unavailable 1 / 1 1" in rows.nth(2).inner_text()
-            assert "Unfurl targets Cancelled Parent cancelled 1 / 1" in rows.nth(3).inner_text()
-            assert "Wayback queries Interrupted Interrupted 0 / 1" in rows.nth(4).inner_text()
-            assert "User Scanner usernames targets Unknown Not admitted 0 / 1" in rows.nth(5).inner_text()
-            assert "User Scanner emails targets Pending Dependency not ready 0 / 1" in rows.nth(6).inner_text()
+            assert _accounting_cells(rows, 0) == [
+                "Native profile search", "queries", "Completed", "—", "1 / 1", "0", "0", "0", "0",
+            ]
+            assert _accounting_cells(rows, 1) == [
+                "Maigret", "site checks", "Running", "—", "3 / 4", "1", "0", "0", "1",
+            ]
+            assert _accounting_cells(rows, 2) == [
+                "GitHub", "queries", "Failed", "Provider unavailable", "1 / 1", "1", "0", "0", "0",
+            ]
+            assert _accounting_cells(rows, 3) == [
+                "Unfurl", "targets", "Cancelled", "Parent cancelled", "1 / 1", "0", "0", "0", "0",
+            ]
+            assert _accounting_cells(rows, 4) == [
+                "Wayback", "queries", "Interrupted", "Interrupted", "0 / 1", "0", "0", "0", "0",
+            ]
+            assert _accounting_cells(rows, 5) == [
+                "User Scanner usernames", "targets", "Unknown", "Not admitted", "0 / 1", "0", "0", "1", "0",
+            ]
+            assert _accounting_cells(rows, 6) == [
+                "User Scanner emails", "targets", "Pending", "Dependency not ready", "0 / 1", "0", "0", "1", "0",
+            ]
 
             # Refresh reconnects to persisted SSE history; it cannot inflate counters.
             page.reload(wait_until="domcontentloaded")
             page.locator("#collection-accounting-body tr").wait_for()
             assert page.locator("#collection-accounting-body tr").count() == 7
-            assert "3 / 4" in page.locator("#collection-accounting-body tr").nth(1).inner_text()
+            assert _accounting_cells(
+                page.locator("#collection-accounting-body tr"), 1
+            ) == ["Maigret", "site checks", "Running", "—", "3 / 4", "1", "0", "0", "1"]
 
             result = _completed_result(job_id)
             web_app_module.job_results[job_id] = result
@@ -262,10 +301,12 @@ def test_browser_submission_progress_refresh_and_partial_results(p3r_browser_app
             assert page.locator("#results-collection-accounting-heading").inner_text() == "Declared collection accounting"
             rows = page.locator("#results-collection-accounting-heading").locator("xpath=../../following-sibling::div//tbody/tr")
             assert rows.count() == 7
-            assert "Timed out" in rows.nth(1).inner_text()
-            assert "4 / 4" in rows.nth(1).inner_text()
-            assert "1" in rows.nth(1).inner_text()  # timeout remains visible
-            assert "Not admitted" in rows.nth(5).inner_text()
+            assert _accounting_cells(rows, 1) == [
+                "Maigret", "site checks", "Timed out", "Timed out", "4 / 4", "1", "1", "0", "0",
+            ]
+            assert _accounting_cells(rows, 5) == [
+                "User Scanner usernames", "targets", "Unknown", "Not admitted", "0 / 1", "0", "0", "1", "0",
+            ]
         finally:
             browser.close()
 
@@ -334,6 +375,8 @@ def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_brow
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         page = browser.new_page()
+        page.set_default_timeout(10_000)
+        _confine_browser_to_fixture(page, base_url)
         try:
             page.goto(base_url + f"/personas/{_first_persona}", wait_until="domcontentloaded")
             assert page.locator('[data-review-status="pending"]').count() > 0
@@ -366,8 +409,10 @@ def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_brow
             page.goto(base_url + "/relationships?mode=shared", wait_until="domcontentloaded")
             page.reload(wait_until="domcontentloaded")
             graph_data = page.locator("#relationshipGraphData")
-            graph_data.wait_for()
-            graph = graph_data.evaluate("node => JSON.parse(node.textContent)")
+            graph_data.wait_for(state="attached")
+            graph_text = graph_data.text_content()
+            assert graph_text
+            graph = json.loads(graph_text)
             assert any(edge.get("review_status") == "approved" for edge in graph["edges"])
             source_nodes = [node for node in graph["nodes"] if node.get("kind") == "source"]
             assert len(source_nodes) > 10
