@@ -18,6 +18,7 @@ from tests.test_p3r_full_acceptance import (
     FULL_ACCEPTANCE_ENV,
     _run_claimed_job,
     full_app,
+    postgres_store,
 )
 
 pytestmark = [

@@ -1365,6 +1365,10 @@ async def run_collection_stages(
             progress_active = False
             _merge_counts(None, ledger, planned, interrupted=True)
             raise
+        if result is None and cleanup_complete and last_progress_counts is not None:
+            # Cooperative stop may return no callback value while its final
+            # progress already persisted retained findings. Preserve that count.
+            result = StageResult(counts=last_progress_counts)
         progress_active = False
         counts = _merge_counts(
             result, ledger, planned, interrupted=status == "interrupted"

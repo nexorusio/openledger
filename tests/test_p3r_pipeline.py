@@ -578,6 +578,7 @@ async def test_cancellation_retains_partial_checkpoint_and_accounts_every_task(
     stages = _stage_map(job)
     assert job["collection_accounting"]["state"] == "cancelled"
     assert stages["maigret"]["status"] == "cancelled"
+    assert stages["maigret"]["observations"] == sum(len(item[2]) for item in job['general_results'])
     # A cancelled in-flight provider check has no source response.  Its
     # terminal outcome remains unknown rather than becoming a negative.
     assert stages["maigret"]["unknown"] == 1

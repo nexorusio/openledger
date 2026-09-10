@@ -15,7 +15,7 @@ from urllib.parse import urlsplit
 import pytest
 
 from tests.p3r_full_browser_journey import _require_chromium, served_full_app
-from tests.test_p3r_full_acceptance import FULL_ACCEPTANCE_ENV, full_app
+from tests.test_p3r_full_acceptance import FULL_ACCEPTANCE_ENV, full_app, postgres_store
 
 
 pytestmark = [
