@@ -32,6 +32,51 @@
 </div>
 {% endif %}
 
+{% set collection_accounting = runtime_state.collection_accounting if runtime_state.collection_accounting is mapping else none %}
+{% if collection_accounting and collection_accounting.schema_version == 1 %}
+{% set engine_labels = {'native': 'Native profile search', 'maigret': 'Maigret', 'github': 'GitHub', 'unfurl': 'Unfurl', 'wayback': 'Wayback', 'user_scanner_username': 'User Scanner usernames', 'user_scanner_email': 'User Scanner emails', 'native-profile-search': 'Native profile search', 'github-public-profile': 'GitHub', 'unfurl-url-analysis': 'Unfurl', 'wayback-cdx': 'Wayback', 'user-scanner-username': 'User Scanner usernames', 'user-scanner': 'User Scanner emails'} %}
+{% set unit_labels = {'site_checks': 'site checks', 'queries': 'queries', 'targets': 'targets', 'invocations': 'invocations'} %}
+{% set status_labels = {'running': 'Running', 'completed': 'Completed', 'partial': 'Partial', 'failed': 'Failed', 'cancelled': 'Cancelled', 'interrupted': 'Interrupted', 'unknown': 'Unknown', 'queued': 'Queued', 'skipped': 'Skipped', 'pending': 'Pending', 'not_selected': 'Not selected', 'skipped_no_targets': 'No targets', 'blocked_dependency': 'Blocked by dependency', 'not_started_budget': 'Not started: budget', 'timed_out': 'Timed out', 'cleanup_incomplete': 'Cleanup incomplete'} %}
+{% set reason_labels = {'budget_exhausted': 'Budget reached', 'cancelled': 'Cancelled', 'interrupted': 'Interrupted', 'provider_unavailable': 'Provider unavailable', 'provider_circuit_open': 'Provider circuit open', 'timeout': 'Timed out', 'failed': 'Failed', 'unavailable': 'Unavailable', 'unattempted': 'Unattempted', 'unknown': 'Unknown outcome', 'source_not_selected': 'Source not selected', 'no_eligible_targets': 'No eligible targets', 'dependency_not_ready': 'Dependency not ready', 'cancellation_requested': 'Cancellation requested', 'stage_budget_exhausted': 'Stage budget reached', 'overall_budget_exhausted': 'Overall budget reached', 'parent_cancelled': 'Parent cancelled', 'timed_out': 'Timed out', 'cleanup_incomplete': 'Cleanup incomplete', 'not_admitted': 'Not admitted'} %}
+<section class="panel-card mb-4" aria-labelledby="results-collection-accounting-heading">
+    <header class="panel-header">
+        <div>
+            <h2 id="results-collection-accounting-heading">Declared collection accounting</h2>
+            <p>Each source keeps its own unit. Accounted operations do not measure discovery accuracy or identity.</p>
+        </div>
+        <span class="badge-soft">{{ status_labels.get(collection_accounting.state, 'Unknown') if collection_accounting.known else 'Coverage unavailable' }}</span>
+    </header>
+    <div class="panel-body">
+        {% if not collection_accounting.known %}
+        <p class="form-text mb-3">Coverage accounting is unavailable for this legacy saved run.</p>
+        {% endif %}
+        <div class="table-responsive">
+            <table class="table table-sm mb-0">
+                <caption class="visually-hidden">Declared collection accounting by source engine</caption>
+                <thead><tr><th>Engine</th><th>Unit</th><th>Status</th><th>Reason</th><th>Terminal / planned</th><th>Errors</th><th>Timeouts</th><th>Unattempted</th><th>Unknown</th></tr></thead>
+                <tbody>
+                {% for stage in collection_accounting.stages if stage is mapping %}
+                    <tr>
+                        <td>{{ engine_labels.get(stage.get('engine_id'), 'Declared collection stage') }}</td>
+                        <td>{{ unit_labels.get(stage.get('unit'), 'operations') }}</td>
+                        <td>{{ status_labels.get(stage.get('status'), 'Unknown') }}</td>
+                        <td>{{ reason_labels.get(stage.get('reason'), '—') }}</td>
+                        <td>{{ stage.get('terminal', '—') if stage.get('terminal') is not none else '—' }} / {{ stage.get('planned', '—') if stage.get('planned') is not none else '—' }}</td>
+                        <td>{{ stage.get('errors', '—') if stage.get('errors') is not none else '—' }}</td>
+                        <td>{{ stage.get('timeouts', '—') if stage.get('timeouts') is not none else '—' }}</td>
+                        <td>{{ stage.get('unattempted', '—') if stage.get('unattempted') is not none else '—' }}</td>
+                        <td>{{ stage.get('unknown', '—') if stage.get('unknown') is not none else '—' }}</td>
+                    </tr>
+                {% else %}
+                    <tr><td colspan="9">No declared collection stages were recorded.</td></tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</section>
+{% endif %}
+
 <section class="metric-grid" aria-label="Investigation summary">
     <article class="metric-card">
         <span class="metric-icon"><i data-lucide="timer"></i></span>

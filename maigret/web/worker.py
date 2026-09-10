@@ -14,6 +14,7 @@ from maigret.web.case_store import (
     WORKER_HEARTBEAT_SECONDS,
     WORKER_STALE_AFTER_SECONDS,
 )
+from maigret.web.profile_discovery_policy import PROFILE_DISCOVERY_JOB_KINDS
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -50,6 +51,10 @@ def maintain_job_heartbeat(store, job, stop_event, lease_lost) -> None:
                 error,
                 session=job_id,
             )
+            # A worker unable to verify its lease stops collection. It never
+            # assumes that a failed renewal still authorizes later writes.
+            lease_lost.set()
+            return
 
 
 def monitor_stale_jobs(store, stop_event) -> None:
@@ -89,6 +94,12 @@ def execute_job(store, job, *, shutdown_check) -> None:
             error,
             session=job["job_id"],
         )
+        if job.get('kind') in PROFILE_DISCOVERY_JOB_KINDS:
+            # The runner may have failed while persisting its own error or
+            # terminal event. Keep the profile job eligible for the existing
+            # stale reconciler, which commits retained/unknown accounting and
+            # exactly one done event without replaying collection.
+            return
         store.finish(
             job["job_id"],
             {

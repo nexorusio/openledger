@@ -1161,13 +1161,13 @@ async def test_dns_resolver_threaded_passes_threaded_resolver_to_tcpconnector(mo
     from maigret.checking import SimpleAiohttpChecker
     from aiohttp.resolver import ThreadedResolver
 
+    _capture_clientsession(monkeypatch)
     captured = _capture_tcpconnector(monkeypatch)
 
     checker = SimpleAiohttpChecker(logger=Mock(), dns_resolver='threaded')
     checker.prepare(url='https://example.com/u/test')
-    # The ClientSession context manager will try to use _DummyConnector and
-    # then make an HTTP request — we don't care about the request itself,
-    # only about the TCPConnector kwargs that were captured before any I/O.
+    # The fake ClientSession has no request transport, so this cannot open a
+    # socket; only the TCPConnector kwargs are under test.
     try:
         await checker.check()
     except Exception:
@@ -1186,6 +1186,7 @@ async def test_dns_resolver_async_omits_resolver_kwarg(monkeypatch):
     would override the smart default with an invalid value."""
     from maigret.checking import SimpleAiohttpChecker
 
+    _capture_clientsession(monkeypatch)
     captured = _capture_tcpconnector(monkeypatch)
 
     checker = SimpleAiohttpChecker(logger=Mock())  # default

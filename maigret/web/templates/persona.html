@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 
 {% macro claim_record(claim, context='profile') %}
-<article class="claim-record review-{{ claim.review_status }}" data-review-status="{{ claim.review_status }}" data-reliability-status="{{ claim.reliability_status }}">
+<article id="claim-{{ claim.id }}" class="claim-record review-{{ claim.review_status }}" data-review-status="{{ claim.review_status }}" data-reliability-status="{{ claim.reliability_status }}">
     <div class="claim-main">
         <div class="claim-value">
             {% if claim.field_name == 'social_account' and claim.value is mapping %}

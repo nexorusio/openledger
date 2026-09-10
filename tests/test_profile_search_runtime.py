@@ -5,6 +5,7 @@ import asyncio
 import json
 import queue
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -31,9 +32,7 @@ from maigret.web.provider_circuit_breaker import ProviderCircuitBreaker
 def _plan():
     return {
         "identifiers": [],
-        "search_targets": [
-            {"value": "alice_example", "source_type": "username"}
-        ],
+        "search_targets": [{"value": "alice_example", "source_type": "username"}],
     }
 
 
@@ -286,9 +285,9 @@ def test_persona_social_seed_query_filters_before_applying_bound(tmp_path):
     )
     try:
         job_id = store.create_investigation(["alice"], {})
-        persona_id = store.get_case(store.get_job(job_id)["case_id"])[
-            "personas"
-        ][0]["id"]
+        persona_id = store.get_case(store.get_job(job_id)["case_id"])["personas"][0][
+            "id"
+        ]
         now = utcnow()
         rows = []
         for index in range(500):
@@ -366,11 +365,13 @@ async def test_disabled_or_misconfigured_search_degrades_to_existing_collector(
     await web_app._stream_search(
         {"queue": disabled_events, "cancelled": False},
         ["alice"],
-        govern_profile_discovery_options(
-            {"investigation_spec": _plan()}, environ={}
-        ),
+        govern_profile_discovery_options({"investigation_spec": _plan()}, environ={}),
     )
-    assert disabled_events.empty()
+    # Declared accounting is emitted even when native search is not selected.
+    assert all(
+        event['type'] == 'collection_accounting'
+        for event in list(disabled_events.queue)
+    )
 
     enabled_events = queue.Queue()
     await web_app._stream_search(
@@ -382,7 +383,11 @@ async def test_disabled_or_misconfigured_search_degrades_to_existing_collector(
         ),
     )
     assert maigret_calls == [True, True]
-    assert [enabled_events.get_nowait()["type"] for _ in range(2)] == [
+    assert [
+        event['type']
+        for event in list(enabled_events.queue)
+        if event['type'] != 'collection_accounting'
+    ] == [
         "collector_started",
         "collector_error",
     ]
@@ -418,7 +423,9 @@ async def test_quick_native_fallback_does_not_call_server_disabled_maigret(
             "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": "true",
         },
     )
-    usernames = [target["value"] for target in options["investigation_spec"]["search_targets"]]
+    usernames = [
+        target["value"] for target in options["investigation_spec"]["search_targets"]
+    ]
     events = queue.Queue()
 
     await web_app._stream_search(
@@ -489,18 +496,14 @@ async def test_inflight_cancel_saves_stopped_audit_and_skips_maigret(
     )
 
 
-def test_worker_refreshes_search_flag_and_persists_native_audit(
-    tmp_path, monkeypatch
-):
+def test_worker_refreshes_search_flag_and_persists_native_audit(tmp_path, monkeypatch):
     store = CaseStore(
         f"sqlite:///{tmp_path / 'profile-search-runtime.db'}",
         create_schema=True,
     )
     monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
     monkeypatch.setattr(web_app, "case_store", store)
-    options = govern_profile_discovery_options(
-        {"investigation_spec": _plan()}
-    )
+    options = govern_profile_discovery_options({"investigation_spec": _plan()})
     job_id = store.create_investigation(["alice"], options, kind="live")
     claimed = store.claim_next("worker:profile-search")
 
@@ -514,10 +517,11 @@ def test_worker_refreshes_search_flag_and_persists_native_audit(
     monkeypatch.setattr(web_app, "load_profile_search_config", _config)
     monkeypatch.setattr(web_app, "ProfileSearchClient", _SuccessfulClient)
     monkeypatch.setattr(web_app, "maigret_search", maigret_search)
-    monkeypatch.setattr(
-        web_app,
-        "build_reports",
-        lambda _results, usernames, session_key: {
+
+    def fake_reports(_results, usernames, session_key, **kwargs):
+        if kwargs.get('write_files', True) and kwargs.get('reports_root'):
+            Path(kwargs['reports_root'], f'search_{session_key}').mkdir()
+        return {
             "status": "completed",
             "session_folder": f"search_{session_key}",
             "usernames": usernames,
@@ -525,14 +529,18 @@ def test_worker_refreshes_search_flag_and_persists_native_audit(
             "graph_file": f"search_{session_key}/graph.html",
             "found_count": 0,
             "profile_reliability_version": 1,
-        },
-    )
+        }
+
+    monkeypatch.setattr(web_app, 'build_reports', fake_reports)
     monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
 
     try:
-        assert claimed["options"]["profile_discovery_policy"]["flags"][
-            "search_first_enabled"
-        ] is True
+        assert (
+            claimed["options"]["profile_discovery_policy"]["flags"][
+                "search_first_enabled"
+            ]
+            is True
+        )
         web_app.run_persistent_job(store, claimed)
         audits = store.list_profile_search_audits(job_id)
         assert len(audits) == 1
@@ -549,30 +557,30 @@ def test_worker_claim_replaces_stale_app_search_flag(tmp_path, monkeypatch):
         create_schema=True,
     )
     monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    options = govern_profile_discovery_options(
-        {"investigation_spec": _plan()}
-    )
+    options = govern_profile_discovery_options({"investigation_spec": _plan()})
     job_id = store.create_investigation(["alice"], options, kind="live")
-    assert store.get_job(job_id)["options"]["profile_discovery_policy"][
-        "flags"
-    ]["search_first_enabled"] is True
-    monkeypatch.delenv(
-        "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", raising=False
+    assert (
+        store.get_job(job_id)["options"]["profile_discovery_policy"]["flags"][
+            "search_first_enabled"
+        ]
+        is True
     )
+    monkeypatch.delenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", raising=False)
 
     try:
         claimed = store.claim_next("worker:profile-search-parity")
         assert claimed["job_id"] == job_id
-        assert claimed["options"]["profile_discovery_policy"]["flags"][
-            "search_first_enabled"
-        ] is False
+        assert (
+            claimed["options"]["profile_discovery_policy"]["flags"][
+                "search_first_enabled"
+            ]
+            is False
+        )
     finally:
         store.dispose()
 
 
-def test_worker_deadline_stops_native_search_and_retains_audit(
-    tmp_path, monkeypatch
-):
+def test_worker_deadline_stops_native_search_and_retains_audit(tmp_path, monkeypatch):
     store = CaseStore(
         f"sqlite:///{tmp_path / 'profile-search-deadline.db'}",
         create_schema=True,
@@ -585,30 +593,69 @@ def test_worker_deadline_stops_native_search_and_retains_audit(
         kind="live",
     )
     claimed = store.claim_next("worker:profile-search-deadline")
-    claimed["deadline_at"] = (
-        datetime.now(timezone.utc) + timedelta(milliseconds=30)
-    ).isoformat()
+    deadline_reached = False
+    client_admitted = False
+    client_cancelled = False
+    maigret_calls = []
+    search_entered = asyncio.Event()
 
     class _BlockingClient(_RawClient):
         def __init__(self, _config_value):
             super().__init__(_success)
 
         async def search(self, query):
-            await asyncio.Event().wait()
-            return _success(query)
+            nonlocal client_admitted, client_cancelled, deadline_reached
+            client_admitted = True
+            deadline_reached = True
+            search_entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                client_cancelled = True
+                raise
+
+    async def maigret_search(*_args, **_kwargs):
+        maigret_calls.append(True)
+        return {}
 
     monkeypatch.setattr(web_app, "load_profile_search_config", _config)
     monkeypatch.setattr(web_app, "ProfileSearchClient", _BlockingClient)
+    monkeypatch.setattr(web_app, "maigret_search", maigret_search)
+    original_await_persistent_stream = web_app.await_persistent_stream
+    original_remaining_seconds = web_app.ExecutionBudget.remaining_seconds
+
+    async def await_persistent_stream_after_search(*args):
+        await search_entered.wait()
+        return await original_await_persistent_stream(*args)
+
+    monkeypatch.setattr(
+        web_app,
+        "await_persistent_stream",
+        await_persistent_stream_after_search,
+    )
+    monkeypatch.setattr(
+        web_app.ExecutionBudget,
+        "remaining_seconds",
+        lambda budget: 0 if deadline_reached else original_remaining_seconds(budget),
+    )
+    monkeypatch.setattr(
+        web_app.ExecutionBudget,
+        "is_exhausted",
+        lambda _budget: deadline_reached,
+    )
     monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
 
     try:
         web_app.run_persistent_job(store, claimed)
         audits = store.list_profile_search_audits(job_id)
+        assert client_admitted is True
+        assert client_cancelled is True
         assert len(audits) == 1
         assert audits[0]["status"] == "stopped"
         assert audits[0]["executed_query_count"] == 0
         completed = store.get_job(job_id)
         assert completed["status"] == "budget_exhausted"
         assert completed["collection_status"] == "budget_exhausted"
+        assert maigret_calls == []
     finally:
         store.dispose()

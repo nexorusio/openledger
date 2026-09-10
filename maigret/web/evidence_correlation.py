@@ -24,6 +24,7 @@ MAX_CORRELATION_OBSERVATIONS = 1_000
 MAX_CORRELATION_RELATIONSHIPS = 5_000
 MAX_CORRELATION_OUTPUT_RELATIONSHIPS = 5_000
 MAX_CORRELATION_OUTPUT_BYTES = 96 * 1024 * 1024
+COMPACT_CORRELATION_RESULT_SCHEMA_VERSION = 2
 
 _RETRIEVAL_CONTEXT_FIELDS = (
     "observation_id",
@@ -131,6 +132,7 @@ class _SourceGroups:
 def _cluster_confidence(
     observations: Sequence[Dict[str, Any]],
     relationships: Sequence[Dict[str, Any]],
+    automatic_duplicate_memberships: Sequence[Sequence[str]] = (),
 ) -> tuple[int, int, List[str]]:
     observed = {
         observation["observation_id"]: observation
@@ -142,6 +144,17 @@ def _cluster_confidence(
     )
     observation_ids = set(observation["observation_id"] for observation in observations)
     conflict_ids = set()
+    explicit_pairs = {
+        tuple(
+            sorted(
+                (
+                    relationship["left_observation_id"],
+                    relationship["right_observation_id"],
+                )
+            )
+        )
+        for relationship in relationships
+    }
 
     for relationship in relationships:
         left_id = relationship["left_observation_id"]
@@ -155,6 +168,19 @@ def _cluster_confidence(
             left_id in observation_ids or right_id in observation_ids
         ):
             conflict_ids.add(relationship["relationship_id"])
+
+    # Compact duplicate memberships describe the same automatic duplicate
+    # semantics as the legacy pair list.  Iterate only for union-find state;
+    # do not materialize relationship records.  Explicit pairs retain their
+    # existing precedence over automatic inference.
+    for observation_ids in automatic_duplicate_memberships:
+        for left_id, right_id in combinations(observation_ids, 2):
+            if tuple(sorted((left_id, right_id))) in explicit_pairs:
+                continue
+            left = observed.get(left_id)
+            right = observed.get(right_id)
+            if left is not None and right is not None:
+                sources.union(left["source_id"], right["source_id"])
 
     source_count = sources.count
     conflict_count = len(conflict_ids)
@@ -215,6 +241,124 @@ def _validate_output(output: Dict[str, Any]) -> None:
         raise CorrelationContractError("Evidence correlation output is too large")
 
 
+def _automatic_relationship_counts(
+    items: Sequence[Dict[str, Any]],
+    explicit_pairs: set[tuple[str, str]],
+) -> Dict[str, int]:
+    """Count inferred pairs without constructing their relationship records."""
+    duplicates_by_snapshot: Dict[str, int] = defaultdict(int)
+    observed_by_source: Dict[str, int] = defaultdict(int)
+    observed_by_snapshot: Dict[str, int] = defaultdict(int)
+    observed_by_source_snapshot: Dict[tuple[str, str], int] = defaultdict(int)
+
+    for item in items:
+        duplicates_by_snapshot[item["source_snapshot_sha256"]] += 1
+        if item["outcome"] == "observed":
+            observed_by_source[item["source_id"]] += 1
+            observed_by_snapshot[item["source_snapshot_sha256"]] += 1
+            observed_by_source_snapshot[
+                (item["source_id"], item["source_snapshot_sha256"])
+            ] += 1
+
+    duplicate_count = sum(
+        count * (count - 1) // 2 for count in duplicates_by_snapshot.values()
+    )
+    observed_count = sum(observed_by_source.values())
+    supporting_count = observed_count * (observed_count - 1) // 2
+    supporting_count -= sum(
+        count * (count - 1) // 2 for count in observed_by_source.values()
+    )
+    supporting_count -= sum(
+        count * (count - 1) // 2 for count in observed_by_snapshot.values()
+    )
+    supporting_count += sum(
+        count * (count - 1) // 2
+        for count in observed_by_source_snapshot.values()
+    )
+
+    by_id = {item["observation_id"]: item for item in items}
+    for left_id, right_id in explicit_pairs:
+        left = by_id.get(left_id)
+        right = by_id.get(right_id)
+        if left is None or right is None:
+            continue
+        relationship_kind = _auto_relationship_kind(left, right)
+        if relationship_kind == "duplicate":
+            duplicate_count -= 1
+        elif relationship_kind == "supporting":
+            supporting_count -= 1
+    return {"duplicate": duplicate_count, "supporting": supporting_count}
+
+
+def _auto_relationship_kind(
+    left: Dict[str, Any], right: Dict[str, Any]
+) -> str | None:
+    if left["source_snapshot_sha256"] == right["source_snapshot_sha256"]:
+        return "duplicate"
+    if (
+        left["outcome"] == "observed"
+        and right["outcome"] == "observed"
+        and left["source_id"] != right["source_id"]
+    ):
+        return "supporting"
+    return None
+
+
+def _compact_relationships(
+    cluster_observations: Mapping[str, Sequence[Dict[str, Any]]],
+    explicit_pair_overrides: Mapping[tuple[str, str], Sequence[str]],
+) -> Dict[str, Any]:
+    """Describe automatic inference by memberships rather than every pair.
+
+    Consumers apply the existing automatic rules to members, with any explicit
+    relationship for a pair taking precedence.  Observations in clusters retain
+    their full retrieval contexts and source provenance separately.
+    """
+    duplicate_memberships = []
+    supporting_memberships = []
+    for cluster_id in sorted(cluster_observations):
+        items = cluster_observations[cluster_id]
+        by_snapshot: Dict[str, List[str]] = defaultdict(list)
+        observed_ids = []
+        for item in items:
+            by_snapshot[item["source_snapshot_sha256"]].append(
+                item["observation_id"]
+            )
+            if item["outcome"] == "observed":
+                observed_ids.append(item["observation_id"])
+        for snapshot_sha256 in sorted(by_snapshot):
+            observation_ids = sorted(by_snapshot[snapshot_sha256])
+            if len(observation_ids) > 1:
+                duplicate_memberships.append(
+                    {
+                        "cluster_id": cluster_id,
+                        "source_snapshot_sha256": snapshot_sha256,
+                        "observation_ids": observation_ids,
+                    }
+                )
+        if len(observed_ids) > 1:
+            supporting_memberships.append(
+                {
+                    "cluster_id": cluster_id,
+                    "observation_ids": sorted(observed_ids),
+                }
+            )
+    return {
+        "representation": "membership-v1",
+        "explicit_pair_overrides": True,
+        "duplicate_memberships": duplicate_memberships,
+        "supporting_memberships": supporting_memberships,
+        "excluded_pairs": [
+            {
+                "left_observation_id": pair[0],
+                "right_observation_id": pair[1],
+                "relationship_ids": sorted(relationship_ids),
+            }
+            for pair, relationship_ids in sorted(explicit_pair_overrides.items())
+        ],
+    }
+
+
 def correlate_evidence(
     observations: Iterable[Mapping[str, Any]],
     relationships: Iterable[Mapping[str, Any]] = (),
@@ -273,24 +417,51 @@ def correlate_evidence(
     cluster_observations: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for observation in observations_by_id.values():
         cluster_observations[observation["cluster_id"]].append(observation)
+    explicit_pairs_by_cluster: Dict[str, set[tuple[str, str]]] = defaultdict(set)
+    explicit_pair_relationship_ids: Dict[tuple[str, str], List[str]] = defaultdict(
+        list
+    )
+    for relationship in relationship_map.values():
+        pair = tuple(
+            sorted(
+                (
+                    relationship["left_observation_id"],
+                    relationship["right_observation_id"],
+                )
+            )
+        )
+        explicit_pair_relationship_ids[pair].append(relationship["relationship_id"])
+        left_cluster_id = observations_by_id[pair[0]]["cluster_id"]
+        if left_cluster_id == observations_by_id[pair[1]]["cluster_id"]:
+            explicit_pairs_by_cluster[left_cluster_id].add(pair)
+
+    automatic_counts = {"duplicate": 0, "supporting": 0}
     for items in cluster_observations.values():
         items.sort(key=lambda item: item["observation_id"])
-        for left, right in combinations(items, 2):
-            pair = tuple(sorted((left["observation_id"], right["observation_id"])))
-            if pair in explicit_pairs:
-                continue
-            relationship = _auto_relationship(case_id, left, right)
-            if relationship is not None:
-                _add_relationship(
-                    relationship_map,
-                    relationship,
-                    explicit=False,
-                    explicit_ids=explicit_ids,
-                )
-                if len(relationship_map) > MAX_CORRELATION_OUTPUT_RELATIONSHIPS:
-                    raise CorrelationContractError(
-                        "Correlated relationships exceed the output limit of "
-                        f"{MAX_CORRELATION_OUTPUT_RELATIONSHIPS}"
+        counts = _automatic_relationship_counts(
+            items, explicit_pairs_by_cluster[items[0]["cluster_id"]]
+        )
+        for relationship_kind, count in counts.items():
+            automatic_counts[relationship_kind] += count
+
+    automatic_relationship_count = sum(automatic_counts.values())
+    compact_projection = (
+        len(relationship_map) + automatic_relationship_count
+        > MAX_CORRELATION_OUTPUT_RELATIONSHIPS
+    )
+    if not compact_projection:
+        for items in cluster_observations.values():
+            for left, right in combinations(items, 2):
+                pair = tuple(sorted((left["observation_id"], right["observation_id"])))
+                if pair in explicit_pairs:
+                    continue
+                relationship = _auto_relationship(case_id, left, right)
+                if relationship is not None:
+                    _add_relationship(
+                        relationship_map,
+                        relationship,
+                        explicit=False,
+                        explicit_ids=explicit_ids,
                     )
 
     normalized_relationships = [
@@ -319,8 +490,20 @@ def correlate_evidence(
             outcome: sum(item["outcome"] == outcome for item in items)
             for outcome in sorted(EVIDENCE_OUTCOMES)
         }
+        automatic_duplicate_memberships = ()
+        if compact_projection:
+            automatic_duplicate_memberships = tuple(
+                tuple(
+                    item["observation_id"]
+                    for item in items
+                    if item["source_snapshot_sha256"] == snapshot_sha256
+                )
+                for snapshot_sha256 in sorted(
+                    {item["source_snapshot_sha256"] for item in items}
+                )
+            )
         source_count, confidence_score, confidence_basis = _cluster_confidence(
-            items, normalized_relationships
+            items, normalized_relationships, automatic_duplicate_memberships
         )
         clusters.append(
             {
@@ -342,10 +525,34 @@ def correlate_evidence(
         )
 
     output = {
-        "schema_version": EVIDENCE_CORRELATION_SCHEMA_VERSION,
+        "schema_version": (
+            COMPACT_CORRELATION_RESULT_SCHEMA_VERSION
+            if compact_projection
+            else EVIDENCE_CORRELATION_SCHEMA_VERSION
+        ),
         "case_id": case_id,
         "clusters": clusters,
         "relationships": normalized_relationships,
     }
+    if compact_projection:
+        compact_overrides = {
+            pair: relationship_ids
+            for pair, relationship_ids in explicit_pair_relationship_ids.items()
+            if _auto_relationship_kind(
+                observations_by_id[pair[0]], observations_by_id[pair[1]]
+            )
+            is not None
+        }
+        output["relationship_projection"] = {
+            "mode": "compact",
+            "automatic_relationship_counts": {
+                **automatic_counts,
+                "total": automatic_relationship_count,
+            },
+            "materialized_automatic_relationship_count": 0,
+        }
+        output["compact_relationships"] = _compact_relationships(
+            cluster_observations, compact_overrides
+        )
     _validate_output(output)
     return output

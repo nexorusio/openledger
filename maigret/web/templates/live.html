@@ -42,23 +42,45 @@
         <div class="live-stat"><span>Runtime budget</span><strong id="stat-budget">{{ runtime_state.budget_seconds // 60 }} minutes</strong></div>
         <div class="live-stat"><span>Time remaining</span><strong id="stat-remaining">{{ 'Starts when running' if runtime_state.status == 'queued' else 'Calculating…' }}</strong></div>
         <div class="live-stat"><span>Worker heartbeat</span><strong id="stat-heartbeat">{{ 'Waiting for worker' if not runtime_state.heartbeat_at else 'Healthy' }}</strong></div>
-        <div class="live-stat"><span>Sources checked</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
-        <div class="live-stat"><span>Supported profiles</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
+        <div class="live-stat"><span>Maigret site checks</span><strong><span id="stat-maigret-terminal">—</span> / <span id="stat-maigret-planned">—</span></strong><small id="stat-maigret-legacy" class="form-text">Coverage awaiting declaration</small></div>
+        <div class="live-stat"><span>Maigret errors / timeouts</span><strong><span id="stat-maigret-errors">—</span> / <span id="stat-maigret-timeouts">—</span></strong></div>
+        <div class="live-stat"><span>Maigret supported profiles</span><strong id="stat-found">{{ completed_found_count }}</strong></div>
         {% if legacy_untriaged %}
         <div class="live-stat"><span>Legacy untriaged hits</span><strong id="stat-untriaged">{{ completed_untriaged_count }}</strong></div>
         {% endif %}
-        <div class="live-stat"><span>Review candidates</span><strong id="stat-candidates">{{ completed_candidate_count }}</strong></div>
+        <div class="live-stat"><span>Maigret review candidates</span><strong id="stat-candidates">{{ completed_candidate_count }}</strong></div>
         <div class="live-stat"><span>Suppressed noise</span><strong id="stat-suppressed">{{ completed_suppressed_count }}</strong></div>
-        <div class="live-stat"><span>Username accounts found</span><strong id="stat-username-verified">{{ completed_username_verification_count }}</strong></div>
-        <div class="live-stat"><span>Email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
+        <div class="live-stat"><span>User Scanner usernames found</span><strong id="stat-username-verified">{{ completed_username_verification_count }}</strong></div>
+        <div class="live-stat"><span>User Scanner email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
         <div class="live-stat"><span>GitHub profiles enriched</span><strong id="stat-github-enriched">{{ completed_github_enrichment_count }}</strong></div>
         <div class="live-stat"><span>Archived profile URLs</span><strong id="stat-archived-profiles">{{ completed_archived_profile_count }}</strong></div>
-        <div class="live-stat"><span>Graph status</span><strong>{{ 'Rerun required' if legacy_untriaged else 'Streaming' }}</strong></div>
+        <div class="live-stat"><span>Graph status</span><strong id="stat-graph-status">{{ 'Rerun required' if legacy_untriaged else 'Awaiting publication' }}</strong></div>
         {% endif %}
     </div>
     <div class="progress mb-3" style="height: 8px;">
         <div id="live-progress" class="progress-bar" role="progressbar" style="width: 0%;"></div>
     </div>
+    {% if job_kind in ('live', 'refresh') %}
+    <section class="panel-card mb-3" id="collection-accounting" aria-labelledby="collection-accounting-heading" hidden>
+        <header class="panel-header">
+            <div>
+                <h3 id="collection-accounting-heading">Declared collection accounting</h3>
+                <p>Each source keeps its own unit. Accounted operations do not measure discovery accuracy or identity.</p>
+            </div>
+            <span class="badge-soft" id="collection-accounting-state">Coverage unavailable</span>
+        </header>
+        <div class="panel-body">
+            <p id="collection-accounting-unavailable" class="form-text mb-3">Coverage accounting is unavailable for this legacy saved run.</p>
+            <div class="table-responsive" id="collection-accounting-table-wrap">
+                <table class="table table-sm mb-0">
+                    <caption class="visually-hidden">Declared collection accounting by source engine</caption>
+                    <thead><tr><th>Engine</th><th>Unit</th><th>Status</th><th>Reason</th><th>Terminal / planned</th><th>Errors</th><th>Timeouts</th><th>Unattempted</th><th>Unknown</th></tr></thead>
+                    <tbody id="collection-accounting-body"></tbody>
+                </table>
+            </div>
+        </div>
+    </section>
+    {% endif %}
     <div class="security-callout mb-3" id="runtime-notices" role="status" hidden>
         <i data-lucide="triangle-alert"></i>
         <span><strong>Operational notice</strong><span id="runtime-notice-list" class="d-block"></span></span>
@@ -78,6 +100,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 
+<script src="{{ url_for('static', filename='collection-progress.js') }}"></script>
 <script>
     const jobId = {{ job_id|tojson }};
     const isCaseFusion = {{ (job_kind == 'case_fusion')|tojson }};
@@ -115,6 +138,52 @@
     let runtimePollTimer = null;
     let runtimeClockTimer = null;
     let evtSource = null;
+    const seenEventIds = new Set();
+    const collectionProgress = window.CollectionProgress.create({
+        panelId: 'collection-accounting',
+        stateId: 'collection-accounting-state',
+        bodyId: 'collection-accounting-body',
+        unavailableId: 'collection-accounting-unavailable',
+        onSnapshot: applyCollectionAccountingSummary,
+    });
+
+    function setText(id, value) {
+        const element = document.getElementById(id);
+        if (element) element.textContent = value;
+    }
+
+    function accountingCount(value) {
+        return Number.isFinite(Number(value)) && Number(value) >= 0
+            ? String(Math.floor(Number(value))) : '—';
+    }
+
+    function applyCollectionAccountingSummary(snapshot) {
+        if (!isProfileDiscovery) return;
+        const maigret = snapshot.stages.find(stage => stage.engineId === 'maigret');
+        if (!maigret) return;
+        setText('stat-maigret-terminal', accountingCount(maigret.counts.terminal));
+        setText('stat-maigret-planned', accountingCount(maigret.counts.planned));
+        setText('stat-maigret-errors', accountingCount(maigret.counts.errors));
+        setText('stat-maigret-timeouts', accountingCount(maigret.counts.timeouts));
+        setText('stat-maigret-legacy', snapshot.known
+            ? 'Declared accounting; outcomes remain source-specific.'
+            : 'Coverage unavailable for this saved run.');
+        const terminal = Number(maigret.counts.terminal);
+        const planned = Number(maigret.counts.planned);
+        if (Number.isFinite(terminal) && Number.isFinite(planned) && planned > 0) {
+            document.getElementById('live-progress').style.width =
+                Math.min(terminal, planned) / planned * 100 + '%';
+        }
+    }
+
+    function updateGraphStatus() {
+        if (!isProfileDiscovery || legacyUntriaged) return;
+        const partial = ['budget_exhausted', 'cancelled', 'interrupted'].includes(runtimeState.collection_status);
+        const status = runtimeState.status;
+        setText('stat-graph-status', runtimeIsTerminal(status)
+            ? (partial ? 'Partial evidence retained' : status === 'completed' ? 'Published' : 'Not published')
+            : 'Provisional evidence view');
+    }
 
     function runtimeIsTerminal(status) {
         return ['completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted'].includes(status);
@@ -187,6 +256,9 @@
 
     function applyRuntimeState(next, updateHeadline = false) {
         runtimeState = {...runtimeState, ...(next || {})};
+        if (runtimeState.collection_accounting) {
+            collectionProgress.apply(runtimeState.collection_accounting);
+        }
         if (!isProfileDiscovery) return;
         document.getElementById('stat-mode').textContent = runtimeState.mode_label
             || (runtimeState.mode === 'exhaustive' ? 'Full Scan' : 'Quick Scan');
@@ -197,6 +269,7 @@
             : String(runtimeState.status || 'queued').replaceAll('_', ' ');
         document.getElementById('runtime-badge').textContent = badgeStatus;
         refreshRuntimeClock();
+        updateGraphStatus();
 
         const statusEl = document.getElementById('live-status');
         if (runtimeState.status === 'queued') {
@@ -370,7 +443,10 @@
     }
 
     function onScanEvent(e) {
+        if (e.lastEventId && seenEventIds.has(e.lastEventId)) return;
+        if (e.lastEventId) seenEventIds.add(e.lastEventId);
         const ev = JSON.parse(e.data);
+        if (ev.collection_accounting) collectionProgress.apply(ev.collection_accounting);
         const statusEl = document.getElementById('live-status');
         if (ev.type === 'running') {
             const budget = ev.execution_budget || {};
@@ -382,12 +458,18 @@
                 deadline_at: budget.deadline_at,
             }, true);
         } else if (ev.type === 'start') {
-            document.getElementById('stat-total').textContent = ev.total;
+            if (!collectionProgress.hasKnownSnapshot()) {
+                setText('stat-maigret-planned', ev.total == null ? '—' : ev.total);
+                setText('stat-maigret-legacy', 'Legacy per-target progress; full coverage is unavailable.');
+            }
             statusEl.textContent = isCaseFusion
                 ? 'Capturing approved evidence from the selected cases…'
                 : 'Scanning ' + ev.username + '…';
         } else if (ev.type === 'progress') {
-            document.getElementById('stat-checked').textContent = ev.checked;
+            if (!collectionProgress.hasKnownSnapshot()) {
+                setText('stat-maigret-terminal', ev.checked == null ? '—' : ev.checked);
+                setText('stat-maigret-planned', ev.total == null ? '—' : ev.total);
+            }
             if (isCaseFusion) statusEl.textContent = 'Finalizing the approved-evidence snapshot…';
             if (ev.total) {
                 const pct = Math.min(ev.checked, ev.total) / ev.total * 100;
@@ -426,8 +508,10 @@
             };
             statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
             const bar = document.getElementById('live-progress');
-            bar.style.width = '100%';
-            bar.classList.add('progress-bar-striped', 'progress-bar-animated');
+            if (!collectionProgress.hasKnownSnapshot()) {
+                bar.style.width = '100%';
+                bar.classList.add('progress-bar-striped', 'progress-bar-animated');
+            }
         } else if (ev.type === 'collector_completed') {
             if (ev.collector === 'github-public-profile') {
                 githubEnrichmentCount += Number(ev.found || 0);
@@ -520,6 +604,7 @@
             applyRuntimeState({
                 status: ev.status === 'partial' ? 'completed' : ev.status,
                 collection_status: ev.reason || runtimeState.collection_status,
+                collection_accounting: ev.collection_accounting || runtimeState.collection_accounting,
             });
             let text;
             if (ev.status === 'cancelled') {
@@ -547,6 +632,12 @@
     document.getElementById('stopBtn').addEventListener('click', stopScan);
 
     applyRuntimeState(initialRuntimeState, true);
+    if (isProfileDiscovery && !initialRuntimeState.collection_accounting) {
+        collectionProgress.markUnavailable();
+        setText('stat-maigret-legacy', runtimeIsTerminal(runtimeState.status)
+            ? 'Coverage unavailable for this legacy saved run.'
+            : 'Coverage declaration pending.');
+    }
     if (isProfileDiscovery && !runtimeIsTerminal(runtimeState.status)) {
         runtimeClockTimer = window.setInterval(refreshRuntimeClock, 1000);
         runtimePollTimer = window.setInterval(pollRuntimeState, 5000);
