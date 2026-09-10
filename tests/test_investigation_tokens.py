@@ -161,7 +161,7 @@ def test_public_url_contract_blocks_private_local_and_credential_targets(url):
         normalize_public_url(url)
 
 
-def test_unified_plan_is_same_subject_and_exposes_only_the_minimal_contract():
+def test_unified_plan_is_same_subject_and_preserves_explicit_existing_collectors():
     plan = build_unified_investigation_plan(
         {
             "investigation_token": [
@@ -172,7 +172,8 @@ def test_unified_plan_is_same_subject_and_exposes_only_the_minimal_contract():
             ],
             "mode": "quick",
             "search_likely_username_aliases": "on",
-            # Former ordinary controls cannot widen a schema-v2 submission.
+            # AI and source filters remain outside the ordinary contract, while
+            # established opt-in collectors are preserved explicitly.
             "allow_ai_context": "on",
             "enable_github_profile_enrichment": "on",
             "tags": ["social"],
@@ -186,7 +187,7 @@ def test_unified_plan_is_same_subject_and_exposes_only_the_minimal_contract():
     assert plan["requested_mode"] == "quick"
     assert plan["execution_mode"] == "focused"
     assert plan["allow_ai_context"] is False
-    assert plan["enable_github_profile_enrichment"] is False
+    assert plan["enable_github_profile_enrichment"] is True
     assert plan["enable_archived_url_evidence"] is False
     assert plan["tags"] == []
     assert plan["excluded_tags"] == []
@@ -300,13 +301,17 @@ def test_route_plan_records_requested_effective_skipped_and_a_stable_digest():
     ]
     assert _route_names(first, "effective_routes") == ["user_scanner_email"]
     assert _route_names(first, "skipped_routes") == [
+        "maigret",
         "native_profile_search",
         "context_only",
     ]
-    assert first["route_plan"]["skipped_routes"][0]["reason_code"] == "server_disabled"
-    assert first["route_plan"]["skipped_routes"][0]["planned_request_count"] == 5
+    assert first["route_plan"]["skipped_routes"][0]["reason_code"] == (
+        "no_username_targets"
+    )
+    assert first["route_plan"]["skipped_routes"][1]["reason_code"] == "server_disabled"
+    assert first["route_plan"]["skipped_routes"][1]["planned_request_count"] == 5
     assert (
-        first["route_plan"]["skipped_routes"][1]["reason_code"]
+        first["route_plan"]["skipped_routes"][2]["reason_code"]
         == "context_only_no_outbound"
     )
     assert first["route_plan"]["sha256"] == second["route_plan"]["sha256"]
@@ -365,6 +370,58 @@ def test_policy_refuses_when_every_requested_collection_route_is_disabled():
         govern_profile_discovery_options(
             {"investigation_spec": plan},
             environ={"OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": "false"},
+        )
+
+
+def test_policy_allows_quick_native_fallback_but_requires_maigret_for_full_scan():
+    plan = build_unified_investigation_plan(
+        {"investigation_token": ["alice"], "mode": "quick"}
+    )
+    environment = {
+        "OPENLEDGER_MAIGRET_DISCOVERY_ENABLED": "false",
+        "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": "true",
+    }
+
+    governed = govern_profile_discovery_options(
+        {"investigation_spec": plan}, "quick", environ=environment
+    )
+    assert _route_names(governed["investigation_spec"], "effective_routes") == [
+        "native_profile_search"
+    ]
+
+    with pytest.raises(ProfileDiscoveryPolicyError, match="Maigret"):
+        govern_profile_discovery_options(
+            {"investigation_spec": plan}, "full", environ=environment
+        )
+
+
+@pytest.mark.parametrize(
+    "follow_up_capability",
+    [
+        "enable_github_profile_enrichment",
+        "enable_archived_url_evidence",
+    ],
+)
+def test_follow_up_route_cannot_make_seedless_quick_scan_startable(
+    follow_up_capability,
+):
+    plan = build_unified_investigation_plan(
+        {
+            "investigation_token": ["Alice Example"],
+            "mode": "quick",
+            "search_likely_username_aliases": "on",
+            "alias_candidates_present": "1",
+            follow_up_capability: "on",
+        }
+    )
+
+    with pytest.raises(ProfileDiscoveryPolicyError, match="No authorized"):
+        govern_profile_discovery_options(
+            {"investigation_spec": plan},
+            environ={
+                "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": "false",
+                "OPENLEDGER_ENRICHMENT_PROVIDERS_ENABLED": "true",
+            },
         )
 
 
@@ -429,10 +486,11 @@ def test_json_schema_tracks_the_persisted_runtime_contract():
         schema["$defs"]["routePlan"]["properties"]["schema_version"]["const"]
         == ROUTE_PLAN_SCHEMA_VERSION
     )
-    assert (
-        schema["$defs"]["routePlan"]["properties"]["policy_version"]["const"]
-        == ROUTE_PLAN_POLICY_VERSION
-    )
+    policy_versions = schema["$defs"]["routePlan"]["properties"][
+        "policy_version"
+    ]["enum"]
+    assert ROUTE_PLAN_POLICY_VERSION in policy_versions
+    assert "investigation-routes-v1" in policy_versions
     assert set(schema["required"]).issubset(planned)
     assert set(schema["$defs"]["token"]["required"]).issubset(planned["tokens"][0])
     assert set(schema["$defs"]["routePlan"]["required"]) == set(planned["route_plan"])

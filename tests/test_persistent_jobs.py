@@ -91,6 +91,70 @@ def test_live_job_is_queued_without_browser_owned_thread(
     assert "Open live progress" in history
 
 
+def test_production_failure_input_reaches_the_persistent_worker_with_maigret_targets(
+    client, web_app, persistent_store, monkeypatch
+):
+    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
+    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
+    monkeypatch.setattr(web_app, "resolve_profile_url_identifiers", lambda _url: {})
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "production-failure-csrf"
+
+    response = client.post(
+        "/api/scan",
+        headers={"X-OpenLedger-CSRF": "production-failure-csrf"},
+        data={
+            "investigation_token": [
+                "jati pratomo",
+                "jati.pratomo@gmail.com",
+                "+6281325104331",
+                "https://www.linkedin.com/in/jati-pratomo/",
+            ],
+            "mode": "full",
+            "search_likely_username_aliases": "on",
+            "confirm_email_route": "on",
+        },
+    )
+
+    assert response.status_code == 200
+    job_id = response.get_json()["job_id"]
+    stored = persistent_store.get_job(job_id)
+    assert stored["usernames"]
+    assert any(
+        target["source_type"] == "ranked_alias"
+        for target in stored["options"]["investigation_spec"]["search_targets"]
+    )
+
+    claimed = persistent_store.claim_next("worker:production-failure")
+    received = {}
+
+    async def fake_stream(runtime_job, usernames, options, cancellation_check=None):
+        received["usernames"] = list(usernames)
+        return [(usernames[0], "username", {})]
+
+    monkeypatch.setattr(web_app, "_stream_search", fake_stream)
+    monkeypatch.setattr(
+        web_app,
+        "build_reports",
+        lambda _results, usernames, session_key: {
+            "status": "completed",
+            "session_folder": f"search_{session_key}",
+            "usernames": usernames,
+            "individual_reports": [],
+            "graph_file": f"search_{session_key}/graph.html",
+            "found_count": 0,
+            "profile_reliability_version": 1,
+        },
+    )
+    monkeypatch.setattr(web_app, "persist_job_result", lambda *_args: None)
+
+    web_app.run_persistent_job(persistent_store, claimed)
+
+    assert received["usernames"] == stored["usernames"]
+    assert received["usernames"]
+    assert persistent_store.get_job(job_id)["status"] == "completed"
+
+
 def test_legacy_search_route_uses_the_same_governed_persistent_queue(
     client, persistent_store, monkeypatch
 ):

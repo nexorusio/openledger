@@ -129,6 +129,8 @@ from maigret.web.investigation_input import (
     MAX_IDENTIFIERS,
     MAX_TOKEN_LENGTH,
     MAX_USERNAME_LENGTH,
+    MAX_USER_SCANNER_USERNAME_TARGETS,
+    USER_SCANNER_USERNAME_PLATFORMS,
     build_investigation_plan,
     build_unified_investigation_plan,
     extract_profile_usernames,
@@ -2851,11 +2853,20 @@ def parse_investigation_submission(form):
             profile_url_resolver=resolve_profile_url_identifiers,
             require_route_confirmation=True,
         )
-        if plan.get('enable_user_scanner_email') and not user_scanner_available():
+        usernames = search_usernames(plan)
+        if plan.get('execution_mode') == 'exhaustive' and not usernames:
             raise InvestigationInputError(
-                'The bounded email route is unavailable in this deployment.'
+                'Full Scan requires at least one username, social handle, '
+                'supported profile URL, or selected username alias.'
             )
-        return search_usernames(plan), plan
+        if (
+            plan.get('enable_user_scanner_email')
+            or plan.get('enable_user_scanner_username')
+        ) and not user_scanner_available():
+            raise InvestigationInputError(
+                'The requested User Scanner route is unavailable in this deployment.'
+            )
+        return usernames, plan
 
     if form.getlist('identifier_type'):
         plan = build_investigation_plan(
@@ -3141,7 +3152,10 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     )
     if profile_search_result is not None and profile_search_result.stopped:
         return general_results
-    for username in usernames:
+    policy_flags = _profile_search_policy_flags(options)
+    maigret_enabled = policy_flags.get('maigret_enabled', True) is not False
+    maigret_usernames = usernames if maigret_enabled else ()
+    for username in maigret_usernames:
         if job['cancelled'] or (cancellation_check and cancellation_check()):
             q.put({'type': 'stopped', 'username': username.strip()})
             break
@@ -6040,6 +6054,24 @@ INVESTIGATION_PREVIEW_PUBLIC_ERRORS = {
     f"Select no more than {MAX_SELECTED_ALIASES} username aliases.": (
         f"Select no more than {MAX_SELECTED_ALIASES} username aliases."
     ),
+    "Select a supported username platform.": (
+        "Select a supported username platform."
+    ),
+    "Select at least one platform for User Scanner username verification.": (
+        "Select at least one platform for User Scanner username verification."
+    ),
+    "User Scanner username verification requires at least one username target. "
+    "Select a username alias or add a username, social handle, or supported "
+    "profile URL.": (
+        "User Scanner username verification requires at least one username target. "
+        "Select a username alias or add a username, social handle, or supported "
+        "profile URL."
+    ),
+    f"User Scanner username verification accepts no more than "
+    f"{MAX_USER_SCANNER_USERNAME_TARGETS} total account targets.": (
+        f"User Scanner username verification accepts no more than "
+        f"{MAX_USER_SCANNER_USERNAME_TARGETS} total account targets."
+    ),
     "The current bounded email route accepts one email per investigation.": (
         "The current bounded email route accepts one email per investigation."
     ),
@@ -6101,6 +6133,32 @@ def api_investigation_plan_preview():
     mode = payload.get("mode", "quick")
     if not isinstance(mode, str):
         return {"error": "Select Quick Scan or Full Scan."}, 400
+    optional_boolean_fields = (
+        "allow_user_scanner_vxtwitter",
+        "confirm_email_route",
+        "enable_archived_url_evidence",
+        "enable_github_profile_enrichment",
+        "enable_user_scanner_username",
+        "search_likely_username_aliases",
+    )
+    if any(
+        key in payload and not isinstance(payload[key], bool)
+        for key in optional_boolean_fields
+    ):
+        return {"error": "Investigation preview inputs are invalid."}, 400
+    requested_username_platforms = payload.get(
+        "user_scanner_username_platforms", []
+    )
+    if (
+        not isinstance(requested_username_platforms, list)
+        or len(requested_username_platforms) > len(USER_SCANNER_USERNAME_PLATFORMS)
+        or any(
+            not isinstance(value, str)
+            or value.strip().casefold() not in USER_SCANNER_USERNAME_PLATFORMS
+            for value in requested_username_platforms
+        )
+    ):
+        return {"error": "Investigation preview inputs are invalid."}, 400
 
     preview_form = {
         "investigation_token": raw_tokens,
@@ -6109,6 +6167,16 @@ def api_investigation_plan_preview():
     }
     if payload.get("search_likely_username_aliases") is True:
         preview_form["search_likely_username_aliases"] = "on"
+    if payload.get("enable_user_scanner_username") is True:
+        preview_form["enable_user_scanner_username"] = "on"
+        preview_form["user_scanner_platforms_present"] = "1"
+        preview_form["user_scanner_platform"] = requested_username_platforms
+    if payload.get("allow_user_scanner_vxtwitter") is True:
+        preview_form["allow_user_scanner_vxtwitter"] = "on"
+    if payload.get("enable_github_profile_enrichment") is True:
+        preview_form["enable_github_profile_enrichment"] = "on"
+    if payload.get("enable_archived_url_evidence") is True:
+        preview_form["enable_archived_url_evidence"] = "on"
     selected_aliases = payload.get("selected_aliases", [])
     alias_selection_present = payload.get("alias_selection_present") is True
     if (
@@ -6144,6 +6212,7 @@ def api_investigation_plan_preview():
             flags["maigret_enabled"] = False
             flags["search_first_enabled"] = False
             flags["user_scanner_enabled"] = False
+            flags["enrichment_providers_enabled"] = False
         plan = finalize_investigation_route_plan(
             plan,
             flags=flags,
@@ -6158,6 +6227,30 @@ def api_investigation_plan_preview():
         and not plan.get("email_route_confirmed")
     )
     has_collection_route = investigation_has_effective_collection_route(plan)
+    full_scan_without_username_targets = bool(
+        plan.get("execution_mode") == "exhaustive"
+        and not list(plan.get("search_targets") or [])
+    )
+    explicitly_requested_unavailable = any(
+        route.get("reason_code") == "server_disabled"
+        and route.get("route")
+        in {
+            "archived_profile_evidence",
+            "github_profile_enrichment",
+            "user_scanner_email",
+            "user_scanner_username",
+        }
+        for route in plan["route_plan"]["skipped_routes"]
+        if isinstance(route, dict)
+    )
+    full_scan_maigret_unavailable = bool(
+        plan.get("execution_mode") == "exhaustive"
+    ) and any(
+        route.get("route") == "maigret"
+        and route.get("reason_code") == "server_disabled"
+        for route in plan["route_plan"]["skipped_routes"]
+        if isinstance(route, dict)
+    )
     blocking_error = ""
     if not flags["profile_discovery_enabled"]:
         blocking_error = (
@@ -6169,6 +6262,21 @@ def api_investigation_plan_preview():
         )
     elif confirmation_required:
         blocking_error = "Confirm the bounded public email check before starting."
+    elif full_scan_without_username_targets:
+        blocking_error = (
+            "Full Scan requires at least one username, social handle, supported "
+            "profile URL, or selected username alias."
+        )
+    elif full_scan_maigret_unavailable:
+        blocking_error = (
+            "Public account discovery is unavailable because Maigret is disabled "
+            "by server policy."
+        )
+    elif explicitly_requested_unavailable:
+        blocking_error = (
+            "A requested optional collection route is unavailable. Deselect it "
+            "or ask an administrator to enable its provider."
+        )
     elif not has_collection_route:
         blocking_error = (
             "No authorized collection route is currently available for these "
@@ -6182,7 +6290,7 @@ def api_investigation_plan_preview():
             "alias_candidates": list(plan.get("alias_candidates") or []),
             "route_plan": plan["route_plan"],
             "requires_email_confirmation": confirmation_required,
-            "can_start": bool(has_collection_route and not confirmation_required),
+            "can_start": bool(has_collection_route and not blocking_error),
             "blocking_error": blocking_error,
         }
     )

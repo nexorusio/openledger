@@ -10,6 +10,7 @@ import pytest
 
 from maigret.web import app as web_app
 from maigret.web.case_store import CaseStore, persona_claims, utcnow
+from maigret.web.investigation_input import build_unified_investigation_plan
 from maigret.web.profile_discovery_policy import (
     govern_profile_discovery_options,
 )
@@ -385,6 +386,50 @@ async def test_disabled_or_misconfigured_search_degrades_to_existing_collector(
         "collector_started",
         "collector_error",
     ]
+
+
+@pytest.mark.asyncio
+async def test_quick_native_fallback_does_not_call_server_disabled_maigret(
+    monkeypatch,
+):
+    maigret_calls = []
+
+    async def native_search(*_args, **_kwargs):
+        return None
+
+    async def maigret_search(*_args, **_kwargs):
+        maigret_calls.append(True)
+        return {}
+
+    monkeypatch.setattr(web_app, "run_native_profile_search_phase", native_search)
+    monkeypatch.setattr(web_app, "maigret_search", maigret_search)
+    options = govern_profile_discovery_options(
+        {
+            "investigation_spec": build_unified_investigation_plan(
+                {
+                    "investigation_token": ["Alice Example"],
+                    "mode": "quick",
+                    "search_likely_username_aliases": "on",
+                }
+            )
+        },
+        environ={
+            "OPENLEDGER_MAIGRET_DISCOVERY_ENABLED": "false",
+            "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": "true",
+        },
+    )
+    usernames = [target["value"] for target in options["investigation_spec"]["search_targets"]]
+    events = queue.Queue()
+
+    await web_app._stream_search(
+        {"queue": events, "cancelled": False},
+        usernames,
+        options,
+    )
+
+    assert usernames
+    assert maigret_calls == []
+    assert not any(event.get("type") == "error" for event in list(events.queue))
 
 
 @pytest.mark.asyncio

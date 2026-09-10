@@ -131,6 +131,42 @@ def govern_profile_discovery_options(
                 flags=flags,
                 execution_mode=mode,
             )
+            search_targets = [
+                target
+                for target in list(specification.get("search_targets") or [])
+                if isinstance(target, Mapping) and target.get("value")
+            ]
+            if mode == "exhaustive" and not search_targets:
+                raise ProfileDiscoveryPolicyError(
+                    "Full Scan requires at least one username, social handle, "
+                    "supported profile URL, or selected username alias."
+                )
+            if (
+                mode == "exhaustive"
+                and search_targets
+                and not flags["maigret_enabled"]
+            ):
+                raise ProfileDiscoveryPolicyError(
+                    "Maigret profile discovery is disabled by server policy."
+                )
+            unavailable_optional_routes = {
+                str(route.get("route") or "")
+                for route in specification["route_plan"]["skipped_routes"]
+                if isinstance(route, Mapping)
+                and route.get("reason_code") == "server_disabled"
+                and route.get("route")
+                in {
+                    "archived_profile_evidence",
+                    "github_profile_enrichment",
+                    "user_scanner_email",
+                    "user_scanner_username",
+                }
+            }
+            if unavailable_optional_routes:
+                raise ProfileDiscoveryPolicyError(
+                    "A requested optional collection route is disabled by server "
+                    "policy."
+                )
             if not investigation_has_effective_collection_route(specification):
                 raise ProfileDiscoveryPolicyError(
                     "No authorized collection route is currently available for "
