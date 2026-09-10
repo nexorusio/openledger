@@ -77,6 +77,26 @@ def test_browser_uses_only_the_authoritative_plan_preview_for_classification():
     assert "classifyToken" not in script
 
 
+def test_plan_presents_conditional_unavailable_and_context_states_truthfully():
+    script = SCRIPT_PATH.read_text(encoding="utf-8")
+    styles = STYLE_PATH.read_text(encoding="utf-8")
+
+    assert "confirmation_required: {" in script
+    assert "state: 'conditional'" in script
+    assert "badge: 'Conditional'" in script
+    assert "context_only_no_outbound: {" in script
+    assert "state: 'context'" in script
+    assert "badge: 'Context only'" in script
+    assert "server_disabled: {" in script
+    assert "state: 'unavailable'" in script
+    assert "badge: 'Unavailable'" in script
+    assert "`${contextCount} context ${contextCount === 1 ? 'value' : 'values'}`" in script
+    assert "`${skippedRoutes.length} skipped`" not in script
+    assert ".investigation-route-item.is-conditional" in styles
+    assert ".investigation-route-item.is-context" in styles
+    assert ".investigation-route-item.is-unavailable" in styles
+
+
 def test_builder_has_reviewable_alias_selection_and_quick_full_controls():
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
     script = SCRIPT_PATH.read_text(encoding="utf-8")

@@ -45,10 +45,22 @@
         'profile_url',
         'public_url'
     ];
-    const routeReasons = {
-        confirmation_required: 'Confirmation required',
-        context_only_no_outbound: 'Context only · no outbound request',
-        server_disabled: 'Disabled by server policy'
+    const routePresentations = {
+        confirmation_required: {
+            state: 'conditional',
+            badge: 'Conditional',
+            detail: 'Confirmation required'
+        },
+        context_only_no_outbound: {
+            state: 'context',
+            badge: 'Context only',
+            detail: 'No outbound request'
+        },
+        server_disabled: {
+            state: 'unavailable',
+            badge: 'Unavailable',
+            detail: 'Disabled by server policy'
+        }
     };
 
     let tokens = Array.from(list.querySelectorAll('.investigation-token-chip'))
@@ -333,7 +345,7 @@
         return accepted;
     }
 
-    function renderRoute(route, state) {
+    function renderRoute(route, state, badgeText = '') {
         const item = document.createElement('div');
         item.className = `investigation-route-item is-${state}`;
         const copy = document.createElement('div');
@@ -347,12 +359,13 @@
                 ? `${requestCount} planned request${requestCount === 1 ? '' : 's'}`
                 : `${count} target${count === 1 ? '' : 's'}`;
         } else {
-            detail.textContent = routeReasons[route.reason_code] || 'Not included in this run';
+            const presentation = routePresentations[route.reason_code];
+            detail.textContent = presentation ? presentation.detail : 'Not included in this run';
         }
         copy.append(label, detail);
         const badge = document.createElement('span');
         badge.className = 'route-status';
-        badge.textContent = state === 'active' ? 'Active' : 'Skipped';
+        badge.textContent = badgeText || (state === 'active' ? 'Active' : 'Not included');
         item.append(copy, badge);
         return item;
     }
@@ -363,13 +376,51 @@
             ? routePlan.effective_routes : [];
         const skippedRoutes = Array.isArray(routePlan.skipped_routes)
             ? routePlan.skipped_routes : [];
+        const inactiveRoutes = skippedRoutes.map(route => ({
+            route,
+            presentation: routePresentations[route.reason_code] || {
+                state: 'excluded',
+                badge: 'Not included',
+                detail: 'Not included in this run'
+            }
+        }));
+        const conditionalCount = inactiveRoutes.filter(
+            item => item.presentation.state === 'conditional'
+        ).length;
+        const unavailableCount = inactiveRoutes.filter(
+            item => item.presentation.state === 'unavailable'
+        ).length;
+        const contextCount = inactiveRoutes.filter(
+            item => item.presentation.state === 'context'
+        ).length;
+        const excludedCount = inactiveRoutes.filter(
+            item => item.presentation.state === 'excluded'
+        ).length;
         const minutes = Math.round(Number(routePlan.budget_seconds || 0) / 60);
         const modeLabel = routePlan.requested_mode === 'full' ? 'Full Scan' : 'Quick Scan';
         previewMode.textContent = `${modeLabel} · ${minutes} min`;
-        previewSummary.textContent = `${tokens.length} classified ${tokens.length === 1 ? 'value' : 'values'} · ${activeRoutes.length} active ${activeRoutes.length === 1 ? 'route' : 'routes'}${skippedRoutes.length ? ` · ${skippedRoutes.length} skipped` : ''}.`;
+        const summaryParts = [
+            `${tokens.length} classified ${tokens.length === 1 ? 'value' : 'values'}`,
+            `${activeRoutes.length} active ${activeRoutes.length === 1 ? 'route' : 'routes'}`
+        ];
+        if (conditionalCount) {
+            summaryParts.push(`${conditionalCount} conditional ${conditionalCount === 1 ? 'route' : 'routes'}`);
+        }
+        if (unavailableCount) {
+            summaryParts.push(`${unavailableCount} unavailable ${unavailableCount === 1 ? 'route' : 'routes'}`);
+        }
+        if (contextCount) {
+            summaryParts.push(`${contextCount} context ${contextCount === 1 ? 'value' : 'values'}`);
+        }
+        if (excludedCount) summaryParts.push(`${excludedCount} not included`);
+        previewSummary.textContent = `${summaryParts.join(' · ')}.`;
         routeList.replaceChildren(
             ...activeRoutes.map(route => renderRoute(route, 'active')),
-            ...skippedRoutes.map(route => renderRoute(route, 'skipped'))
+            ...inactiveRoutes.map(item => renderRoute(
+                item.route,
+                item.presentation.state,
+                item.presentation.badge
+            ))
         );
         if (!routeList.children.length) {
             const empty = document.createElement('p');

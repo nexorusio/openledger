@@ -1283,7 +1283,10 @@ textarea.form-control {
     font-size: 0.66rem;
 }
 
-.investigation-route-item.is-skipped {
+.investigation-route-item.is-conditional,
+.investigation-route-item.is-unavailable,
+.investigation-route-item.is-context,
+.investigation-route-item.is-excluded {
     opacity: 0.72;
 }
 
@@ -1301,6 +1304,11 @@ textarea.form-control {
 .investigation-route-item.is-active .route-status {
     border-color: color-mix(in srgb, var(--ol-success) 38%, var(--ol-border));
     color: var(--ol-success);
+}
+
+.investigation-route-item.is-conditional .route-status {
+    border-color: color-mix(in srgb, var(--ol-warning) 38%, var(--ol-border));
+    color: var(--ol-warning);
 }
 
 .section-heading-row,
