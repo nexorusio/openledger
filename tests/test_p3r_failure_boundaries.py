@@ -379,7 +379,7 @@ def test_outer_worker_exception_remains_reconcilable_before_first_checkpoint(
     def crash(*_args, **_kwargs):
         raise RuntimeError('outer worker failure before accounting')
 
-    monkeypatch.setattr(worker, 'run_persistent_job', crash)
+    monkeypatch.setattr(worker, 'execute_profile_process', crash)
     worker.execute_job(store, claimed, shutdown_check=lambda: False)
     assert store.get_job(job_id)['status'] == 'running'
     assert not any(row['event']['type'] == 'done' for row in store.get_events(job_id))

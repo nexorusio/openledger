@@ -1697,6 +1697,7 @@ def test_approved_coordinates_are_validated_and_serialized(store):
         location["id"],
         "approved",
         "analyst",
+        note="Analyst verified the cited place point",
         latitude="-6.1754",
         longitude="106.8272",
     )
@@ -1748,12 +1749,14 @@ def test_ai_location_coordinates_remain_pending_until_human_approval(store):
     claim = store.get_persona(persona_id)["claims"][0]
     assert synced["diagnostics"]["accepted"] == 1
     assert claim["review_status"] == "pending"
-    assert claim["latitude"] == pytest.approx(-6.1754)
+    assert claim["latitude"] is None
+    assert claim['legacy_coordinates']['latitude'] == pytest.approx(-6.1754)
 
     store.review_claim(claim["id"], "approved", "analyst")
     approved = store.get_persona(persona_id)["claims"][0]
     assert approved["review_status"] == "approved"
-    assert approved["latitude"] == pytest.approx(-6.1754)
+    assert approved["latitude"] is None
+    assert approved['coordinate_selection']['action'] == 'unmapped'
 
 
 def test_ai_coordinates_do_not_silently_map_an_already_approved_location(store):

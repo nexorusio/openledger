@@ -826,13 +826,14 @@ def test_is_safe_report_image_url_rejects_non_global_ranges():
         assert _is_safe_report_image_url(value) is False, value
 
 
-def test_is_safe_report_image_url_allows_public_hosts():
-    # IP literals resolve without DNS, so this stays offline and deterministic.
-    assert _is_safe_report_image_url("https://1.1.1.1/avatar.png") is True
-    assert _is_safe_report_image_url("http://8.8.8.8/avatar.png") is True
+def test_is_safe_report_image_url_rejects_public_hosts_too():
+    # The PDF engine has no application-owned network controls. It must not be
+    # handed even apparently public resources after an application-side check.
+    assert _is_safe_report_image_url("https://1.1.1.1/avatar.png") is False
+    assert _is_safe_report_image_url("http://8.8.8.8/avatar.png") is False
 
 
-def test_pdf_link_callback_diverts_unsafe_to_local_blank():
+def test_pdf_link_callback_diverts_every_resource_to_local_blank():
     assert os.path.exists(_BLANK_IMAGE_PATH)
     # Unsafe URLs resolve to a local placeholder path, so xhtml2pdf never
     # fetches or reads them.
@@ -840,9 +841,10 @@ def test_pdf_link_callback_diverts_unsafe_to_local_blank():
     assert (
         _pdf_report_link_callback("http://169.254.169.254/x", "") == _BLANK_IMAGE_PATH
     )
-    # Safe public URLs pass through unchanged.
+    # Public URLs do not pass through unchanged either: xhtml2pdf would fetch
+    # them outside the bounded report-media client.
     url = "https://1.1.1.1/a.png"
-    assert _pdf_report_link_callback(url, "") == url
+    assert _pdf_report_link_callback(url, "") == _BLANK_IMAGE_PATH
 
 
 def test_pdf_report_does_not_fetch_unsafe_image(tmp_path):

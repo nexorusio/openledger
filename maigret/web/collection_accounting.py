@@ -92,10 +92,16 @@ def public_collection_accounting(value: Any) -> Optional[dict]:
     stages = value.get("stages")
     if not isinstance(stages, list) or len(stages) > 7:
         return None
+    causes = {None, 'operator_cancel', 'job_deadline', 'stage_deadline', 'cleanup_incomplete',
+              'persistence_failure', 'lease_lost', 'worker_shutdown'}
+    if value.get('stop_cause') not in causes:
+        return None
     cleaned = []
     seen = set()
     for row in stages:
         if not isinstance(row, Mapping):
+            return None
+        if row.get('stop_cause') not in causes:
             return None
         stage_id = row.get("stage_id")
         if stage_id not in ENGINES or stage_id in seen:
@@ -135,6 +141,7 @@ def public_collection_accounting(value: Any) -> Optional[dict]:
                 "unit": row["unit"],
                 "status": row["status"],
                 "reason": reason,
+                **({'stop_cause': row['stop_cause']} if 'stop_cause' in row else {}),
                 "cleanup_complete": row.get('cleanup_complete', True) is True,
                 **counts,
             }
@@ -144,6 +151,7 @@ def public_collection_accounting(value: Any) -> Optional[dict]:
         "revision": revision,
         "state": value["state"],
         "known": value["known"],
+        **({'stop_cause': value['stop_cause']} if 'stop_cause' in value else {}),
         "stages": cleaned,
     }
 

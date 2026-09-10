@@ -79,6 +79,9 @@ from maigret.web.profile_search_x import parse_x_profile_url
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
+from maigret.web.location_records import declare_tables, append_selection, coordinate_projection, list_sites
+
+affiliation_sites, location_selections = declare_tables(metadata, json_document)
 LEGACY_PROFILE_CLAIM_ENGINES = frozenset(
     {
         "github_public_profile",
@@ -3078,6 +3081,7 @@ class CaseStore:
                     "collection_accounting",
                     "collection_task_terminal",
                     "collection_task_cleanup",
+                    "lifecycle",
                 }:
                     return 0
             progress = dict(row["progress"] or {})
@@ -3163,6 +3167,12 @@ class CaseStore:
                 if current.get('revision', -1) >= snapshot['revision']:
                     return 0
                 progress['collection_accounting'] = snapshot
+            if event_type == 'lifecycle':
+                if event.get('phase') not in {'collection', 'stopping', 'finalizing'}:
+                    raise ValueError('Invalid collection lifecycle phase')
+                if event.get('cleanup_state', 'unknown') not in {'unknown', 'pending', 'complete', 'incomplete', 'terminated'}:
+                    raise ValueError('Invalid collection cleanup state')
+                progress['lifecycle'] = {key: event.get(key) for key in ('phase', 'stop_cause', 'cleanup_state')}
             if event_type == "start":
                 progress["total"] = event.get("total")
                 progress["username"] = event.get("username")
@@ -5447,6 +5457,7 @@ class CaseStore:
         )
         evidence_by_claim: Dict[str, list] = {}
         reviews_by_claim: Dict[str, list] = {}
+        coordinates_by_claim: Dict[str, list] = {}
         claim_ids = [claim_row["id"] for claim_row in claim_rows]
         if claim_ids:
             for evidence_row in connection.execute(
@@ -5471,6 +5482,9 @@ class CaseStore:
                 reviews_by_claim.setdefault(review_row["claim_id"], []).append(
                     review_row
                 )
+            for selection in connection.execute(select(location_selections).where(
+                location_selections.c.claim_id.in_(claim_ids)).order_by(location_selections.c.id.desc())).mappings():
+                coordinates_by_claim.setdefault(selection['claim_id'], []).append(selection)
         serialized_claims = []
         for claim_row in claim_rows:
             serialized_claims.append(
@@ -5478,6 +5492,7 @@ class CaseStore:
                     claim_row,
                     evidence_by_claim.get(claim_row["id"], []),
                     reviews_by_claim.get(claim_row["id"], []),
+                    coordinates_by_claim.get(claim_row["id"], []),
                 )
             )
         return {
@@ -5488,6 +5503,7 @@ class CaseStore:
             "display_name": row["display_name"],
             "created_at": _as_iso(row["created_at"]),
             "claims": serialized_claims,
+            "affiliation_sites": list_sites(self, persona_id, connection=connection),
         }
 
     def get_persona(self, persona_id: str) -> Optional[Dict[str, Any]]:
@@ -6804,6 +6820,7 @@ class CaseStore:
         note: str = "",
         latitude: Optional[str] = None,
         longitude: Optional[str] = None,
+        *, clear_coordinates: bool = False, coordinate_metadata=None,
     ) -> Optional[str]:
         """Record an auditable human decision and return the persona id."""
         if decision not in {"pending", "approved", "rejected", "uncertain"}:
@@ -6812,6 +6829,10 @@ class CaseStore:
         if not reviewer:
             raise ValueError("A reviewer is required")
         coordinates = self._validated_coordinates(latitude, longitude)
+        if coordinates and not str(note or '').strip():
+            raise ValueError('Explain the source and meaning of the selected coordinates')
+        if coordinates and clear_coordinates:
+            raise ValueError('Choose coordinates or clear coordinates, not both')
         now = utcnow()
         with self.engine.begin() as connection:
             claim = (
@@ -6820,6 +6841,8 @@ class CaseStore:
                         persona_claims.c.persona_id,
                         persona_claims.c.field_name,
                         persona_claims.c.source_engine,
+                        persona_claims.c.latitude,
+                        persona_claims.c.longitude,
                         personas.c.case_id,
                     )
                     .select_from(
@@ -6829,6 +6852,7 @@ class CaseStore:
                         )
                     )
                     .where(persona_claims.c.id == claim_id)
+                    .with_for_update(of=persona_claims)
                 )
                 .mappings()
                 .first()
@@ -6863,10 +6887,35 @@ class CaseStore:
                     original_engine,
                 )
             if coordinates:
-                values.update(
-                    latitude=coordinates[0],
-                    longitude=coordinates[1],
-                )
+                values.update(latitude=coordinates[0], longitude=coordinates[1])
+            elif clear_coordinates:
+                values.update(latitude=None, longitude=None)
+            if claim['field_name'] in {'address', 'current_location'}:
+                previous = connection.execute(select(location_selections.c.snapshot).where(
+                    location_selections.c.claim_id == claim_id).order_by(location_selections.c.id.desc()).limit(1)).scalar_one_or_none()
+                if coordinates:
+                    supplied = dict(coordinate_metadata or {})
+                    if supplied.get('method', 'analyst_selected') != 'analyst_selected':
+                        raise ValueError('Person coordinates require an explicit analyst selection')
+                    snapshot = {'action': 'select', 'latitude': coordinates[0], 'longitude': coordinates[1],
+                                'method': 'analyst_selected', 'precision': supplied.get('precision', 'analyst_specified'),
+                                'source_url': str(supplied.get('source_url') or '')[:2000],
+                                'source_claim_id': claim_id, 'validation': 'finite_range_only',
+                                'source_evidence': [dict(record) for record in connection.execute(
+                                    select(claim_evidence.c.id, claim_evidence.c.source_url, claim_evidence.c.source_name)
+                                    .where(claim_evidence.c.claim_id == claim_id)).mappings()]}
+                elif clear_coordinates:
+                    snapshot = {'action': 'clear', 'method': 'analyst_selected', 'source_claim_id': claim_id}
+                else:
+                    # Approval of text never adopts AI or legacy coordinates.
+                    snapshot = dict(previous or {'action': 'unmapped', 'method': 'legacy_unknown',
+                                                 'source_claim_id': claim_id})
+                if previous is None and claim.get('latitude') is not None:
+                    snapshot['previous_unreviewed_coordinates'] = {
+                        'latitude': claim.get('latitude'), 'longitude': claim.get('longitude'),
+                        'method': 'legacy_unknown'}
+                append_selection(connection, location_selections, claim_id=claim_id, decision=decision,
+                                 reviewer=reviewer, reason=note, snapshot=snapshot)
             connection.execute(
                 update(persona_claims)
                 .where(persona_claims.c.id == claim_id)
@@ -8699,7 +8748,7 @@ class CaseStore:
         }
 
     @staticmethod
-    def _serialize_claim(claim_row, evidence_rows, review_rows) -> Dict[str, Any]:
+    def _serialize_claim(claim_row, evidence_rows, review_rows, coordinate_rows=()) -> Dict[str, Any]:
         legacy_untriaged = _legacy_untriaged_source_details(
             claim_row["source_engine"]
         )
@@ -8743,6 +8792,8 @@ class CaseStore:
             "normalized_value": claim_row["normalized_value"],
             "latitude": claim_row["latitude"],
             "longitude": claim_row["longitude"],
+            **(coordinate_projection(dict(claim_row), coordinate_rows)
+               if claim_row['field_name'] in {'address', 'current_location'} else {}),
             "evidence": active_evidence,
             "retired_evidence": retired_evidence,
             "reviews": [
@@ -8756,7 +8807,7 @@ class CaseStore:
             ],
         }
 
-    def request_cancel(self, job_id: str) -> bool:
+    def request_cancel(self, job_id: str, *, requested_by='local-operator', origin='operator') -> bool:
         now = utcnow()
         event_types = []
         with self.engine.begin() as connection:
@@ -8787,6 +8838,8 @@ class CaseStore:
                     ),
                     "usernames": list(row["usernames"] or []),
                     "session_folder": f"search_{job_id}",
+                    "lifecycle": {"phase": "terminal", "stop_cause": "operator_cancel",
+                                  "cleanup_state": "not_required"},
                 }
                 connection.execute(
                     update(investigation_jobs)
@@ -8807,6 +8860,7 @@ class CaseStore:
                 if isinstance(options.get("governed_pivot_plan"), Mapping):
                     event_types.append("cancel_requested")
                 event_types.append("cancelled")
+                event_types.append("done")
             else:
                 connection.execute(
                     update(investigation_jobs)
@@ -8819,8 +8873,14 @@ class CaseStore:
                     )
                 )
                 event_types.append("cancel_requested")
-        for event_type in event_types:
-            self.append_event(job_id, {"type": event_type})
+            for event_type in event_types:
+                event = {'type': event_type, 'stop_cause': 'operator_cancel',
+                         'requested_by': str(requested_by or 'local-operator')[:200],
+                         'origin': str(origin or 'operator')[:100], 'requested_at': now.isoformat()}
+                if event_type == 'done':
+                    event.update(status='cancelled', reason='operator_cancel')
+                connection.execute(insert(investigation_events).values(
+                    job_id=job_id, event=event, created_at=now))
         return True
 
     def is_cancel_requested(self, job_id: str) -> bool:
@@ -8910,7 +8970,8 @@ class CaseStore:
         return bool(updated.rowcount)
 
     def mark_stale_running(
-        self, stale_after_seconds: int = WORKER_STALE_AFTER_SECONDS
+        self, stale_after_seconds: int = WORKER_STALE_AFTER_SECONDS,
+        *, job_id=None, worker_id=None, stop_cause='lease_lost',
     ) -> int:
         cutoff = utcnow() - timedelta(seconds=max(0, stale_after_seconds))
         now = utcnow()
@@ -8923,6 +8984,11 @@ class CaseStore:
                 or_(investigation_jobs.c.heartbeat_at.is_(None),
                     investigation_jobs.c.heartbeat_at < cutoff),
             )
+            if job_id is not None:
+                if not worker_id:
+                    raise ValueError('Scoped reconciliation requires the previous worker lease')
+                stale_statement = stale_statement.where(investigation_jobs.c.id == job_id,
+                                                        investigation_jobs.c.worker_id == worker_id)
             if self.engine.dialect.name == 'postgresql':
                 stale_statement = stale_statement.with_for_update(skip_locked=True)
             stale_rows = list(connection.execute(stale_statement).mappings())
@@ -8973,6 +9039,10 @@ class CaseStore:
                     accounting = {'schema_version': 1, 'revision': 0,
                                   'state': 'interrupted', 'known': False, 'stages': []}
                 progress['collection_accounting'] = accounting
+                lifecycle = {'phase': 'terminal', 'stop_cause': stop_cause,
+                             'cleanup_state': 'terminated' if job_id else 'unknown'}
+                progress['lifecycle'] = lifecycle
+                retained['lifecycle'] = lifecycle
                 retained.update(status='interrupted', collection_status='interrupted',
                                 collection_accounting=accounting, collection_message=message)
                 connection.execute(update(investigation_jobs).where(
@@ -8983,7 +9053,7 @@ class CaseStore:
                 connection.execute(insert(investigation_events).values(
                     job_id=row['id'], created_at=now,
                     event={'type': 'done', 'status': 'interrupted',
-                           'reason': 'worker_lease_lost', 'collection_accounting': accounting},
+                           'reason': stop_cause, 'collection_accounting': accounting, 'lifecycle': lifecycle},
                 ))
                 if native and not connection.scalar(select(profile_search_audits.c.id).where(
                     profile_search_audits.c.job_id == row['id']

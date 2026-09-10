@@ -64,8 +64,15 @@ class AsyncioQueueGeneratorExecutor:
             1, kwargs.get("max_outstanding", self.workers_count)
         )
         self.execution_id = str(kwargs.get("execution_id", "executor"))
+        # Admission can wait for a cooperative timed-out child, but only
+        # within the same bounded cleanup budget used by finalization.
+        self.cleanup_timeout = min(
+            DEFAULT_CLEANUP_SECONDS,
+            max(0.0, float(kwargs.get("cleanup_timeout", DEFAULT_CLEANUP_SECONDS))),
+        )
         self.execution_time = 0.0
         self.cleanup_incomplete = False
+        self._admission_cleanup_deadline: Optional[float] = None
         # Retained until their callbacks run.  They are not awaited during
         # finalization because cancellation cleanup may intentionally or
         # accidentally suppress cancellation forever.
@@ -78,6 +85,18 @@ class AsyncioQueueGeneratorExecutor:
     def pending_cleanup_count(self) -> int:
         """Number of cancellation-cleanup tasks still running."""
         return sum(1 for task in self._cleaning_tasks if not task.done())
+
+    @property
+    def remaining_cleanup_budget(self) -> float:
+        """Unspent admission-cleanup time for the current executor run.
+
+        ``checking`` uses this for finalization so a resistant source cannot
+        receive the configured cleanup budget once during admission and again
+        after all pending work has already been classified.
+        """
+        if self._admission_cleanup_deadline is None:
+            return self.cleanup_timeout
+        return max(0.0, self._admission_cleanup_deadline - time.monotonic())
 
     @staticmethod
     def _opaque_id(*parts: object) -> str:
@@ -201,6 +220,35 @@ class AsyncioQueueGeneratorExecutor:
                 # failures are handled by _notify and are never swallowed.
                 return
 
+    def _report_completed_cleanup(self) -> None:
+        """Publish completed cleanup transitions without waiting for survivors."""
+        for metadata in self._completed_cleanup:
+            task_id = str(metadata["task_id"])
+            state_key = (task_id, "complete")
+            if state_key not in self._reported_cleanup_states:
+                self._notify_cleanup(metadata, "complete")
+                self._reported_cleanup_states.add(state_key)
+        self._completed_cleanup.clear()
+        self._cleaning_tasks.intersection_update(
+            task for task in self._cleaning_tasks if not task.done()
+        )
+
+    async def _wait_for_cleanup_capacity(self, timeout: float) -> None:
+        """Wait for one cleanup child only while admission is saturated.
+
+        A completed child frees one real slot.  Waiting for every child here
+        would strand healthy pending work behind one cancellation-resistant
+        source even though capacity is available.
+        """
+        pending = {task for task in self._cleaning_tasks if not task.done()}
+        if pending and timeout > 0.0:
+            await asyncio.wait(
+                pending, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+            )
+        # Run done callbacks before testing the occupancy invariant.
+        await asyncio.sleep(0)
+        self._report_completed_cleanup()
+
     async def drain_cleanup(self, timeout: float = DEFAULT_CLEANUP_SECONDS) -> bool:
         """Wait at most ``timeout`` for tracked cancellation cleanup.
 
@@ -215,16 +263,7 @@ class AsyncioQueueGeneratorExecutor:
             await asyncio.wait(pending, timeout=timeout)
             # Run done callbacks before exposing the final state to callers.
             await asyncio.sleep(0)
-        for metadata in self._completed_cleanup:
-            task_id = str(metadata["task_id"])
-            state_key = (task_id, "complete")
-            if state_key not in self._reported_cleanup_states:
-                self._notify_cleanup(metadata, "complete")
-                self._reported_cleanup_states.add(state_key)
-        self._completed_cleanup.clear()
-        self._cleaning_tasks.intersection_update(
-            task for task in self._cleaning_tasks if not task.done()
-        )
+        self._report_completed_cleanup()
         self.cleanup_incomplete = bool(self._cleaning_tasks)
         if self.cleanup_incomplete:
             for task in self._cleaning_tasks:
@@ -321,10 +360,11 @@ class AsyncioQueueGeneratorExecutor:
     async def run(self, queries: Iterable[TaskSpec]):
         """Yield one native/default result for every planned task.
 
-        Errors and timeouts yield their task-specific fallback.  If occupied
-        cleanup reaches ``max_outstanding``, remaining tasks are never started
-        and yield their ``unattempted`` fallback.  This preserves complete
-        accounting without waiting forever for a cancellation-resistant task.
+        Errors and timeouts yield their task-specific fallback.  If timed-out
+        children occupy ``max_outstanding``, admission waits once, within the
+        configured cleanup budget, for cooperative cleanup to release capacity.
+        A cancellation-resistant child still prevents replacement admission;
+        remaining work then yields its ``unattempted`` fallback.
         """
         start_time = time.monotonic()
         pending: Deque[Tuple[int, TaskSpec]] = deque(enumerate(queries))
@@ -339,13 +379,17 @@ class AsyncioQueueGeneratorExecutor:
         workers: Dict[asyncio.Task, Tuple[int, TaskSpec, Dict[str, object]]] = {}
         cancelled = False
         terminal_error: Optional[BaseException] = None
+        # This deadline begins only when cleanup actually blocks admission. It
+        # is not reset by each event-loop turn, so cancellation-resistant
+        # sources cannot extend the collection indefinitely.
+        admission_cleanup_deadline: Optional[float] = None
 
         try:
             while pending or workers:
                 while (
                     pending
                     and len(workers) < self.workers_count
-                    and len(workers) + len(self._cleaning_tasks) < self.max_outstanding
+                    and len(workers) + self.pending_cleanup_count < self.max_outstanding
                 ):
                     ordinal, task = pending.popleft()
                     metadata = self._metadata(task, ordinal)
@@ -353,9 +397,41 @@ class AsyncioQueueGeneratorExecutor:
                     workers[worker] = (ordinal, task, metadata)
 
                 if not workers:
-                    for result in self._emit_unattempted(
-                        pending, "outstanding_limit_reached"
-                    ):
+                    # A timeout wrapper can finish before its child completes
+                    # cancellation cleanup.  Preserve the occupied slot until
+                    # the child is actually done, but give cooperative cleanup
+                    # a bounded chance to release capacity before classifying
+                    # healthy pending work as unattempted.
+                    if pending and self.pending_cleanup_count:
+                        if admission_cleanup_deadline is None:
+                            admission_cleanup_deadline = (
+                                time.monotonic() + self.cleanup_timeout
+                            )
+                            self._admission_cleanup_deadline = (
+                                admission_cleanup_deadline
+                            )
+                        remaining = max(
+                            0.0, admission_cleanup_deadline - time.monotonic()
+                        )
+                        await self._wait_for_cleanup_capacity(remaining)
+                        if self.pending_cleanup_count < self.max_outstanding:
+                            # Keep the original deadline while any source is
+                            # still alive.  A resistant source therefore never
+                            # receives a fresh cleanup budget on later waves.
+                            if not self.pending_cleanup_count:
+                                admission_cleanup_deadline = None
+                                self._admission_cleanup_deadline = None
+                            continue
+                        # The bounded admission wait expired with every slot
+                        # still occupied.  Surface the accurate cleanup state
+                        # before marking later work unattempted.
+                        await self.drain_cleanup(0)
+                    reason = (
+                        "cleanup_incomplete"
+                        if self.pending_cleanup_count
+                        else "outstanding_limit_reached"
+                    )
+                    for result in self._emit_unattempted(pending, reason):
                         yield result
                     break
 

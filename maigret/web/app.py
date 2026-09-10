@@ -16,6 +16,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 import base64
 import io
 import logging
+import math
 import os
 import asyncio
 import hashlib
@@ -51,6 +52,7 @@ from maigret.checking import build_cloudflare_bypass_config
 from maigret.result import MaigretCheckStatus
 from maigret.sites import MaigretDatabase
 from maigret.report import generate_report_context
+from maigret.web.artifact_execution import build_bounded_artifacts
 from maigret.utils import is_country_tag, is_plausible_username
 from maigret.web.case_store import (
     ActiveInvestigationError,
@@ -112,7 +114,7 @@ from maigret.web.geocoding import GeocodingError, geocode_place_center
 from maigret.web.execution_budget import ExecutionBudget
 from maigret.web.collection_accounting import public_collection_accounting
 from maigret.web.collection_orchestration import (
-    StageSpec, StageResult, StageCounts, run_collection_stages, profile_stage_weights,
+    StopCause, StageSpec, StageResult, StageCounts, run_collection_stages, profile_stage_weights,
 )
 from maigret.web.profile_discovery_policy import (
     ProfileDiscoveryPolicyError,
@@ -1552,7 +1554,7 @@ def normalize_persisted_result(session_key: str, result: Dict[str, Any]):
     normalized['session_folder'] = expected_folder
     normalized['usernames'] = usernames
     if status == 'completed':
-        if not isinstance(normalized.get('graph_file'), str) or not isinstance(
+        if normalized.get('graph_file') is not None and not isinstance(normalized.get('graph_file'), str) or not isinstance(
             normalized.get('individual_reports'), list
         ):
             raise ValueError('Incomplete report session metadata')
@@ -1750,7 +1752,12 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
         budget_seconds = 1800 if mode == 'exhaustive' else 600
     collection_status = str(source.get('collection_status') or '').strip()
     progress = source.get('progress') if isinstance(source.get('progress'), dict) else {}
+    lifecycle = source.get('lifecycle') or progress.get('lifecycle') or {}
+    terminal = source.get('status') in TERMINAL_STATUSES
     runtime = {
+        'phase': 'terminal' if terminal else lifecycle.get('phase', 'stopping' if source.get('status') == 'cancel_requested' else 'collection'),
+        'stop_cause': lifecycle.get('stop_cause'),
+        'cleanup_state': lifecycle.get('cleanup_state', 'unknown'),
         'status': str(source.get('status') or 'queued'),
         'mode': mode,
         'mode_label': 'Full Scan' if mode == 'exhaustive' else 'Quick Scan',
@@ -2724,6 +2731,7 @@ def build_reports(
     collector_observations=None,
     write_files=True,
     reports_root=None,
+    projection_cache=None,
 ):
     """Write per-username CSV/JSON/PDF/HTML reports + combined graph to disk.
 
@@ -2736,19 +2744,36 @@ def build_reports(
     if write_files:
         os.makedirs(session_folder, mode=0o700, exist_ok=True)
         graph_path = os.path.join(session_folder, "combined_graph.html")
-        maigret.report.save_graph_report(
-            graph_path,
-            supported_general_results(general_results, detector_health_registry),
-            MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"]),
-        )
+        try:
+            maigret.report.save_graph_report(
+                graph_path,
+                supported_general_results(general_results, detector_health_registry),
+                MaigretDatabase().load_from_path(app.config["MAIGRET_DB_FILE"]),
+            )
+        except Exception as error:
+            record_internal_error('Optional graph artifact failed', error)
+
+    def artifact(path):
+        relative = os.path.relpath(path, root)
+        available = bool(write_files and os.path.isfile(path) and os.path.getsize(path))
+        return {'available': available, 'filename': relative if available else None,
+                'message': '' if available else 'Artifact unavailable; collected evidence is retained.'}
+
 
     individual_reports = []
     found_count = 0
     candidate_count = 0
     suppressed_count = 0
     raw_claimed_count = 0
+    report_names = {}
     for username, id_type, results in general_results:
         safe_username = sanitize_username_for_path(username)
+        # Distinct identifiers can normalize to the same filename. Keep every
+        # report independently addressable without changing ordinary legacy names.
+        identity = (username, id_type)
+        if safe_username in report_names and report_names[safe_username] != identity:
+            safe_username += '_' + hashlib.sha256(repr(identity).encode()).hexdigest()[:12]
+        report_names[safe_username] = identity
         report_base = os.path.join(session_folder, f"report_{safe_username}")
 
         csv_path = f"{report_base}.csv"
@@ -2757,14 +2782,21 @@ def build_reports(
         html_path = f"{report_base}.html"
 
         if write_files:
-            context = generate_report_context(general_results)
-
-            maigret.report.save_csv_report(csv_path, username, results)
-            maigret.report.save_json_report(
-                json_path, username, results, report_type='ndjson'
+            context = generate_report_context([(username, id_type, results)])
+            writers = (
+                (csv_path, lambda: maigret.report.save_csv_report(csv_path, username, results)),
+                (json_path, lambda: maigret.report.save_json_report(json_path, username, results, report_type='ndjson')),
+                (pdf_path, lambda: maigret.report.save_pdf_report(pdf_path, context)),
+                (html_path, lambda: maigret.report.save_html_report(html_path, context)),
             )
-            maigret.report.save_pdf_report(pdf_path, context)
-            maigret.report.save_html_report(html_path, context)
+            for path, writer in writers:
+                try:
+                    writer()
+                except Exception as error:
+                    # Partial converter output is never a declared artifact.
+                    if os.path.isfile(path):
+                        os.unlink(path)
+                    record_internal_error('Optional report artifact failed', error)
 
         claimed_profiles = []
         candidate_profiles = []
@@ -2772,15 +2804,20 @@ def build_reports(
         diagnostics = {'claimed': 0, 'available': 0, 'unknown': 0, 'illegal': 0}
         major_platforms = []
         for site_name, site_data in results.items():
-            state, reason = result_status_details(site_data)
+            cache_key = (username, id_type, site_name)
+            cached = projection_cache.get(cache_key) if projection_cache is not None else None
+            if cached is not None and cached[0] is site_data:
+                state, reason, profile = cached[1:]
+            else:
+                state, reason = result_status_details(site_data)
+                profile = profile_detection_record(username, site_name, site_data,
+                    detector_health_registry=detector_health_registry)
+                if projection_cache is not None:
+                    # StreamNotify replaces a site dictionary for every new native
+                    # result. Retain its object to prevent identity reuse.
+                    projection_cache[cache_key] = (site_data, state, reason, profile)
             diagnostics[state] = diagnostics.get(state, 0) + 1
             status = site_data.get('status')
-            profile = profile_detection_record(
-                username,
-                site_name,
-                site_data,
-                detector_health_registry=detector_health_registry,
-            )
             if site_name.lower() in MAJOR_PLATFORM_NAMES:
                 major_platforms.append(
                     {
@@ -2828,10 +2865,21 @@ def build_reports(
             }
         )
 
+    for report in individual_reports:
+        if write_files:
+            report['artifacts'] = {
+                kind: artifact(os.path.join(root, report[f'{kind}_file']))
+                for kind in ('csv', 'json', 'pdf', 'html')
+            }
+        for kind in ('csv', 'json', 'pdf', 'html'):
+            if not write_files or not report['artifacts'][kind]['available']:
+                report[f'{kind}_file'] = None
     return {
+        **({'graph_artifact': artifact(os.path.join(session_folder, 'combined_graph.html'))} if write_files else {}),
         'status': 'completed',
         'session_folder': f"search_{session_key}",
-        'graph_file': os.path.join(f"search_{session_key}", "combined_graph.html"),
+        'graph_file': (os.path.join(f"search_{session_key}", "combined_graph.html")
+                       if write_files and artifact(os.path.join(session_folder, 'combined_graph.html'))['available'] else None),
         'usernames': usernames,
         'individual_reports': individual_reports,
         'found_count': found_count,
@@ -3287,9 +3335,13 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     weights = profile_stage_weights()
 
     def stopped():
-        return (bool(job.get('cancelled')) or bool(job.get('cleanup_incomplete'))
-                or bool(job.get('persistence_failed'))
-                or bool(cancellation_check and cancellation_check()))
+        if job.get('persistence_failed'):
+            return StopCause.PERSISTENCE_FAILURE
+        if job.get('cleanup_incomplete'):
+            return StopCause.CLEANUP_INCOMPLETE
+        if job.get('cancelled'):
+            return StopCause.OPERATOR_CANCEL
+        return cancellation_check() if cancellation_check else False
 
     def checkpoint():
         if job.get('persistence_failed'):
@@ -3299,6 +3351,7 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
             snapshot = build_reports(
                 general_results, list(usernames), scope,
                 collector_observations=observations, write_files=False,
+                projection_cache=job.setdefault('checkpoint_projection_cache', {}),
             )
             snapshot['collection_accounting'] = job.get('collection_accounting')
             try:
@@ -3315,7 +3368,7 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
         if job.get('maigret_cleanup_incomplete'):
             for row in snapshot['stages']:
                 if row['stage_id'] == 'maigret':
-                    row.update(cleanup_complete=False, reason='cleanup_incomplete', status='interrupted')
+                    row.update(cleanup_complete=False, reason='cleanup_incomplete', status='interrupted', stop_cause='cleanup_incomplete')
             if snapshot['state'] != 'running':
                 snapshot['state'] = 'interrupted'
         q.put({'type': 'collection_accounting', 'collection_accounting': snapshot})
@@ -3369,11 +3422,16 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
 
     async def maigret_stage(context):
         failures = 0
-        for username in usernames:
+        for target_index, username in enumerate(usernames):
             if context.is_cancelled():
                 raise asyncio.CancelledError()
+            # Divide the remaining stage time among remaining aliases. An early
+            # slow alias cannot consume the entire selected Maigret allocation.
+            target_deadline = time.monotonic() + max(0.0, context.remaining_seconds() - min(PERSISTENT_BUDGET_CLEANUP_SECONDS, context.remaining_seconds() * 0.1)) / max(1, len(usernames) - target_index)
+            def target_stopped():
+                return context.is_cancelled() or time.monotonic() >= target_deadline
             notify = StreamNotify(q, username.strip(),
-                                  cancellation_check=context.is_cancelled,
+                                  cancellation_check=target_stopped,
                                   stage_context=context, checkpoint=checkpoint,
                                   observation_count=lambda: sum(len(row[2]) for row in general_results))
             # The notifier dictionary remains reachable while the source is
@@ -3384,12 +3442,22 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
             job['task'] = task
             completed = False
             try:
+                done, _ = await asyncio.wait({task}, timeout=max(0.0, target_deadline - time.monotonic()))
+                if not done:
+                    task.cancel()
+                    done, _ = await asyncio.wait({task}, timeout=PERSISTENT_BUDGET_CLEANUP_SECONDS)
+                    if not done:
+                        job['cleanup_incomplete'] = True
+                        notify.cleanup_incomplete = True
+                        raise asyncio.CancelledError()
                 results = await task
                 notify.results.update(results or {})
                 completed = True
             except asyncio.CancelledError:
-                q.put({'type': 'stopped', 'collector': 'maigret', 'username': username.strip()})
-                raise
+                q.put({'type': 'stopped', 'collector': 'maigret', 'username': username.strip(),
+                       'reason': 'target_budget_exhausted' if not context.is_cancelled() else 'source_stopped'})
+                if context.is_cancelled() or job.get('cleanup_incomplete'):
+                    raise
             except Exception as error:
                 failures += 1
                 circuit = provider_circuit_event(error, 'maigret')
@@ -3589,6 +3657,8 @@ def finalize_stream_job(
     execution_budget=None,
     worker_id=None,
     collection_accounting=None,
+    stop_check=None,
+    lifecycle=None,
 ):
     """Persist one terminal scan result and publish its final progress event."""
     collector_observations = list(collector_observations or [])
@@ -3621,6 +3691,8 @@ def finalize_stream_job(
         nonlocal published_folder
         if collection_accounting is not None:
             result['collection_accounting'] = collection_accounting
+        if lifecycle is not None:
+            result['lifecycle'] = dict(lifecycle, phase='terminal')
         if durable_collection:
             terminal = {'type': 'done', 'status': 'partial' if partial_status and result['status'] == 'completed' else result['status'],
                         'reason': partial_status, 'collection_accounting': collection_accounting}
@@ -3629,7 +3701,7 @@ def finalize_stream_job(
 
             def publish():
                 nonlocal published_folder
-                if staging_root and result['status'] == 'completed':
+                if staging_root and result['status'] == 'completed' and os.path.isdir(os.path.join(staging_root, f'search_{job_id}')):
                     staged_folder = os.path.join(staging_root, f'search_{job_id}')
                     destination = os.path.join(app.config['REPORTS_FOLDER'], f'search_{job_id}')
                     os.rename(staged_folder, destination)
@@ -3647,10 +3719,19 @@ def finalize_stream_job(
                     cancelled_accounting = dict(collection_accounting)
                     cancelled_accounting.update(state='cancelled', revision=collection_accounting['revision'] + 1)
                     result['collection_accounting'] = cancelled_accounting
+                    result['lifecycle'] = dict(result.get('lifecycle') or {},
+                                               phase='terminal', stop_cause='operator_cancel')
                     terminal.update(status='partial' if result['status'] == 'completed' else result['status'],
                                     reason='cancelled', collection_accounting=cancelled_accounting)
+                    result.update(graph_file=None, graph_artifact={'available': False, 'filename': None},
+                                  artifact_status='unavailable')
+                    for report in result.get('individual_reports', []):
+                        report['artifacts'] = {kind: {'available': False, 'filename': None}
+                                               for kind in ('csv', 'json', 'pdf', 'html')}
+                        for kind in report['artifacts']:
+                            report[f'{kind}_file'] = None
                     persisted = record_job_result(job_id, result, worker_id=worker_id,
-                                                  publication=publish, terminal_event=terminal)
+                                                  terminal_event=terminal)
             except BaseException:
                 if published_folder:
                     shutil.rmtree(published_folder, ignore_errors=True)
@@ -3679,9 +3760,37 @@ def finalize_stream_job(
                 os.makedirs(app.config['REPORTS_FOLDER'], mode=0o700, exist_ok=True)
                 staging_root = tempfile.mkdtemp(prefix=f'p3r-{job_id}-', dir=app.config['REPORTS_FOLDER'])
                 report_kwargs['reports_root'] = staging_root
-            result = build_reports(
-                general_results, usernames, job_id, **report_kwargs
-            )
+            if durable_collection:
+                # The parent owns permitted evidence before optional conversion begins.
+                result = build_reports(general_results, usernames, job_id,
+                                       collector_observations=collector_observations,
+                                       write_files=False)
+                event_sink.put({'type': 'lifecycle', 'phase': 'finalizing',
+                                'stop_cause': (lifecycle or {}).get('stop_cause'),
+                                'cleanup_state': (lifecycle or {}).get('cleanup_state', 'complete')})
+                try:
+                    rendered = build_bounded_artifacts(
+                        general_results, usernames, job_id, kwargs=report_kwargs,
+                        config={key: app.config[key] for key in ('MAIGRET_DB_FILE', 'REPORTS_FOLDER')},
+                        stop_check=stop_check,
+                    )
+                except Exception as error:
+                    record_internal_error('Optional artifact execution failed', error)
+                    rendered = None
+            else:
+                rendered = build_reports(general_results, usernames, job_id, **report_kwargs)
+            if rendered is not None:
+                result = rendered
+            else:
+                result['artifact_status'] = 'unavailable'
+                result['artifact_message'] = 'Optional report generation did not finish; collected evidence is retained.'
+                result['graph_artifact'] = {'available': False, 'filename': None}
+                for report in result.get('individual_reports', []):
+                    report['artifacts'] = {kind: {'available': False, 'filename': None}
+                                           for kind in ('csv', 'json', 'pdf', 'html')}
+                if staging_root:
+                    shutil.rmtree(staging_root, ignore_errors=True)
+                    staging_root = None
             result['started_at'] = started_at
             if execution_budget:
                 result['execution_budget'] = dict(execution_budget)
@@ -3856,9 +3965,13 @@ async def watch_persistent_job_stop(
     """Actively interrupt an in-flight collector after a durable stop request."""
     while not stream_task.done():
         cancel_requested = store.is_cancel_requested(job_id)
-        shutdown_requested = bool(shutdown_check and shutdown_check())
+        shutdown_requested = shutdown_check() if shutdown_check else False
         if cancel_requested or shutdown_requested:
+            cause = (shutdown_requested if isinstance(shutdown_requested, str) else 'worker_shutdown') if shutdown_requested else 'operator_cancel'
+            runtime_job['stop_cause'] = cause
             runtime_job['cancelled'] = cancel_requested and not shutdown_requested
+            runtime_job['queue'].put({'type': 'lifecycle', 'phase': 'stopping',
+                                      'stop_cause': cause, 'cleanup_state': 'pending'})
             stream_task.cancel()
             return 'interrupted' if shutdown_requested else 'cancelled'
         await asyncio.sleep(PERSISTENT_CANCEL_POLL_SECONDS)
@@ -3891,6 +4004,7 @@ async def await_persistent_stream(
         return list(runtime_job.get('general_results') or [])
 
     runtime_job['budget_exhausted'] = True
+    runtime_job['stop_cause'] = 'job_deadline'
     stream_task.cancel()
     done, _pending = await asyncio.wait(
         {stream_task},
@@ -5546,9 +5660,9 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
                 usernames,
                 options,
                 cancellation_check=lambda: (
-                    store.is_cancel_requested(job_id)
-                    or bool(shutdown_check and shutdown_check())
-                    or execution_budget.is_exhausted()
+                    (shutdown_check() if shutdown_check else False)
+                    or ('operator_cancel' if store.is_cancel_requested(job_id) else False)
+                    or ('job_deadline' if execution_budget.is_exhausted() else False)
                 ),
             )
         )
@@ -5587,11 +5701,16 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
             loop.run_until_complete(
                 asyncio.gather(stop_watcher, return_exceptions=True)
             )
-        if stream_task is not None and not stream_task.done():
-            stream_task.cancel()
-            loop.run_until_complete(
-                asyncio.wait({stream_task}, timeout=0.1)
-            )
+        pending = {task for task in asyncio.all_tasks(loop) if not task.done()}
+        if pending:
+            for task in pending:
+                task.cancel()
+            loop.run_until_complete(asyncio.wait(pending, timeout=PERSISTENT_BUDGET_CLEANUP_SECONDS))
+        if any(not task.done() for task in pending):
+            # The supervisor must terminate this execution boundary before it
+            # reconciles retained evidence. Never close a live source loop.
+            from maigret.web.worker_execution import IncompleteCollectionCleanup
+            raise IncompleteCollectionCleanup()
         loop.close()
     if runtime_job.get('persistence_failed'):
         # No terminal report, file publication or done event may assert complete
@@ -5630,6 +5749,11 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         execution_budget=execution_budget.as_dict(),
         worker_id=worker_id,
         collection_accounting=runtime_job.get("collection_accounting"),
+        stop_check=lambda: (store.is_cancel_requested(job_id) or bool(shutdown_check and shutdown_check())),
+        lifecycle={'phase': 'finalizing', 'stop_cause': runtime_job.get('stop_cause') or (
+            'operator_cancel' if cancel_requested else 'job_deadline' if budget_exhausted else
+            (runtime_job.get('collection_accounting') or {}).get('stop_cause')),
+            'cleanup_state': 'incomplete' if runtime_job.get('cleanup_incomplete') else 'complete'},
     )
 
 
@@ -5813,7 +5937,8 @@ def scan_stop(job_id):
         current = case_store.get_job(job_id)
         if not current:
             return {'error': 'unknown job'}, 404
-        if not case_store.request_cancel(job_id):
+        if not case_store.request_cancel(job_id, requested_by=session.get('username') or 'local-operator',
+                                         origin='live_stop'):
             current = case_store.get_job(job_id) or current
             return {
                 'error': 'investigation is not running',
@@ -7845,14 +7970,8 @@ def persona_workspace(persona_id):
             'longitude': claim['longitude'],
             'field_name': claim['field_name'],
             'confidence': claim['confidence'],
-            'coordinate_precision': next(
-                (
-                    evidence.get('details', {}).get('coordinate_precision')
-                    for evidence in claim['evidence']
-                    if evidence.get('details', {}).get('coordinate_precision')
-                ),
-                None,
-            ),
+            'coordinate_precision': claim.get('coordinate_precision'),
+            'coordinate_method': claim.get('coordinate_method'),
         }
         for claim in persona['claims']
         if claim['field_name'] in ('address', 'current_location')
@@ -8628,41 +8747,10 @@ def review_persona_claim(claim_id):
     reviewer = session.get('username') or 'local-operator'
     latitude = request.form.get('latitude')
     longitude = request.form.get('longitude')
+    if request.form.get('clear_coordinates') == '1':
+        latitude = longitude = None
     generated_map_center = False
     geocoding_warning = None
-    if (
-        decision == 'approved'
-        and not str(latitude or '').strip()
-        and not str(longitude or '').strip()
-    ):
-        if reviewed_claim and reviewed_claim.get('field_name') in {
-            'address',
-            'current_location',
-        }:
-            try:
-                center = geocode_place_center(
-                    reviewed_claim.get('display_value', ''),
-                    endpoint=app.config['GEOCODER_URL'],
-                    timeout_seconds=app.config['GEOCODER_TIMEOUT_SECONDS'],
-                )
-            except GeocodingError as error:
-                logging.warning(
-                    'Approved-place geocoding failed: %s', safe_log_value(error)
-                )
-                geocoding_warning = (
-                    'The record was approved, but OpenLedger could not generate '
-                    'its map center. You can add coordinates by amending the record.'
-                )
-            else:
-                if center:
-                    latitude = str(center['latitude'])
-                    longitude = str(center['longitude'])
-                    generated_map_center = True
-                else:
-                    geocoding_warning = (
-                        'The record was approved, but no map center was found. '
-                        'You can add coordinates by amending the record.'
-                    )
     try:
         stored_persona_id = case_store.review_claim(
             claim_id,
@@ -8671,6 +8759,7 @@ def review_persona_claim(claim_id):
             request.form.get('note', ''),
             latitude,
             longitude,
+            clear_coordinates=request.form.get('clear_coordinates') == '1',
         )
     except ValueError as error:
         flash(str(error), 'danger')
@@ -9234,7 +9323,29 @@ def analyze_session(session_id):
 def download_report(filename):
     reports_root = app.config["REPORTS_FOLDER"]
     os.makedirs(reports_root, exist_ok=True)
-    if os.path.basename(filename) == SESSION_METADATA_FILENAME:
+    # An on-disk file is not publication authority. Only a terminal result's
+    # declared artifacts may be read, including compatible legacy declarations.
+    pieces = filename.split('/')
+    if len(pieces) != 2 or not pieces[0].startswith('search_'):
+        return "File not found", 404
+    key = pieces[0].removeprefix('search_')
+    if not SESSION_KEY_PATTERN.fullmatch(key) or pieces[1] == SESSION_METADATA_FILENAME:
+        return "File not found", 404
+    current = case_store.get_job(key) if case_store is not None else None
+    if current is None:
+        loaded = load_persisted_job_result(pieces[0])
+        current = loaded[1] if loaded else job_results.get(key)
+    if not current or current.get('status') not in TERMINAL_STATUSES:
+        return "File not found", 404
+    declared = {current.get('graph_file')}
+    for report in current.get('individual_reports') or []:
+        declared.update(report.get(f'{kind}_file') for kind in ('csv', 'json', 'pdf', 'html'))
+    if filename not in declared:
+        return "File not found", 404
+    candidate = os.path.join(reports_root, filename)
+    root_real = os.path.realpath(reports_root)
+    if (os.path.commonpath([root_real, os.path.realpath(candidate)]) != root_real
+            or any(os.path.islink(os.path.join(reports_root, *pieces[:i])) for i in (1, 2))):
         return "File not found", 404
     try:
         return send_from_directory(reports_root, filename)
@@ -9246,6 +9357,9 @@ def download_report(filename):
         )
         return "File not found", 404
 
+
+from maigret.web.location_routes import register_location_routes
+register_location_routes(app)
 
 if __name__ == "__main__":
     logging.basicConfig(

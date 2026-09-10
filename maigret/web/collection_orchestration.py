@@ -15,6 +15,7 @@ import inspect
 import math
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import (
     Any,
     Awaitable,
@@ -74,6 +75,64 @@ _OPERATION_DISPOSITIONS = frozenset(
 
 class CollectionOrchestrationError(ValueError):
     """Raised for an invalid server-owned source plan."""
+
+
+class StopCause(str, Enum):
+    """A durable reason that the scheduler stopped admitting source work."""
+
+    OPERATOR_CANCEL = "operator_cancel"
+    JOB_DEADLINE = "job_deadline"
+    STAGE_DEADLINE = "stage_deadline"
+    CLEANUP_INCOMPLETE = "cleanup_incomplete"
+    PERSISTENCE_FAILURE = "persistence_failure"
+    LEASE_LOST = "lease_lost"
+    WORKER_SHUTDOWN = "worker_shutdown"
+
+
+StopSignal = Union[bool, StopCause, str, None]
+StopCallback = Callable[[], StopSignal]
+
+
+def _normalize_stop_signal(value: StopSignal) -> Tuple[Optional[StopCause], bool]:
+    """Return ``(cause, legacy_boolean)`` for a stop callback result.
+
+    ``True`` remains the historical operator cancellation signal.  Typed
+    callers must use the stable values in :class:`StopCause`; rejecting other
+    truthy values prevents a persistence or lease boundary from being silently
+    reported as a user cancellation.
+    """
+    if value is None or value is False:
+        return None, False
+    if value is True:
+        return StopCause.OPERATOR_CANCEL, True
+    if isinstance(value, StopCause):
+        return value, False
+    if isinstance(value, str):
+        try:
+            return StopCause(value), False
+        except ValueError as error:
+            raise CollectionOrchestrationError(
+                "Unknown collection stop cause"
+            ) from error
+    raise CollectionOrchestrationError("Stop callback must return bool or StopCause")
+
+
+def _stop_status(cause: StopCause) -> str:
+    if cause is StopCause.OPERATOR_CANCEL:
+        return "cancelled"
+    if cause in {StopCause.JOB_DEADLINE, StopCause.STAGE_DEADLINE}:
+        return "timed_out"
+    return "interrupted"
+
+
+def _stop_reason(cause: StopCause, *, legacy_boolean: bool = False) -> str:
+    if legacy_boolean and cause is StopCause.OPERATOR_CANCEL:
+        return "cancellation_requested"
+    if cause is StopCause.STAGE_DEADLINE:
+        return "stage_budget_exhausted"
+    if cause is StopCause.JOB_DEADLINE:
+        return "overall_budget_exhausted"
+    return cause.value
 
 
 class _ParentCancellation(asyncio.CancelledError):
@@ -335,7 +394,7 @@ class StageContext:
     stage_id: str
     engine_id: str
     deadline: float
-    cancellation_check: Callable[[], bool]
+    cancellation_check: StopCallback
     operation_ledger: OperationLedger
     clock: Callable[[], float] = time.monotonic
     _publish_progress: Callable[[Optional[StageCounts]], bool] = field(
@@ -345,8 +404,15 @@ class StageContext:
     def remaining_seconds(self) -> float:
         return max(0.0, self.deadline - self.clock())
 
+    def stop_cause(self) -> Optional[StopCause]:
+        """Return the active scheduler stop cause, if one is known."""
+        cause, _legacy_boolean = _normalize_stop_signal(self.cancellation_check())
+        return cause or (
+            StopCause.STAGE_DEADLINE if self.remaining_seconds() <= 0 else None
+        )
+
     def is_cancelled(self) -> bool:
-        return bool(self.cancellation_check()) or self.remaining_seconds() <= 0
+        return self.stop_cause() is not None
 
     def counts_snapshot(self) -> StageCounts:
         """Return the non-final operation-ledger snapshot for this stage."""
@@ -423,6 +489,7 @@ class StageOutcome:
     counts: StageCounts
     cleanup_complete: bool = True
     value: Any = field(default=None, repr=False, compare=False)
+    stop_cause: Optional[StopCause] = None
 
     def __post_init__(self) -> None:
         if self.status not in _STAGE_STATUSES:
@@ -448,6 +515,9 @@ class StageOutcome:
             "unknown": self.counts.unknown,
             "observations": self.counts.observations,
             "cleanup_complete": self.cleanup_complete,
+            "stop_cause": (
+                self.stop_cause.value if self.stop_cause is not None else None
+            ),
         }
 
 
@@ -505,6 +575,13 @@ class OrchestrationSummary:
             for item in self.outcomes
         )
 
+    @property
+    def stop_cause(self) -> Optional[StopCause]:
+        return next(
+            (item.stop_cause for item in self.outcomes if item.stop_cause is not None),
+            None,
+        )
+
     def as_dict(self) -> Dict[str, Any]:
         envelope = _accounting_envelope(
             self.outcomes,
@@ -513,6 +590,9 @@ class OrchestrationSummary:
         )
         envelope["overall_budget_exhausted"] = self.overall_budget_exhausted
         envelope["stage_budget_exhausted"] = self.stage_budget_exhausted
+        envelope["stop_cause"] = (
+            self.stop_cause.value if self.stop_cause is not None else None
+        )
         return envelope
 
 
@@ -603,6 +683,10 @@ def _accounting_envelope(
         ),
         "overall_budget_exhausted": overall_budget_exhausted,
         "stage_budget_exhausted": stage_budget_exhausted,
+        "stop_cause": next(
+            (row["stop_cause"] for row in rows if row["stop_cause"] is not None),
+            None,
+        ),
         "stages": rows,
     }
 
@@ -627,6 +711,7 @@ def _outcome(
     reason: Optional[str] = None,
     counts: Optional[StageCounts] = None,
     cleanup_complete: bool = True,
+    stop_cause: Optional[StopCause] = None,
     value: Any = None,
 ) -> StageOutcome:
     return StageOutcome(
@@ -639,6 +724,7 @@ def _outcome(
         counts or StageCounts(),
         cleanup_complete,
         value,
+        stop_cause,
     )
 
 
@@ -686,26 +772,28 @@ async def _run_callback(
     spec: StageSpec,
     context: StageContext,
     *,
-    cancellation_check: Callable[[], bool],
+    cancellation_check: StopCallback,
     clock: Callable[[], float],
     cleanup_seconds: float,
     progress_failures: list[BaseException],
-) -> Tuple[str, Optional[StageResult], Optional[str], bool]:
+) -> Tuple[str, Optional[StageResult], Optional[str], bool, Optional[StopCause]]:
     running = asyncio.create_task(spec.callback(context))
     try:
         while True:
             if progress_failures:
                 cleaned = await _stop_callback(running, cleanup_seconds=cleanup_seconds)
                 raise _ProgressSinkFailure(progress_failures[0], cleaned)
-            if cancellation_check():
+            stop_cause, legacy_boolean = _normalize_stop_signal(cancellation_check())
+            if stop_cause is not None:
                 cleaned = await _stop_callback(running, cleanup_seconds=cleanup_seconds)
                 if progress_failures:
                     raise _ProgressSinkFailure(progress_failures[0], cleaned)
                 return (
-                    "cancelled",
+                    _stop_status(stop_cause),
                     _stopped_result(running, cleanup_complete=cleaned),
-                    "cancellation_requested",
+                    _stop_reason(stop_cause, legacy_boolean=legacy_boolean),
                     cleaned,
+                    stop_cause,
                 )
             remaining = context.deadline - clock()
             if remaining <= 0:
@@ -715,8 +803,9 @@ async def _run_callback(
                 return (
                     "timed_out",
                     _stopped_result(running, cleanup_complete=cleaned),
-                    "stage_budget_exhausted",
+                    _stop_reason(StopCause.STAGE_DEADLINE),
                     cleaned,
+                    StopCause.STAGE_DEADLINE,
                 )
             done, _ = await asyncio.wait({running}, timeout=min(remaining, 0.1))
             if not done:
@@ -734,15 +823,32 @@ async def _run_callback(
                 # at the await above and handled by the outer cleanup branch.
                 # Do not require Task.cancelling(), which Python 3.10 lacks.
                 if clock() >= context.deadline:
-                    return "timed_out", None, "stage_budget_exhausted", True
-                return "interrupted", None, "callback_cancelled", True
+                    return (
+                        "timed_out",
+                        None,
+                        _stop_reason(StopCause.STAGE_DEADLINE),
+                        True,
+                        StopCause.STAGE_DEADLINE,
+                    )
+                stop_cause, legacy_boolean = _normalize_stop_signal(
+                    cancellation_check()
+                )
+                if stop_cause is not None:
+                    return (
+                        _stop_status(stop_cause),
+                        None,
+                        _stop_reason(stop_cause, legacy_boolean=legacy_boolean),
+                        True,
+                        stop_cause,
+                    )
+                return "interrupted", None, "callback_cancelled", True, None
             except Exception as error:
                 if progress_failures:
                     raise _ProgressSinkFailure(progress_failures[0], True)
-                return "failed", None, _safe_error_code(error), True
+                return "failed", None, _safe_error_code(error), True, None
             if not isinstance(result, StageResult):
-                return "failed", None, "invalid_stage_result", True
-            return "completed", result, None, True
+                return "failed", None, "invalid_stage_result", True, None
+            return "completed", result, None, True, None
     except asyncio.CancelledError:
         cleaned = await _stop_callback(running, cleanup_seconds=cleanup_seconds)
         if progress_failures:
@@ -881,6 +987,7 @@ def _materialize_interrupted(
     *,
     status: str = "interrupted",
     reason: str = "parent_cancelled",
+    stop_cause: Optional[StopCause] = None,
 ) -> None:
     """Finalize every not-yet-admitted full-plan row without dispatching it."""
     for index in range(start, len(stages)):
@@ -919,6 +1026,7 @@ def _materialize_interrupted(
                 status,
                 reason=reason,
                 counts=counts,
+                stop_cause=stop_cause,
             )
         _replace(outcomes, index, outcome, by_stage)
 
@@ -928,7 +1036,7 @@ async def run_collection_stages(
     *,
     deadline: Optional[float] = None,
     remaining_seconds: Optional[float] = None,
-    cancellation_check: Callable[[], bool] = lambda: False,
+    cancellation_check: StopCallback = lambda: False,
     event_sink: Callable[[Mapping[str, Any]], None] = lambda _event: None,
     on_progress: Optional[Callable[[Mapping[str, Any]], None]] = None,
     clock: Callable[[], float] = time.monotonic,
@@ -1081,15 +1189,19 @@ async def run_collection_stages(
         pre_admission_counts = (
             _known_unattempted_counts(planned) if planned is not None else StageCounts()
         )
-        if cancellation_check():
+        stop_cause, legacy_boolean = _normalize_stop_signal(cancellation_check())
+        if stop_cause is not None:
+            status = _stop_status(stop_cause)
+            reason = _stop_reason(stop_cause, legacy_boolean=legacy_boolean)
             _replace(
                 outcomes,
                 index,
                 _outcome(
                     spec,
-                    "cancelled",
-                    reason="cancellation_requested",
+                    status,
+                    reason=reason,
                     counts=pre_admission_counts,
+                    stop_cause=stop_cause,
                 ),
                 by_stage,
             )
@@ -1098,10 +1210,15 @@ async def run_collection_stages(
                 index + 1,
                 outcomes,
                 by_stage,
-                status="cancelled",
-                reason="cancellation_requested",
+                status=status,
+                reason=reason,
+                stop_cause=stop_cause,
             )
-            publish("cancelled")
+            publish(
+                "cancelled"
+                if stop_cause is StopCause.OPERATOR_CANCEL
+                else "interrupted"
+            )
             break
         available = absolute_deadline - clock()
         future_weight = _future_weight(stage_list, index, by_stage)
@@ -1117,8 +1234,9 @@ async def run_collection_stages(
                 _outcome(
                     spec,
                     "not_started_budget",
-                    reason="overall_budget_exhausted",
+                    reason=_stop_reason(StopCause.JOB_DEADLINE),
                     counts=pre_admission_counts,
+                    stop_cause=StopCause.JOB_DEADLINE,
                 ),
                 by_stage,
             )
@@ -1172,7 +1290,7 @@ async def run_collection_stages(
         )
         publish("running")
         try:
-            status, result, reason, cleanup_complete = await _run_callback(
+            status, result, reason, cleanup_complete, stop_cause = await _run_callback(
                 spec,
                 context,
                 cancellation_check=cancellation_check,
@@ -1182,10 +1300,23 @@ async def run_collection_stages(
             )
         except asyncio.CancelledError as error:
             progress_active = False
+            cleanup_complete = getattr(error, "cleanup_complete", True)
+            if cleanup_complete:
+                parent_stop_cause, legacy_boolean = _normalize_stop_signal(
+                    cancellation_check()
+                )
+                parent_reason = (
+                    _stop_reason(parent_stop_cause, legacy_boolean=legacy_boolean)
+                    if parent_stop_cause is not None
+                    else "parent_cancelled"
+                )
+            else:
+                parent_stop_cause = StopCause.CLEANUP_INCOMPLETE
+                parent_reason = StopCause.CLEANUP_INCOMPLETE.value
             stopped_result = getattr(error, "result", None)
             if (
                 stopped_result is None
-                and getattr(error, "cleanup_complete", True)
+                and cleanup_complete
                 and last_progress_counts is not None
             ):
                 stopped_result = StageResult(counts=last_progress_counts)
@@ -1196,17 +1327,21 @@ async def run_collection_stages(
                 _outcome(
                     spec,
                     "interrupted",
-                    reason=(
-                        "parent_cancelled"
-                        if getattr(error, "cleanup_complete", True)
-                        else "cleanup_incomplete"
-                    ),
+                    reason=parent_reason,
                     counts=counts,
-                    cleanup_complete=getattr(error, "cleanup_complete", True),
+                    cleanup_complete=cleanup_complete,
+                    stop_cause=parent_stop_cause,
                 ),
                 by_stage,
             )
-            _materialize_interrupted(stage_list, index + 1, outcomes, by_stage)
+            _materialize_interrupted(
+                stage_list,
+                index + 1,
+                outcomes,
+                by_stage,
+                reason=parent_reason,
+                stop_cause=parent_stop_cause,
+            )
             try:
                 publish("interrupted")
             except BaseException as publish_error:
@@ -1229,7 +1364,11 @@ async def run_collection_stages(
             result, ledger, planned, interrupted=status == "interrupted"
         )
         if not cleanup_complete:
-            status, reason = "interrupted", "cleanup_incomplete"
+            status, reason, stop_cause = (
+                "interrupted",
+                StopCause.CLEANUP_INCOMPLETE.value,
+                StopCause.CLEANUP_INCOMPLETE,
+            )
         _replace(
             outcomes,
             index,
@@ -1239,12 +1378,20 @@ async def run_collection_stages(
                 reason=reason,
                 counts=counts,
                 cleanup_complete=cleanup_complete,
+                stop_cause=stop_cause,
                 value=result.value if result is not None else None,
             ),
             by_stage,
         )
         if not cleanup_complete:
-            _materialize_interrupted(stage_list, index + 1, outcomes, by_stage)
+            _materialize_interrupted(
+                stage_list,
+                index + 1,
+                outcomes,
+                by_stage,
+                reason=StopCause.CLEANUP_INCOMPLETE.value,
+                stop_cause=StopCause.CLEANUP_INCOMPLETE,
+            )
             publish("interrupted")
             break
         publish("running")

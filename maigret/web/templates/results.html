@@ -5,6 +5,9 @@
 
 {% block content %}
 {% set partial_status = runtime_state.collection_status %}
+{% set graph_descriptor = graph_artifact if graph_artifact is mapping else none %}
+{% set graph_available = graph_descriptor.available if graph_descriptor is mapping else graph_file is string and graph_file %}
+{% set graph_filename = graph_descriptor.filename if graph_descriptor is mapping else graph_file %}
 <section class="page-heading">
     <div>
         <p class="eyebrow">{{ 'Partial investigation' if partial_status else 'Completed investigation' }}</p>
@@ -139,7 +142,7 @@
 </section>
 
 <div class="results-grid">
-    {% if graph_file %}
+    {% if graph_available and graph_filename %}
     <section class="panel-card">
         <header class="panel-header">
             <div>
@@ -149,13 +152,18 @@
             <span class="badge-soft"><i data-lucide="network"></i> Interactive</span>
         </header>
         <div class="panel-body p-0">
-            <iframe src="{{ url_for('download_report', filename=graph_file) }}"
+            <iframe src="{{ url_for('download_report', filename=graph_filename) }}"
                 title="OpenLedger combined relationship graph"
                 sandbox="allow-scripts"
                 loading="lazy"
                 referrerpolicy="no-referrer"
                 style="width:100%; height:620px; border:0;"></iframe>
         </div>
+    </section>
+    {% elif graph_descriptor is mapping and not graph_descriptor.available %}
+    <section class="panel-card">
+        <header class="panel-header"><div><h2>Discovery evidence graph unavailable</h2></div></header>
+        <div class="panel-body"><p class="form-text mb-0">{{ graph_descriptor.message or 'The graph artifact was not available for this retained result.' }}</p></div>
     </section>
     {% endif %}
 
@@ -295,11 +303,19 @@
                         <span class="chevron collapsed" aria-hidden="true"></span>
                     </button>
                     <div id="report-{{ loop.index }}" class="report-content">
+                        {% set artifact_descriptors = report.artifacts if report.artifacts is mapping else none %}
+                        {% set artifact_specs = [('csv', 'CSV Report · raw', report.csv_file), ('json', 'JSON Report · raw', report.json_file), ('pdf', 'PDF Report · raw', report.pdf_file), ('html', 'HTML Report · raw', report.html_file)] %}
                         <div class="d-flex flex-wrap gap-2 mb-3">
-                            <a href="{{ url_for('download_report', filename=report.csv_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">CSV Report · raw</a>
-                            <a href="{{ url_for('download_report', filename=report.json_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">JSON Report · raw</a>
-                            <a href="{{ url_for('download_report', filename=report.pdf_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">PDF Report · raw</a>
-                            <a href="{{ url_for('download_report', filename=report.html_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">HTML Report · raw</a>
+                            {% for artifact_key, artifact_label, legacy_filename in artifact_specs %}
+                                {% set descriptor = artifact_descriptors.get(artifact_key) if artifact_descriptors is mapping else none %}
+                                {% set artifact_available = descriptor.available if descriptor is mapping else legacy_filename is string and legacy_filename %}
+                                {% set artifact_filename = descriptor.filename if descriptor is mapping else legacy_filename %}
+                                {% if artifact_available and artifact_filename %}
+                                <a href="{{ url_for('download_report', filename=artifact_filename) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">{{ artifact_label }}</a>
+                                {% elif descriptor is mapping %}
+                                <span class="form-text">{{ artifact_label }} unavailable{% if descriptor.message %}: {{ descriptor.message }}{% endif %}</span>
+                                {% endif %}
+                            {% endfor %}
                         </div>
                         {% if report.major_platforms %}
                         <p class="form-label mb-2">Major-platform coverage</p>

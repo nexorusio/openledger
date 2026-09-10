@@ -11,6 +11,7 @@ from maigret.web.collection_orchestration import (
     OperationLedger,
     StageCounts,
     StageResult,
+    StopCause,
     StageSpec,
     profile_stage_engine_ids,
     profile_stage_weights,
@@ -345,6 +346,11 @@ async def test_job_cancellation_is_distinct_from_budget_timeout():
     assert summary.budget_exhausted is False
     assert summary.outcomes[1].counts.unattempted == 1
     assert summary.outcomes[2].reason == "cancellation_requested"
+    assert summary.stop_cause is StopCause.OPERATOR_CANCEL
+    assert all(
+        outcome.stop_cause is StopCause.OPERATOR_CANCEL
+        for outcome in summary.outcomes[1:]
+    )
 
 
 def stopped_native_counts():
@@ -573,6 +579,14 @@ async def test_cleanup_incomplete_halts_later_admission_and_marks_snapshot():
         "interrupted",
     ]
     assert summary.outcomes[0].cleanup_complete is False
+    assert all(
+        outcome.stop_cause is StopCause.CLEANUP_INCOMPLETE
+        for outcome in summary.outcomes
+    )
+    assert [outcome.reason for outcome in summary.outcomes] == [
+        "cleanup_incomplete",
+        "cleanup_incomplete",
+    ]
     assert summary.outcomes[1].counts.unattempted == 1
     assert later_called is False
 
@@ -905,16 +919,7 @@ async def test_dynamic_site_plan_uses_ledger_counts_without_username_cap():
         return StageResult(counts=StageCounts(observations=9))
 
     summary = await run_collection_stages(
-        [
-            StageSpec(
-                "maigret",
-                "maigret",
-                "Maigret",
-                "site_check",
-                source,
-                planned_units=None,
-            )
-        ],
+        [StageSpec("maigret", "maigret", "Maigret", "site_check", source, planned_units=None)],
         remaining_seconds=1,
     )
 
@@ -925,3 +930,187 @@ async def test_dynamic_site_plan_uses_ledger_counts_without_username_cap():
     assert counts.completed == 3
     assert counts.observations == 9
     assert counts.known is True
+
+
+@pytest.mark.asyncio
+async def test_typed_stop_cause_reaches_callback_and_persists_downstream_reason():
+    entered = asyncio.Event()
+    observed = []
+
+    async def slow_source(context):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            observed.append(context.stop_cause())
+            return complete()
+
+    async def must_not_run(_context):
+        raise AssertionError("typed stop must halt later admission")
+
+    summary = await run_collection_stages(
+        [
+            StageSpec("first", "first", "First", "unit", slow_source),
+            StageSpec("later", "later", "Later", "unit", must_not_run, planned_units=4),
+        ],
+        remaining_seconds=1,
+        cancellation_check=lambda: "lease_lost" if entered.is_set() else False,
+    )
+
+    assert observed == [StopCause.LEASE_LOST]
+    assert [outcome.status for outcome in summary.outcomes] == [
+        "interrupted",
+        "interrupted",
+    ]
+    assert [outcome.reason for outcome in summary.outcomes] == [
+        "lease_lost",
+        "lease_lost",
+    ]
+    assert all(
+        outcome.stop_cause is StopCause.LEASE_LOST for outcome in summary.outcomes
+    )
+    assert summary.stop_cause is StopCause.LEASE_LOST
+    assert summary.as_dict()["stop_cause"] == "lease_lost"
+    assert summary.as_dict()["stages"][1]["unattempted"] == 4
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("planned", [1, 4, 16])
+async def test_typed_stop_reason_accounts_for_each_unstarted_fixture_target(planned):
+    calls = []
+
+    async def first(_context):
+        calls.append("first")
+        return complete()
+
+    async def later(_context):
+        raise AssertionError("job deadline must stop later target admission")
+
+    summary = await run_collection_stages(
+        [
+            StageSpec("first", "first", "First", "unit", first),
+            StageSpec(
+                "later", "later", "Later", "target", later, planned_units=planned
+            ),
+        ],
+        remaining_seconds=1,
+        cancellation_check=lambda: StopCause.JOB_DEADLINE if calls else False,
+    )
+
+    downstream = summary.outcomes[1]
+    assert downstream.status == "timed_out"
+    assert downstream.reason == "overall_budget_exhausted"
+    assert downstream.stop_cause is StopCause.JOB_DEADLINE
+    assert downstream.counts.unattempted == planned
+
+
+@pytest.mark.asyncio
+async def test_cooperative_stage_deadline_keeps_selected_downstream_admissible():
+    callbacks = []
+
+    async def slow_source(context):
+        callbacks.append("slow")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            assert context.stop_cause() is StopCause.STAGE_DEADLINE
+            return complete()
+
+    async def downstream(_context):
+        callbacks.append("downstream")
+        return complete()
+
+    summary = await run_collection_stages(
+        [
+            StageSpec("slow", "slow", "Slow", "unit", slow_source),
+            StageSpec("downstream", "downstream", "Downstream", "unit", downstream),
+        ],
+        remaining_seconds=0.1,
+        cleanup_seconds=0.05,
+    )
+
+    assert callbacks == ["slow", "downstream"]
+    assert summary.outcomes[0].status == "timed_out"
+    assert summary.outcomes[0].cleanup_complete is True
+    assert summary.outcomes[0].stop_cause is StopCause.STAGE_DEADLINE
+    assert summary.outcomes[1].status == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "cause",
+    [StopCause.PERSISTENCE_FAILURE, StopCause.WORKER_SHUTDOWN],
+)
+async def test_typed_boundary_stops_are_never_labeled_operator_cancellation(cause):
+    admitted = []
+
+    async def first(_context):
+        admitted.append("first")
+        return complete()
+
+    async def later(_context):
+        raise AssertionError("boundary failure must stop admission")
+
+    summary = await run_collection_stages(
+        [
+            StageSpec("first", "first", "First", "unit", first),
+            StageSpec("later", "later", "Later", "unit", later),
+        ],
+        remaining_seconds=1,
+        cancellation_check=lambda: cause if admitted else False,
+    )
+
+    downstream = summary.outcomes[1]
+    assert downstream.status == "interrupted"
+    assert downstream.reason == cause.value
+    assert downstream.stop_cause is cause
+    assert "cancellation" not in downstream.reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("signal", "expected_cause", "expected_reason"),
+    [
+        (True, StopCause.OPERATOR_CANCEL, "cancellation_requested"),
+        (StopCause.JOB_DEADLINE, StopCause.JOB_DEADLINE, "overall_budget_exhausted"),
+        ("lease_lost", StopCause.LEASE_LOST, "lease_lost"),
+        (False, None, "parent_cancelled"),
+    ],
+)
+async def test_parent_cancellation_preserves_active_stop_cause_or_unknown(
+    signal, expected_cause, expected_reason
+):
+    entered = asyncio.Event()
+    external_cancel = asyncio.Event()
+    events = []
+
+    async def blocking(_context):
+        entered.set()
+        await asyncio.Event().wait()
+
+    task = asyncio.create_task(
+        run_collection_stages(
+            [
+                StageSpec("first", "first", "First", "unit", blocking),
+                StageSpec(
+                    "later", "later", "Later", "target", blocking, planned_units=4
+                ),
+            ],
+            remaining_seconds=1,
+            cancellation_check=lambda: signal if external_cancel.is_set() else False,
+            event_sink=events.append,
+        )
+    )
+    await entered.wait()
+    external_cancel.set()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    rows = events[-1]["collection_accounting"]["stages"]
+    assert [row["status"] for row in rows] == ["interrupted", "interrupted"]
+    assert [row["reason"] for row in rows] == [expected_reason, expected_reason]
+    assert [row["stop_cause"] for row in rows] == [
+        expected_cause.value if expected_cause is not None else None,
+        expected_cause.value if expected_cause is not None else None,
+    ]
