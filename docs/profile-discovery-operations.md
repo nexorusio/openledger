@@ -29,7 +29,13 @@ work, retains evidence already collected, and records a distinct
 
 Eligible coverage still respects source enablement, detector-health controls,
 case category/country filters, and provider-specific policy. Full Scan means
-all eligible sources, not disabled or quarantined sources.
+all eligible sources, not disabled or quarantined sources. In the unified
+builder, Full Scan also requires at least one explicit username, social handle,
+supported profile URL, or selected server-ranked username alias. The server
+refuses the submission if no such Maigret target exists or if Maigret is
+disabled; it never reports a native-name or email-only run as a Full Scan.
+Quick Scan may proceed through enabled native search when Maigret is disabled,
+with the unavailable Maigret route shown explicitly in the plan.
 
 ## Durable lifecycle
 
@@ -162,7 +168,7 @@ app-only; it does not alter worker policy.
 | `OPENLEDGER_PROFILE_DISCOVERY_ENABLED` | Refuses all new live and refresh profile-discovery jobs. |
 | `OPENLEDGER_FOCUSED_DISCOVERY_ENABLED` | Refuses new Quick Scan jobs. |
 | `OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED` | Refuses new Full Scan jobs. |
-| `OPENLEDGER_MAIGRET_DISCOVERY_ENABLED` | Refuses profile discovery because the required long-tail engine is unavailable. |
+| `OPENLEDGER_MAIGRET_DISCOVERY_ENABLED` | Refuses Full Scan and marks Maigret unavailable. Quick Scan may proceed only when another effective collection route, such as native search, remains available. |
 | `OPENLEDGER_USER_SCANNER_DISCOVERY_ENABLED` | Refuses plans that request User Scanner; plans without it remain eligible. |
 | `OPENLEDGER_ENRICHMENT_PROVIDERS_ENABLED` | Blocks governed enrichment adapters, including shared organization and public-record adapters. |
 | `OPENLEDGER_PROVIDER_CIRCUIT_BREAKERS_ENABLED` | Bypasses breaker state while retaining one bounded call with no retry. |
@@ -186,8 +192,20 @@ builder; direct unified submissions and preview requests are refused.
 Both builders create the same bounded persisted investigation contracts. The
 flag does not cancel or reinterpret queued or completed jobs, change Quick
 Scan or Full Scan coverage, alter graph projection, approve evidence, or hide
-retained state. To stage the unified builder, set the flag to `true`, validate
-Compose, and recreate only `app`:
+retained state.
+
+The unified builder enables server-ranked likely username aliases by default,
+matching the legacy builder's default name-variant behavior. The analyst can
+clear individual aliases or disable alias planning, but a Full Scan cannot start
+after every Maigret target has been removed. Phone numbers and generic public
+URLs remain context only. Email discovery remains conditional on explicit
+confirmation. Established username verification, GitHub enrichment, and
+archive-evidence collectors remain optional and off by default under
+`Additional existing checks`; selected routes and their policy state appear in
+the authoritative preview before submission.
+
+To stage the unified builder, set the flag to `true`, validate Compose, and
+recreate only `app`:
 
 ```bash
 cd /opt/openledger
@@ -197,10 +215,11 @@ sudo docker compose --env-file deploy/.env -f deploy/compose.yaml exec -T app en
 curl -fsS https://openledger.nexorus.io/healthz
 ```
 
-For immediate presentation rollback, set the flag to `false`, repeat those
+For immediate presentation containment, set the flag to `false`, repeat those
 app-only validation and recreation commands, and confirm the typed builder is
-shown. Do not recreate the worker for this flag. Existing jobs continue under
-their persisted server-owned route plans.
+shown. This restores the legacy input presentation but is not a remediation for
+a unified-builder defect. Do not recreate the worker for this flag. Existing
+jobs continue under their persisted server-owned route plans.
 
 ## Change flags on the supported Docker deployment
 

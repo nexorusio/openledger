@@ -54,22 +54,33 @@ do not repeat P0--P2 work.
 | P1 | PR #47, squash commit `33106f3` |
 | P2 search provider | PR #49; branch `codex/self-hosted-profile-search`; final remote head `19c45c3fef01c20c9f70a0a43b63b49b87d8544e`; tested tree `894c552548dd2636bd0c088c708d4230a5f17ecd`; squash commit `3c5b2a9e818d9c64ca7f74d440f91060ce5b3445` |
 | P2 report update | PR #50; branch `codex/human-centric-investigation-report`; final remote head `62c045f8e36644ada0b155a9a5154fd84114ddef`; final tree `d771486cfbd9683f97bd59b76829d2eac495f72a`; squash commit `288fdd216c1a107113719cc1c850d9fc0dd47808` |
+| P3 | PR #51; branch `codex/p3-evidence-correlation-pivots`; final pre-merge head `b9782fa28d101a02a838d473808c1fcbb3916cdf`; squash commit `0c05e52c0d8e4c26f0cc0e9b00309e0da6237677`, tree `35e783f88e1fa7d7046392d42cda1b39240851cb`; deployed but production acceptance failed, so P3 is not production-verified |
 
-Production currently runs Git SHA
+The last production-verified baseline remains P2 Git SHA
 `288fdd216c1a107113719cc1c850d9fc0dd47808`, tree
-`d771486cfbd9683f97bd59b76829d2eac495f72a`, and Alembic head
-`b3e9d7c4a610`. The P2 search-first discovery baseline, private SearXNG
-provider, governed analyst review, and human-centric investigation report have
-passed their release and production gates.
+`d771486cfbd9683f97bd59b76829d2eac495f72a`. Production currently runs P3
+squash commit `0c05e52c0d8e4c26f0cc0e9b00309e0da6237677`, tree
+`35e783f88e1fa7d7046392d42cda1b39240851cb`, and unchanged Alembic head
+`b3e9d7c4a610`. The authorized P3 deployment passed its automated deployment
+gates, but the subsequent human production scan found no Maigret targets or
+username results. P3 therefore remains production-failed pending the separately
+authorized remediation below. Do not begin P4.
 
-The verified PostgreSQL backup is
-`/opt/openledger/runtime/backups/openledger-20260909T013742Z.dump` with SHA-256
-`a0d6f8dfa986a20c74f389975ae21d133c4acabeca6a9fb69d1ca8df4cf862d1`.
-Report-update source recovery material is in
-`/opt/openledger/runtime/backups/report-update-20260909T013733Z`, including
-`source-before.bundle`. The report update introduced no migration; restoring an
-older database dump is not part of normal code rollback because it could
-discard newer production data.
+The P3 pre-deployment PostgreSQL backup is
+`/opt/openledger/runtime/backups/openledger-20260910T042838Z.dump` with SHA-256
+`8889b76a49f4d9a35191c58a934b8a28022dd2b3c4ee5de9f562a20a387ddb2e`.
+The source bundle
+`/opt/openledger/runtime/backups/source-pre-p3.20260910T042832Z.bundle` has
+SHA-256 `5269c29d4532d41c4ac2130e52ac968ef7162b0ba2de94b09600831b2214ce7ce`.
+The pre-P3 environment backup is
+`/opt/openledger/runtime/backups/deploy.env.pre-p3.20260910T042832Z` with
+SHA-256 `1e8bdb8ef6149dafa3687191aaaba6de48d9b90b47ad8c547230ffaf3a6094d1`;
+the pre-enable environment backup is
+`/opt/openledger/runtime/backups/deploy.env.pre-p3-enable.20260910T043711Z`
+with SHA-256
+`a4cab6279e2b26cd96361d5ff066f148ef38aa8dc597799948ce9479556579a1b`.
+P3 introduced no database migration, so remediation or code rollback must not
+restore an older database dump and discard newer production data.
 
 The application, database, and private SearXNG containers are healthy; the
 worker and proxy are running; the migration service exited successfully; the
@@ -88,13 +99,20 @@ Mobile acceptance first identified a misleading plan-state label:
 confirmation-gated, server-disabled, and context-only items were all presented
 as `Skipped`. The correction, roadmap publication, final CI, and review gate
 then completed. On 2026-09-10 the user passed the required keyboard/mobile
-acceptance against the refreshed UI-only preview. P3 is ready for a separately
-authorized squash merge, but no authorization has been given for squash,
-merge, deployment, or production modification.
-All P3 work started from exact
-production-verified commit
+acceptance against the refreshed UI-only preview. The user subsequently
+authorized squash merge and production deployment. PR #51 was squash-merged
+and the exact squash tree was deployed with both automated production gates
+passing. Human production acceptance then failed because the unified builder
+submitted a Full Scan with no Maigret username targets. Production remediation
+is authorized and is being prepared on a separate branch; remediation merge
+and deployment remain unauthorized. P4 remains unauthorized.
+
+All original P3 phase work started from exact production-verified commit
 `288fdd216c1a107113719cc1c850d9fc0dd47808` and tree
-`d771486cfbd9683f97bd59b76829d2eac495f72a`; none was built on the old P2
+`d771486cfbd9683f97bd59b76829d2eac495f72a`. The production-failure
+remediation starts from exact P3 squash commit
+`0c05e52c0d8e4c26f0cc0e9b00309e0da6237677` and tree
+`35e783f88e1fa7d7046392d42cda1b39240851cb`. Neither used the invalid older P2
 checkout.
 
 The authoritative phase integration branch is
@@ -129,14 +147,16 @@ has 21 commits with head
 `5bf3d1915961d506fd4fce7c05ecf93f7ba4087f` exactly matches the locally
 tested and reviewed application tree at local commit
 `01fe35e3659d910b57ff11e8f156c6590b91f75f`. Consolidated P3 pull request
-#51 targets unchanged P2 `main` at
-`288fdd216c1a107113719cc1c850d9fc0dd47808`. The assessed extension baseline
+#51 targeted unchanged P2 `main` at
+`288fdd216c1a107113719cc1c850d9fc0dd47808` and was squash-merged as
+`0c05e52c0d8e4c26f0cc0e9b00309e0da6237677`. The assessed extension baseline
 was remote head `b1d4734157e9818c5653f6a9b469ca15bc75014e`, tree
 `0b79843dbe2aad2d72e97ebd8cc255701f012ec0`.
 
 | Owner | Branch and worktree | Exclusive responsibility | Checkpoint state |
 |---|---|---|---|
-| Coordinator | Phase branch and isolated P3X4 worktree | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a--P3c, P3X1--P3X4, and both P3X4 acceptance remediations are published; plan-state remediation code checkpoint `1141005495f4a19e5c6c5780deb55ecccf200d9e`, tree `1a25fe489bbfcee429ea688fe04c163d144a6e7d`, is published and tested; final CI and review passed, and the user passed manual keyboard/mobile acceptance on 2026-09-10; separately authorized squash merge remains pending |
+| Coordinator | Phase branch and isolated P3X4 worktree | Architecture, shared app/store/worker integration, review fixes, test gate, and durable checkpoint | P3a--P3c, P3X1--P3X4, and both P3X4 acceptance remediations were published; manual preview acceptance passed; PR #51 was squash-merged and deployed; automated deployment gates passed; production acceptance failed and P3 is not production-verified |
+| P3 production-failure remediation | `codex/p3-production-failure-remediation` in `/workspace/scratch/22e746991f51/openledger-p3-production-remediation` | Preserve Maigret targets and established optional collectors through the unified builder, prevent misleading Full Scans, add browser-to-worker regression coverage, and publish a remediation PR | Authorized on 2026-09-10; code checkpoint `9591d7c7a255751141068fd62a2980e16166f46c`, tree `04e5f1a0f33225945967856df2c7b479263caef7`; merge, production deployment, and P4 remain unauthorized |
 | P3a contract worker | `codex/p3a-correlation-contract` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-contract` | Correlation contract module and schema | Source `9586e626420817dae5a068f36119f389a264f14e`; integrated as `6eacc3539fdf9c3e972c897d1bafb61b9778ec03` |
 | P3a acceptance worker | `codex/p3a-acceptance-fixtures` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-tests` | Contract fixtures and acceptance tests | Source `18dd0f84cc96de847f6500ae77938f8a9f811c3b`; integrated as `b560f61c24e1cf9877b341abf5c872b65a255380` |
 | P3a continuity worker | `codex/p3a-roadmap-docs` in `/workspace/scratch/a7cc4d9992b8/openledger-p3a-docs` | Multi-agent runbook and roadmap state | Source `cd719ea850820243b1e74ffb5d3e66d807d9eb46`; integrated as `2c0afd83fb41618162c12202c5fcace919d732c1`; final P3a checkpoint `3191b860cc334ff8c45fd20d56ef47d3847c2bc8` |
@@ -511,6 +531,61 @@ could be selected or cleared; phone and generic URL values remained `Context
 only` and never `Skipped`; unconfirmed email was `Conditional` and confirmation
 changed only that route to `Active`; and no horizontal clipping was observed.
 No OpenLedger production deployment or modification occurred.
+
+#### P3 production-failure remediation checkpoint
+
+After the authorized squash merge and production deployment, the automated
+deployment gates passed at squash commit
+`0c05e52c0d8e4c26f0cc0e9b00309e0da6237677`, tree
+`35e783f88e1fa7d7046392d42cda1b39240851cb`. Human production acceptance then
+failed: a Full Scan using a full name, email, phone, and generic LinkedIn URL
+completed with zero Maigret sources checked and zero username accounts. The
+email collector still returned registrations, demonstrating that the worker
+and provider policy were live rather than globally disabled.
+
+The defect was in the P3X4 unified builder boundary. Likely username aliases
+were off by default even though the legacy builder generated name variants by
+default; the unified parser also hardcoded the established username-verification,
+GitHub-enrichment, and archive-evidence collector selections off. With no
+explicit username, supported profile handle, or selected alias, the submitted
+plan contained no Maigret targets. Because native full-name search and the
+confirmed email route were still effective, the server allowed the job to be
+presented as a Full Scan.
+
+The separately authorized remediation preserves the unified P3 journey. Likely
+username aliases are enabled by default, remain visible and individually
+selectable, and are carried through the authoritative route plan into the
+durable worker queue. The three established optional collector controls are
+available under an additional-checks disclosure and remain explicit opt-ins;
+their selections, username platforms, and third-party X consent are validated
+and included in the signed plan. A Full Scan is refused unless it has at least
+one Maigret target, and it is refused when Maigret is disabled. Quick Scan may
+still degrade to an enabled native-search route and visibly marks Maigret
+unavailable. Name-only Quick Scan plans expose `Needs username` rather than
+hiding the missing Maigret target.
+
+The tested code checkpoint is
+`9591d7c7a255751141068fd62a2980e16166f46c`, tree
+`04e5f1a0f33225945967856df2c7b479263caef7`. The production-shaped regression
+uses the exact failed input class, proves that selected ranked aliases produce
+non-empty persisted usernames, claims the durable job, and proves that those
+targets reach the worker. The focused post-adjustment web, input, policy,
+persistence, store, alias-UI, and deployment gate passed 378 tests with the one
+legacy running-status test deselected; that case separately passed against an
+initialized SQLite database. The broader correlation and profile-search gate
+passed 546 tests. The complete offline repository gate passed 1,625 tests with
+11 intentional skips and 25 slow/live-network tests deselected. JavaScript
+syntax, Python compilation, critical Flake8, JSON parsing, and
+`git diff --check` passed.
+
+Automated live-browser execution was attempted from the isolated checkout, but
+the runner had no Chromium binary and the isolated Playwright download endpoint
+timed out. No TLS or network control was bypassed and no application dependency
+or lockfile was added. Browser-contract tests cover the default alias state,
+optional controls, route labels, and responsive CSS; human production
+acceptance remains mandatory after separately authorized remediation merge and
+deployment. This remediation adds no migration, provider, service, graph,
+evidence, or P4 change. It has not been merged or deployed.
 
 #### Assessment finding and fixed mode mapping
 
