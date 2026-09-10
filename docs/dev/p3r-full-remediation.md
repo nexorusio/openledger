@@ -39,6 +39,17 @@ The full SQLite migration chain could not run because an earlier migration
 adds foreign keys using a PostgreSQL-specific operation. This is not evidence
 of a successful migration; the required PostgreSQL migration gate remains pending.
 
+The first PR CI run passed PostgreSQL migrations/check, 24 PostgreSQL integrity
+tests and two existing Chromium journeys. The new full gate then exposed fixture
+registration/flattened-result contract errors, compact JSON export metadata,
+and premature notifier closure during cancellation. The offline Python matrix
+reported the same three failures across 3.10–3.14: queued-cancel terminal-event
+expectation, partial stage timeout labeling and missing cancellation accounting.
+These findings have follow-up fixes; the 15 pipeline/alias tests pass locally,
+and the surrounding focused run passed 150 tests with two optional skips before
+the three alias expectations were corrected and rerun. A new full CI run is
+required; prior passing substeps are not final-tree acceptance.
+
 The mandatory full acceptance command is
 `.github/scripts/run_p3r_full_acceptance.sh <absolute-python-path>`.
 It starts a disposable PostgreSQL instance inside a loopback-only network

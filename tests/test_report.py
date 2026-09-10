@@ -439,6 +439,18 @@ def test_generate_json_ndjson_report():
     assert json.loads(data[0])['sitename'] == 'GitHub'
 
 
+def test_json_report_retains_streamed_detection_without_site_definition():
+    jsonfile = StringIO()
+    compact = dict(EXAMPLE_RESULTS['GitHub'])
+    compact.pop('site')
+    generate_json_report('test', {'GitHub': compact}, jsonfile, 'ndjson')
+    data = json.loads(jsonfile.getvalue())
+    assert data['sitename'] == 'GitHub'
+    assert data['url_user'] == compact['url_user']
+    assert data['status'] == compact['status'].json()
+    assert 'site' not in data
+
+
 def test_save_xmind_report():
     filename = 'report_test.xmind'
     save_xmind_report(filename, 'test', EXAMPLE_RESULTS)

@@ -431,6 +431,7 @@ class StageResult:
 
     value: Any = None
     counts: StageCounts = field(default_factory=StageCounts)
+    stop_cause: Optional[StopCause] = None
 
 
 Resolver = Union[bool, int, Callable[..., Any]]
@@ -848,6 +849,11 @@ async def _run_callback(
                 return "failed", None, _safe_error_code(error), True, None
             if not isinstance(result, StageResult):
                 return "failed", None, "invalid_stage_result", True, None
+            if result.stop_cause is not None:
+                if not isinstance(result.stop_cause, StopCause):
+                    return "failed", None, "invalid_stage_stop_cause", True, None
+                return (_stop_status(result.stop_cause), result,
+                        _stop_reason(result.stop_cause), True, result.stop_cause)
             return "completed", result, None, True, None
     except asyncio.CancelledError:
         cleaned = await _stop_callback(running, cleanup_seconds=cleanup_seconds)

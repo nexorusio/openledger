@@ -351,7 +351,9 @@ def test_real_worker_submission_sse_runtime_and_reports(full_app):
 
         terminal = store.get_job(job_id)
         assert terminal and terminal["status"] == "completed"
-        result = terminal["result"]
+        # ``CaseStore.get_job`` serializes the persisted result at the top
+        # level; it deliberately has no nested ``result`` key.
+        result = terminal
         assert result and result["status"] == "completed"
         assert result["collection_accounting"]["state"] == "completed"
         maigret = next(
@@ -411,7 +413,7 @@ def _wait_for_event(store: CaseStore, job_id: str, event_type: str) -> list[dict
 def _assert_one_terminal_reconciliation(store: CaseStore, job_id: str, *, cause: str) -> dict:
     terminal = store.get_job(job_id)
     assert terminal and terminal["status"] in {"completed", "cancelled", "interrupted"}
-    result = terminal["result"] or {}
+    result = terminal
     lifecycle = result.get("lifecycle") or (terminal.get("progress") or {}).get("lifecycle")
     assert lifecycle and lifecycle["phase"] == "terminal"
     assert lifecycle["stop_cause"] == cause
@@ -470,7 +472,7 @@ def test_stop_retains_partial_findings_and_records_operator_source_cause(full_ap
             event.get("type") == "stopped" and event.get("reason") == "source_stopped"
             for event in _event_payloads(store, job_id)
         )
-        result = terminal["result"] or {}
+        result = terminal
         assert result["collection_status"] == "cancelled"
         assert "fixture-shared@example.test" in repr(result)
         maigret = next(row for row in result["collection_accounting"]["stages"] if row["stage_id"] == "maigret")
@@ -499,7 +501,7 @@ def test_parent_reaps_cancellation_resistant_fixture_within_stop_bound(full_app)
 
         terminal = _assert_one_terminal_reconciliation(store, job_id, cause="operator_cancel")
         progress = terminal["progress"] or {}
-        accounting = (terminal["result"] or {}).get("collection_accounting") or progress.get("collection_accounting")
+        accounting = terminal.get("collection_accounting") or progress.get("collection_accounting")
         assert accounting and accounting["state"] == "interrupted"
         maigret = next(row for row in accounting["stages"] if row["stage_id"] == "maigret")
         assert maigret["cleanup_complete"] is False
@@ -517,7 +519,7 @@ def test_parent_recovers_spawn_child_crash_from_durable_checkpoint(full_app):
     assert not runner.is_alive(), "parent did not reap its crashed collector child"
 
     terminal = _assert_one_terminal_reconciliation(store, job_id, cause="cleanup_incomplete")
-    result = terminal["result"] or {}
+    result = terminal
     assert result["status"] == "interrupted"
     assert "fixture-shared@example.test" in repr(result)
     assert result["collection_accounting"]["known"] is False

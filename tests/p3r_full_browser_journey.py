@@ -14,7 +14,11 @@ from urllib.parse import urlsplit
 import pytest
 from werkzeug.serving import make_server
 
-from tests.test_p3r_full_acceptance import FULL_ACCEPTANCE_ENV, _run_claimed_job
+from tests.test_p3r_full_acceptance import (
+    FULL_ACCEPTANCE_ENV,
+    _run_claimed_job,
+    full_app,
+)
 
 pytestmark = [
     pytest.mark.browser,

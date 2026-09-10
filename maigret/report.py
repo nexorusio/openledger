@@ -771,7 +771,10 @@ def generate_json_report(username: str, results: dict, file, report_type):
 
         data = dict(site_result)
         data["status"] = data["status"].json()
-        data["site"] = data["site"].json
+        # Permitted streaming/checkpoint results retain detection evidence but
+        # may not carry the optional full site-definition object.
+        if data.get("site") is not None:
+            data["site"] = data["site"].json
         for field in ["future", "checker"]:
             if field in data:
                 del data[field]

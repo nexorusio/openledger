@@ -3422,6 +3422,35 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
 
     async def maigret_stage(context):
         failures = 0
+        target_budget_exhausted = False
+
+        async def cancel_and_drain(task, notify):
+            """Let the source finish its own terminal accounting before close.
+
+            The Maigret adapter owns per-site terminal events in its ``finally``
+            blocks.  Closing its notifier while that task is still unwinding
+            turns a cooperative cancellation into an unobserved task failure.
+            Keep the same bounded cleanup contract as the stage supervisor; if
+            the task resists cancellation, leave its notifier usable until the
+            supervisor terminates the worker.
+            """
+            if not task.done():
+                task.cancel()
+                done, _ = await asyncio.wait(
+                    {task}, timeout=PERSISTENT_BUDGET_CLEANUP_SECONDS
+                )
+                if not done:
+                    job['cleanup_incomplete'] = True
+                    notify.cleanup_incomplete = True
+                    return False
+            try:
+                task.result()
+            except (asyncio.CancelledError, Exception):
+                # The caller retains the cancellation or source outcome; this
+                # read only prevents an unretrieved task exception.
+                pass
+            return True
+
         for target_index, username in enumerate(usernames):
             if context.is_cancelled():
                 raise asyncio.CancelledError()
@@ -3441,21 +3470,25 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
             task = asyncio.create_task(maigret_search(username.strip(), options, query_notify=notify))
             job['task'] = task
             completed = False
+            task_drained = False
             try:
                 done, _ = await asyncio.wait({task}, timeout=max(0.0, target_deadline - time.monotonic()))
                 if not done:
-                    task.cancel()
-                    done, _ = await asyncio.wait({task}, timeout=PERSISTENT_BUDGET_CLEANUP_SECONDS)
-                    if not done:
-                        job['cleanup_incomplete'] = True
-                        notify.cleanup_incomplete = True
+                    target_budget_exhausted = True
+                    q.put({'type': 'stopped', 'collector': 'maigret', 'username': username.strip(),
+                           'reason': 'target_budget_exhausted'})
+                    task_drained = await cancel_and_drain(task, notify)
+                    if not task_drained:
                         raise asyncio.CancelledError()
                 results = await task
                 notify.results.update(results or {})
                 completed = True
             except asyncio.CancelledError:
-                q.put({'type': 'stopped', 'collector': 'maigret', 'username': username.strip(),
-                       'reason': 'target_budget_exhausted' if not context.is_cancelled() else 'source_stopped'})
+                if not task_drained:
+                    task_drained = await cancel_and_drain(task, notify)
+                if not target_budget_exhausted:
+                    q.put({'type': 'stopped', 'collector': 'maigret', 'username': username.strip(),
+                           'reason': 'source_stopped' if context.is_cancelled() else 'callback_cancelled'})
                 if context.is_cancelled() or job.get('cleanup_incomplete'):
                     raise
             except Exception as error:
@@ -3464,7 +3497,11 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 q.put(circuit or {'type': 'collector_error', 'collector': 'maigret',
                                  'message': record_internal_error('Username collection failed', error)})
             finally:
-                notify.close()
+                # A resistant source can still emit its own terminal event.
+                # Do not seal the notifier until it has stopped; the worker
+                # supervisor owns the remaining process-level cleanup.
+                if task.done() or task_drained:
+                    notify.close()
                 if not notify.results and (not completed or context.is_cancelled()):
                     general_results.remove(item)
                 if notify.cleanup_incomplete:
@@ -3472,6 +3509,13 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                     job['maigret_cleanup_incomplete'] = True
             if job.get('cleanup_incomplete'):
                 raise asyncio.CancelledError()
+        if target_budget_exhausted:
+            # Publish the partial outcome immediately and give unused time to
+            # later sources; never wait out a deadline only to label it.
+            return StageResult(
+                counts=StageCounts(observations=sum(len(item[2]) for item in general_results)),
+                stop_cause=StopCause.STAGE_DEADLINE,
+            )
         if failures:
             raise RuntimeError('One or more username collections failed')
         return StageResult(counts=StageCounts(observations=sum(len(item[2]) for item in general_results)))

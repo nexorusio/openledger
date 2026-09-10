@@ -225,8 +225,8 @@ async def test_cooperative_alias_timeout_releases_later_aliases_and_github(
     assert [item[0] for item in general_results] == usernames
     maigret = _stage(job, "maigret")
     github = _stage(job, "github")
-    assert maigret["status"] == "completed"
-    assert maigret["stop_cause"] is None
+    assert maigret["status"] == "timed_out"
+    assert maigret["stop_cause"] == "stage_deadline"
     assert maigret["planned"] == alias_count
     assert maigret["timeouts"] == 1
     assert maigret["completed"] == alias_count - 1
