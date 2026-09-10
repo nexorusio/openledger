@@ -248,7 +248,7 @@ class StreamNotify:
     """
 
     def __init__(self, event_queue, username, cancellation_check=None, *,
-                 stage_context=None, checkpoint=None):
+                 stage_context=None, checkpoint=None, observation_count=None):
         self.q = event_queue
         self.username = username
         self.cancellation_check = cancellation_check
@@ -258,6 +258,7 @@ class StreamNotify:
         self.cancel_requested = False
         self.stage_context = stage_context
         self.checkpoint = checkpoint
+        self.observation_count = observation_count
         self.closed = False
         self.cleanup_incomplete = False
         self._terminal_batch = []
@@ -377,7 +378,8 @@ class StreamNotify:
             # No start notification exists for native per-site queries. Keep
             # their in-flight admission counts unknown until terminal accounting.
             snapshot.update(started=None, unattempted=None, unknown=None,
-                            interrupted=None, observations=len(self.results))
+                            interrupted=None, observations=(self.observation_count()
+                            if self.observation_count is not None else len(self.results)))
             self.stage_context.publish_progress(StageCounts(**snapshot))
         if self.checkpoint is not None:
             self.checkpoint()
@@ -3258,7 +3260,23 @@ async def run_native_profile_search_phase(
 
 async def _stream_search(job, usernames, options, cancellation_check=None):
     """Run existing adapters through the bounded, persisted stage contract."""
-    q = job['queue']
+    original_queue = job['queue']
+
+    class CollectionEventSink:
+        def __getattr__(self, name):
+            return getattr(original_queue, name)
+
+        def put(self, event):
+            try:
+                return original_queue.put(event)
+            except Exception:
+                # A ledger write failure is not an ordinary source failure.
+                # Freeze admission and leave the last committed checkpoint for
+                # stale-job reconciliation, with missing dispositions unknown.
+                job['persistence_failed'] = True
+                raise
+
+    q = job['queue'] = CollectionEventSink()
     general_results = job['general_results'] = []
     observations = job['collector_observations'] = []
     options = dict(options)
@@ -3274,6 +3292,8 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 or bool(cancellation_check and cancellation_check()))
 
     def checkpoint():
+        if job.get('persistence_failed'):
+            raise RuntimeError('Collection persistence failed; reconciliation required')
         sink = job.get('collection_checkpoint_sink')
         if callable(sink):
             snapshot = build_reports(
@@ -3354,7 +3374,8 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
                 raise asyncio.CancelledError()
             notify = StreamNotify(q, username.strip(),
                                   cancellation_check=context.is_cancelled,
-                                  stage_context=context, checkpoint=checkpoint)
+                                  stage_context=context, checkpoint=checkpoint,
+                                  observation_count=lambda: sum(len(row[2]) for row in general_results))
             # The notifier dictionary remains reachable while the source is
             # running, so a checkpoint/cancellation retains partial outcomes.
             item = (username.strip(), 'username', notify.results)
@@ -3773,6 +3794,8 @@ def run_stream_job(job_id, usernames, options):
             }
         )
 
+    if job.get('persistence_failed'):
+        return False
     # Same report files + results page as the classic /search flow, so the
     # live graph is a progress view, not a replacement for the report.
     finalize_stream_job(
@@ -5562,6 +5585,11 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
                 asyncio.wait({stream_task}, timeout=0.1)
             )
         loop.close()
+    if runtime_job.get('persistence_failed'):
+        # No terminal report, file publication or done event may assert complete
+        # accounting after a failed durable write. The stale monitor reconciles
+        # the existing committed checkpoint without replaying source work.
+        return False
     shutdown_requested = bool(shutdown_check and shutdown_check())
     cancel_requested = store.is_cancel_requested(job_id)
     if runtime_job.get("cancellation_deadline_exceeded"):

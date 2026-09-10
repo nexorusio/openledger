@@ -175,6 +175,33 @@ def test_real_stream_notifier_flushes_short_terminal_batch_before_cleanup(job_st
 
 
 @pytest.mark.parametrize(
+    'extra',
+    [
+        {
+            'google_places_search': {
+                'name': 'Transient name',
+                'formatted_address': 'Transient details',
+            }
+        },
+        {'provider_response': {'payload': 'Unreviewed response'}},
+        {
+            'collector_observations': [
+                {'source_engine': 'google_places_search', 'name': 'Transient name'}
+            ]
+        },
+    ],
+)
+def test_profile_checkpoint_rejects_other_source_payloads_without_writing(
+    job_store, extra
+):
+    store, job_id = job_store
+    checkpoint = {'status': 'completed', 'collector_observations': [], **extra}
+    with pytest.raises(ValueError, match='unsupported'):
+        store.save_collection_checkpoint(job_id, checkpoint, worker_id='worker:fixture')
+    assert store.get_collection_checkpoint(job_id) == {}
+
+
+@pytest.mark.parametrize(
     'disposition,attempted,cleanup',
     [
         ('unattempted', True, 'not_required'),

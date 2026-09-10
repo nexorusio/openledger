@@ -3204,13 +3204,32 @@ class CaseStore:
     def save_collection_checkpoint(self, job_id, result, *, worker_id):
         """Commit permitted partial evidence and pending claims under one lease.
 
-        The checkpoint has the same reviewed evidence schema as report metadata;
-        it is never a provider response body or a Google Places live-details dump.
+        Accept only profile report fields and the existing profile collector
+        families. Native evidence validation remains source-specific.
         """
+        allowed_fields = {
+            'status', 'session_folder', 'graph_file', 'usernames',
+            'individual_reports', 'found_count', 'candidate_count',
+            'suppressed_count', 'raw_claimed_count', 'untriaged_count',
+            'profile_reliability_version', 'collector_observations',
+            'collector_found_count', 'collector_registration_count',
+            'username_verification_found_count', 'username_verification_unknown_count',
+            'github_enrichment_count', 'archived_profile_count', 'collection_accounting',
+        }
+        if not isinstance(result, dict) or set(result) - allowed_fields:
+            raise ValueError('Collection checkpoint has unsupported report fields')
+        result = dict(result)
+        if result.get('collection_accounting') is not None:
+            accounting = public_collection_accounting(result['collection_accounting'])
+            if accounting is None:
+                raise ValueError('Invalid collection checkpoint accounting')
+            result['collection_accounting'] = accounting
         allowed_engines = {'github_public_profile', 'unfurl_url_analysis', 'wayback_cdx',
                            'user_scanner_username', 'user_scanner_email'}
-        if any(not isinstance(item, dict) or item.get('source_engine') not in allowed_engines
-               for item in result.get('collector_observations', [])):
+        observations = result.get('collector_observations', [])
+        if not isinstance(observations, list) or any(
+                not isinstance(item, dict) or item.get('source_engine') not in allowed_engines
+                for item in observations):
             raise ValueError('Collection checkpoint has an unsupported evidence policy')
         now = utcnow()
         with self.engine.begin() as connection:
@@ -8940,21 +8959,26 @@ class CaseStore:
                     progress.get('collection_accounting'), task_events, native,
                 )
                 retained = dict(progress.get('collection_checkpoint') or {})
-                if accounting is not None:
-                    progress['collection_accounting'] = accounting
-                    retained.update(status='interrupted', collection_status='interrupted',
-                                    collection_accounting=accounting,
-                                    collection_message='The worker stopped; committed evidence remains available for review.')
-                    connection.execute(update(investigation_jobs).where(
-                        investigation_jobs.c.id == row['id'],
-                        investigation_jobs.c.status == 'interrupted',
-                        investigation_jobs.c.worker_id.is_(None),
-                    ).values(progress=progress, result=retained))
-                    connection.execute(insert(investigation_events).values(
-                        job_id=row['id'], created_at=now,
-                        event={'type': 'done', 'status': 'interrupted',
-                               'reason': 'worker_lease_lost', 'collection_accounting': accounting},
-                    ))
+                message = ('The worker stopped; committed evidence remains available for review.'
+                           if retained else 'The worker stopped before a collection checkpoint was saved.')
+                if accounting is None:
+                    # Claim-to-first-event crashes have no justified task counts.
+                    # Persist an explicit unknown snapshot and one terminal event.
+                    accounting = {'schema_version': 1, 'revision': 0,
+                                  'state': 'interrupted', 'known': False, 'stages': []}
+                progress['collection_accounting'] = accounting
+                retained.update(status='interrupted', collection_status='interrupted',
+                                collection_accounting=accounting, collection_message=message)
+                connection.execute(update(investigation_jobs).where(
+                    investigation_jobs.c.id == row['id'],
+                    investigation_jobs.c.status == 'interrupted',
+                    investigation_jobs.c.worker_id.is_(None),
+                ).values(progress=progress, result=retained))
+                connection.execute(insert(investigation_events).values(
+                    job_id=row['id'], created_at=now,
+                    event={'type': 'done', 'status': 'interrupted',
+                           'reason': 'worker_lease_lost', 'collection_accounting': accounting},
+                ))
                 if native and not connection.scalar(select(profile_search_audits.c.id).where(
                     profile_search_audits.c.job_id == row['id']
                 ).limit(1)):

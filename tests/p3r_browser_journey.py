@@ -48,7 +48,7 @@ ACCOUNTING_RUNNING = {
             "cancelled": 0,
             "interrupted": 0,
             "unattempted": 0,
-            "unknown": None,
+            "unknown": 0,
             "observations": 1,
         },
         {
@@ -66,8 +66,8 @@ ACCOUNTING_RUNNING = {
             "timeouts": 0,
             "cancelled": 0,
             "interrupted": 0,
-            "unattempted": 1,
-            "unknown": None,
+            "unattempted": 0,
+            "unknown": 1,
             "observations": 2,
         },
         {
@@ -86,7 +86,7 @@ ACCOUNTING_RUNNING = {
             "cancelled": 0,
             "interrupted": 0,
             "unattempted": 0,
-            "unknown": None,
+            "unknown": 0,
             "observations": 0,
         },
         {
@@ -95,15 +95,15 @@ ACCOUNTING_RUNNING = {
             "status": "cancelled", "reason": "parent_cancelled", "planned": 1,
             "started": 1, "terminal": 1, "completed": 0, "errors": 0,
             "timeouts": 0, "cancelled": 1, "interrupted": 0, "unattempted": 0,
-            "unknown": None, "observations": 0,
+            "unknown": 0, "observations": 0,
         },
         {
             "stage_id": "wayback", "engine_id": "wayback-cdx",
             "label": "ignored by the renderer", "unit": "queries",
             "status": "interrupted", "reason": "interrupted", "planned": 1,
-            "started": 1, "terminal": 1, "completed": 0, "errors": 0,
+            "started": 1, "terminal": 0, "completed": 0, "errors": 0,
             "timeouts": 0, "cancelled": 0, "interrupted": 1, "unattempted": 0,
-            "unknown": 1, "observations": None,
+            "unknown": 0, "observations": 0,
         },
         {
             "stage_id": "user_scanner_username", "engine_id": "user-scanner-username",
@@ -111,7 +111,7 @@ ACCOUNTING_RUNNING = {
             "status": "unknown", "reason": "not_admitted", "planned": 1,
             "started": 0, "terminal": 0, "completed": 0, "errors": 0,
             "timeouts": 0, "cancelled": 0, "interrupted": 0, "unattempted": 1,
-            "unknown": None, "observations": None,
+            "unknown": 0, "observations": 0,
         },
         {
             "stage_id": "user_scanner_email", "engine_id": "user-scanner",
@@ -119,7 +119,7 @@ ACCOUNTING_RUNNING = {
             "status": "pending", "reason": "dependency_not_ready", "planned": 1,
             "started": 0, "terminal": 0, "completed": 0, "errors": 0,
             "timeouts": 0, "cancelled": 0, "interrupted": 0, "unattempted": 1,
-            "unknown": None, "observations": None,
+            "unknown": 0, "observations": 0,
         },
     ],
 }
@@ -131,7 +131,8 @@ ACCOUNTING_PARTIAL = {
     "stages": [
         ACCOUNTING_RUNNING["stages"][0],
         {**ACCOUNTING_RUNNING["stages"][1], "status": "timed_out", "reason": "timeout",
-         "terminal": 4, "completed": 2, "errors": 1, "timeouts": 1, "unattempted": 0},
+         "terminal": 4, "completed": 2, "errors": 1, "timeouts": 1,
+         "unattempted": 0, "unknown": 0},
         *ACCOUNTING_RUNNING["stages"][2:],
     ],
 }
@@ -234,7 +235,7 @@ def test_browser_submission_progress_refresh_and_partial_results(p3r_browser_app
             assert "3 / 4" in rows.nth(1).inner_text()
             assert "GitHub queries Failed Provider unavailable 1 / 1 1" in rows.nth(2).inner_text()
             assert "Unfurl targets Cancelled Parent cancelled 1 / 1" in rows.nth(3).inner_text()
-            assert "Wayback queries Interrupted Interrupted 1 / 1" in rows.nth(4).inner_text()
+            assert "Wayback queries Interrupted Interrupted 0 / 1" in rows.nth(4).inner_text()
             assert "User Scanner usernames targets Unknown Not admitted 0 / 1" in rows.nth(5).inner_text()
             assert "User Scanner emails targets Pending Dependency not ready 0 / 1" in rows.nth(6).inner_text()
 
@@ -295,6 +296,18 @@ def _seed_persona_with_many_citations(store: CaseStore, username: str) -> tuple[
     return persona["id"], full_name_claim["id"]
 
 
+def _visible_claim_record(page, claim_id: str):
+    """Resolve the visible occurrence of the explicit review claim.
+
+    A pending record is intentionally shown in both its subject category and
+    the hidden review queue.  Scope assertions and review actions to the
+    server-assigned claim identifier rather than matching duplicated text.
+    """
+    return page.locator(
+        f'article.claim-record:has(form[action="/claims/{claim_id}/review"]):visible'
+    )
+
+
 def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_browser_app):
     sync_playwright = _require_browser()
     base_url, store, _job_id = p3r_browser_app
@@ -307,26 +320,28 @@ def test_browser_pending_evidence_requires_approval_before_shared_graph(p3r_brow
         try:
             page.goto(base_url + f"/personas/{_first_persona}", wait_until="domcontentloaded")
             assert page.locator('[data-review-status="pending"]').count() > 0
-            assert page.get_by_text("12 supporting sources").count() == 1
-            assert page.locator('a[href^="https://evidence.test/alice/"]').count() == 12
+            first_claim_record = _visible_claim_record(page, first_claim)
+            assert first_claim_record.count() == 1
+            assert first_claim_record.get_by_text(
+                "12 supporting sources", exact=True
+            ).count() == 1
+            assert first_claim_record.locator(
+                'a[href^="https://evidence.test/alice/"]'
+            ).count() == 12
 
             page.goto(base_url + "/relationships?mode=shared", wait_until="domcontentloaded")
             assert page.locator('[data-relationship-state="pending_review"]').count() == 1
             assert page.locator("#relationshipGraphData").count() == 0
 
             page.goto(base_url + f"/personas/{_first_persona}", wait_until="domcontentloaded")
-            first_claim_record = page.locator("article.claim-record").filter(
-                has_text="Shared Exact Name"
-            )
+            first_claim_record = _visible_claim_record(page, first_claim)
             assert first_claim_record.count() == 1
             with page.expect_navigation(wait_until="domcontentloaded"):
                 first_claim_record.get_by_role("button", name="Approve").click()
             assert page.locator('[data-review-status="approved"]').count() > 0
 
             page.goto(base_url + f"/personas/{_second_persona}", wait_until="domcontentloaded")
-            second_claim_record = page.locator("article.claim-record").filter(
-                has_text="Shared Exact Name"
-            )
+            second_claim_record = _visible_claim_record(page, second_claim)
             assert second_claim_record.count() == 1
             with page.expect_navigation(wait_until="domcontentloaded"):
                 second_claim_record.get_by_role("button", name="Approve").click()

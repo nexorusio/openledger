@@ -250,7 +250,14 @@ def test_postgres_rejects_wrong_and_expired_worker_event_writes(postgres_store):
     assert postgres_store.mark_stale_running(WORKER_STALE_AFTER_SECONDS) == 1
     interrupted = postgres_store.get_job(job_id)
     assert interrupted["status"] == "interrupted"
-    assert postgres_store.get_events(job_id) == events_before_expired_write
+    events = postgres_store.get_events(job_id)
+    assert events[:-1] == events_before_expired_write
+    assert events[-1]['event']['type'] == 'done'
+    assert events[-1]['event']['status'] == 'interrupted'
+    assert interrupted['result']['collection_accounting']['known'] is False
+    assert interrupted['result']['collection_accounting']['stages'] == []
+    assert postgres_store.mark_stale_running(WORKER_STALE_AFTER_SECONDS) == 0
+    assert postgres_store.get_events(job_id) == events
 
 
 @pytest.mark.parametrize("claimed", (False, True), ids=("queued", "running"))
@@ -590,4 +597,180 @@ def test_postgres_atomic_finish_rolls_back_and_blocks_late_writes(postgres_store
     assert (
         sum(row["event"]["type"] == "done" for row in postgres_store.get_events(job_id))
         == 1
+    )
+
+
+def test_postgres_rejects_a_second_task_id_for_the_same_logical_attempt(
+    postgres_store,
+):
+    job_id, _usernames = _enqueue(postgres_store, 1)
+    claimed = postgres_store.claim_next("worker:p3r:logical-attempt")
+    task = _task_fixture("logical-attempt")
+
+    plan_id = postgres_store.append_event(
+        job_id,
+        {"type": "collection_task_plan", "tasks": [task]},
+        runtime_guard=True,
+        worker_id=claimed["worker_id"],
+    )
+    conflicting = {
+        **task,
+        "task_id": _opaque_id("task:logical-attempt:conflicting-id"),
+    }
+    with pytest.raises(ValueError, match="logical collection attempt"):
+        postgres_store.append_event(
+            job_id,
+            {"type": "collection_task_plan", "tasks": [conflicting]},
+            runtime_guard=True,
+            worker_id=claimed["worker_id"],
+        )
+
+    task_events = [
+        row
+        for row in postgres_store.get_events(job_id)
+        if row["event"]["type"].startswith("collection_task_")
+    ]
+    assert [row["id"] for row in task_events] == [plan_id]
+    assert task_events[0]["event"]["tasks"] == [task]
+
+
+def test_postgres_rebatching_and_cleanup_progression_are_idempotent(
+    postgres_store,
+):
+    job_id, _usernames = _enqueue(postgres_store, 1)
+    claimed = postgres_store.claim_next("worker:p3r:cleanup")
+    first = _task_fixture("cleanup-first")
+    second = _task_fixture("cleanup-second")
+
+    plan_id = postgres_store.append_event(
+        job_id,
+        {"type": "collection_task_plan", "tasks": [first, second]},
+        runtime_guard=True,
+        worker_id=claimed["worker_id"],
+    )
+    assert (
+        postgres_store.append_event(
+            job_id,
+            {"type": "collection_task_plan", "tasks": [first]},
+            runtime_guard=True,
+            worker_id=claimed["worker_id"],
+        )
+        == plan_id
+    )
+
+    def cleanup(state):
+        return {
+            "type": "collection_task_cleanup",
+            "tasks": [
+                {
+                    **first,
+                    "event_type": "cleanup",
+                    "cleanup_state": state,
+                }
+            ],
+        }
+
+    with pytest.raises(ValueError, match="no pending terminal task"):
+        postgres_store.append_event(
+            job_id,
+            cleanup("complete"),
+            runtime_guard=True,
+            worker_id=claimed["worker_id"],
+        )
+
+    terminal_id = postgres_store.append_event(
+        job_id,
+        {
+            "type": "collection_task_terminal",
+            "tasks": [
+                {
+                    **first,
+                    "disposition": "timeout",
+                    "attempted": True,
+                    "cleanup_state": "pending",
+                    "reason": "stage_budget_exhausted",
+                }
+            ],
+        },
+        runtime_guard=True,
+        worker_id=claimed["worker_id"],
+    )
+    incomplete_id = postgres_store.append_event(
+        job_id,
+        cleanup("incomplete"),
+        runtime_guard=True,
+        worker_id=claimed["worker_id"],
+    )
+    complete_id = postgres_store.append_event(
+        job_id,
+        cleanup("complete"),
+        runtime_guard=True,
+        worker_id=claimed["worker_id"],
+    )
+    assert (
+        postgres_store.append_event(
+            job_id,
+            cleanup("complete"),
+            runtime_guard=True,
+            worker_id=claimed["worker_id"],
+        )
+        == complete_id
+    )
+    with pytest.raises(ValueError, match="terminal disposition"):
+        postgres_store.append_event(
+            job_id,
+            cleanup("incomplete"),
+            runtime_guard=True,
+            worker_id=claimed["worker_id"],
+        )
+
+    task_events = [
+        row["event"]
+        for row in postgres_store.get_events(job_id)
+        if row["event"]["type"].startswith("collection_task_")
+    ]
+    assert plan_id < terminal_id < incomplete_id < complete_id
+    assert [event["type"] for event in task_events] == [
+        "collection_task_plan",
+        "collection_task_terminal",
+        "collection_task_cleanup",
+        "collection_task_cleanup",
+    ]
+    assert [event["tasks"][0].get("cleanup_state") for event in task_events[1:]] == [
+        "pending",
+        "incomplete",
+        "complete",
+    ]
+
+
+def test_postgres_committed_stop_blocks_normal_finish_and_publication(
+    postgres_store,
+):
+    job_id, _usernames = _enqueue(postgres_store, 1)
+    claimed = postgres_store.claim_next("worker:p3r:stop-before-finish")
+    result = _claim_result(claimed)
+    persona_id = postgres_store.get_case(claimed["case_id"])["personas"][0]["id"]
+    published = []
+
+    assert postgres_store.request_cancel(job_id) is True
+    assert (
+        postgres_store.finish(
+            job_id,
+            result,
+            worker_id=claimed["worker_id"],
+            synchronize_claims=True,
+            publication=lambda: published.append(True),
+            terminal_event={"type": "done", "status": "completed"},
+        )
+        is False
+    )
+
+    stopped = postgres_store.get_job(job_id)
+    assert published == []
+    assert stopped["status"] == "cancel_requested"
+    assert stopped.get("result") is None
+    assert stopped["completed_at"] is None
+    assert postgres_store.get_persona(persona_id)["claims"] == []
+    assert not any(
+        row["event"]["type"] == "done" for row in postgres_store.get_events(job_id)
     )
