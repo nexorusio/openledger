@@ -67,6 +67,41 @@ def test_profile_search_deployment_is_fail_closed_with_runtime_parity():
     assert "OPENLEDGER_PROFILE_SEARCH_API_KEY:" not in worker
     assert "../runtime/secrets:/app/runtime/secrets" in app
     assert "../runtime/secrets:/app/runtime/secrets:ro" in worker
+    governed_switch = (
+        "OPENLEDGER_GOVERNED_PIVOTS_ENABLED: "
+        '"${OPENLEDGER_GOVERNED_PIVOTS_ENABLED:-false}"'
+    )
+    assert governed_switch in app
+    assert governed_switch in worker
+    assert "OPENLEDGER_GOVERNED_PIVOTS_ENABLED=false" in (
+        REPOSITORY_ROOT / "deploy" / ".env.example"
+    ).read_text(encoding="utf-8")
+    assert "OPENLEDGER_GOVERNED_PIVOTS_ENABLED='false'" in (
+        REPOSITORY_ROOT / "deploy" / "install.sh"
+    ).read_text(encoding="utf-8")
+
+
+def test_unified_investigation_rollout_is_app_only_and_defaults_off():
+    setting = (
+        "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED: "
+        '"${OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED:-false}"'
+    )
+    app = _compose_service("app")
+    worker = _compose_service("worker")
+    example = (REPOSITORY_ROOT / "deploy" / ".env.example").read_text(
+        encoding="utf-8"
+    )
+    install_script = (REPOSITORY_ROOT / "deploy" / "install.sh").read_text(
+        encoding="utf-8"
+    )
+
+    assert setting in app
+    assert "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED" not in worker
+    assert "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED=false" in example
+    assert (
+        "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED='false'"
+        in install_script
+    )
 
 
 def test_self_hosted_search_is_private_optional_and_resource_bounded():

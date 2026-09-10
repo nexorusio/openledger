@@ -6,6 +6,11 @@ import os
 from typing import Any, Mapping, MutableMapping, Optional
 
 from maigret.web.execution_budget import apply_execution_budget
+from maigret.web.investigation_input import (
+    finalize_investigation_route_plan,
+    investigation_has_effective_collection_route,
+    is_unified_investigation_plan,
+)
 
 PROFILE_DISCOVERY_POLICY_VERSION = "profile-discovery-routing-v2"
 PROFILE_DISCOVERY_JOB_KINDS = frozenset({"live", "refresh"})
@@ -20,11 +25,14 @@ _FLAG_ENVIRONMENT = {
     "provider_circuit_breakers_enabled": (
         "OPENLEDGER_PROVIDER_CIRCUIT_BREAKERS_ENABLED"
     ),
+    "governed_pivots_enabled": "OPENLEDGER_GOVERNED_PIVOTS_ENABLED",
     "search_first_enabled": "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED",
 }
 _FALSE_VALUES = frozenset({"0", "false", "no", "off"})
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_DEFAULT_OFF_FLAGS = frozenset({"search_first_enabled"})
+_DEFAULT_OFF_FLAGS = frozenset(
+    {"governed_pivots_enabled", "search_first_enabled"}
+)
 
 
 class ProfileDiscoveryPolicyError(ValueError):
@@ -91,23 +99,52 @@ def govern_profile_discovery_options(
         raise ProfileDiscoveryPolicyError(
             f"{mode.title()} profile discovery is disabled by server policy."
         )
-    if not flags["maigret_enabled"]:
+
+    specification = governed.get("investigation_spec")
+    unified_plan = is_unified_investigation_plan(specification)
+    if not unified_plan and not flags["maigret_enabled"]:
         raise ProfileDiscoveryPolicyError(
             "Maigret profile discovery is disabled by server policy."
         )
-
-    specification = governed.get("investigation_spec")
     if isinstance(specification, Mapping):
         specification = dict(specification)
         user_scanner_requested = bool(
             specification.get("enable_user_scanner_email")
             or specification.get("enable_user_scanner_username")
         )
-        if user_scanner_requested and not flags["user_scanner_enabled"]:
+        if (
+            user_scanner_requested
+            and not flags["user_scanner_enabled"]
+            and not unified_plan
+        ):
             raise ProfileDiscoveryPolicyError(
                 "User Scanner verification is disabled by server policy."
             )
+        if unified_plan:
+            # Schema-v2 ordinary scans have no hidden case source filters or
+            # site checklist. Quick/Full breadth remains server-owned.
+            governed["tags"] = []
+            governed["excluded_tags"] = []
+            governed["site_list"] = []
+            specification = finalize_investigation_route_plan(
+                specification,
+                flags=flags,
+                execution_mode=mode,
+            )
+            if not investigation_has_effective_collection_route(specification):
+                raise ProfileDiscoveryPolicyError(
+                    "No authorized collection route is currently available for "
+                    "these investigation tokens."
+                )
         governed["investigation_spec"] = specification
+
+    if (
+        isinstance(governed.get("governed_pivot_plan"), Mapping)
+        and not flags["governed_pivots_enabled"]
+    ):
+        raise ProfileDiscoveryPolicyError(
+            "Governed evidence pivots are disabled by server policy."
+        )
 
     # Replace any client-supplied policy document with the server snapshot.
     governed["profile_discovery_policy"] = {

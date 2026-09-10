@@ -75,15 +75,25 @@ Apply normal updates after changes have been merged to main:
     cd /opt/openledger
     bash deploy/update.sh
 
-Profile discovery has server-owned Focused/Exhaustive budgets, durable
+Profile discovery presents the server-owned `focused`/`exhaustive` modes as
+Quick Scan and Full Scan, with durable
 cancellation and worker leases, provider circuit breakers, seven default-on P1
 operational flags, and a separate default-off native search-first capability.
-The same flag and provider settings must reach both the app and worker. The
-supported no-subscription path runs a pinned private SearXNG container only
+The same execution-policy flag and provider settings must reach both the app
+and worker. The supported no-subscription path runs a pinned private SearXNG
+container only
 when explicitly enabled; it has no public port or paid API credential. For the
 exact capacity checks, staged enablement, validation, restart, and rollback
 commands, use the
 [profile discovery operations runbook](../docs/profile-discovery-operations.md).
+
+The unified investigation builder has its own default-off, app-only rollout
+flag: `OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED`. Set it to `true` in
+`deploy/.env`, validate Compose, and force-recreate only `app` to expose the
+token editor. Set it back to `false` and recreate only `app` to restore the
+legacy typed builder. Do not inject this presentation flag into `worker`;
+existing persisted jobs and evidence are unchanged by either transition. The
+runbook contains the exact rollout, health-check, and rollback commands.
 
 The first update from the original Basic Authentication deployment prompts for
 an application username and password before removing the proxy login. Existing

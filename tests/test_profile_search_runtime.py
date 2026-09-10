@@ -242,6 +242,42 @@ def test_persona_refresh_loads_only_approved_social_claims():
     assert result == (claims[0],)
 
 
+def test_governed_profile_pivot_uses_only_its_verified_source_claim():
+    claims = [
+        {
+            "id": "claim-source",
+            "field_name": "social_account",
+            "review_status": "approved",
+            "value": {"username": "source_handle"},
+        },
+        {
+            "id": "claim-other",
+            "field_name": "social_account",
+            "review_status": "approved",
+            "value": {"username": "other_handle"},
+        },
+    ]
+
+    class _Store:
+        def list_approved_persona_social_accounts(self, persona_id, *, limit):
+            assert persona_id == "persona-1"
+            assert limit == 8
+            return claims
+
+    result = web_app._profile_search_existing_evidence(
+        _Store(),
+        {
+            "investigation_spec": {"target_persona_id": "persona-1"},
+            "governed_pivot_plan": {
+                "pivot_kind": "verified_profile_discovery",
+                "source_claim": {"id": "claim-source"},
+            },
+        },
+    )
+
+    assert result == (claims[0],)
+
+
 def test_persona_social_seed_query_filters_before_applying_bound(tmp_path):
     store = CaseStore(
         f"sqlite:///{tmp_path / 'profile-search-seeds.db'}",

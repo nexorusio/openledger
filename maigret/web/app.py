@@ -112,6 +112,8 @@ from maigret.web.execution_budget import ExecutionBudget
 from maigret.web.profile_discovery_policy import (
     ProfileDiscoveryPolicyError,
     govern_profile_discovery_options,
+    profile_discovery_flag_enabled,
+    profile_discovery_flags,
 )
 from maigret.web.profile_search_backend import (
     ProfileSearchClient,
@@ -124,14 +126,22 @@ from maigret.web.profile_search_runtime import GovernedProfileSearchClient
 from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web.investigation_input import (
     InvestigationInputError,
+    MAX_IDENTIFIERS,
+    MAX_TOKEN_LENGTH,
+    MAX_USERNAME_LENGTH,
     build_investigation_plan,
+    build_unified_investigation_plan,
     extract_profile_usernames,
+    finalize_investigation_route_plan,
+    investigation_has_effective_collection_route,
+    is_unified_investigation_plan,
     normalize_profile_url,
     normalize_username,
     public_ai_context,
     search_usernames,
 )
 from maigret.web.username_aliases import (
+    MAX_SELECTED_ALIASES,
     normalize_context_numbers,
     normalize_nicknames,
     rank_username_aliases,
@@ -204,6 +214,12 @@ PERSISTENT_CANCEL_POLL_SECONDS = 0.25
 PERSISTENT_CANCEL_COMPLETION_SECONDS = 15.0
 PERSISTENT_BUDGET_CLEANUP_SECONDS = 5.0
 COMBINED_AI_HEARTBEAT_SECONDS = 5.0
+UNIFIED_INVESTIGATION_INPUT_FLAG = (
+    "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED"
+)
+UNIFIED_INVESTIGATION_INPUT_TRUE_VALUES = frozenset(
+    {"1", "true", "yes", "on"}
+)
 
 
 def resolve_selected_site(sites, result_site_name):
@@ -1662,7 +1678,7 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
     return {
         'status': str(source.get('status') or 'queued'),
         'mode': mode,
-        'mode_label': 'Exhaustive' if mode == 'exhaustive' else 'Focused',
+        'mode_label': 'Full Scan' if mode == 'exhaustive' else 'Quick Scan',
         'budget_recorded': budget_recorded,
         'budget_seconds': budget_seconds,
         'deadline_at': source.get('deadline_at') or budget.get('deadline_at'),
@@ -2825,6 +2841,22 @@ def resolve_profile_url_identifiers(url):
 
 def parse_investigation_submission(form):
     """Return scan targets plus a bounded, persisted investigation plan."""
+    if form.getlist('investigation_token'):
+        if not unified_investigation_input_enabled():
+            raise InvestigationInputError(
+                'Unified investigation input is disabled by server policy.'
+            )
+        plan = build_unified_investigation_plan(
+            form,
+            profile_url_resolver=resolve_profile_url_identifiers,
+            require_route_confirmation=True,
+        )
+        if plan.get('enable_user_scanner_email') and not user_scanner_available():
+            raise InvestigationInputError(
+                'The bounded email route is unavailable in this deployment.'
+            )
+        return search_usernames(plan), plan
+
     if form.getlist('identifier_type'):
         plan = build_investigation_plan(
             form,
@@ -2884,6 +2916,7 @@ def parse_investigation_submission(form):
 
 def parse_search_options(form, investigation_plan=None):
     settings = load_settings()
+    unified_plan = is_unified_investigation_plan(investigation_plan)
     case_tags = (
         list(investigation_plan.get('tags') or [])
         if isinstance(investigation_plan, dict)
@@ -2908,7 +2941,9 @@ def parse_search_options(form, investigation_plan=None):
         # Categories and countries belong to the case, not global settings.
         'tags': case_tags,
         'excluded_tags': case_excluded_tags,
-        'site_list': settings['site_list'],
+        # Quick/Full schema-v2 plans cannot inherit a hidden source checklist.
+        # Legacy/internal submissions retain the existing configured list.
+        'site_list': [] if unified_plan else settings['site_list'],
     }
     if investigation_plan:
         options['investigation_spec'] = investigation_plan
@@ -2956,12 +2991,25 @@ def _profile_search_existing_evidence(store, options):
         persona_id,
         limit=MAX_EXISTING_PROFILE_SEEDS,
     )
+    pivot_plan = options.get('governed_pivot_plan')
+    pivot_plan = pivot_plan if isinstance(pivot_plan, dict) else {}
+    source_claim = pivot_plan.get('source_claim')
+    source_claim = source_claim if isinstance(source_claim, dict) else {}
+    source_claim_id = (
+        str(source_claim.get('id') or '').strip()
+        if pivot_plan.get('pivot_kind') == 'verified_profile_discovery'
+        else ''
+    )
     approved = [
         claim
         for claim in claims
         if isinstance(claim, dict)
         and claim.get('field_name') == 'social_account'
         and claim.get('review_status') == 'approved'
+        and (
+            not source_claim_id
+            or str(claim.get('id') or '') == source_claim_id
+        )
     ]
     return tuple(approved[:MAX_EXISTING_PROFILE_SEEDS])
 
@@ -4626,6 +4674,17 @@ def run_persistent_identity_enrichment_job(
 ):
     job_id = job['job_id']
     specification = (job.get('options') or {}).get('investigation_spec') or {}
+    pivot_plan = (job.get('options') or {}).get('governed_pivot_plan') or {}
+    execution_budget = (
+        pivot_plan.get('execution_budget')
+        if isinstance(pivot_plan, dict)
+        else None
+    )
+    budget_seconds = (
+        int(execution_budget.get('total_seconds'))
+        if isinstance(execution_budget, dict)
+        else None
+    )
     persona_id = str(specification.get('persona_id') or '')
     confirmed_name = str(specification.get('confirmed_name') or '').strip()
     selected_page_id = (
@@ -4654,15 +4713,24 @@ def run_persistent_identity_enrichment_job(
             return_exceptions=True,
         )
 
-    task = loop.create_task(collect_sources())
+    source_collection = collect_sources()
+    if budget_seconds is not None:
+        source_collection = asyncio.wait_for(
+            source_collection,
+            timeout=max(1, min(budget_seconds, 120)),
+        )
+    task = loop.create_task(source_collection)
     watcher = loop.create_task(
         watch_persistent_job_stop(
             store, job_id, task, runtime_job, shutdown_check=shutdown_check
         )
     )
     source_results = None
+    budget_exhausted = False
     try:
         source_results = loop.run_until_complete(task)
+    except asyncio.TimeoutError:
+        budget_exhausted = True
     except asyncio.CancelledError:
         pass
     finally:
@@ -4699,6 +4767,11 @@ def run_persistent_identity_enrichment_job(
         'matches': [],
     }
     source_errors = []
+    if budget_exhausted:
+        source_errors.append(
+            'Public-record enrichment reached its governed execution budget; '
+            'uncompleted sources remain indeterminate.'
+        )
     if isinstance(source_results, list) and len(source_results) == 2:
         if isinstance(source_results[0], Exception):
             source_errors.append(
@@ -4727,7 +4800,7 @@ def run_persistent_identity_enrichment_job(
     )
     offshore_matches = list(icij_observation.get('matches') or [])[:5]
     result = {
-        'status': 'completed',
+        'status': 'budget_exhausted' if budget_exhausted else 'completed',
         'usernames': [],
         'persona_id': persona_id,
         'confirmed_name': confirmed_name,
@@ -4742,6 +4815,9 @@ def run_persistent_identity_enrichment_job(
         'offshore_alert_count': synchronized['offshore_alerts'],
         'source_errors': [str(message)[:1000] for message in source_errors[:2]],
     }
+    if budget_exhausted:
+        result['collection_status'] = 'budget_exhausted'
+        result['execution_budget'] = dict(execution_budget)
     if offshore_matches:
         sink.put(
             {
@@ -4755,23 +4831,36 @@ def run_persistent_identity_enrichment_job(
         )
     sink.put(
         {
-            'type': 'collector_completed',
+            'type': (
+                'collector_error'
+                if budget_exhausted
+                else 'collector_completed'
+            ),
             'collector': 'public-record-enrichment',
             'observations': (
                 synchronized['wikipedia_claims'] + synchronized['offshore_alerts']
             ),
             'found': len(offshore_matches),
+            'message': source_errors[0] if budget_exhausted else None,
         }
     )
+    if budget_exhausted:
+        sink.put(
+            {
+                'type': 'budget_exhausted',
+                'execution_budget': dict(execution_budget),
+            }
+        )
     if not store.finish(job_id, result, worker_id=worker_id):
         return None
-    sink.put(
-        {
-            'type': 'done',
-            'status': 'completed',
-            'redirect': f'/personas/{persona_id}',
-        }
-    )
+    done_event = {
+        'type': 'done',
+        'status': 'partial' if budget_exhausted else 'completed',
+        'redirect': f'/personas/{persona_id}',
+    }
+    if budget_exhausted:
+        done_event['reason'] = 'budget_exhausted'
+    sink.put(done_event)
 
 
 class CombinedAiStopped(Exception):
@@ -5283,6 +5372,7 @@ def combined_case_chat_context(case: Dict[str, Any]):
 
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
     """Execute a claimed database job independently from any browser request."""
+    store.validate_governed_pivot_job(job)
     if job.get("kind") == "case_fusion_ai":
         return run_persistent_combined_ai_job(store, job, shutdown_check=shutdown_check)
     if job.get("kind") == "affiliation":
@@ -5768,9 +5858,31 @@ def investigation_builder_context(persona=None):
     }
 
 
+def unified_investigation_input_enabled(environ=None) -> bool:
+    """Return the strict, app-only rollout state for the unified builder."""
+    source = os.environ if environ is None else environ
+    raw_value = source.get(UNIFIED_INVESTIGATION_INPUT_FLAG, "")
+    return (
+        str(raw_value).strip().casefold()
+        in UNIFIED_INVESTIGATION_INPUT_TRUE_VALUES
+    )
+
+
+def investigation_builder_template() -> str:
+    """Select the reversible presentation without changing stored contracts."""
+    return (
+        'index.html'
+        if unified_investigation_input_enabled()
+        else 'index_legacy.html'
+    )
+
+
 @app.route('/')
 def index():
-    return render_template('index.html', **investigation_builder_context())
+    return render_template(
+        investigation_builder_template(),
+        **investigation_builder_context(),
+    )
 
 
 @app.route('/healthz')
@@ -5865,6 +5977,217 @@ def api_username_aliases():
         ],
         'exact_target_keys': exact_target_keys,
     }
+
+
+INVESTIGATION_PREVIEW_INVALID_MESSAGE = (
+    "Investigation preview inputs are invalid."
+)
+INVESTIGATION_PREVIEW_PUBLIC_ERRORS = {
+    "Enter an investigation token.": "Enter an investigation token.",
+    f"Investigation tokens must be {MAX_TOKEN_LENGTH} characters or fewer.": (
+        f"Investigation tokens must be {MAX_TOKEN_LENGTH} characters or fewer."
+    ),
+    "Enter a valid public HTTP or HTTPS URL.": (
+        "Enter a valid public HTTP or HTTPS URL."
+    ),
+    "Enter a complete public HTTP or HTTPS URL.": (
+        "Enter a complete public HTTP or HTTPS URL."
+    ),
+    "Investigation URLs must not contain credentials.": (
+        "Investigation URLs must not contain credentials."
+    ),
+    "Investigation URLs may use only the default HTTP or HTTPS port.": (
+        "Investigation URLs may use only the default HTTP or HTTPS port."
+    ),
+    "Investigation URLs must use a public Internet hostname.": (
+        "Investigation URLs must use a public Internet hostname."
+    ),
+    "Investigation URLs must not target private or local addresses.": (
+        "Investigation URLs must not target private or local addresses."
+    ),
+    "Enter a username or social handle.": "Enter a username or social handle.",
+    f"Usernames must be {MAX_USERNAME_LENGTH} characters or fewer.": (
+        f"Usernames must be {MAX_USERNAME_LENGTH} characters or fewer."
+    ),
+    "Phone numbers must contain between 7 and 15 digits.": (
+        "Phone numbers must contain between 7 and 15 digits."
+    ),
+    "Enter a complete name of 300 characters or fewer.": (
+        "Enter a complete name of 300 characters or fewer."
+    ),
+    f"Use no more than {MAX_IDENTIFIERS} investigation tokens.": (
+        f"Use no more than {MAX_IDENTIFIERS} investigation tokens."
+    ),
+    "Add at least one investigation token.": (
+        "Add at least one investigation token."
+    ),
+    "Select Quick Scan or Full Scan.": "Select Quick Scan or Full Scan.",
+    "Select a supported investigation value type.": (
+        "Select a supported investigation value type."
+    ),
+    "Investigation values and type selections must remain aligned.": (
+        "Investigation values and type selections must remain aligned."
+    ),
+    "Select Profile URL only for a supported public account URL.": (
+        "Select Profile URL only for a supported public account URL."
+    ),
+    "Enable likely username aliases before selecting aliases.": (
+        "Enable likely username aliases before selecting aliases."
+    ),
+    "Select aliases from the displayed server-ranked plan.": (
+        "Select aliases from the displayed server-ranked plan."
+    ),
+    f"Select no more than {MAX_SELECTED_ALIASES} username aliases.": (
+        f"Select no more than {MAX_SELECTED_ALIASES} username aliases."
+    ),
+    "The current bounded email route accepts one email per investigation.": (
+        "The current bounded email route accepts one email per investigation."
+    ),
+    "These tokens are context only. Add a name, username, social handle, "
+    "supported public profile URL, or email with an available authorized route.": (
+        "These tokens are context only. Add a name, username, social handle, "
+        "supported public profile URL, or email with an available authorized route."
+    ),
+}
+
+
+def public_investigation_preview_error(error):
+    """Return only reviewed validation copy, never exception-derived details."""
+    if len(error.args) != 1 or not isinstance(error.args[0], str):
+        return INVESTIGATION_PREVIEW_INVALID_MESSAGE
+    return INVESTIGATION_PREVIEW_PUBLIC_ERRORS.get(
+        error.args[0], INVESTIGATION_PREVIEW_INVALID_MESSAGE
+    )
+
+
+@app.route("/api/investigation-plan-preview", methods=["POST"])
+def api_investigation_plan_preview():
+    """Return the bounded, server-authoritative plan for the token editor."""
+    if not unified_investigation_input_enabled():
+        response = jsonify(
+            {"error": "Unified investigation input is disabled by server policy."}
+        )
+        response.status_code = 404
+        response.headers["Cache-Control"] = "private, no-store, max-age=0"
+        return response
+    if not is_valid_csrf(request.headers.get("X-OpenLedger-CSRF", "")):
+        return {"error": "Invalid CSRF token."}, 403
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return {"error": "A JSON investigation preview is required."}, 400
+
+    raw_token_items = payload.get("tokens", [])
+    if not isinstance(raw_token_items, list) or len(raw_token_items) > MAX_IDENTIFIERS:
+        return {"error": "Investigation preview inputs are invalid."}, 400
+    raw_tokens = []
+    raw_token_types = []
+    for item in raw_token_items:
+        if isinstance(item, str):
+            value = item
+            token_type = ""
+        elif isinstance(item, dict) and set(item).issubset({"value", "type"}):
+            value = item.get("value")
+            token_type = item.get("type") or ""
+        else:
+            return {"error": "Investigation preview inputs are invalid."}, 400
+        if (
+            not isinstance(value, str)
+            or len(value) > MAX_TOKEN_LENGTH
+            or not isinstance(token_type, str)
+        ):
+            return {"error": "Investigation preview inputs are invalid."}, 400
+        raw_tokens.append(value)
+        raw_token_types.append(token_type)
+    mode = payload.get("mode", "quick")
+    if not isinstance(mode, str):
+        return {"error": "Select Quick Scan or Full Scan."}, 400
+
+    preview_form = {
+        "investigation_token": raw_tokens,
+        "investigation_token_type": raw_token_types,
+        "mode": mode,
+    }
+    if payload.get("search_likely_username_aliases") is True:
+        preview_form["search_likely_username_aliases"] = "on"
+    selected_aliases = payload.get("selected_aliases", [])
+    alias_selection_present = payload.get("alias_selection_present") is True
+    if (
+        not isinstance(selected_aliases, list)
+        or len(selected_aliases) > MAX_SELECTED_ALIASES
+        or any(
+            not isinstance(value, str) or len(value) > MAX_USERNAME_LENGTH
+            for value in selected_aliases
+        )
+        or (selected_aliases and not alias_selection_present)
+    ):
+        return {"error": "Investigation preview inputs are invalid."}, 400
+    if alias_selection_present:
+        preview_form["alias_candidates_present"] = "1"
+        preview_form["selected_alias"] = selected_aliases
+    if payload.get("confirm_email_route") is True:
+        preview_form["confirm_email_route"] = "on"
+
+    try:
+        plan = build_unified_investigation_plan(
+            preview_form,
+            profile_url_resolver=resolve_profile_url_identifiers,
+        )
+        flags = profile_discovery_flags()
+        flags["user_scanner_enabled"] = bool(
+            flags["user_scanner_enabled"] and user_scanner_available()
+        )
+        discovery_enabled = bool(
+            flags["profile_discovery_enabled"]
+            and flags[f'{plan["execution_mode"]}_mode_enabled']
+        )
+        if not discovery_enabled:
+            flags["maigret_enabled"] = False
+            flags["search_first_enabled"] = False
+            flags["user_scanner_enabled"] = False
+        plan = finalize_investigation_route_plan(
+            plan,
+            flags=flags,
+            execution_mode=plan["execution_mode"],
+        )
+    except InvestigationInputError as error:
+        return {"error": public_investigation_preview_error(error)}, 400
+
+    tokens = list(plan.get("tokens") or [])
+    confirmation_required = bool(
+        any(token.get("type") == "email" for token in tokens)
+        and not plan.get("email_route_confirmed")
+    )
+    has_collection_route = investigation_has_effective_collection_route(plan)
+    blocking_error = ""
+    if not flags["profile_discovery_enabled"]:
+        blocking_error = (
+            "Profile discovery is temporarily disabled by server policy."
+        )
+    elif not flags[f'{plan["execution_mode"]}_mode_enabled']:
+        blocking_error = (
+            f'{plan["requested_mode"].title()} Scan is disabled by server policy.'
+        )
+    elif confirmation_required:
+        blocking_error = "Confirm the bounded public email check before starting."
+    elif not has_collection_route:
+        blocking_error = (
+            "No authorized collection route is currently available for these "
+            "investigation values."
+        )
+    response = jsonify(
+        {
+            "schema_version": plan["schema_version"],
+            "input_contract": plan["input_contract"],
+            "tokens": tokens,
+            "alias_candidates": list(plan.get("alias_candidates") or []),
+            "route_plan": plan["route_plan"],
+            "requires_email_confirmation": confirmation_required,
+            "can_start": bool(has_collection_route and not confirmation_required),
+            "blocking_error": blocking_error,
+        }
+    )
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    return response
 
 
 @app.route('/settings', methods=['GET', 'POST'])
@@ -7327,6 +7650,9 @@ def persona_workspace(persona_id):
         approved_full_name=approved_full_name,
         offshore_matches=offshore_matches,
         identity_enrichment=identity_enrichment,
+        governed_pivots_enabled=profile_discovery_flag_enabled(
+            'governed_pivots_enabled'
+        ),
         map_locations=map_locations,
         ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
         field_display_label=field_display_label,
@@ -7379,7 +7705,7 @@ def configure_persona_investigation(persona_id):
         return redirect(url_for('cases_workspace'))
     if request.method == 'GET':
         return render_template(
-            'index.html',
+            investigation_builder_template(),
             **investigation_builder_context(persona),
         )
     if not is_valid_csrf(request.form.get('csrf_token')):
@@ -7418,6 +7744,247 @@ def configure_persona_investigation(persona_id):
         'success',
     )
     return redirect(url_for('live_results', job_id=job_id))
+
+
+def relationship_state_presentation(
+    relationship_state: Dict[str, Any], *, mode: str
+) -> Dict[str, Any]:
+    """Attach static, review-safe presentation copy to persisted diagnostics."""
+    state = dict(relationship_state or {})
+    status = str(state.get("status") or "no_scope")
+    reason = str(state.get("reason") or "")
+    persona_mode = mode == "persona"
+    presentations = {
+        "no_scope": {
+            "icon": "folder-search-2",
+            "title": "No relationship scope selected",
+            "message": (
+                "Select a case with a Persona before interpreting relationship "
+                "evidence."
+            ),
+            "empty_title": "Select a case or Persona",
+            "empty_message": (
+                "The graph remains empty until a persisted investigation scope is "
+                "available."
+            ),
+        },
+        "active_collection": {
+            "icon": "loader-circle",
+            "title": "Collection in progress",
+            "message": (
+                "A persisted collection or combined snapshot job is still active. "
+                "Existing evidence remains readable while this scope may change."
+            ),
+            "empty_title": "Waiting for persisted collection",
+            "empty_message": (
+                "The relationship view will update after collection finishes and "
+                "reviewable evidence is stored."
+            ),
+        },
+        "graph_ready": {
+            "icon": "git-compare-arrows" if not persona_mode else "contact-round",
+            "title": (
+                "Relationship graph ready"
+                if not persona_mode
+                else "Persona evidence graph ready"
+            ),
+            "message": (
+                "The graph contains qualifying exact approved relationships."
+                if not persona_mode
+                else "The graph contains persisted reviewable Persona evidence."
+            ),
+            "empty_title": "Graph ready",
+            "empty_message": "Persisted graph evidence is available.",
+        },
+        "pending_review": {
+            "icon": "clipboard-check",
+            "title": "Evidence is awaiting review",
+            "message": (
+                "Pending or uncertain evidence cannot create a relationship edge "
+                "until an analyst approves the exact relationship-eligible value."
+            ),
+            "empty_title": "No qualifying graph yet",
+            "empty_message": (
+                "Review the pending evidence. Rejected, uncertain, and unapproved "
+                "records remain outside the relationship graph."
+            ),
+        },
+        "failed": {
+            "icon": "circle-alert",
+            "title": "Collection failed",
+            "message": (
+                "The latest persisted collection failed before it produced a "
+                "qualifying relationship result. Existing reviewed evidence was "
+                "not changed."
+            ),
+            "empty_title": "No relationship result available",
+            "empty_message": (
+                "Inspect the failed investigation and rerun it only when the source "
+                "and authorization remain valid."
+            ),
+        },
+        "clean_empty": {
+            "icon": "circle-check",
+            "title": "Clean result: no qualifying relationship",
+            "message": (
+                "Collection completed without the same exact approved, "
+                "relationship-eligible value on at least two Personas. This is a "
+                "valid empty evidence result, not a failure."
+            ),
+            "empty_title": "No qualifying relationship",
+            "empty_message": (
+                "No action is required. Future reviewed evidence may change this "
+                "result without altering the exact-match rule."
+            ),
+        },
+    }
+    degraded_presentations = {
+        "stale_snapshot": {
+            "title": "Combined-case snapshot is stale",
+            "message": (
+                "A source case changed after the latest immutable snapshot. Refresh "
+                "the combined investigation before treating this empty graph as current."
+            ),
+            "empty_message": (
+                "Refresh the combined investigation to evaluate the current approved "
+                "source evidence."
+            ),
+        },
+        "budget_limited": {
+            "title": "Collection ended at its budget",
+            "message": (
+                "The persisted execution budget stopped collection. Evidence gathered "
+                "before the deadline remains available, but the empty result is partial."
+            ),
+            "empty_message": (
+                "Treat the empty result as budget-limited rather than as evidence that "
+                "no qualifying relationship exists."
+            ),
+        },
+        "interrupted": {
+            "title": "Collection was interrupted",
+            "message": (
+                "The worker stopped before collection completed. Retained evidence and "
+                "review history remain unchanged."
+            ),
+            "empty_message": (
+                "Treat the empty result as interrupted until an authorized rerun "
+                "completes."
+            ),
+        },
+        "cancelled": {
+            "title": "Collection was cancelled",
+            "message": (
+                "An operator stopped collection. Any retained evidence remains "
+                "reviewable, but this is not a clean negative result."
+            ),
+            "empty_message": (
+                "Treat the empty result as cancelled unless an authorized collection "
+                "later completes."
+            ),
+        },
+        "blocked_provider": {
+            "title": "A provider was blocked or rate-limited",
+            "message": (
+                "Persisted provider diagnostics show that part of collection was "
+                "blocked. No negative identity or relationship decision was inferred."
+            ),
+            "empty_message": (
+                "Treat the empty result as provider-limited, not as proof that no "
+                "qualifying relationship exists."
+            ),
+        },
+        "partial_completion": {
+            "title": "Collection completed partially",
+            "message": (
+                "Persisted events show incomplete collection. Available evidence "
+                "remains reviewable without converting missing work into a negative."
+            ),
+            "empty_message": (
+                "Treat the empty result as partial until the missing collection work "
+                "is resolved."
+            ),
+        },
+        "degraded_provider": {
+            "title": "Collection completed with degraded providers",
+            "message": (
+                "One or more persisted provider outcomes were unavailable or failed. "
+                "No ambiguous provider outcome became a relationship decision."
+            ),
+            "empty_message": (
+                "Treat the empty result as degraded rather than as a clean no-match."
+            ),
+        },
+    }
+    if status == "degraded":
+        presentation = {
+            "icon": "triangle-alert",
+            "empty_title": "No current qualifying graph",
+            **degraded_presentations.get(
+                reason, degraded_presentations["degraded_provider"]
+            ),
+        }
+    else:
+        presentation = presentations.get(status, presentations["no_scope"])
+
+    diagnostics = list(state.get("diagnostics") or [])
+    if status == "graph_ready" and "stale_snapshot" in diagnostics:
+        presentation = {
+            **presentation,
+            "message": (
+                f"{presentation['message']} The latest combined-case snapshot is "
+                "stale; refresh it before treating the graph as current."
+            ),
+        }
+
+    diagnostic_labels = {
+        "failed_collection": "Failed collection",
+        "partial_completion": "Partial completion",
+        "budget_limited": "Budget-limited",
+        "cancelled": "Cancelled",
+        "interrupted": "Interrupted",
+        "blocked_provider": "Blocked or rate-limited provider",
+        "degraded_provider": "Degraded provider",
+        "stale_snapshot": "Stale combined snapshot",
+    }
+    counts = state.get("counts") if isinstance(state.get("counts"), dict) else {}
+    metadata = []
+    if int(counts.get("active_jobs") or 0):
+        metadata.append(f"{int(counts['active_jobs'])} active job(s)")
+    pending_count = int(counts.get("pending_reviews") or 0)
+    uncertain_count = int(counts.get("uncertain_reviews") or 0)
+    if pending_count:
+        metadata.append(f"{pending_count} pending review(s)")
+    if uncertain_count:
+        metadata.append(f"{uncertain_count} uncertain review(s)")
+    latest_plan = state.get("latest_plan")
+    if isinstance(latest_plan, dict):
+        mode_label = latest_plan.get("mode_label")
+        route_count = int(latest_plan.get("effective_route_count") or 0)
+        if mode_label:
+            metadata.append(f"{mode_label} · {route_count} effective route(s)")
+    metadata.extend(
+        diagnostic_labels[code]
+        for code in diagnostics
+        if code in diagnostic_labels
+    )
+    if state.get("diagnostics_truncated"):
+        metadata.append("Bounded diagnostic window")
+    state.update(presentation, metadata=metadata)
+    return state
+
+
+def relationship_graph_is_ready(graph: Dict[str, Any], *, mode: str) -> bool:
+    """Keep pending or uncertain hypotheses from claiming graph readiness."""
+    nodes = list(graph.get("nodes") or [])
+    if mode == "persona":
+        return bool(nodes) and bool((graph.get("stats") or {}).get("claim_count"))
+    return any(
+        str(edge.get("review_status") or "approved")
+        not in {"pending", "uncertain", "rejected"}
+        for edge in list(graph.get("edges") or [])
+        if isinstance(edge, dict)
+    )
 
 
 @app.route("/relationships")
@@ -7514,9 +8081,20 @@ def relationships_workspace():
     for edge in graph.get("edges", []):
         if edge.get("field_name") and not edge.get("relationship_rule"):
             edge["label"] = field_display_label(edge["field_name"])
+    graph_ready = relationship_graph_is_ready(graph, mode=mode)
+    relationship_state = relationship_state_presentation(
+        case_store.build_relationship_state(
+            case_id=selected_case_id or None,
+            persona_id=selected_persona_id or None,
+            mode=mode,
+            graph_ready=graph_ready,
+        ),
+        mode=mode,
+    )
     return render_template(
         "relationships.html",
         graph=graph,
+        relationship_state=relationship_state,
         cases=cases,
         mode=mode,
         selected_case_id=selected_case_id,
@@ -7563,7 +8141,11 @@ def enrich_identity_claim(claim_id):
         return redirect(url_for('cases_workspace'))
     try:
         job_id = case_store.create_identity_enrichment(
-            claim['persona_id'], claim_id
+            claim['persona_id'],
+            claim_id,
+            requested_by=session.get('username') or 'local-operator',
+            purpose=request.form.get('pivot_purpose', ''),
+            scope_confirmed='pivot_scope_confirmed' in request.form,
         )
     except KeyError:
         flash('That Persona no longer exists.', 'danger')
@@ -7576,6 +8158,39 @@ def enrich_identity_claim(claim_id):
     flash(
         'Wikipedia and ICIJ public-record checks were queued. '
         'Every proposal still requires review.',
+        'success',
+    )
+    return redirect(url_for('live_results', job_id=job_id))
+
+
+@app.route('/claims/<claim_id>/pivot-profile', methods=['POST'])
+def pivot_verified_profile_claim(claim_id):
+    if not is_valid_csrf(request.form.get('csrf_token')):
+        flash('Your case session expired. Please try again.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    if case_store is None:
+        flash('Verified-link discovery requires persistent storage.', 'warning')
+        return redirect(url_for('cases_workspace'))
+    claim = case_store.get_claim(claim_id)
+    if not claim:
+        flash('That verified profile record no longer exists.', 'danger')
+        return redirect(url_for('cases_workspace'))
+    try:
+        job_id = case_store.create_verified_link_pivot(
+            claim['persona_id'],
+            claim_id,
+            session.get('username') or 'local-operator',
+            purpose=request.form.get('pivot_purpose', ''),
+            scope_confirmed='pivot_scope_confirmed' in request.form,
+        )
+    except (KeyError, ValueError) as error:
+        flash(str(error), 'warning')
+        return redirect(
+            url_for('persona_workspace', persona_id=claim['persona_id'])
+        )
+    flash(
+        'A bounded same-case investigation was queued. '
+        'Every new assertion remains pending review.',
         'success',
     )
     return redirect(url_for('live_results', job_id=job_id))
@@ -7594,6 +8209,9 @@ def select_wikipedia_biography(persona_id):
             persona_id,
             request.form.get('source_claim_id', ''),
             selected_wikipedia_page_id=request.form.get('page_id', ''),
+            requested_by=session.get('username') or 'local-operator',
+            purpose=request.form.get('pivot_purpose', ''),
+            scope_confirmed='pivot_scope_confirmed' in request.form,
         )
     except KeyError:
         flash('That Persona no longer exists.', 'danger')
@@ -7834,18 +8452,11 @@ def review_persona_claim(claim_id):
         and reviewed_claim.get('field_name') == 'full_name'
         and reviewed_claim.get('review_status') != 'approved'
     ):
-        try:
-            case_store.create_identity_enrichment(stored_persona_id, claim_id)
-        except ValueError as error:
-            flash(
-                f'Name approved, but public-record enrichment was not queued: {error}',
-                'warning',
-            )
-        else:
-            flash(
-                'Confirmed-name Wikipedia and Offshore Leaks checks were queued.',
-                'success',
-            )
+        flash(
+            'Name approved. Use Enrich confirmed name to declare the follow-up '
+            'purpose and confirm its authorized scope before collection.',
+            'info',
+        )
     if generated_map_center:
         flash(
             'Record approved and mapped to the generated place centroid.',

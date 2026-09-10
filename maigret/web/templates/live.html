@@ -189,7 +189,7 @@
         runtimeState = {...runtimeState, ...(next || {})};
         if (!isProfileDiscovery) return;
         document.getElementById('stat-mode').textContent = runtimeState.mode_label
-            || (runtimeState.mode === 'exhaustive' ? 'Exhaustive' : 'Focused');
+            || (runtimeState.mode === 'exhaustive' ? 'Full Scan' : 'Quick Scan');
         document.getElementById('stat-budget').textContent =
             Math.round(Number(runtimeState.budget_seconds || 0) / 60) + ' minutes';
         const badgeStatus = runtimeState.status === 'completed' && runtimeState.collection_status
@@ -377,7 +377,7 @@
             applyRuntimeState({
                 status: 'running',
                 mode: budget.mode,
-                mode_label: budget.mode === 'exhaustive' ? 'Exhaustive' : 'Focused',
+                mode_label: budget.mode === 'exhaustive' ? 'Full Scan' : 'Quick Scan',
                 budget_seconds: budget.total_seconds,
                 deadline_at: budget.deadline_at,
             }, true);

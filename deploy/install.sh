@@ -129,6 +129,8 @@ umask 077
     printf "SEARXNG_SECRET='%s'\n" "${SEARXNG_SECRET}"
     printf "OPENAI_MODEL='%s'\n" "${OPENAI_MODEL}"
     printf "OPENAI_API_BASE_URL='https://api.openai.com/v1'\n"
+    printf "OPENLEDGER_GOVERNED_PIVOTS_ENABLED='false'\n"
+    printf "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED='false'\n"
     printf "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED='false'\n"
     printf "OPENLEDGER_PROFILE_SEARCH_PROVIDER='disabled'\n"
     printf "OPENLEDGER_PROFILE_SEARCH_TIMEOUT_SECONDS='10'\n"

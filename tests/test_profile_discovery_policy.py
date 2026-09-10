@@ -8,7 +8,7 @@ from maigret.web.profile_discovery_policy import (
 )
 
 
-def test_all_existing_safety_and_provider_flags_default_on():
+def test_existing_flags_default_on_but_new_outbound_features_default_off():
     assert profile_discovery_flags(environ={}) == {
         "profile_discovery_enabled": True,
         "focused_mode_enabled": True,
@@ -17,6 +17,7 @@ def test_all_existing_safety_and_provider_flags_default_on():
         "user_scanner_enabled": True,
         "enrichment_providers_enabled": True,
         "provider_circuit_breakers_enabled": True,
+        "governed_pivots_enabled": False,
         "search_first_enabled": False,
     }
 
@@ -122,4 +123,24 @@ def test_disabled_user_scanner_refuses_only_plans_that_request_it():
         govern_profile_discovery_options(
             {"investigation_spec": {"enable_user_scanner_username": True}},
             environ=environment,
+        )
+
+
+def test_governed_pivot_kill_switch_is_server_owned():
+    assert profile_discovery_flags(
+        environ={"OPENLEDGER_GOVERNED_PIVOTS_ENABLED": "true"}
+    )["governed_pivots_enabled"] is True
+    assert profile_discovery_flags(
+        environ={"OPENLEDGER_GOVERNED_PIVOTS_ENABLED": "false"}
+    )["governed_pivots_enabled"] is False
+    assert profile_discovery_flags(
+        environ={"OPENLEDGER_GOVERNED_PIVOTS_ENABLED": "typo"}
+    )["governed_pivots_enabled"] is False
+
+
+def test_disabled_governed_pivot_refuses_a_stored_pivot_plan():
+    with pytest.raises(ProfileDiscoveryPolicyError, match="Governed evidence"):
+        govern_profile_discovery_options(
+            {"governed_pivot_plan": {"policy_version": "test"}},
+            environ={"OPENLEDGER_GOVERNED_PIVOTS_ENABLED": "false"},
         )

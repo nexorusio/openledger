@@ -12,6 +12,8 @@ PROFILE_FLAGS = (
     "OPENLEDGER_PROVIDER_CIRCUIT_BREAKERS_ENABLED",
 )
 
+GOVERNED_PIVOT_FLAG = "OPENLEDGER_GOVERNED_PIVOTS_ENABLED"
+
 
 def test_production_compose_passes_default_on_flags_to_app_and_worker():
     compose = (ROOT / "deploy" / "compose.yaml").read_text(encoding="utf-8")
@@ -27,16 +29,25 @@ def test_production_compose_passes_default_on_flags_to_app_and_worker():
         assert compose.count(expected) == 2
 
 
+def test_governed_pivot_flag_requires_explicit_deployment_enablement():
+    compose = (ROOT / "deploy" / "compose.yaml").read_text(encoding="utf-8")
+    expected = f'{GOVERNED_PIVOT_FLAG}: "${{{GOVERNED_PIVOT_FLAG}:-false}}"'
+
+    assert compose.count(expected) == 2
+
+
 def test_investigation_builder_uses_canonical_mode_names_and_fixed_budgets():
     template = (
         ROOT / "maigret" / "web" / "templates" / "index.html"
     ).read_text(encoding="utf-8")
 
-    assert 'name="mode" id="mode-focused" value="focused"' in template
-    assert 'name="mode" id="mode-exhaustive" value="exhaustive"' in template
+    assert 'name="mode" id="mode-quick" value="quick"' in template
+    assert 'name="mode" id="mode-full" value="full"' in template
+    assert "Quick Scan" in template
+    assert "Full Scan" in template
     assert "Up to 10 minutes" in template
     assert "Up to 30 minutes" in template
-    assert "queue time does not count" in template
+    assert "not while it waits in the queue" in template
     assert "Fast check" not in template
     assert "Full check" not in template
 

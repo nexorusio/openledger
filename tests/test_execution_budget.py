@@ -13,6 +13,7 @@ from maigret.web.execution_budget import (
 
 def test_legacy_modes_normalize_to_governed_names():
     assert normalize_execution_mode("fast") == "focused"
+    assert normalize_execution_mode("quick") == "focused"
     assert normalize_execution_mode("full") == "exhaustive"
     assert normalize_execution_mode("focused") == "focused"
     assert normalize_execution_mode("exhaustive") == "exhaustive"
