@@ -217,7 +217,23 @@ def test_leaflet_persona_map_groups_duplicates_keeps_view_on_resize_and_wraps_da
         try:
             duplicate = _open_persona_map(page, base_url, duplicate_persona, duplicate_points)
             assert duplicate["markerCount"] == 2
-            page.locator(".leaflet-marker-icon").first.click()
+            # Persisted claim ordering is not marker identity. Find the one
+            # rendered marker at the duplicated coordinate, then click its
+            # actual DOM element so the normal browser interaction is exercised.
+            marker_handle = page.evaluate_handle(
+                """coordinate => {
+                    const matches = [];
+                    window.personaMap.eachLayer(layer => {
+                        if (layer instanceof L.Marker && layer.getLatLng().equals(coordinate)) matches.push(layer);
+                    });
+                    if (matches.length !== 1) throw new Error('Expected one marker at the duplicated coordinate');
+                    return matches[0].getElement();
+                }""",
+                list(duplicate_points[0][1:]),
+            )
+            marker_element = marker_handle.as_element()
+            assert marker_element is not None
+            marker_element.click()
             popup = page.locator(".leaflet-popup-content")
             assert "Jakarta office" in popup.inner_text()
             assert "Jakarta duplicate provenance" in popup.inner_text()
