@@ -849,7 +849,7 @@ def test_only_discovery_graph_report_can_be_framed_same_origin(
         'session_folder': 'search_frameable',
         'graph_file': 'search_frameable/combined_graph.html',
         'usernames': ['alice'],
-            'individual_reports': [],
+            'individual_reports': [{'username': 'alice', 'html_file': 'search_frameable/report_alice.html', 'claimed_profiles': []}],
             'found_count': 0,
             'profile_reliability_version': 1,
         }
@@ -883,7 +883,7 @@ def test_only_discovery_graph_report_can_be_framed_same_origin(
     nested_response = client.get(
         '/reports/search_frameable/nested/combined_graph.html'
     )
-    assert nested_response.status_code == 200
+    assert nested_response.status_code == 404
     assert nested_response.headers['X-Frame-Options'] == 'DENY'
 
 
@@ -2405,11 +2405,13 @@ def test_failed_task_redirects_to_index(client, web_app, monkeypatch):
 
 def test_download_report_serves_file_inside_reports_folder(client, web_app, tmp_path):
     """Happy path: a real file inside REPORTS_FOLDER is served back."""
-    target = tmp_path / 'session1'
+    target = tmp_path / 'search_session1'
     target.mkdir()
     (target / 'report.json').write_text('{"ok": true}')
 
-    resp = client.get('/reports/session1/report.json')
+    web_app.job_results['session1'] = {'status': 'completed', 'individual_reports': [
+        {'username': 'fixture', 'json_file': 'search_session1/report.json'}]}
+    resp = client.get('/reports/search_session1/report.json')
 
     assert resp.status_code == 200
     assert resp.get_data() == b'{"ok": true}'

@@ -1438,12 +1438,15 @@ async def maigret(
         timeout=timeout + 0.5,
         execution_id=execution_scope,
         task_notify=task_terminal,
+        cleanup_timeout=cleanup_timeout,
         *args,
         **executor_kwargs,
     )
 
     async def finish_executor_cleanup() -> bool:
-        cleanup_complete = await executor.drain_cleanup(cleanup_timeout)
+        cleanup_complete = await executor.drain_cleanup(
+            min(cleanup_timeout, executor.remaining_cleanup_budget)
+        )
         cleanup_notify = getattr(query_notify, 'task_cleanup', None)
         if callable(cleanup_notify):
             cleanup_notify({

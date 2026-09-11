@@ -176,17 +176,33 @@
         }
     }
 
+    function runtimePhase(state = runtimeState) {
+        const source = typeof state === 'string' ? {status: state} : (state || {});
+        const phase = String(source.phase || '').toLowerCase();
+        if (['collection', 'stopping', 'finalizing', 'terminal'].includes(phase)) return phase;
+        return ['completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted'].includes(source.status)
+            ? 'terminal'
+            : source.status === 'cancel_requested' ? 'stopping'
+            : 'collection';
+    }
+
+    function runtimeIsTerminal(state = runtimeState) {
+        return runtimePhase(state) === 'terminal';
+    }
+
     function updateGraphStatus() {
         if (!isProfileDiscovery || legacyUntriaged) return;
         const partial = ['budget_exhausted', 'cancelled', 'interrupted'].includes(runtimeState.collection_status);
         const status = runtimeState.status;
-        setText('stat-graph-status', runtimeIsTerminal(status)
+        setText('stat-graph-status', runtimeIsTerminal()
             ? (partial ? 'Partial evidence retained' : status === 'completed' ? 'Published' : 'Not published')
             : 'Provisional evidence view');
     }
 
-    function runtimeIsTerminal(status) {
-        return ['completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted'].includes(status);
+    function lifecycleReason() {
+        const cause = String(runtimeState.stop_cause || '').replaceAll('_', ' ').trim();
+        const cleanup = String(runtimeState.cleanup_state || '').replaceAll('_', ' ').trim();
+        return [cause && `cause: ${cause}`, cleanup && `cleanup: ${cleanup}`].filter(Boolean).join(' · ');
     }
 
     function formatRemaining(seconds) {
@@ -224,7 +240,7 @@
         const heartbeat = document.getElementById('stat-heartbeat');
         if (runtimeState.status === 'queued') {
             remaining.textContent = 'Starts when running';
-        } else if (runtimeState.deadline_at && !runtimeIsTerminal(runtimeState.status)) {
+        } else if (runtimeState.deadline_at && !runtimeIsTerminal()) {
             const deadline = parsedUtc(runtimeState.deadline_at);
             const seconds = deadline ? (deadline.getTime() - Date.now()) / 1000 : 0;
             remaining.textContent = seconds > 0
@@ -233,7 +249,7 @@
         } else if (runtimeState.collection_status === 'budget_exhausted'
                 || runtimeState.status === 'budget_exhausted') {
             remaining.textContent = 'Budget reached';
-        } else if (runtimeIsTerminal(runtimeState.status)) {
+        } else if (runtimeIsTerminal()) {
             remaining.textContent = 'Run ended';
         } else {
             remaining.textContent = 'Calculating…';
@@ -244,10 +260,10 @@
             heartbeat.textContent = 'Waiting for worker';
         } else if (runtimeState.status === 'interrupted') {
             heartbeat.textContent = 'Lost · no auto-retry';
-        } else if (heartbeatAt && !runtimeIsTerminal(runtimeState.status)) {
+        } else if (heartbeatAt && !runtimeIsTerminal()) {
             const age = Math.max(0, Math.floor((Date.now() - heartbeatAt.getTime()) / 1000));
             heartbeat.textContent = age <= 30 ? 'Healthy · ' + age + 's ago' : 'Delayed · ' + age + 's ago';
-        } else if (runtimeIsTerminal(runtimeState.status)) {
+        } else if (runtimeIsTerminal()) {
             heartbeat.textContent = 'Run ended';
         } else {
             heartbeat.textContent = 'Waiting for worker';
@@ -264,9 +280,16 @@
             || (runtimeState.mode === 'exhaustive' ? 'Full Scan' : 'Quick Scan');
         document.getElementById('stat-budget').textContent =
             Math.round(Number(runtimeState.budget_seconds || 0) / 60) + ' minutes';
-        const badgeStatus = runtimeState.status === 'completed' && runtimeState.collection_status
-            ? 'partial · ' + runtimeState.collection_status.replaceAll('_', ' ')
-            : String(runtimeState.status || 'queued').replaceAll('_', ' ');
+        const phase = runtimePhase();
+        const terminalStatus = ['completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted']
+            .includes(runtimeState.status) ? runtimeState.status : 'finalized';
+        const badgeStatus = phase === 'collection'
+            ? (runtimeState.status === 'queued' ? 'queued' : 'collecting')
+            : phase === 'stopping' ? 'stopping'
+            : phase === 'finalizing' ? 'finalizing'
+            : terminalStatus === 'completed' && runtimeState.collection_status
+                ? 'partial · ' + runtimeState.collection_status.replaceAll('_', ' ')
+                : terminalStatus.replaceAll('_', ' ');
         document.getElementById('runtime-badge').textContent = badgeStatus;
         refreshRuntimeClock();
         updateGraphStatus();
@@ -274,8 +297,12 @@
         const statusEl = document.getElementById('live-status');
         if (runtimeState.status === 'queued') {
             statusEl.textContent = 'Queued — the runtime budget starts only when a worker claims this investigation.';
-        } else if (runtimeState.status === 'cancel_requested') {
-            statusEl.textContent = 'Stop requested — waiting for the worker to save partial evidence and confirm cancellation.';
+        } else if (phase === 'stopping') {
+            statusEl.textContent = 'Stop requested — admissions have stopped while the worker saves retained evidence.'
+                + (lifecycleReason() ? ` (${lifecycleReason()})` : '');
+        } else if (phase === 'finalizing') {
+            statusEl.textContent = 'Finalizing retained evidence and artifacts…'
+                + (lifecycleReason() ? ` (${lifecycleReason()})` : '');
         } else if (runtimeState.status === 'interrupted') {
             statusEl.textContent = 'Investigation interrupted — no automatic retry was started. Review History before rerunning.';
         } else if (runtimeState.status === 'budget_exhausted') {
@@ -284,6 +311,8 @@
             statusEl.textContent = 'Cancellation confirmed — no reportable findings were retained.';
         } else if (runtimeState.status === 'failed') {
             statusEl.textContent = 'Investigation failed. Review History for details.';
+        } else if (phase === 'terminal' && terminalStatus === 'finalized') {
+            statusEl.textContent = 'Investigation finalized. Review the retained result for its recorded outcome.';
         } else if (runtimeState.status === 'completed' && runtimeState.collection_status === 'budget_exhausted') {
             statusEl.textContent = 'Runtime budget reached — partial findings were retained for analyst review.';
         } else if (runtimeState.status === 'completed' && runtimeState.collection_status === 'cancelled') {
@@ -293,19 +322,19 @@
         } else if (updateHeadline && runtimeState.status === 'running') {
             statusEl.textContent = 'Running within the server-owned runtime budget…';
         }
-        if (runtimeIsTerminal(runtimeState.status)) {
+        if (runtimeIsTerminal()) {
             document.getElementById('stopBtn').disabled = true;
         }
     }
 
     async function pollRuntimeState() {
-        if (!isProfileDiscovery || runtimeIsTerminal(runtimeState.status)) return;
+        if (!isProfileDiscovery || runtimeIsTerminal()) return;
         try {
             const response = await fetch('/api/scan/' + jobId + '/runtime', {cache: 'no-store'});
             if (!response.ok) return;
             const payload = await response.json();
             applyRuntimeState(payload);
-            if (runtimeIsTerminal(runtimeState.status)) {
+            if (runtimeIsTerminal()) {
                 window.clearInterval(runtimePollTimer);
             }
         } catch (_error) {
@@ -430,7 +459,7 @@
             }
             const payload = await response.json();
             applyRuntimeState(payload);
-            const terminal = Boolean(payload.terminal) || runtimeIsTerminal(payload.status);
+            const terminal = Boolean(payload.terminal) || runtimeIsTerminal(payload);
             statusEl.textContent = payload.status === 'cancelled'
                 ? 'Cancellation confirmed.'
                 : terminal
@@ -447,6 +476,10 @@
         if (e.lastEventId) seenEventIds.add(e.lastEventId);
         const ev = JSON.parse(e.data);
         if (ev.collection_accounting) collectionProgress.apply(ev.collection_accounting);
+        if (ev.type === 'lifecycle' && ['collection', 'stopping', 'finalizing', 'terminal'].includes(ev.phase)) {
+            // Persisted lifecycle events and runtime polls describe the job; collector events only describe a source.
+            applyRuntimeState({phase: ev.phase, stop_cause: ev.stop_cause, cleanup_state: ev.cleanup_state});
+        }
         const statusEl = document.getElementById('live-status');
         if (ev.type === 'running') {
             const budget = ev.execution_budget || {};
@@ -592,7 +625,9 @@
             const organizations = nodes.get({filter: node => node.group === 'organization'});
             if (organizations.length) addEdge(personId, organizations[0].id);
         } else if (ev.type === 'stopped') {
-            statusEl.textContent = 'Stopped.';
+            const source = ev.collector || ev.source || 'A source';
+            const lifecycle = runtimePhase();
+            addRuntimeNotice(`${source} stopped; investigation lifecycle remains ${lifecycle}.`);
         } else if (ev.type === 'budget_exhausted') {
             const message = 'Runtime budget reached — finalizing and retaining partial evidence.';
             runtimeState.collection_status = 'budget_exhausted';
@@ -603,6 +638,7 @@
         } else if (ev.type === 'done') {
             applyRuntimeState({
                 status: ev.status === 'partial' ? 'completed' : ev.status,
+                phase: 'terminal',
                 collection_status: ev.reason || runtimeState.collection_status,
                 collection_accounting: ev.collection_accounting || runtimeState.collection_accounting,
             });
@@ -634,11 +670,11 @@
     applyRuntimeState(initialRuntimeState, true);
     if (isProfileDiscovery && !initialRuntimeState.collection_accounting) {
         collectionProgress.markUnavailable();
-        setText('stat-maigret-legacy', runtimeIsTerminal(runtimeState.status)
+        setText('stat-maigret-legacy', runtimeIsTerminal()
             ? 'Coverage unavailable for this legacy saved run.'
             : 'Coverage declaration pending.');
     }
-    if (isProfileDiscovery && !runtimeIsTerminal(runtimeState.status)) {
+    if (isProfileDiscovery && !runtimeIsTerminal()) {
         runtimeClockTimer = window.setInterval(refreshRuntimeClock, 1000);
         runtimePollTimer = window.setInterval(pollRuntimeState, 5000);
         pollRuntimeState();
@@ -658,7 +694,7 @@
         evtSource = new EventSource('/api/scan/' + jobId + '/stream');
         evtSource.onmessage = onScanEvent;
         evtSource.onerror = function () {
-            if (!runtimeIsTerminal(runtimeState.status)) {
+            if (!runtimeIsTerminal()) {
                 addRuntimeNotice('Live event delivery was interrupted; runtime status polling remains active while the browser reconnects.');
             }
         };

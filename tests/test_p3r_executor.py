@@ -66,59 +66,181 @@ async def test_exceptions_receive_default_and_exactly_one_terminal_event(planned
 
 
 @pytest.mark.asyncio
-async def test_timeout_bounds_active_and_cleaning_queries_and_accounts_unstarted_work():
+async def test_cooperative_cleanup_releases_capacity_and_resumes_admission():
+    """Timed-out children that finish cleanup must not strand pending work."""
     events = []
     state = {'active': 0, 'peak': 0}
-    planned, parallel, timeout, cleanup = 1000, 10, 0.003, 0.10
+    planned, parallel, timeout, cleanup = 12, 3, 0.001, 0.01
 
-    async def slow_check(index, **_kwargs):
+    async def check(index, **_kwargs):
         state['active'] += 1
         state['peak'] = max(state['peak'], state['active'])
         try:
-            await asyncio.sleep(60)
+            if index < parallel:
+                await asyncio.sleep(60)
+            return index
         finally:
-            try:
+            if index < parallel:
                 await asyncio.sleep(cleanup)
-            finally:
-                state['active'] -= 1
+            state['active'] -= 1
 
     work = [
-        (
-            slow_check,
-            [index],
-            {
-                'default': index,
-                '_executor_task': task_metadata(index),
-            },
-        )
+        (check, [index], {'default': index, '_executor_task': task_metadata(index)})
         for index in range(planned)
     ]
     executor = AsyncioQueueGeneratorExecutor(
-        logger=logger,
-        in_parallel=parallel,
-        timeout=timeout,
-        max_outstanding=parallel,
-        task_notify=events.append,
+        logger=logger, in_parallel=parallel, timeout=timeout,
+        max_outstanding=parallel, cleanup_timeout=0.1, task_notify=events.append,
+    )
+    results = [value async for value in executor.run(work)]
+    terminal_events = [event for event in events if event.get('event_type') != 'cleanup']
+
+    assert sorted(results) == list(range(planned))
+    assert state['peak'] <= parallel
+    assert state['active'] == 0
+    assert executor.cleanup_incomplete is False
+    assert [event['task_id'] for event in terminal_events] == [
+        f'opaque-task-{index}' for index in range(planned)
+    ]
+    assert sum(event['disposition'] == 'timeout' for event in terminal_events) == parallel
+    assert sum(event['disposition'] == 'completed' for event in terminal_events) == planned - parallel
+    assert not any(event['disposition'] == 'unattempted' for event in terminal_events)
+    cleanup_events = [event for event in events if event.get('event_type') == 'cleanup']
+    assert len(cleanup_events) == parallel
+    assert {event['cleanup_state'] for event in cleanup_events} == {'complete'}
+
+
+@pytest.mark.asyncio
+async def test_resistant_cleanup_stops_admission_after_one_bounded_wait():
+    """A live cancellation-resistant source continues to occupy its slot."""
+    events = []
+    release = asyncio.Event()
+    started = asyncio.Event()
+    planned, parallel = 16, 2
+
+    async def resistant(index, **_kwargs):
+        started.set()
+        try:
+            await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            await release.wait()
+        return index
+
+    work = [
+        (resistant, [index], {'default': index, '_executor_task': task_metadata(index)})
+        for index in range(planned)
+    ]
+    executor = AsyncioQueueGeneratorExecutor(
+        logger=logger, in_parallel=parallel, timeout=0.001,
+        max_outstanding=parallel, cleanup_timeout=0.02, task_notify=events.append,
     )
     start = time.monotonic()
     results = [value async for value in executor.run(work)]
     elapsed = time.monotonic() - start
+    terminal_events = [event for event in events if event.get('event_type') != 'cleanup']
 
-    assert set(results) == set(range(planned))
-    assert state['peak'] <= parallel
-    assert state['active'] <= parallel
+    assert started.is_set()
+    assert elapsed < 0.15
+    assert results == list(range(planned))
+    assert executor.pending_cleanup_count == parallel
     assert executor.cleanup_incomplete is True
-    assert elapsed < cleanup
-    assert sum(event['disposition'] == 'timeout' for event in events) == parallel
-    assert sum(event['disposition'] == 'unattempted' for event in events) == planned - parallel
-    assert len({event['task_id'] for event in events}) == planned
+    assert sum(event['disposition'] == 'timeout' for event in terminal_events) == parallel
+    assert sum(event['disposition'] == 'unattempted' for event in terminal_events) == planned - parallel
+    assert all(
+        event.get('reason') == 'cleanup_incomplete'
+        for event in terminal_events
+        if event['disposition'] == 'unattempted'
+    )
+    assert len({event['task_id'] for event in terminal_events}) == planned
 
-    assert await executor.drain_cleanup(cleanup + 0.05) is True
-    assert state['active'] == 0
-    assert not executor._cleaning_tasks
-    cleanup_events = [event for event in events if event.get('event_type') == 'cleanup']
-    assert len(cleanup_events) == parallel
-    assert {event['cleanup_state'] for event in cleanup_events} == {'complete'}
+    release.set()
+    assert await executor.drain_cleanup(0.1) is True
+
+
+@pytest.mark.asyncio
+async def test_mixed_cleanup_keeps_live_slots_occupied_but_uses_released_capacity():
+    """One resistant child cannot block work once another child cleans up."""
+    events = []
+    release = asyncio.Event()
+    cleanup_started = asyncio.Event()
+    active = {'count': 0, 'peak': 0}
+
+    async def check(index, **_kwargs):
+        active['count'] += 1
+        active['peak'] = max(active['peak'], active['count'])
+        try:
+            if index in (0, 1):
+                await asyncio.sleep(60)
+            return index
+        except asyncio.CancelledError:
+            if index == 0:
+                cleanup_started.set()
+                await asyncio.sleep(0.01)
+                return index
+            if index == 1:
+                cleanup_started.set()
+                await release.wait()
+                return index
+            raise
+        finally:
+            active['count'] -= 1
+
+    work = [
+        (check, [index], {'default': index, '_executor_task': task_metadata(index)})
+        for index in range(8)
+    ]
+    executor = AsyncioQueueGeneratorExecutor(
+        logger=logger, in_parallel=2, timeout=0.001,
+        max_outstanding=2, cleanup_timeout=0.05, task_notify=events.append,
+    )
+    results = [value async for value in executor.run(work)]
+    terminal_events = [event for event in events if event.get('event_type') != 'cleanup']
+
+    assert cleanup_started.is_set()
+    assert active['peak'] <= 2
+    assert results == list(range(8))
+    assert sum(event['disposition'] == 'timeout' for event in terminal_events) == 2
+    assert sum(event['disposition'] == 'completed' for event in terminal_events) == 6
+    assert not any(event['disposition'] == 'unattempted' for event in terminal_events)
+    assert executor.pending_cleanup_count == 1
+
+    release.set()
+    assert await executor.drain_cleanup(0.1) is True
+
+
+@pytest.mark.asyncio
+async def test_production_shaped_plan_reconciles_after_cooperative_cleanup():
+    """A 15,870-task plan retains one terminal disposition for every task."""
+    events = []
+    planned, parallel = 15870, 4
+
+    async def check(index, **_kwargs):
+        if index < parallel:
+            try:
+                await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                await asyncio.sleep(0.001)
+                return index
+        return index
+
+    work = [
+        (check, [index], {'default': index, '_executor_task': task_metadata(index)})
+        for index in range(planned)
+    ]
+    executor = AsyncioQueueGeneratorExecutor(
+        logger=logger, in_parallel=parallel, timeout=0.001,
+        max_outstanding=parallel, cleanup_timeout=0.1, task_notify=events.append,
+    )
+    results = [value async for value in executor.run(work)]
+    terminal_events = [event for event in events if event.get('event_type') != 'cleanup']
+
+    assert len(results) == planned
+    assert set(results) == set(range(planned))
+    assert len(terminal_events) == planned
+    assert len({event['task_id'] for event in terminal_events}) == planned
+    assert sum(event['disposition'] == 'timeout' for event in terminal_events) == parallel
+    assert sum(event['disposition'] == 'completed' for event in terminal_events) == planned - parallel
+    assert not any(event['disposition'] == 'unattempted' for event in terminal_events)
 
 
 @pytest.mark.asyncio

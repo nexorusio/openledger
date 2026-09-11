@@ -9,7 +9,9 @@ import socket
 import threading
 import uuid
 
-from maigret.web.app import case_store, record_internal_error, run_persistent_job
+from maigret.web.app import app, case_store, record_internal_error, run_persistent_job
+from maigret.web.case_store import CaseStore
+from maigret.web.worker_execution import execute_profile_process
 from maigret.web.case_store import (
     WORKER_HEARTBEAT_SECONDS,
     WORKER_STALE_AFTER_SECONDS,
@@ -70,7 +72,7 @@ def monitor_stale_jobs(store, stop_event) -> None:
             record_internal_error("Stale investigation watchdog failed", error)
 
 
-def execute_job(store, job, *, shutdown_check) -> None:
+def execute_job(store, job, *, shutdown_check, fixture_adapter_factory=None) -> None:
     """Run one claimed job while maintaining its durable worker lease."""
     logger.info("Starting investigation %s (%s)", job["job_id"], job.get("kind"))
     heartbeat_stop = threading.Event()
@@ -83,11 +85,24 @@ def execute_job(store, job, *, shutdown_check) -> None:
     )
     heartbeat_thread.start()
 
-    def execution_should_stop() -> bool:
-        return bool(shutdown_check()) or lease_lost.is_set()
+    def execution_should_stop():
+        if lease_lost.is_set():
+            return 'lease_lost'
+        if shutdown_check():
+            return 'worker_shutdown'
+        return False
 
     try:
-        run_persistent_job(store, job, shutdown_check=execution_should_stop)
+        if isinstance(store, CaseStore) and job.get('kind') in PROFILE_DISCOVERY_JOB_KINDS:
+            if app.config.get('TESTING') and fixture_adapter_factory is None:
+                raise RuntimeError('Test collectors require an explicit spawn-safe fixture adapter')
+            execute_profile_process(
+                store, job, shutdown_check=execution_should_stop,
+                config={key: app.config[key] for key in ('TESTING', 'REPORTS_FOLDER', 'MAIGRET_DB_FILE')},
+                fixture_adapter_factory=fixture_adapter_factory,
+            )
+        else:
+            run_persistent_job(store, job, shutdown_check=execution_should_stop)
     except Exception as error:
         public_error = record_internal_error(
             "Investigation worker crashed",

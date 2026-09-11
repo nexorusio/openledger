@@ -565,6 +565,7 @@ def test_verified_link_pivot_can_be_cancelled_before_execution(store):
         "queued",
         "cancel_requested",
         "cancelled",
+        "done",
     ]
 
 

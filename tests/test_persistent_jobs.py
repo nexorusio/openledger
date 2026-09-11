@@ -202,6 +202,7 @@ def test_runtime_endpoint_distinguishes_queue_time_from_running_budget(
 
     queued = client.get(f"/api/scan/{job_id}/runtime").get_json()
     assert queued == {
+        "phase": "collection", "stop_cause": None, "cleanup_state": "unknown",
         "status": "queued",
         "mode": "focused",
         "mode_label": "Quick Scan",
@@ -1684,7 +1685,7 @@ def test_claim_review_requires_csrf_and_records_operator_decision(
     assert reviewed["reviews"][0]["note"].startswith("Verified")
 
 
-def test_approving_place_without_coordinates_generates_and_persists_centroid(
+def test_approving_place_text_does_not_geocode_or_adopt_a_centroid(
     client, persistent_store, monkeypatch
 ):
     job_id = persistent_store.create_investigation(["alice"], {})
@@ -1740,14 +1741,14 @@ def test_approving_place_without_coordinates_generates_and_persists_centroid(
     )
 
     assert response.status_code == 200
-    assert captured["place"] == "Jakarta, Indonesia"
+    assert captured == {}
     reviewed = persistent_store.get_persona(persona_id)["claims"][0]
     assert reviewed["review_status"] == "approved"
-    assert reviewed["latitude"] == pytest.approx(-6.1841)
-    assert reviewed["longitude"] == pytest.approx(106.831)
+    assert reviewed["latitude"] is None
+    assert reviewed["longitude"] is None
     page = response.get_data(as_text=True)
-    assert "generated place centroid" in page
-    assert 'id="personaLocationMap"' in page
+    assert "generated place centroid" not in page
+    assert 'id="personaLocationMap"' not in page
 
 
 def test_legacy_persona_refresh_requires_configuration_before_queueing(
@@ -2055,6 +2056,7 @@ def test_approved_location_and_photo_render_in_persona_workspace(
         location["id"],
         "approved",
         "analyst",
+        note="Verified the cited location point",
         latitude="-6.1754",
         longitude="106.8272",
     )
@@ -2125,8 +2127,8 @@ def test_approved_location_requires_saving_ai_map_center_before_mapping(
 
     page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
     assert "0 mapped" in page
-    assert 'value="-6.1754"' in page
-    assert 'value="106.8272"' in page
+    assert 'value="-6.1754"' not in page
+    assert 'value="106.8272"' not in page
     assert "AI proposed an approximate city map center" in page
 
 

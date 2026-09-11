@@ -1,16 +1,13 @@
 import ast
 import csv
 import io
-import ipaddress
 import json
 import logging
 import os
-import socket
 import tempfile
 import zipfile
 from datetime import datetime
 from typing import Dict, Any
-from urllib.parse import urlparse
 from xml.etree import ElementTree
 
 import xmind  # type: ignore[import-untyped]
@@ -79,7 +76,9 @@ def save_txt_report(filename: str, username: str, results: dict):
 
 def save_html_report(filename: str, context: dict):
     template, _ = generate_report_template(is_pdf=False)
-    filled_template = template.render(**context)
+    render_context = dict(context)
+    render_context["legacy_report_placeholder_image"] = _BLANK_IMAGE_DATA_URI
+    filled_template = template.render(**render_context)
     with open(filename, "w", encoding="utf-8") as f:
         f.write(filled_template)
 
@@ -89,64 +88,39 @@ PDF_EXTRA_HINT = (
     "Install it with: pip install 'maigret[pdf]'"
 )
 
-# 1x1 transparent PNG substituted for any report image URL that isn't a safe
-# public http(s) resource (see _is_safe_report_image_url).
+# 1x1 transparent PNG used for every image in the legacy HTML-to-PDF report.
+# The legacy report takes image URLs from scanned profile data.  It deliberately
+# does not render those images: xhtml2pdf owns its resource fetching and cannot
+# apply the application's redirect, byte, deadline, or DNS-pinning controls.
 _BLANK_IMAGE_PATH = os.path.join(
     os.path.dirname(os.path.realpath(__file__)), "resources", "blank.png"
+)
+# The HTML report is a portable file, so it uses an inline encoding of the
+# bundled placeholder instead of an unavailable server-local path.
+_BLANK_IMAGE_DATA_URI = (
+    "data:image/png;base64,"
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYGBg"
+    "AAAABQABpfZFQAAAAABJRU5ErkJggg=="
 )
 
 
 def _is_safe_report_image_url(uri) -> bool:
-    """Whether ``uri`` is a public http(s) image safe to fetch during PDF render.
+    """Legacy PDFs never permit a URL resource, including public image URLs.
 
-    Report images come from scraped profile data (``ids_data['image']``), which
-    is attacker-influenced. xhtml2pdf resolves ``<img src>`` while building the
-    PDF, so an intranet or cloud-metadata URL is a request made by the machine
-    running maigret (server-side in the web UI). A src with no scheme at all is
-    worse than a URL: xhtml2pdf falls back to treating it as a local path and
-    opens it. Only allow http(s) hosts that resolve to public addresses.
+    Kept as a private compatibility helper for callers that previously checked
+    this policy.  URL admission followed by xhtml2pdf's second resolution is a
+    DNS/redirect TOCTOU boundary, so there is no safe arbitrary URL here.
     """
-    if not isinstance(uri, str):
-        return False
-    parsed = urlparse(uri.strip())
-    if parsed.scheme not in ("http", "https"):
-        return False
-    host = parsed.hostname
-    if not host:
-        return False
-    try:
-        infos = socket.getaddrinfo(host, None)
-    except (socket.gaierror, UnicodeError, ValueError):
-        return False
-    if not infos:
-        return False
-    for info in infos:
-        try:
-            ip = ipaddress.ip_address(info[4][0])
-        except ValueError:
-            return False
-        mapped = getattr(ip, "ipv4_mapped", None)
-        if mapped is not None:
-            ip = mapped
-        # is_global is False for private, loopback, link-local, unspecified and
-        # CGNAT (100.64.0.0/10) addresses. Multicast and reserved ranges are
-        # still is_global on CPython, so they stay explicit: 64:ff9b::/96 is
-        # reserved but routes to IPv4 through a NAT64 gateway.
-        if not ip.is_global or ip.is_multicast or ip.is_reserved:
-            return False
-    return True
+    return False
 
 
 def _pdf_report_link_callback(uri, rel):
-    """xhtml2pdf resource resolver: let safe public images through, and divert
-    everything else to a local blank placeholder so no fetch/read happens.
+    """Resolve all legacy-PDF resources to the approved bundled placeholder.
 
-    Returning a local path (rather than raising) keeps report generation working
-    even when a scanned profile carries a hostile image URL — a raise would abort
-    the whole PDF.
+    In particular, do not return an arbitrary public URL.  xhtml2pdf would
+    fetch it outside the application's bounded media client, so a redirect,
+    DNS rebind, huge body, or stalled peer could bypass report safeguards.
     """
-    if _is_safe_report_image_url(uri):
-        return uri
     return _BLANK_IMAGE_PATH
 
 
@@ -159,7 +133,9 @@ def save_pdf_report(filename: str, context: dict):
         raise RuntimeError(PDF_EXTRA_HINT) from e
 
     template, css = generate_report_template(is_pdf=True)
-    filled_template = template.render(**context)
+    render_context = dict(context)
+    render_context["pdf_placeholder_image"] = _BLANK_IMAGE_PATH
+    filled_template = template.render(**render_context)
 
     with open(filename, "w+b") as f:
         pisa.pisaDocument(
@@ -795,7 +771,10 @@ def generate_json_report(username: str, results: dict, file, report_type):
 
         data = dict(site_result)
         data["status"] = data["status"].json()
-        data["site"] = data["site"].json
+        # Permitted streaming/checkpoint results retain detection evidence but
+        # may not carry the optional full site-definition object.
+        if data.get("site") is not None:
+            data["site"] = data["site"].json
         for field in ["future", "checker"]:
             if field in data:
                 del data[field]

@@ -83,15 +83,6 @@
         <input type="hidden" name="persona_id" value="{{ persona.id }}">
         {% if claim.field_name in ('address', 'current_location') %}
         {% set coordinate = namespace(latitude=claim.latitude, longitude=claim.longitude, precision=none) %}
-        {% for evidence in claim.evidence %}
-            {% if evidence.details.coordinate_role == 'approximate_map_center' %}
-                {% set coordinate.precision = evidence.details.coordinate_precision %}
-                {% if coordinate.latitude is none and coordinate.longitude is none %}
-                    {% set coordinate.latitude = evidence.details.proposed_latitude %}
-                    {% set coordinate.longitude = evidence.details.proposed_longitude %}
-                {% endif %}
-            {% endif %}
-        {% endfor %}
         <div class="coordinate-fields">
             <label>Latitude
                 <input type="number" name="latitude" min="-90" max="90" step="any" value="{{ coordinate.latitude if coordinate.latitude is not none else '' }}" placeholder="e.g. -6.1754">
@@ -99,7 +90,8 @@
             <label>Longitude
                 <input type="number" name="longitude" min="-180" max="180" step="any" value="{{ coordinate.longitude if coordinate.longitude is not none else '' }}" placeholder="e.g. 106.8272">
             </label>
-            <small>Optional override. If both fields are empty when you approve, OpenLedger sends the approved place label to the configured geocoder and stores its bounding-box centroid.</small>
+            <label><input type="checkbox" name="clear_coordinates" value="1"> Clear the map point and keep the approved text</label>
+            <small>Coordinates require an explicit selection. Approving the text preserves it even when no reliable map point is available.</small>
             {% for evidence in claim.evidence %}
                 {% if evidence.details.coordinate_role == 'approximate_map_center' %}
                 <small class="coordinate-proposal-note">AI proposed an approximate {{ evidence.details.coordinate_precision }} map center ({{ evidence.details.proposed_latitude }}, {{ evidence.details.proposed_longitude }}). Verify that it represents the named place, not the person's precise position, then save the decision.</small>
@@ -323,6 +315,7 @@
                 <h2>{{ group.title }}</h2>
                 <p>{{ group.description }}</p>
             </div>
+            <a href="{{ url_for('affiliation_sites_workspace', persona_id=persona.id) }}" class="btn btn-outline-secondary">Affiliation sites</a>
             <a href="{{ url_for('export_persona_pdf', persona_id=persona.id) }}" class="btn btn-outline-secondary persona-export-button"><i data-lucide="file-down"></i> Export investigation report</a>
         </header>
         <div class="panel-body persona-form">
@@ -349,14 +342,14 @@
         {% if group.key == 'contact' %}
         <div class="persona-map-section">
             <div class="map-section-heading">
-                <div><h3>Confirmed locations</h3><p>Approved places are mapped from analyst coordinates, cited AI proposals, or a generated place centroid.</p></div>
+                <div><h3>Confirmed locations</h3><a href="{{ url_for('affiliation_sites_workspace', persona_id=persona.id) }}">Review affiliation addresses and sites</a><p>Only explicitly reviewed coordinate selections are mapped. Legacy points with unknown origin need review.</p></div>
                 <span class="badge-soft">{{ map_locations | length }} mapped</span>
             </div>
             {% if map_locations %}
             <div id="personaLocationMap" class="persona-location-map" aria-label="Approved persona locations"></div>
             <p class="map-disclosure">Map tiles are loaded from the configured tile provider. Use an internal tile server for isolated or sensitive deployments.</p>
             {% else %}
-            <div class="map-empty"><i data-lucide="map-pin-off"></i><span>Approve a place to generate its map center automatically, or enter coordinates as an override.</span></div>
+            <div class="map-empty"><i data-lucide="map-pin-off"></i><span>Approved location text is retained. Select verified coordinates to add a map point.</span></div>
             {% endif %}
         </div>
         {% endif %}
@@ -397,6 +390,140 @@
 (() => {
     const tabs = Array.from(document.querySelectorAll('[data-persona-tab]'));
     const panels = Array.from(document.querySelectorAll('[data-persona-panel]'));
+    const locations = {{ map_locations | tojson }};
+    const mapElement = document.getElementById('personaLocationMap');
+    let personaMap = null;
+    let mapHasInitialView = false;
+    let mapRetryTimer = null;
+
+    function validCoordinate(location) {
+        const latitude = Number(location && location.latitude);
+        const longitude = Number(location && location.longitude);
+        return Number.isFinite(latitude) && Number.isFinite(longitude)
+            && latitude >= -90 && latitude <= 90
+            && longitude >= -180 && longitude <= 180;
+    }
+
+    function normalizedLocations() {
+        return locations.filter(validCoordinate).map((location) => ({
+            ...location,
+            latitude: Number(location.latitude),
+            longitude: Number(location.longitude),
+        }));
+    }
+
+    function groupedLocations(points) {
+        const groups = new Map();
+        points.forEach((location) => {
+            const key = `${location.latitude},${location.longitude}`;
+            const group = groups.get(key) || {point: [location.latitude, location.longitude], locations: []};
+            group.locations.push(location);
+            groups.set(key, group);
+        });
+        return Array.from(groups.values());
+    }
+
+    function shortestLongitudeBounds(points) {
+        if (points.length < 2) return null;
+        const longitudes = points.map((point) => (point.longitude + 360) % 360).sort((a, b) => a - b);
+        let largestGap = -1;
+        let gapIndex = 0;
+        longitudes.forEach((longitude, index) => {
+            const next = index === longitudes.length - 1 ? longitudes[0] + 360 : longitudes[index + 1];
+            if (next - longitude > largestGap) {
+                largestGap = next - longitude;
+                gapIndex = index;
+            }
+        });
+        const west = longitudes[(gapIndex + 1) % longitudes.length];
+        const east = west + (360 - largestGap);
+        // Leaflet accepts unwrapped longitudes here, which keeps a dateline pair in its short world copy.
+        return [west, east];
+    }
+
+    function buildPopup(group) {
+        const popup = document.createElement('div');
+        group.locations.forEach((location, index) => {
+            if (index) popup.append(document.createElement('hr'));
+            const title = document.createElement('strong');
+            title.textContent = location.label || 'Approved location';
+            const precision = location.coordinate_precision ? ` · approximate ${location.coordinate_precision} center` : '';
+            const methodValue = location.coordinate_method || location.method;
+            const method = methodValue ? ` · ${String(methodValue).replaceAll('_', ' ')}` : '';
+            const detail = document.createElement('span');
+            detail.textContent = `${String(location.field_name || 'location').replaceAll('_', ' ')} · ${location.confidence ?? '—'}% confidence${precision}${method}`;
+            popup.append(title, document.createElement('br'), detail);
+            const provenance = Array.isArray(location.provenance) ? location.provenance
+                : Array.isArray(location.claims) ? location.claims : [];
+            const sources = provenance.length ? provenance : [location];
+            sources.forEach((source) => {
+                const provenanceLine = document.createElement('small');
+                const sourceLabel = source.label || source.display_value || source.claim_id || source.id;
+                if (sourceLabel) {
+                    provenanceLine.textContent = `Source: ${sourceLabel}`;
+                    popup.append(document.createElement('br'), provenanceLine);
+                }
+            });
+        });
+        return popup;
+    }
+
+    function fitInitialView(map, points) {
+        if (mapHasInitialView || !points.length) return;
+        if (points.length === 1) {
+            map.setView([points[0].latitude, points[0].longitude], 8);
+        } else {
+            const south = Math.min(...points.map((point) => point.latitude));
+            const north = Math.max(...points.map((point) => point.latitude));
+            const [west, east] = shortestLongitudeBounds(points);
+            map.fitBounds([[south, west], [north, east]], {padding: [28, 28]});
+        }
+        mapHasInitialView = true;
+    }
+
+    function initializeMapWhenVisible() {
+        if (!mapElement || !window.L || personaMap) return;
+        if (mapElement.clientWidth <= 0 || mapElement.clientHeight <= 0) {
+            window.clearTimeout(mapRetryTimer);
+            mapRetryTimer = window.setTimeout(initializeMapWhenVisible, 50);
+            return;
+        }
+        const points = normalizedLocations();
+        if (!points.length) return;
+        personaMap = L.map(mapElement, {scrollWheelZoom: false});
+        window.personaMap = personaMap;
+        L.tileLayer({{ map_tile_url | tojson }}, {
+            maxZoom: 19,
+            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+        }).addTo(personaMap);
+        const longitudeBounds = shortestLongitudeBounds(points);
+        groupedLocations(points).forEach((group) => {
+            // Markers must use the same world copy as the initial bounds.
+            // Keep saved coordinates and popup provenance unchanged.
+            const [latitude, longitude] = group.point;
+            let displayLongitude = longitude;
+            if (longitudeBounds) {
+                const boundaryTolerance = 1e-9;
+                while (displayLongitude < longitudeBounds[0] - boundaryTolerance) displayLongitude += 360;
+                while (displayLongitude > longitudeBounds[1] + boundaryTolerance
+                    && displayLongitude - 360 >= longitudeBounds[0] - boundaryTolerance) displayLongitude -= 360;
+            }
+            const marker = L.marker([latitude, displayLongitude]).addTo(personaMap).bindPopup(buildPopup(group));
+            if (group.locations.length > 1) marker.bindTooltip(`${group.locations.length} approved locations`, {direction: 'top'});
+        });
+        fitInitialView(personaMap, points);
+    }
+
+    function onContactVisible() {
+        window.clearTimeout(mapRetryTimer);
+        if (!personaMap) {
+            initializeMapWhenVisible();
+            return;
+        }
+        // The initial fit is deliberately one-time; later tab switches and resizes retain the analyst's view.
+        personaMap.invalidateSize();
+    }
+
     const activateTab = (key) => {
         tabs.forEach((tab) => {
             const active = tab.dataset.personaTab === key;
@@ -404,9 +531,10 @@
             tab.setAttribute('aria-selected', String(active));
         });
         panels.forEach((panel) => { panel.hidden = panel.dataset.personaPanel !== key; });
-        if (key === 'contact' && window.personaMap) setTimeout(() => window.personaMap.invalidateSize(), 0);
+        if (key === 'contact') window.requestAnimationFrame(onContactVisible);
     };
     tabs.forEach((tab) => tab.addEventListener('click', () => activateTab(tab.dataset.personaTab)));
+    window.addEventListener('resize', () => { if (personaMap) personaMap.invalidateSize(); });
 
     document.querySelectorAll('[data-profile-image]').forEach((image) => {
         image.addEventListener('error', () => {
@@ -432,29 +560,7 @@
     });
     reviewItems.forEach((item) => { item.hidden = item.dataset.reviewItem === 'rejected'; });
 
-    const locations = {{ map_locations | tojson }};
-    const mapElement = document.getElementById('personaLocationMap');
-    if (mapElement && locations.length && window.L) {
-        const map = L.map(mapElement, {scrollWheelZoom: false});
-        window.personaMap = map;
-        L.tileLayer({{ map_tile_url | tojson }}, {
-            maxZoom: 19,
-            attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        }).addTo(map);
-        const bounds = [];
-        locations.forEach((location) => {
-            const point = [location.latitude, location.longitude];
-            bounds.push(point);
-            const popup = document.createElement('div');
-            const title = document.createElement('strong'); title.textContent = location.label;
-            const precision = location.coordinate_precision ? ` · approximate ${location.coordinate_precision} center` : '';
-            const detail = document.createElement('span'); detail.textContent = `${location.field_name.replace('_', ' ')} · ${location.confidence}% confidence${precision}`;
-            popup.append(title, document.createElement('br'), detail);
-            L.marker(point).addTo(map).bindPopup(popup);
-        });
-        if (bounds.length === 1) map.setView(bounds[0], 8);
-        else map.fitBounds(bounds, {padding: [28, 28]});
-    }
+    if (mapElement && !mapElement.closest('[hidden]')) initializeMapWhenVisible();
 })();
 </script>
 {% endblock %}

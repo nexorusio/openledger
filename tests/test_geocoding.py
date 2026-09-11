@@ -21,56 +21,58 @@ class FakeResponse:
         return json.dumps(self.payload).encode("utf-8")
 
 
-def test_geocoder_uses_approved_place_bounding_box_centroid():
-    captured = {}
+def _public_affiliation_evidence(**overrides):
+    evidence = {
+        "address": "100 Example Avenue, Jakarta, Indonesia",
+        "source_url": "https://example.org/contact",
+        "observation_key": "official-website-location:example-office",
+        "source_engine": "official_website_public_content",
+        "is_public": True,
+        "address_type": "operating",
+    }
+    evidence.update(overrides)
+    return evidence
 
-    def opener(request, timeout):
-        captured.update(url=request.full_url, timeout=timeout, headers=request.headers)
-        return FakeResponse(
-            [
-                {
-                    "display_name": "Jakarta, Indonesia",
-                    "lat": "-6.1754",
-                    "lon": "106.8272",
-                    "boundingbox": ["-6.3745", "-5.9937", "106.689", "106.973"],
-                }
-            ]
+
+def test_legacy_geocoder_never_sends_raw_person_claim_to_provider():
+    calls = []
+
+    def opener(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse([])
+
+    assert (
+        geocode_place_center("A person's current home address", opener=opener) is None
+    )
+    assert calls == []
+
+
+def test_legacy_geocoder_does_not_autoapprove_affiliation_site_point():
+    calls = []
+
+    def opener(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResponse([])
+
+    assert (
+        geocode_place_center(
+            "100 Example Avenue, Jakarta, Indonesia",
+            evidence=_public_affiliation_evidence(),
+            opener=opener,
         )
-
-    result = geocode_place_center("Jakarta, Indonesia", opener=opener)
-
-    assert result["latitude"] == pytest.approx((-6.3745 + -5.9937) / 2)
-    assert result["longitude"] == pytest.approx((106.689 + 106.973) / 2)
-    assert result["precision"] == "place"
-    assert "q=Jakarta%2C+Indonesia" in captured["url"]
-    assert captured["timeout"] == 10
-
-
-def test_geocoder_returns_none_when_place_is_not_found():
-    assert geocode_place_center(
-        "Unknown place",
-        opener=lambda *_args, **_kwargs: FakeResponse([]),
-    ) is None
+        is None
+    )
+    assert calls == []
 
 
 @pytest.mark.parametrize(
-    "endpoint",
+    "evidence",
     [
-        "http://example.test/search",
-        "file:///tmp/geocoder",
-        "https://user:secret@example.test/search",
+        _public_affiliation_evidence(is_public=False),
+        _public_affiliation_evidence(source_engine="search_result"),
+        _public_affiliation_evidence(address_type="residential"),
     ],
 )
-def test_geocoder_rejects_unsafe_endpoints(endpoint):
-    with pytest.raises(GeocodingError, match="HTTPS URL"):
-        geocode_place_center("Jakarta", endpoint=endpoint)
-
-
-def test_geocoder_rejects_out_of_range_provider_data():
-    with pytest.raises(GeocodingError, match="out-of-range"):
-        geocode_place_center(
-            "Invalid",
-            opener=lambda *_args, **_kwargs: FakeResponse(
-                [{"lat": "95", "lon": "106"}]
-            ),
-        )
+def test_legacy_geocoder_rejects_ineligible_evidence(evidence):
+    with pytest.raises(GeocodingError):
+        geocode_place_center("address", evidence=evidence)

@@ -578,6 +578,7 @@ async def test_cancellation_retains_partial_checkpoint_and_accounts_every_task(
     stages = _stage_map(job)
     assert job["collection_accounting"]["state"] == "cancelled"
     assert stages["maigret"]["status"] == "cancelled"
+    assert stages["maigret"]["observations"] == sum(len(item[2]) for item in job['general_results'])
     # A cancelled in-flight provider check has no source response.  Its
     # terminal outcome remains unknown rather than becoming a negative.
     assert stages["maigret"]["unknown"] == 1
@@ -597,3 +598,41 @@ async def test_cancellation_retains_partial_checkpoint_and_accounts_every_task(
     assert checkpoints[-1]["found_count"] == 2
     assert len(checkpoints[-1]["individual_reports"]) == 2
     assert checkpoints[-1]["collection_accounting"]["state"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_maigret_cancellation_drains_source_finalizer_before_notifier_close(
+    monkeypatch,
+):
+    """A cooperative adapter may emit its terminal event from ``finally``."""
+    plan = _alias_plan(2)
+    options = _options(plan)
+    control = {
+        "budget_seconds": 0.8,
+        "cancel_after_first": True,
+        "stall_entered": asyncio.Event(),
+    }
+    _install_fake_adapters(monkeypatch, control)
+    job = {
+        "job_id": "cancel-drain-maigret",
+        "queue": queue.Queue(),
+        "cancelled": False,
+        "execution_budget_object": _CompressedBudget(control["budget_seconds"]),
+        "collection_checkpoint_sink": lambda _snapshot: True,
+        "native_profile_checkpoint_sink": lambda _result: True,
+    }
+
+    running = asyncio.create_task(
+        web_app._stream_search(job, search_usernames(plan), options)
+    )
+    await asyncio.wait_for(control["stall_entered"].wait(), timeout=1)
+    job["cancelled"] = True
+    await asyncio.wait_for(running, timeout=1)
+
+    planned, terminal = _assert_complete_task_log(_events(job))
+    assert set(terminal) == set(planned)
+    maigret = _stage_map(job)["maigret"]
+    assert maigret["status"] == "cancelled"
+    # The source committed the interrupted terminal event before notifier
+    # closure. The stage ledger preserves its in-flight disposition as unknown.
+    assert maigret["unknown"] == 1
