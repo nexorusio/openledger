@@ -28,6 +28,7 @@ import shutil
 import stat
 import time
 import uuid
+from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from threading import Lock, Thread
@@ -1845,18 +1846,36 @@ def record_job_result(
 def load_persisted_job_result(session_folder: str):
     """Load and validate one persisted result without trusting its file contents."""
     try:
-        metadata_path = get_session_metadata_path(session_folder)
-        expected = os.lstat(metadata_path)
-        if not stat.S_ISREG(expected.st_mode):
-            raise ValueError('Report session metadata must be a regular file')
-        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
-        with os.fdopen(os.open(metadata_path, flags), encoding='utf-8') as metadata_file:
-            actual = os.fstat(metadata_file.fileno())
-            if not stat.S_ISREG(actual.st_mode) or (
-                actual.st_dev, actual.st_ino
-            ) != (expected.st_dev, expected.st_ino):
-                raise ValueError('Report session metadata changed while opening')
-            payload = json.load(metadata_file)
+        if not isinstance(session_folder, str) or not SESSION_FOLDER_PATTERN.fullmatch(
+            session_folder
+        ):
+            raise ValueError('Invalid report session folder')
+        if os.open not in os.supports_dir_fd or not all(
+            hasattr(os, flag) for flag in ('O_DIRECTORY', 'O_NOFOLLOW', 'O_NONBLOCK')
+        ):
+            raise OSError('Safe report metadata reads are unsupported on this platform')
+        reports_root = os.path.realpath(app.config['REPORTS_FOLDER'])
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        with ExitStack() as descriptors:
+            reports_fd = os.open(reports_root, directory_flags)
+            descriptors.callback(os.close, reports_fd)
+            # Resolve each untrusted component relative to its already-open
+            # parent. A renamed/replaced session directory cannot redirect the
+            # metadata read outside the reports directory.
+            session_fd = os.open(session_folder, directory_flags, dir_fd=reports_fd)
+            descriptors.callback(os.close, session_fd)
+            metadata_fd = os.open(
+                SESSION_METADATA_FILENAME,
+                os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=session_fd,
+            )
+            descriptors.callback(os.close, metadata_fd)
+            if not stat.S_ISREG(os.fstat(metadata_fd).st_mode):
+                raise ValueError('Report session metadata must be a regular file')
+            with os.fdopen(
+                metadata_fd, encoding='utf-8', closefd=False
+            ) as metadata_file:
+                payload = json.load(metadata_file)
         if payload.get('schema_version') != SESSION_METADATA_SCHEMA_VERSION:
             raise ValueError('Unsupported report session metadata version')
         session_key = payload.get('session_key')
@@ -1866,7 +1885,10 @@ def load_persisted_job_result(session_folder: str):
         return session_key, result
     except FileNotFoundError:
         return None
-    except (AttributeError, json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+    except (
+        AttributeError, json.JSONDecodeError, NotImplementedError, OSError,
+        TypeError, ValueError,
+    ) as exc:
         logging.warning(
             'Ignoring invalid investigation metadata in %s: %s',
             safe_log_value(session_folder),
