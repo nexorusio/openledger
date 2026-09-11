@@ -65,7 +65,22 @@ _GENERIC_PROFILE_SEGMENTS = {
 
 
 class InvestigationInputError(ValueError):
-    """A user-facing validation error for a submitted investigation plan."""
+    """A rejected plan with guidance deliberately approved for public responses.
+
+    Callers must supply validation guidance, never a serialized lower-level
+    exception. Keep internal diagnostics in a chained cause instead.
+    """
+
+    def __init__(self, public_message: str) -> None:
+        if not isinstance(public_message, str):
+            raise TypeError("Investigation input guidance must be a string.")
+        self._public_message = public_message
+        super().__init__(public_message)
+
+    @property
+    def public_message(self) -> str:
+        """Return the authored guidance independently of exception diagnostics."""
+        return self._public_message
 
 
 def _normalize_text(value: Any, *, limit: int = MAX_CONTEXT_LENGTH) -> str:
@@ -326,11 +341,18 @@ def build_investigation_plan(
     if generate_variants:
         try:
             alias_nicknames = normalize_nicknames(_form_list(form, "alias_nicknames"))
+        except ValueError as error:
+            raise InvestigationInputError(
+                "Enter one nickname per comma-separated value."
+            ) from error
+        try:
             alias_context_numbers = normalize_context_numbers(
                 _form_list(form, "alias_context_numbers")
             )
         except ValueError as error:
-            raise InvestigationInputError(str(error)) from error
+            raise InvestigationInputError(
+                "Contextual numbers must contain 1 to 6 digits each."
+            ) from error
 
     generated_aliases = (
         rank_username_aliases(

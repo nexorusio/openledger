@@ -6,6 +6,7 @@ import json
 import os
 import socket
 from http.cookies import SimpleCookie
+from urllib.parse import unquote, urlsplit
 
 import pytest
 
@@ -96,6 +97,93 @@ def test_model_verification_accepts_successful_response(monkeypatch):
     assert captured_urls == ["https://api.openai.com/v1/models/gpt-5.4"]
 
 
+@pytest.mark.parametrize("model", [
+    "../chat/completions",
+    "../../private-fixture",
+    "//127.0.0.1:9443/private-fixture",
+    "https://other.example.test/private-fixture",
+    "gpt-5.4?target=https://127.0.0.1:9443/private-fixture",
+    "gpt-5.4#private-fragment",
+    "..\\private-fixture",
+    "%2e%2e%2fprivate-fixture",
+    "gpt-5.4\r\nInjected: value",
+    "team/model:revision",
+])
+def test_model_verification_keeps_hostile_delimiters_in_one_identifier(monkeypatch, model):
+    captured_urls = _mock_model_transport(monkeypatch, 200)
+
+    asyncio.run(ai.validate_openai_connection("fixture-not-a-key", model))
+
+    assert len(captured_urls) == 1
+    actual = urlsplit(captured_urls[0])
+    assert actual.scheme == "https"
+    assert actual.netloc == "api.openai.com"
+    assert actual.query == actual.fragment == ""
+    assert actual.path.startswith("/v1/models/")
+    component = actual.path.removeprefix("/v1/models/")
+    assert "/" not in component and "\\" not in component
+    assert unquote(component) == model
+
+
+@pytest.mark.parametrize("model", ["", ".", "..", None])
+def test_model_verification_rejects_empty_or_dot_segments_before_a_request(monkeypatch, model):
+    captured_urls = _mock_model_transport(monkeypatch, 200)
+
+    with pytest.raises(ValueError, match="non-empty identifier"):
+        asyncio.run(ai.validate_openai_connection("fixture-not-a-key", model))
+
+    assert captured_urls == []
+
+
+@pytest.mark.parametrize("component", [
+    "model/../private", "model?query=1", "model#fragment", "model\\private",
+    "model%", "model%2", "model%GG", "model\n", "model ", "model😀", "", ".", "..",
+])
+def test_model_verification_rejects_encoder_contract_violations_before_a_request(monkeypatch, component):
+    captured_urls = _mock_model_transport(monkeypatch, 200)
+    monkeypatch.setattr(ai, "quote", lambda _model, *, safe: component)
+
+    with pytest.raises(ValueError, match="URL component is invalid"):
+        asyncio.run(ai.validate_openai_connection("fixture-not-a-key", "gpt-5.4"))
+
+    assert captured_urls == []
+
+
+@pytest.mark.parametrize("base,options", [
+    ("https://gateway.example.test/openai/v1", {"allow_custom_endpoint": True}),
+    ("http://127.0.0.1:11434/v1", {"allow_custom_endpoint": True}),
+    ("https://10.20.30.40/v1", {"allow_custom_endpoint": True, "allow_private_endpoint": True}),
+])
+def test_model_verification_preserves_authorized_provider_configuration(monkeypatch, base, options):
+    captured_urls = _mock_model_transport(monkeypatch, 200)
+
+    asyncio.run(ai.validate_openai_connection(
+        "fixture-not-a-key", "team/model:revision", api_base_url=base, **options,
+    ))
+
+    assert len(captured_urls) == 1
+    configured, actual = urlsplit(base), urlsplit(captured_urls[0])
+    assert (actual.scheme, actual.netloc) == (configured.scheme, configured.netloc)
+    assert actual.path.startswith(configured.path + "/models/")
+    assert unquote(actual.path.removeprefix(configured.path + "/models/")) == "team/model:revision"
+    assert actual.query == actual.fragment == ""
+
+
+@pytest.mark.parametrize("base,options", [
+    ("https://gateway.example.test/openai/v1", {}),
+    ("https://10.20.30.40/v1", {"allow_custom_endpoint": True}),
+])
+def test_model_verification_requires_provider_opt_ins_before_a_request(monkeypatch, base, options):
+    captured_urls = _mock_model_transport(monkeypatch, 200)
+
+    with pytest.raises(ValueError, match="authorization"):
+        asyncio.run(ai.validate_openai_connection(
+            "fixture-not-a-key", "team/model:revision", api_base_url=base, **options,
+        ))
+
+    assert captured_urls == []
+
+
 @pytest.fixture
 def report_metadata(monkeypatch, tmp_path):
     reports = tmp_path / "reports"
@@ -131,6 +219,66 @@ def test_persisted_metadata_accepts_ordinary_file(report_metadata):
     assert loaded is not None
     assert loaded[0] == "fixture"
     assert loaded[1]["usernames"] == ["fixture"]
+
+
+@pytest.mark.parametrize(
+    "session_folder",
+    [
+        None,
+        b"search_fixture",
+        "",
+        ".",
+        "..",
+        "search_",
+        "other_fixture",
+        "/search_fixture",
+        "//search_fixture",
+        "./search_fixture",
+        "search_fixture/",
+        "search_fixture/.",
+        "search_other/../search_fixture",
+        "search_fixture/../../outside",
+        "search_fixture\\outside",
+        "search_fixture\x00",
+        "search_fixture\n",
+        "search_\uFF0E\uFF0E",
+        "search_\uFF26ixture",
+        "search_" + "a" * 129,
+    ],
+)
+def test_persisted_metadata_rejects_noncanonical_components_before_open(
+    report_metadata, monkeypatch, session_folder
+):
+    metadata, payload = report_metadata
+    metadata.write_text(payload, encoding="utf-8")
+
+    def unexpected_open(*_args, **_kwargs):
+        pytest.fail("Invalid session components must be rejected before file access")
+
+    monkeypatch.setattr(os, "open", unexpected_open)
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {unexpected_open})
+
+    assert web_app.load_persisted_job_result(session_folder) is None
+
+
+@pytest.mark.parametrize("session_key", ["0", "A_key-9", "a" * 128])
+def test_persisted_metadata_preserves_valid_session_components(
+    report_metadata, session_key
+):
+    metadata, payload = report_metadata
+    session_folder = f"search_{session_key}"
+    session_dir = metadata.parent.with_name(session_folder)
+    session_dir.mkdir()
+    document = json.loads(payload)
+    document["session_key"] = session_key
+    document["result"]["session_folder"] = session_folder
+    (session_dir / metadata.name).write_text(json.dumps(document), encoding="utf-8")
+
+    loaded = web_app.load_persisted_job_result(session_folder)
+
+    assert loaded is not None
+    assert loaded[0] == session_key
+    assert loaded[1]["session_folder"] == session_folder
 
 
 @pytest.mark.parametrize("outside_reports", [False, True])

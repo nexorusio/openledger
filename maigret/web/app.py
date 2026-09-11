@@ -488,7 +488,10 @@ LOG_CONTROL_CHARACTER_PATTERN = re.compile(r'[\x00-\x1f\x7f]+')
 
 def safe_log_value(value: Any, *, limit: int = 500) -> str:
     """Bound untrusted log fields and prevent forged multi-line entries."""
-    collapsed = LOG_CONTROL_CHARACTER_PATTERN.sub(' ', str(value or ''))
+    # Remove record separators explicitly so both readers and static analysis
+    # can see the log boundary before the remaining control/whitespace cleanup.
+    single_line = str(value or '').replace('\r', ' ').replace('\n', ' ')
+    collapsed = LOG_CONTROL_CHARACTER_PATTERN.sub(' ', single_line)
     return ' '.join(collapsed.split())[:limit]
 
 
@@ -842,18 +845,33 @@ def clear_login_failures(key: str):
 
 
 def safe_next_path(candidate: str) -> str:
-    """Allow only same-origin absolute paths after login."""
+    """Construct a root-relative login destination without changing URL data."""
     if not candidate:
         return url_for('index')
-    decoded = unquote(str(candidate))
+    candidate = str(candidate)
+    # Require an actual root-relative URL, not a scheme or network-path URL.
+    if not candidate.startswith('/') or candidate.startswith('//'):
+        return url_for('index')
+    # Decode only for validation. Decoding the returned URL would turn encoded
+    # query/path delimiters into structure, and repeated login hops could decode
+    # the same value again. Backslashes are separators in browser URL parsers.
+    decoded = unquote(candidate)
     if '\\' in decoded or LOG_CONTROL_CHARACTER_PATTERN.search(decoded):
         return url_for('index')
     if decoded.startswith('//'):
         return url_for('index')
-    parsed = urlsplit(decoded)
+    try:
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return url_for('index')
     if parsed.scheme or parsed.netloc or not parsed.path.startswith('/'):
         return url_for('index')
-    return parsed.path + (f'?{parsed.query}' if parsed.query else '')
+    # Own the URL prefix: exactly one literal slash followed by a validated
+    # path body. Query values and fragments remain in their original components.
+    path = '/' + parsed.path.lstrip('/')
+    query = '?' + parsed.query if parsed.query else ''
+    fragment = '#' + parsed.fragment if parsed.fragment else ''
+    return path + query + fragment
 
 
 def get_openai_api_key():
@@ -1846,9 +1864,17 @@ def record_job_result(
 def load_persisted_job_result(session_folder: str):
     """Load and validate one persisted result without trusting its file contents."""
     try:
-        if not isinstance(session_folder, str) or not SESSION_FOLDER_PATTERN.fullmatch(
-            session_folder
+        if not isinstance(session_folder, str):
+            raise ValueError('Invalid report session folder')
+        # A dir-FD-relative lookup must receive one canonical component. Reject
+        # alternate spellings rather than normalizing them into another session.
+        session_component = os.path.normpath(session_folder)
+        if (
+            session_component != session_folder
+            or not session_component.startswith('search_')
         ):
+            raise ValueError('Invalid report session folder')
+        if not SESSION_KEY_PATTERN.fullmatch(session_component[len('search_'):]):
             raise ValueError('Invalid report session folder')
         if os.open not in os.supports_dir_fd or not all(
             hasattr(os, flag) for flag in ('O_DIRECTORY', 'O_NOFOLLOW', 'O_NONBLOCK')
@@ -1862,7 +1888,7 @@ def load_persisted_job_result(session_folder: str):
             # Resolve each untrusted component relative to its already-open
             # parent. A renamed/replaced session directory cannot redirect the
             # metadata read outside the reports directory.
-            session_fd = os.open(session_folder, directory_flags, dir_fd=reports_fd)
+            session_fd = os.open(session_component, directory_flags, dir_fd=reports_fd)
             descriptors.callback(os.close, session_fd)
             metadata_fd = os.open(
                 SESSION_METADATA_FILENAME,
@@ -5580,9 +5606,9 @@ def scan_start():
         options = parse_search_options(request.form, investigation_plan)
         job_id = start_live_job(usernames, options)
     except InvestigationInputError as error:
-        return {'error': str(error)}, 400
+        return {'error': error.public_message}, 400
     except ProfileDiscoveryPolicyError as error:
-        return {'error': str(error)}, 503
+        return {'error': error.public_message}, 503
     return {'job_id': job_id}
 
 

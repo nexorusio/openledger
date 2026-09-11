@@ -10,7 +10,7 @@ import os
 import re
 import sys
 import threading
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -1557,9 +1557,20 @@ async def validate_openai_connection(
     allow_private_endpoint: bool = False,
 ) -> str:
     """Verify a server-side OpenAI key and model without generating content."""
+    if not isinstance(model, str) or not model or model in {".", ".."}:
+        raise ValueError("AI model must be a non-empty identifier, not a dot segment")
+    # The model is one identifier under /models/, never a path, query or fragment.
+    # quote leaves exact dot segments unchanged, so reject those explicitly above.
+    model_component = quote(model, safe="")
+    # Enforce the component contract at the request boundary independently of
+    # the encoder: only unreserved ASCII or complete percent escapes may pass.
+    if model_component in {".", ".."} or not re.fullmatch(
+        r"(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+", model_component
+    ):
+        raise ValueError("AI model URL component is invalid")
     url = _ai_api_url(
         api_base_url,
-        f"models/{model}",
+        f"models/{model_component}",
         allow_custom_endpoint=allow_custom_endpoint,
         allow_private_endpoint=allow_private_endpoint,
     )

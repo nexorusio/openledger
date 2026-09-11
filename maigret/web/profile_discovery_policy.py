@@ -28,7 +28,22 @@ _DEFAULT_OFF_FLAGS = frozenset({"search_first_enabled"})
 
 
 class ProfileDiscoveryPolicyError(ValueError):
-    """Raised when server policy refuses a new discovery operation."""
+    """A policy refusal with guidance deliberately approved for public responses.
+
+    Callers must supply policy guidance, never a serialized lower-level
+    exception. Keep internal diagnostics in a chained cause instead.
+    """
+
+    def __init__(self, public_message: str) -> None:
+        if not isinstance(public_message, str):
+            raise TypeError("Profile discovery policy guidance must be a string.")
+        self._public_message = public_message
+        super().__init__(public_message)
+
+    @property
+    def public_message(self) -> str:
+        """Return the authored guidance independently of exception diagnostics."""
+        return self._public_message
 
 
 def _server_flag(
