@@ -160,6 +160,19 @@ def test_case_with_active_investigation_cannot_be_deleted(store):
     assert store.get_case(case_id) is not None
 
 
+def test_case_chat_rejects_oversized_citations_without_persisting_a_truncated_url(store):
+    job_id = store.create_investigation(["alice"], {})
+    case_id = store.get_job(job_id)["case_id"]
+    exact = "https://example.test/actual?ref=retained"
+    oversized = "https://example.test/" + "x" * 2100
+    result = store.append_case_chat_message(
+        case_id, role="assistant", author="OpenLedger AI", content="A cited answer.",
+        sources=[{"url": oversized}, {"url": exact, "title": "Actual citation"}],
+    )
+    assert result["sources"] == [{"url": exact, "title": "Actual citation"}]
+    assert store.list_case_chat_messages(case_id)[0]["sources"] == result["sources"]
+
+
 def test_case_chat_is_durable_and_persona_proposals_retain_message_provenance(store):
     job_id = store.create_investigation(["alice"], {})
     case = store.get_case(store.get_job(job_id)["case_id"])

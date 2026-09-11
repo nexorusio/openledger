@@ -266,6 +266,7 @@ def build_investigation_plan(
     search_targets: List[Dict[str, Any]] = []
     full_names: List[str] = []
     confirmed_usernames: List[str] = []
+    profile_usernames: Dict[str, List[str]] = {}
 
     def add_target(
         username: str,
@@ -303,9 +304,10 @@ def build_investigation_plan(
             add_target(normalized, identifier_type, normalized)
         elif identifier_type == "profile_url":
             normalized = normalize_profile_url(raw_value)
-            for username in extract_profile_usernames(
+            profile_usernames[normalized] = extract_profile_usernames(
                 normalized, resolver=profile_url_resolver
-            ):
+            )
+            for username in profile_usernames[normalized]:
                 add_target(username, identifier_type, normalized)
                 confirmed_usernames.append(username)
         elif identifier_type == "full_name":
@@ -323,9 +325,7 @@ def build_investigation_plan(
     alias_context_numbers: List[str] = []
     if generate_variants:
         try:
-            alias_nicknames = normalize_nicknames(
-                _form_list(form, "alias_nicknames")
-            )
+            alias_nicknames = normalize_nicknames(_form_list(form, "alias_nicknames"))
             alias_context_numbers = normalize_context_numbers(
                 _form_list(form, "alias_context_numbers")
             )
@@ -345,6 +345,22 @@ def build_investigation_plan(
     generated_by_value = {
         str(candidate["value"]).casefold(): candidate for candidate in generated_aliases
     }
+    # Keep each name's aliases attached to that entered subject. The combined
+    # ranking deliberately deduplicates scan targets, not the people being studied.
+    alias_source_names: Dict[str, List[str]] = {}
+    if generate_variants:
+        for name in full_names:
+            for candidate in rank_username_aliases(
+                [name],
+                nicknames=alias_nicknames,
+                contextual_numbers=alias_context_numbers,
+                confirmed_usernames=confirmed_usernames,
+            ):
+                sources = alias_source_names.setdefault(
+                    str(candidate["value"]).casefold(), []
+                )
+                if name not in sources:
+                    sources.append(name)
     alias_candidates: List[Dict[str, Any]] = []
     raw_alias_candidates = _form_list(form, "alias_candidate")
     submitted_alias_plan = bool(
@@ -399,8 +415,7 @@ def build_investigation_plan(
         }
         if submitted_alias_plan:
             scanner_target_keys.update(
-                str(candidate["value"]).casefold()
-                for candidate in selected_aliases
+                str(candidate["value"]).casefold() for candidate in selected_aliases
             )
             if len(scanner_target_keys) > MAX_USER_SCANNER_USERNAME_TARGETS:
                 raise InvestigationInputError(
@@ -425,10 +440,19 @@ def build_investigation_plan(
                 candidate for candidate in alias_candidates if candidate.get("selected")
             ]
     for candidate in selected_aliases:
+        source_names = alias_source_names.get(str(candidate["value"]).casefold())
+        if not source_names:
+            source_names = list(dict.fromkeys(full_names))
+            if processing_mode == "independent" and len(source_names) != 1:
+                raise InvestigationInputError(
+                    "Edited aliases need one originating name in Separate subjects "
+                    "mode. Use One subject mode or submit each subject separately."
+                )
+            alias_source_names[str(candidate["value"]).casefold()] = source_names
         add_target(
             str(candidate["value"]),
             "ranked_alias",
-            full_names[0] if full_names else str(candidate["value"]),
+            source_names[0] if source_names else str(candidate["value"]),
             alias_score=int(candidate["score"]),
             alias_reason=str(candidate["reason"]),
         )
@@ -472,6 +496,59 @@ def build_investigation_plan(
         "",
     )
     subject_label = full_name or search_targets[0]["value"]
+    if processing_mode == "same_subject":
+        subject_groups = [
+            {
+                "label": subject_label,
+                "usernames": [target["value"] for target in search_targets],
+                "identifiers": identifiers,
+            }
+        ]
+    else:
+        subject_groups = []
+        seen_subjects = set()
+        selected_alias_keys = {
+            str(candidate["value"]).casefold() for candidate in selected_aliases
+        }
+        for identifier in identifiers:
+            identifier_type, value = identifier["type"], identifier["value"]
+            if identifier_type not in {
+                "username",
+                "social_handle",
+                "profile_url",
+                "full_name",
+            }:
+                continue
+            key = (
+                "username" if identifier_type == "social_handle" else identifier_type,
+                value.casefold(),
+            )
+            if key in seen_subjects:
+                continue
+            seen_subjects.add(key)
+            if identifier_type == "full_name":
+                targets = [
+                    target["value"]
+                    for target in search_targets
+                    if any(
+                        name.casefold() == value.casefold()
+                        for name in alias_source_names.get(
+                            target["value"].casefold(), []
+                        )
+                    )
+                    and target["value"].casefold() in selected_alias_keys
+                ]
+            elif identifier_type == "profile_url":
+                targets = profile_usernames[value]
+            else:
+                targets = [value]
+            subject_groups.append(
+                {
+                    "label": targets[0] if identifier_type == "profile_url" else value,
+                    "usernames": targets,
+                    "identifiers": [identifier],
+                }
+            )
     return {
         "schema_version": SCHEMA_VERSION,
         "processing_mode": processing_mode,
@@ -484,6 +561,7 @@ def build_investigation_plan(
         "enable_github_profile_enrichment": enable_github_profile_enrichment,
         "enable_archived_url_evidence": enable_archived_url_evidence,
         "subject_label": subject_label,
+        "subject_groups": subject_groups,
         "identifiers": identifiers,
         "alias_nicknames": alias_nicknames,
         "alias_context_numbers": alias_context_numbers,

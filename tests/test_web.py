@@ -17,7 +17,7 @@ import pytest
 import maigret
 import maigret.report
 import maigret.settings
-from maigret.ai import AIEnrichmentContractError
+from maigret.ai import AIEnrichmentContractError, _parse_responses_analysis
 from maigret.result import MaigretCheckResult, MaigretCheckStatus
 from maigret.web import app as web_app_module
 from maigret.web.case_store import CaseStore
@@ -160,6 +160,7 @@ def test_alias_preview_resolves_profile_urls_for_target_budget(
 
     assert response.status_code == 200
     assert response.get_json()['exact_target_keys'] == ['exact-account', 'alice']
+    assert response.get_json()['exact_targets'] == ['exact-account', 'alice']
 
 
 def test_username_verification_requires_explicit_browser_opt_in(
@@ -483,8 +484,8 @@ def test_investigation_builder_explains_identifier_capabilities(client):
     body = client.get('/').get_data(as_text=True)
 
     assert 'Known identifiers' in body
-    assert 'A full name may contain spaces' in body
-    assert 'Phone and email values are never permuted' in body
+    assert 'One phrase for native search when enabled' in body
+    assert 'Email and phone values never generate aliases' in body
     assert 'Case source filters' in body
     assert 'Include terms' not in body
     assert 'Exclude terms' not in body
@@ -1429,8 +1430,237 @@ def test_case_chat_does_not_expose_internal_validation_errors(
         store.dispose()
 
 
+@pytest.mark.parametrize('extraction_fails,cited_url', [
+    (True, 'https://id.linkedin.com/in/alice-example?utm_source=search'),
+    (False, 'https://id.linkedin.com/in/alice-example?utm_source=search'),
+    (False, 'https://news.example/unrelated'),
+    ('full', 'https://id.linkedin.com/in/alice-example?utm_source=search'),
+    ('duplicate', 'https://www.linkedin.com/in/alice-example/'),
+])
+def test_case_chat_retains_linkedin_attachment_and_renders_source_provenance(
+    client, web_app, monkeypatch, tmp_path, extraction_fails, cited_url
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = CaseStore(f"sqlite:///{tmp_path / 'linkedin-chat.db'}", create_schema=True)
+    monkeypatch.setattr(web_app, 'case_store', store)
+    try:
+        job_id = store.create_investigation(['different_username'], {})
+        case = store.get_case(store.get_job(job_id)['case_id'])
+        persona_id = case['personas'][0]['id']
+        supplied_url = 'https://www.linkedin.com/in/alice-example/'
+
+        async def cited_research(**kwargs):
+            assert kwargs['case_context']['selected_persona']['id'] == persona_id
+            return {
+                'analysis': (
+                    '**Supplied URL retained.**\n\n'
+                    '- Direct retrieval was unavailable.\n'
+                    f'- [Public citation]({cited_url})\n\n'
+                    '<script>alert(1)</script>'
+                ),
+                'sources': [{'title': 'Public citation', 'url': cited_url}],
+            }
+
+        async def extract_proposals(**_kwargs):
+            if extraction_fails is True:
+                raise RuntimeError('fixture extraction failure')
+            if extraction_fails in {'full', 'duplicate'}:
+                return [{
+                    'field_name': 'full_name' if extraction_fails == 'full' else 'social_account',
+                    'value': f'Published name {index}' if extraction_fails == 'full' else supplied_url,
+                    'confidence': 70,
+                    'reason': 'Explicit statement in the cited fixture.',
+                    'source_url': cited_url,
+                    'evidence_basis': 'public_web',
+                    'latitude': None,
+                    'longitude': None,
+                    'coordinate_precision': None,
+                } for index in range(100 if extraction_fails == 'full' else 1)]
+            return []
+
+        monkeypatch.setattr(web_app, 'get_case_chat_response', cited_research)
+        monkeypatch.setattr(web_app, 'get_case_chat_claim_proposals', extract_proposals)
+        with client.session_transaction() as browser_session:
+            browser_session['csrf_token'] = 'test-csrf'
+
+        response = client.post(
+            f"/api/cases/{case['id']}/chat",
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+            json={
+                'message': f'Add this profile {supplied_url}',
+                'persona_id': persona_id,
+                'research_enabled': True,
+                'propose_to_persona': True,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.get_json()
+        summary = payload['proposal_summary']
+        assert summary['status'] == 'pending_review'
+        assert summary['count'] == (100 if extraction_fails == 'full' else 1)
+        record = summary['url_evidence'][0]
+        assert record['supplied_url'] == supplied_url
+        assert record['direct_access'] == 'not_verified'
+        assert record['identity_status'] == 'unverified'
+        expected_status = 'profile_url_cited' if 'linkedin.com' in cited_url else 'not_cited'
+        assert record['citation_status'] == expected_status
+        assert record['citation_urls'] == ([cited_url] if expected_status == 'profile_url_cited' else [])
+        if extraction_fails is True:
+            assert summary['extraction_status'] == 'unavailable'
+
+        claims = [c for c in store.get_persona(persona_id)['claims'] if c['field_name'] == 'social_account']
+        assert len(claims) == 1
+        claim = claims[0]
+        assert claim['review_status'] == 'pending'
+        assert claim['value']['url'] == supplied_url
+        assert claim['value']['username'] == 'alice-example'
+        assert claim['confidence'] == 50
+        assert claim['evidence'][0]['details']['independently_corroborated'] is False
+
+        stored = store.list_case_chat_messages(case['id'])[-1]
+        assert stored['proposals']['url_evidence'] == summary['url_evidence']
+        assert stored['sources'] == [{'title': 'Public citation', 'url': cited_url}]
+        html = payload['assistant_message']['content_html']
+        assert '<strong>Supplied URL retained.</strong>' in html
+        assert html.count('<li>') == 2
+        assert '<script>' not in html
+        assert '&lt;script&gt;' in html
+        history = client.get(f"/cases/{case['id']}/chat").get_data(as_text=True)
+        assert html in history
+        assert f'href="{supplied_url}"' in history
+        assert 'Supplied URLs' in history
+        if extraction_fails is True:
+            assert 'Other AI fact proposals could not be extracted.' in history
+    finally:
+        store.engine.dispose()
+
+
+@pytest.mark.parametrize('extraction_result,large_previews', [
+    ('failure', None), ('full', None), ('failure', 'unicode_urls'), ('full', 'model_values'),
+])
+def test_case_chat_saves_supplied_urls_when_matching_citation_metadata_is_large(
+    client, web_app, monkeypatch, tmp_path, extraction_result, large_previews
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "server-only-test-key")
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'large-chat-citations.db'}", create_schema=True
+    )
+    monkeypatch.setattr(web_app, "case_store", store)
+    try:
+        job_id = store.create_investigation(["different_username"], {})
+        case = store.get_case(store.get_job(job_id)["case_id"])
+        persona_id = case["personas"][0]["id"]
+        supplied = [
+            f"https://{host}/in/alice-example/"
+            for host in (
+                "www.linkedin.com",
+                "id.linkedin.com",
+                "uk.linkedin.com",
+                "linkedin.com",
+                "ca.linkedin.com",
+            )
+        ]
+        sources = [
+            {
+                "title": "Actual indexed citation",
+                "url": f"https://id.linkedin.com/in/alice-example?ref={index}"
+                + "a" * 1800,
+            }
+            for index in range(10)
+        ]
+        if large_previews == 'unicode_urls':
+            supplied = [f'https://r{index}.linkedin.com/in/alice-example?ref=' + '😀' * 1000
+                        for index in range(10)]
+            sources = [{'title': 'Actual indexed citation', 'url': 'https://id.linkedin.com/in/alice-example'}]
+        message = 'Add these profiles ' + ' '.join(supplied)
+        assert len(message) <= 12_000
+
+        async def cited_research(**_kwargs):
+            return {
+                "analysis": "**The supplied URLs remain unverified.**",
+                "sources": sources,
+            }
+
+        async def extract_proposals(**_kwargs):
+            if extraction_result == "failure":
+                raise RuntimeError("fixture extraction unavailable")
+            return [
+                {
+                    "field_name": "full_name",
+                    "value": f"Published name {index}" + ('😀' * 250 if large_previews == 'model_values' else ''),
+                    "confidence": 70,
+                    "reason": "A statement in the fixture citation.",
+                    "source_url": sources[0]["url"],
+                    "evidence_basis": "public_web",
+                }
+                for index in range(100)
+            ]
+
+        monkeypatch.setattr(web_app, "get_case_chat_response", cited_research)
+        monkeypatch.setattr(web_app, "get_case_chat_claim_proposals", extract_proposals)
+        with client.session_transaction() as browser_session:
+            browser_session["csrf_token"] = "test-csrf"
+        response = client.post(
+            f"/api/cases/{case['id']}/chat",
+            headers={"X-OpenLedger-CSRF": "test-csrf"},
+            json={
+                "message": message,
+                "persona_id": persona_id,
+                "research_enabled": True,
+                "propose_to_persona": True,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.get_json()
+        summary = payload["proposal_summary"]
+        assert summary["status"] == "pending_review"
+        assert summary["count"] == (
+            100 if extraction_result == "full" else len(supplied)
+        )
+        records = summary["url_evidence"]
+        assert [record["supplied_url"] for record in records] == supplied
+        assert all(record["citation_count"] == (0 if large_previews == 'unicode_urls' else 10) for record in records)
+        assert all(
+            record["citation_status"] == ('not_cited' if large_previews == 'unicode_urls' else 'profile_url_cited') for record in records
+        )
+        assert any(not record["citation_urls"] for record in records)
+        assert all(record["direct_access"] == "not_verified" for record in records)
+        assert all(record["identity_status"] == "unverified" for record in records)
+        if extraction_result == "failure":
+            assert summary["extraction_status"] == "unavailable"
+        stored = store.list_case_chat_messages(case["id"])[-1]
+        assert stored["role"] == "assistant"
+        assert stored['proposals']['status'] == 'pending_review'
+        assert stored["sources"] == payload["assistant_message"]["sources"] == sources
+        assert stored["proposals"]["url_evidence"] == records
+        if large_previews:
+            assert summary['proposal_previews_omitted'] > 0
+            assert len(summary['proposals']) + summary['proposal_previews_omitted'] == summary['count']
+            assert len(json.dumps(summary, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) <= 64 * 1024
+        all_claims = store.get_persona(persona_id)['claims']
+        if large_previews == 'model_values':
+            assert len([claim for claim in all_claims if claim['field_name'] == 'full_name']) == 95
+            assert all(claim['value'].endswith('😀' * 250) for claim in all_claims if claim['field_name'] == 'full_name')
+        claims = [
+            claim
+            for claim in all_claims
+            if claim["field_name"] == "social_account"
+        ]
+        assert {claim["value"]["url"] for claim in claims} == set(supplied)
+        assert all(claim["value"]["username"] == ('' if large_previews == 'unicode_urls' else 'alice-example') for claim in claims)
+        assert all(claim["review_status"] == "pending" for claim in claims)
+        history = client.get(f"/cases/{case['id']}/chat").get_data(as_text=True)
+        if large_previews != 'unicode_urls':
+            assert "Some matching citation URLs are shown only in Sources." in history
+            assert "No matching URL citation" not in history
+        assert all(f'href="{source["url"]}"' in history for source in sources)
+    finally:
+        store.dispose()
+
+
+@pytest.mark.parametrize('overlong_citation', [False, True])
 def test_case_chat_retains_explicit_url_when_research_has_no_citations(
-    client, web_app, monkeypatch, tmp_path
+    client, web_app, monkeypatch, tmp_path, overlong_citation
 ):
     monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
     store = CaseStore(
@@ -1442,8 +1672,15 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
         case = store.get_case(store.get_job(job_id)['case_id'])
         persona_id = case['personas'][0]['id']
         url = 'https://www.tiktok.com/@skandaloknumpejabat'
+        oversized = 'https://example.test/' + 'x' * 2100
 
         async def uncited_research(**_kwargs):
+            if overlong_citation:
+                return _parse_responses_analysis({'output': [
+                    {'type': 'web_search_call', 'status': 'completed'},
+                    {'type': 'message', 'content': [{'type': 'output_text', 'text': 'A model answer.',
+                        'annotations': [{'type': 'url_citation', 'url': oversized}]}]},
+                ]}, require_web_search=True)
             raise AIEnrichmentContractError('no cited public sources')
 
         async def proposals_must_not_run(**_kwargs):
@@ -1481,6 +1718,10 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
         assert payload['proposal_summary']['research_status'] == (
             'no_independent_citations'
         )
+        stored = store.list_case_chat_messages(case['id'])[-1]
+        assert stored['sources'] == payload['assistant_message']['sources']
+        assert stored['proposals']['status'] == 'pending_review'
+        assert all(source['url'] not in {oversized, oversized[:2000]} for source in stored['sources'])
         persona = store.get_persona(persona_id)
         claim = next(
             item
@@ -1495,6 +1736,7 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
         details = claim['evidence'][0]['details']
         assert details['unverified_user_statement'] is True
         assert details['independently_corroborated'] is False
+        assert payload['proposal_summary']['url_evidence'][0]['citation_status'] == 'not_cited'
 
         page = client.get(f"/cases/{case['id']}/chat")
         body = page.get_data(as_text=True)
@@ -3357,7 +3599,6 @@ def test_ai_markdown_excludes_uncorroborated_username_scanner_hits(web_app):
 @pytest.mark.parametrize(
     'relative_path',
     [
-        '../maigret/web/templates/index.html',
         '../maigret/web/templates/live.html',
         '../maigret/web/templates/settings.html',
         '../maigret/resources/ai_prompt.txt',

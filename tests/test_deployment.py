@@ -4,15 +4,17 @@ from pathlib import Path
 import json
 import os
 import re
+import shutil
 import subprocess
+import sys
+
+import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _compose_service(name):
-    compose = (REPOSITORY_ROOT / "deploy" / "compose.yaml").read_text(
-        encoding="utf-8"
-    )
+    compose = (REPOSITORY_ROOT / "deploy" / "compose.yaml").read_text(encoding="utf-8")
     body = compose.split(f"  {name}:\n", 1)[1]
     next_service = re.search(r"(?m)^  [a-z0-9_-]+:\n", body)
     return body if next_service is None else body[: next_service.start()]
@@ -105,9 +107,7 @@ def test_install_and_example_keep_profile_search_disabled_by_default():
     install_script = (REPOSITORY_ROOT / "deploy" / "install.sh").read_text(
         encoding="utf-8"
     )
-    example = (REPOSITORY_ROOT / "deploy" / ".env.example").read_text(
-        encoding="utf-8"
-    )
+    example = (REPOSITORY_ROOT / "deploy" / ".env.example").read_text(encoding="utf-8")
 
     for document in (install_script, example):
         assert "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED" in document
@@ -348,3 +348,412 @@ def test_deployment_rejects_non_file_database_secret_and_writes_atomically():
         assert '-L "${password_file}"' in script
         assert 'mktemp "${password_file}.XXXXXX"' in script
         assert 'mv -f "${temporary_file}" "${password_file}"' in script
+
+
+def _deployment_git(repository, *args):
+    return subprocess.check_output(
+        [shutil.which("git"), "-C", str(repository), *args], text=True
+    ).strip()
+
+
+@pytest.fixture
+def pinned_p2_deployment(tmp_path):
+    """Real temporary Git checkout; Docker and host mutations are simulated."""
+    repository = tmp_path / "openledger"
+    repository.mkdir()
+    shutil.copytree(
+        REPOSITORY_ROOT / "deploy",
+        repository / "deploy",
+        ignore=shutil.ignore_patterns(".env", "__pycache__"),
+    )
+    shutil.copytree(
+        REPOSITORY_ROOT / "migrations",
+        repository / "migrations",
+        ignore=shutil.ignore_patterns("__pycache__"),
+    )
+    (repository / ".gitignore").write_text("runtime/\n.env\n__pycache__/\n")
+    update = repository / "deploy" / "update.sh"
+    # Test the actual shell program without requiring sudo in a non-root CI
+    # process. Only privilege escalation is removed from the isolated fixture.
+    escalation = (
+        "if [[ ${EUID} -ne 0 ]]; then\n"
+        '    exec sudo bash "${BASH_SOURCE[0]}" "$@"\n'
+        "fi\n"
+    )
+    source = update.read_text(encoding="utf-8")
+    assert source.count(escalation) == 1
+    update.write_text(source.replace(escalation, ""), encoding="utf-8")
+    (repository / "deploy" / ".env").write_text(
+        "DOMAIN=openledger.example.test\nFLASK_SECRET_KEY=test-only\n"
+        "SEARXNG_SECRET=test-only-search\n"
+        "OPENLEDGER_PROFILE_SEARCH_PROVIDER=disabled\n"
+    )
+    for directory in ("secrets", "reports", "backups"):
+        (repository / "runtime" / directory).mkdir(parents=True)
+    for name, value in (
+        ("secrets/auth.json", "{}"),
+        ("secrets/postgres_password", "test-only-password"),
+        ("web_settings.json", "{}"),
+    ):
+        (repository / "runtime" / name).write_text(value)
+    _deployment_git(repository, "init", "-q")
+    _deployment_git(repository, "config", "user.name", "Deployment test")
+    _deployment_git(repository, "config", "user.email", "deployment@example.test")
+    _deployment_git(repository, "add", ".")
+    _deployment_git(repository, "commit", "-qm", "Reviewed P2 fixture")
+    commit = _deployment_git(repository, "rev-parse", "HEAD")
+
+    fakebin = tmp_path / "bin"
+    fakebin.mkdir()
+    trace = tmp_path / "commands.jsonl"
+    simulator = fakebin / "simulate"
+    simulator.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, subprocess, sys\n"
+        "name = pathlib.Path(sys.argv[0]).name\n"
+        "args = sys.argv[1:]\n"
+        "with open(os.environ['P2_TEST_TRACE'], 'a') as stream:\n"
+        "    stream.write(json.dumps([name] + args) + '\\n')\n"
+        "if name == 'git':\n"
+        "    if args[0] == 'status' and os.environ.get('P2_TEST_GIT_STATUS_FAILURE') == '1':\n"
+        "        sys.exit(1)\n"
+        "    if args[0] not in ('status', 'rev-parse'):\n"
+        "        sys.exit('Unexpected Git mutation or network operation')\n"
+        "    sys.exit(subprocess.call([os.environ['P2_TEST_REAL_GIT']] + args))\n"
+        "if name == 'docker':\n"
+        "    if args[0] == 'ps':\n"
+        "        print(os.environ.get('P2_TEST_DB_CONTAINERS', 'abcdef012345'))\n"
+        "    elif args[0] == 'exec' and 'psql' in args:\n"
+        "        if os.environ.get('P2_TEST_QUERY_FAILURE') == '1':\n"
+        "            sys.exit(1)\n"
+        "        print(os.environ.get('P2_TEST_DB_REVISION', 'b3e9d7c4a610'))\n"
+        "    elif args[0] == 'compose':\n"
+        "        if 'pg_dump' in args:\n"
+        "            print('simulated-custom-format-backup')\n"
+        "        elif 'pg_restore' in args:\n"
+        "            sys.stdin.read()\n"
+        "            sys.exit(int(os.environ.get('P2_TEST_BACKUP_FAILURE', '0')))\n"
+        "    else:\n"
+        "        sys.exit('Unexpected Docker operation')\n"
+        "elif name == 'openssl':\n"
+        "    print('0' * 64)\n"
+    )
+    simulator.chmod(0o755)
+    for command in ("docker", "git", "install", "chown", "chmod", "openssl", "apt-get"):
+        (fakebin / command).symlink_to(simulator)
+    environment = dict(
+        os.environ,
+        PATH=str(fakebin) + os.pathsep + os.environ["PATH"],
+        P2_TEST_TRACE=str(trace),
+        P2_TEST_REAL_GIT=shutil.which("git"),
+    )
+    return repository, commit, environment, trace
+
+
+def _run_p2_update(deployment, *args, **environment_changes):
+    repository, _, environment, trace = deployment
+    result = subprocess.run(
+        ["bash", str(repository / "deploy" / "update.sh"), *args],
+        env=dict(environment, **environment_changes),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    commands = (
+        [json.loads(line) for line in trace.read_text().splitlines()]
+        if trace.exists()
+        else []
+    )
+    return result, commands
+
+
+def _assert_no_p2_update_mutation(deployment, commands):
+    for command in commands:
+        assert (command[0] == "git" and command[1] in ("status", "rev-parse")) or (
+            command[:2] == ["docker", "ps"]
+            or (command[:2] == ["docker", "exec"] and "psql" in command)
+        ), command
+    repository = deployment[0]
+    assert not list((repository / "runtime" / "backups").iterdir())
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        (),
+        ("--commit", "main"),
+        ("--commit", "HEAD"),
+        ("--commit", "origin/main"),
+        ("--commit", "abcdef0"),
+        ("--commit", "f" * 40, "--force"),
+        ("--commit", "F" * 40),
+    ],
+)
+def test_p2_updater_requires_explicit_full_commit(pinned_p2_deployment, args):
+    result, commands = _run_p2_update(pinned_p2_deployment, *args)
+    assert result.returncode != 0
+    assert "Usage:" in result.stderr
+    assert commands == []
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+def test_p2_updater_help_requires_no_docker_or_privileges(pinned_p2_deployment):
+    result, commands = _run_p2_update(pinned_p2_deployment, "--help")
+    assert result.returncode == 0
+    assert "never fetches" in result.stdout
+    assert "inspect/start the existing P2 database separately" in result.stdout
+    assert commands == []
+
+
+def test_p2_updater_refuses_unapproved_checkout(pinned_p2_deployment):
+    result, commands = _run_p2_update(pinned_p2_deployment, "--commit", "f" * 40)
+    assert result.returncode != 0
+    assert "HEAD is not the reviewed commit" in result.stderr
+    assert all(command[0] == "git" for command in commands)
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+def test_p2_updater_fails_closed_when_git_status_fails(pinned_p2_deployment):
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        pinned_p2_deployment[1],
+        P2_TEST_GIT_STATUS_FAILURE="1",
+    )
+    assert result.returncode != 0
+    assert "Could not verify that the repository is clean" in result.stderr
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+@pytest.mark.parametrize("dirty_kind", ["tracked", "staged", "untracked"])
+def test_p2_updater_refuses_dirty_checkout(pinned_p2_deployment, dirty_kind):
+    repository, commit, _, _ = pinned_p2_deployment
+    path = (
+        repository
+        / "deploy"
+        / ("unexpected.py" if dirty_kind == "untracked" else "compose.yaml")
+    )
+    with path.open("a") as stream:
+        stream.write("\n# Local change\n")
+    if dirty_kind == "staged":
+        _deployment_git(repository, "add", str(path))
+    result, commands = _run_p2_update(pinned_p2_deployment, "--commit", commit)
+    assert result.returncode != 0
+    assert "repository has local changes" in result.stderr
+    assert all(command[0] == "git" for command in commands)
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+@pytest.mark.parametrize(
+    "contamination",
+    ["missing-marker", "p3-marker", "p3-module", "p3-migration", "broken-chain"],
+)
+def test_p2_updater_refuses_incompatible_release_tree(
+    pinned_p2_deployment, contamination
+):
+    repository = pinned_p2_deployment[0]
+    if contamination == "missing-marker":
+        (repository / "deploy" / "release-channel").unlink()
+    elif contamination == "p3-marker":
+        (repository / "deploy" / "release-channel").write_text("p3\n")
+    elif contamination == "p3-module":
+        path = repository / "maigret" / "web" / "evidence_correlation.py"
+        path.parent.mkdir(parents=True)
+        path.write_text("# P3 module must be rejected even with a P2 marker.\n")
+    elif contamination == "p3-migration":
+        (repository / "migrations" / "versions" / "c4f8a2d6e901_p3.py").write_text(
+            "revision = 'c4f8a2d6e901'\ndown_revision = 'b3e9d7c4a610'\n"
+            "branch_labels = None\ndepends_on = None\n"
+        )
+    else:
+        path = (
+            repository
+            / "migrations"
+            / "versions"
+            / "b3e9d7c4a610_add_profile_search_candidate_reviews.py"
+        )
+        path.write_text(
+            path.read_text().replace('= "8c4f2a1d9e70"', '= "c4f8a2d6e901"')
+        )
+    _deployment_git(repository, "add", "-A")
+    _deployment_git(repository, "commit", "-qm", "Accidentally contaminated release")
+    commit = _deployment_git(repository, "rev-parse", "HEAD")
+    result, commands = _run_p2_update(pinned_p2_deployment, "--commit", commit)
+    assert result.returncode != 0
+    assert "P2 update refused:" in result.stderr
+    assert all(command[0] == "git" for command in commands)
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+@pytest.mark.parametrize(
+    "revision",
+    ["c4f8a2d6e901", "8c4f2a1d9e70", "unknown", "", "b3e9d7c4a610\nc4f8a2d6e901"],
+)
+def test_p2_updater_refuses_incompatible_database_before_any_mutation(
+    pinned_p2_deployment, revision
+):
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        pinned_p2_deployment[1],
+        P2_TEST_DB_REVISION=revision,
+    )
+    assert result.returncode != 0
+    assert "Database must have exactly P2 revision" in result.stderr
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+@pytest.mark.parametrize("containers", ["", "abcdef012345\n012345abcdef"])
+def test_p2_updater_refuses_missing_or_ambiguous_running_database(
+    pinned_p2_deployment, containers
+):
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        pinned_p2_deployment[1],
+        P2_TEST_DB_CONTAINERS=containers,
+    )
+    assert result.returncode != 0
+    assert "Expected one running openledger database" in result.stderr
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+def test_p2_updater_refuses_unreadable_database_revision(pinned_p2_deployment):
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        pinned_p2_deployment[1],
+        P2_TEST_QUERY_FAILURE="1",
+    )
+    assert result.returncode != 0
+    assert "Could not read the existing database revision" in result.stderr
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+def test_p2_updater_bad_database_cannot_bootstrap_missing_secrets(pinned_p2_deployment):
+    repository = pinned_p2_deployment[0]
+    environment_file = repository / "deploy" / ".env"
+    old_environment = "DOMAIN=openledger.example.test\n"
+    environment_file.write_text(old_environment)
+    password = repository / "runtime" / "secrets" / "postgres_password"
+    authentication = repository / "runtime" / "secrets" / "auth.json"
+    password.unlink()
+    authentication.unlink()
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        pinned_p2_deployment[1],
+        P2_TEST_DB_REVISION="c4f8a2d6e901",
+    )
+    assert result.returncode != 0
+    assert "Database must have exactly P2 revision" in result.stderr
+    assert environment_file.read_text() == old_environment
+    assert not password.exists() and not authentication.exists()
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+def test_p2_updater_accepts_forward_rollback_while_remote_main_remains_p3(
+    pinned_p2_deployment,
+):
+    repository = pinned_p2_deployment[0]
+    path = repository / "maigret" / "web" / "evidence_correlation.py"
+    path.parent.mkdir(parents=True)
+    path.write_text("# P3 ancestor\n")
+    _deployment_git(repository, "add", ".")
+    _deployment_git(repository, "commit", "-qm", "P3 ancestor")
+    p3_commit = _deployment_git(repository, "rev-parse", "HEAD")
+    _deployment_git(repository, "update-ref", "refs/remotes/origin/main", p3_commit)
+    _deployment_git(repository, "rm", str(path))
+    _deployment_git(repository, "commit", "-qm", "Forward rollback to P2")
+    reviewed_commit = _deployment_git(repository, "rev-parse", "HEAD")
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        reviewed_commit,
+        "--check",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "P2 preflight passed" in result.stdout
+    assert _deployment_git(repository, "rev-parse", "HEAD") == reviewed_commit
+    assert _deployment_git(repository, "rev-parse", "origin/main") == p3_commit
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+
+
+def test_p2_updater_preflight_is_read_only(pinned_p2_deployment):
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        pinned_p2_deployment[1],
+        "--check",
+    )
+    assert result.returncode == 0, result.stderr
+    assert "No changes made" in result.stdout
+    _assert_no_p2_update_mutation(pinned_p2_deployment, commands)
+    query = next(command for command in commands if "psql" in command)
+    assert (
+        "PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=5000"
+        in query
+    )
+    assert (
+        "SELECT version_num FROM public.alembic_version ORDER BY version_num;" in query
+    )
+    assert "-X" in query and "ON_ERROR_STOP=1" in query
+
+
+def test_p2_updater_accepts_reviewed_checkout_and_preserves_backup_order(
+    pinned_p2_deployment,
+):
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        pinned_p2_deployment[1],
+    )
+    assert result.returncode == 0, result.stderr
+    assert "P2 update completed from reviewed commit" in result.stdout
+    first_query = next(i for i, command in enumerate(commands) if "psql" in command)
+    first_runtime_write = next(
+        i for i, command in enumerate(commands) if command[0] == "chown"
+    )
+    backup = next(i for i, command in enumerate(commands) if "pg_dump" in command)
+    verify_backup = next(
+        i for i, command in enumerate(commands) if "pg_restore" in command
+    )
+    final_query = max(i for i, command in enumerate(commands) if "psql" in command)
+    build = next(i for i, command in enumerate(commands) if "build" in command)
+    deploy = next(i for i, command in enumerate(commands) if "up" in command)
+    assert (
+        first_query
+        < first_runtime_write
+        < backup
+        < verify_backup
+        < final_query
+        < build
+        < deploy
+    )
+    assert all(
+        command[1] in ("status", "rev-parse")
+        for command in commands
+        if command[0] == "git"
+    )
+    assert all(
+        "--project-name" in command and "openledger" in command
+        for command in commands
+        if command[:2] == ["docker", "compose"]
+    )
+    assert (
+        len(list((pinned_p2_deployment[0] / "runtime" / "backups").glob("*.dump"))) == 1
+    )
+
+
+def test_p2_updater_backup_failure_never_builds_or_changes_services(
+    pinned_p2_deployment,
+):
+    result, commands = _run_p2_update(
+        pinned_p2_deployment,
+        "--commit",
+        pinned_p2_deployment[1],
+        P2_TEST_BACKUP_FAILURE="1",
+    )
+    assert result.returncode != 0
+    assert "Database backup verification failed" in result.stdout
+    assert all("build" not in command and "up" not in command for command in commands)

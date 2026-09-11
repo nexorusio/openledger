@@ -1200,7 +1200,9 @@ def _bounded_chat_sources(value: Any) -> list[Dict[str, str]]:
     for item in value[:100]:
         if not isinstance(item, dict):
             continue
-        candidate = str(item.get("url") or "").strip()[:2000]
+        candidate = str(item.get("url") or "")
+        if len(candidate) > 2000 or candidate != candidate.strip():
+            continue
         try:
             parsed = urlsplit(candidate)
         except ValueError:
@@ -1294,6 +1296,95 @@ class CaseStore:
             return None
         return WorkerLock(connection, advisory_lock_key=WORKER_LOCK_KEY)
 
+    @staticmethod
+    def _job_persona_bindings(investigation_spec, persona_rows):
+        """Resolve queued ownership by ID, with a fallback for historical jobs."""
+        specification = (
+            investigation_spec if isinstance(investigation_spec, dict) else {}
+        )
+        known_ids = {row["id"] for row in persona_rows}
+        target_id = str(specification.get("target_persona_id") or "")
+        grouped_id = target_id if target_id in known_ids else None
+        if "persona_bindings" in specification:
+            by_username: Dict[str, list[str]] = {}
+            for binding in specification.get("persona_bindings") or []:
+                if (
+                    not isinstance(binding, dict)
+                    or binding.get("persona_id") not in known_ids
+                ):
+                    continue
+                for username in binding.get("usernames") or []:
+                    key = str(username).strip().casefold()
+                    owners = by_username.setdefault(key, [])
+                    if binding["persona_id"] not in owners:
+                        owners.append(binding["persona_id"])
+            return grouped_id, by_username
+        if (
+            not target_id
+            and specification.get("processing_mode") == "same_subject"
+            and len(persona_rows) == 1
+        ):
+            grouped_id = persona_rows[0]["id"]
+        return grouped_id, {
+            str(row["display_name"]).strip().casefold(): [row["id"]]
+            for row in persona_rows
+        }
+
+    @staticmethod
+    def _persona_input_specification(investigation_spec, persona_id):
+        """Limit supplied context to its entered subject, even for shared handles."""
+        if not isinstance(investigation_spec, dict):
+            return {}
+        for binding in investigation_spec.get("persona_bindings") or []:
+            if binding.get("persona_id") == persona_id and "identifiers" in binding:
+                return dict(
+                    investigation_spec,
+                    processing_mode="same_subject",
+                    identifiers=binding["identifiers"],
+                )
+        return investigation_spec
+
+    @staticmethod
+    def _profile_source_persona_ids(investigation_spec, persona_ids, source_url):
+        """Respect explicit profile ownership when distinct subjects share a handle."""
+        if (
+            not isinstance(investigation_spec, dict)
+            or investigation_spec.get("processing_mode") != "independent"
+            or not source_url
+        ):
+            return persona_ids
+
+        def url_key(value):
+            try:
+                parsed = urlsplit(str(value or ""))
+            except ValueError:
+                return None
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return None
+            return (
+                parsed.scheme.casefold(),
+                parsed.netloc.casefold(),
+                parsed.path.rstrip("/") or "/",
+                parsed.query,
+            )
+
+        key = url_key(source_url)
+        owners = {
+            binding.get("persona_id")
+            for binding in investigation_spec.get("persona_bindings") or []
+            if any(
+                identifier.get("type") == "profile_url"
+                and key is not None
+                and url_key(identifier.get("value")) == key
+                for identifier in binding.get("identifiers") or []
+            )
+        }
+        return (
+            [persona_id for persona_id in persona_ids if persona_id in owners]
+            if owners
+            else persona_ids
+        )
+
     def create_investigation(
         self,
         usernames: Iterable[str],
@@ -1301,6 +1392,8 @@ class CaseStore:
         *,
         kind: str = "live",
     ) -> str:
+        from maigret.web.persona_intelligence import extract_supplied_profile_claims
+
         normalized = [str(value).strip() for value in usernames if str(value).strip()]
         if not normalized:
             raise ValueError("At least one username is required")
@@ -1314,7 +1407,56 @@ class CaseStore:
             if isinstance(investigation_spec, dict)
             else ""
         )
-        persona_names = [subject_label or normalized[0]] if grouped else normalized
+        group_specs = (
+            [
+                {
+                    "label": subject_label or normalized[0],
+                    "usernames": normalized,
+                    "identifiers": investigation_spec.get("identifiers", []),
+                }
+            ]
+            if grouped
+            else (
+                investigation_spec.get("subject_groups")
+                if isinstance(investigation_spec, dict)
+                else None
+            )
+        )
+        if group_specs is None:
+            group_specs = [
+                {"label": username, "usernames": [username]} for username in normalized
+            ]
+        if not isinstance(group_specs, list) or not group_specs:
+            raise ValueError("At least one subject group is required")
+        target_keys = {username.casefold() for username in normalized}
+        covered_keys = set()
+        new_personas = []
+        persona_bindings = []
+        for group in group_specs:
+            label = str(group.get("label") or "").strip()[:500]
+            usernames_for_persona = [
+                str(value).strip() for value in group.get("usernames", [])
+            ]
+            group_keys = {value.casefold() for value in usernames_for_persona}
+            if not label or not group_keys.issubset(target_keys):
+                raise ValueError("Invalid subject group")
+            covered_keys.update(group_keys)
+            persona_id = str(uuid.uuid4())
+            new_personas.append({"id": persona_id, "display_name": label})
+            persona_bindings.append(
+                {
+                    "persona_id": persona_id,
+                    "subject_label": label,
+                    "usernames": usernames_for_persona,
+                    **(
+                        {"identifiers": group["identifiers"]}
+                        if "identifiers" in group
+                        else {}
+                    ),
+                }
+            )
+        if covered_keys != target_keys:
+            raise ValueError("Every search target needs a subject group")
         now = utcnow()
         case_id = str(uuid.uuid4())
         job_id = str(uuid.uuid4())
@@ -1323,6 +1465,17 @@ class CaseStore:
             if kind in PROFILE_DISCOVERY_JOB_KINDS
             else dict(options)
         )
+        # Capture ownership once, when the new Personas are created. Labels may
+        # later change after review; existing jobs and Personas are not rewritten.
+        specification = (
+            dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
+        )
+        specification["persona_bindings"] = persona_bindings
+        if grouped:
+            specification["target_persona_id"] = new_personas[0]["id"]
+        else:
+            specification.pop("target_persona_id", None)
+        stored_options["investigation_spec"] = specification
         budget = (
             execution_budget_spec_from_options(stored_options)
             if kind in PROFILE_DISCOVERY_JOB_KINDS
@@ -1332,9 +1485,7 @@ class CaseStore:
             stored_options["execution_mode"] = budget["mode"]
             stored_options["all_sites"] = budget["mode"] == "exhaustive"
             stored_options["execution_budget"] = dict(budget)
-        title = (subject_label if grouped and subject_label else ", ".join(normalized))[
-            :500
-        ]
+        title = ", ".join(persona["display_name"] for persona in new_personas)[:500]
         with self.engine.begin() as connection:
             connection.execute(
                 insert(cases).values(
@@ -1349,12 +1500,12 @@ class CaseStore:
                 insert(personas),
                 [
                     {
-                        "id": str(uuid.uuid4()),
+                        "id": persona["id"],
                         "case_id": case_id,
-                        "display_name": username,
+                        "display_name": persona["display_name"],
                         "created_at": now,
                     }
-                    for username in persona_names
+                    for persona in new_personas
                 ],
             )
             connection.execute(
@@ -1381,6 +1532,19 @@ class CaseStore:
                     updated_at=now,
                 )
             )
+            for binding in persona_bindings:
+                self._upsert_persona_candidates(
+                    connection,
+                    persona_id=binding["persona_id"],
+                    job_id=job_id,
+                    candidates=extract_supplied_profile_claims(
+                        self._persona_input_specification(
+                            specification, binding["persona_id"]
+                        ),
+                        usernames=binding["usernames"],
+                    ),
+                    now=now,
+                )
         self.append_event(job_id, {"type": "queued", "usernames": normalized})
         return job_id
 
@@ -2265,19 +2429,26 @@ class CaseStore:
             )
             if active_job:
                 raise ValueError("This case already has an active investigation")
-            latest_job = (
-                connection.execute(
-                    select(
-                        investigation_jobs.c.options,
-                        investigation_jobs.c.usernames,
-                    )
-                    .where(investigation_jobs.c.case_id == persona_row["case_id"])
-                    .order_by(investigation_jobs.c.created_at.desc())
-                    .limit(1)
+            previous_jobs = connection.execute(
+                select(investigation_jobs.c.options, investigation_jobs.c.usernames)
+                .where(investigation_jobs.c.case_id == persona_row["case_id"])
+                .order_by(investigation_jobs.c.created_at.desc())
+            ).mappings()
+            latest_job = None
+            for previous_job in previous_jobs:
+                previous_spec = (
+                    dict(previous_job["options"] or {}).get("investigation_spec") or {}
                 )
-                .mappings()
-                .first()
-            )
+                previous_target = previous_spec.get("target_persona_id")
+                if previous_target and previous_target != persona_id:
+                    continue
+                if "persona_bindings" in previous_spec and not any(
+                    binding.get("persona_id") == persona_id
+                    for binding in previous_spec.get("persona_bindings") or []
+                ):
+                    continue
+                latest_job = previous_job
+                break
             explicit_plan = usernames is not None or options is not None
             if explicit_plan and (usernames is None or options is None):
                 raise ValueError(
@@ -2294,30 +2465,97 @@ class CaseStore:
                 and investigation_spec.get("processing_mode") == "same_subject"
             )
             display_name = str(persona_row["display_name"]).strip()
+            binding = next(
+                (
+                    item
+                    for item in (investigation_spec or {}).get("persona_bindings", [])
+                    if item.get("persona_id") == persona_id
+                ),
+                None,
+            )
             queued_usernames = (
                 [str(value).strip() for value in list(usernames or [])]
                 if explicit_plan
                 else (
-                    [str(value).strip() for value in latest_usernames]
-                    if grouped
-                    else [display_name]
+                    list(binding["usernames"])
+                    if binding is not None
+                    else (
+                        [str(value).strip() for value in latest_usernames]
+                        if grouped
+                        else [display_name]
+                    )
                 )
             )
             queued_usernames = [value for value in queued_usernames if value]
             if not queued_usernames:
                 raise ValueError("No searchable account identifiers are available")
-            if explicit_plan:
-                specification = (
-                    dict(investigation_spec)
-                    if isinstance(investigation_spec, dict)
-                    else {}
-                )
-                specification.update(
-                    processing_mode="same_subject",
-                    subject_label=display_name,
-                    target_persona_id=persona_id,
-                )
-                queued_options["investigation_spec"] = specification
+            specification = (
+                dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
+            )
+            if not explicit_plan and not grouped:
+                target_keys = {value.casefold() for value in queued_usernames}
+                source_label = str(
+                    (binding or {}).get("subject_label") or display_name
+                ).casefold()
+                specification["search_targets"] = [
+                    target
+                    for target in specification.get("search_targets", [])
+                    if str(target.get("value") or "").casefold() in target_keys
+                ]
+                profile_urls = {
+                    target.get("source_value")
+                    for target in specification["search_targets"]
+                    if target.get("source_type") == "profile_url"
+                }
+                specification["identifiers"] = [
+                    identifier
+                    for identifier in specification.get("identifiers", [])
+                    if (
+                        identifier.get("type") in {"username", "social_handle"}
+                        and str(identifier.get("value") or "").casefold() in target_keys
+                    )
+                    or (
+                        identifier.get("type") == "full_name"
+                        and str(identifier.get("value") or "").casefold()
+                        == source_label
+                    )
+                    or (
+                        identifier.get("type") == "profile_url"
+                        and identifier.get("value") in profile_urls
+                    )
+                ]
+                if binding is not None and "identifiers" in binding:
+                    specification["identifiers"] = binding["identifiers"]
+                    if len(binding["identifiers"]) == 1:
+                        origin = binding["identifiers"][0]
+                        source_type = (
+                            "ranked_alias"
+                            if origin.get("type") == "full_name"
+                            else origin.get("type")
+                        )
+                        specification["search_targets"] = [
+                            dict(
+                                target,
+                                source_type=source_type,
+                                source_value=origin["value"],
+                            )
+                            for target in specification["search_targets"]
+                        ]
+            specification.update(
+                processing_mode="same_subject",
+                subject_label=display_name,
+                target_persona_id=persona_id,
+                subject_groups=[{"label": display_name, "usernames": queued_usernames}],
+                persona_bindings=[
+                    {
+                        "persona_id": persona_id,
+                        "subject_label": display_name,
+                        "usernames": queued_usernames,
+                        "identifiers": specification.get("identifiers", []),
+                    }
+                ],
+            )
+            queued_options["investigation_spec"] = specification
             queued_options = govern_profile_discovery_options(queued_options)
             budget = execution_budget_spec_from_options(queued_options)
             connection.execute(
@@ -5442,13 +5680,13 @@ class CaseStore:
         from maigret.web.persona_intelligence import (
             extract_investigation_identifier_claims,
             extract_persona_claims,
+            extract_supplied_profile_claims,
         )
 
         now = utcnow()
         synchronized = 0
         allow_legacy_reactivation = (
-            result.get("profile_reliability_version")
-            == PROFILE_RELIABILITY_VERSION
+            result.get("profile_reliability_version") == PROFILE_RELIABILITY_VERSION
         )
         with self.engine.begin() as connection:
             job_row = (
@@ -5471,33 +5709,32 @@ class CaseStore:
                     )
                 ).mappings()
             )
-            personas_by_name = {
-                str(row["display_name"]).strip().casefold(): row["id"]
-                for row in persona_rows
-            }
             investigation_spec = dict(job_row["options"] or {}).get(
                 "investigation_spec"
             )
-            target_persona_id = (
-                str(investigation_spec.get("target_persona_id") or "")
-                if isinstance(investigation_spec, dict)
-                else ""
+            grouped_persona_id, personas_by_username = self._job_persona_bindings(
+                investigation_spec, persona_rows
             )
-            grouped_persona_id = next(
-                (
-                    row["id"]
-                    for row in persona_rows
-                    if target_persona_id and row["id"] == target_persona_id
-                ),
-                None,
-            )
-            if (
-                grouped_persona_id is None
-                and isinstance(investigation_spec, dict)
-                and investigation_spec.get("processing_mode") == "same_subject"
-                and len(persona_rows) == 1
-            ):
-                grouped_persona_id = persona_rows[0]["id"]
+            inputs_by_persona: Dict[str, list[str]] = {}
+            for username, persona_ids in personas_by_username.items():
+                for persona_id in persona_ids:
+                    inputs_by_persona.setdefault(persona_id, []).append(username)
+            if grouped_persona_id:
+                inputs_by_persona = {grouped_persona_id: list(personas_by_username)}
+            for persona_id, input_usernames in inputs_by_persona.items():
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=persona_id,
+                    job_id=job_id,
+                    candidates=extract_supplied_profile_claims(
+                        self._persona_input_specification(
+                            investigation_spec, persona_id
+                        ),
+                        usernames=input_usernames,
+                    ),
+                    now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
+                )
             if grouped_persona_id:
                 synchronized += self._upsert_persona_candidates(
                     connection,
@@ -5511,19 +5748,32 @@ class CaseStore:
                 )
             for report in result.get("individual_reports") or []:
                 username = str(report.get("username") or "").strip()
-                persona_id = grouped_persona_id or personas_by_name.get(
-                    username.casefold()
+                persona_ids = (
+                    [grouped_persona_id]
+                    if grouped_persona_id
+                    else personas_by_username.get(username.casefold(), [])
                 )
-                if not persona_id:
-                    continue
-                synchronized += self._upsert_persona_candidates(
-                    connection,
-                    persona_id=persona_id,
-                    job_id=job_id,
-                    candidates=extract_persona_claims(report),
-                    now=now,
-                    allow_legacy_reactivation=allow_legacy_reactivation,
-                )
+                for persona_id in persona_ids:
+                    scoped_report = dict(
+                        report,
+                        claimed_profiles=[
+                            profile
+                            for profile in report.get("claimed_profiles") or []
+                            if isinstance(profile, dict)
+                            and persona_id
+                            in self._profile_source_persona_ids(
+                                investigation_spec, persona_ids, profile.get("url")
+                            )
+                        ],
+                    )
+                    synchronized += self._upsert_persona_candidates(
+                        connection,
+                        persona_id=persona_id,
+                        job_id=job_id,
+                        candidates=extract_persona_claims(scoped_report),
+                        now=now,
+                        allow_legacy_reactivation=allow_legacy_reactivation,
+                    )
             collector_observations = [
                 observation
                 for observation in result.get("collector_observations") or []
@@ -5534,9 +5784,7 @@ class CaseStore:
                     connection,
                     persona_id=grouped_persona_id,
                     job_id=job_id,
-                    candidates=extract_user_scanner_claims(
-                        collector_observations
-                    ),
+                    candidates=extract_user_scanner_claims(collector_observations),
                     now=now,
                     allow_legacy_reactivation=allow_legacy_reactivation,
                 )
@@ -5554,9 +5802,7 @@ class CaseStore:
                     connection,
                     persona_id=grouped_persona_id,
                     job_id=job_id,
-                    candidates=extract_github_profile_claims(
-                        collector_observations
-                    ),
+                    candidates=extract_github_profile_claims(collector_observations),
                     now=now,
                     allow_legacy_reactivation=allow_legacy_reactivation,
                 )
@@ -5573,50 +5819,71 @@ class CaseStore:
             else:
                 observations_by_username: Dict[str, list] = {}
                 for observation in collector_observations:
-                    username_key = str(
-                        (
-                            observation.get("seed_username")
-                            or observation.get("subject_value")
-                            or ""
+                    username_key = (
+                        str(
+                            (
+                                observation.get("seed_username")
+                                or observation.get("subject_value")
+                                or ""
+                            )
+                            if observation.get("source_engine")
+                            == "user_scanner_username"
+                            else observation.get("subject_value") or ""
                         )
-                        if observation.get("source_engine")
-                        == "user_scanner_username"
-                        else observation.get("subject_value") or ""
-                    ).strip().casefold()
+                        .strip()
+                        .casefold()
+                    )
                     if username_key:
                         observations_by_username.setdefault(username_key, []).append(
                             observation
                         )
                 for username_key, observations in observations_by_username.items():
-                    persona_id = personas_by_name.get(username_key)
-                    if not persona_id:
-                        continue
-                    synchronized += self._upsert_persona_candidates(
-                        connection,
-                        persona_id=persona_id,
-                        job_id=job_id,
-                        candidates=extract_user_scanner_username_claims(
-                            observations
-                        ),
-                        now=now,
-                        allow_legacy_reactivation=allow_legacy_reactivation,
-                    )
-                    synchronized += self._upsert_persona_candidates(
-                        connection,
-                        persona_id=persona_id,
-                        job_id=job_id,
-                        candidates=extract_github_profile_claims(observations),
-                        now=now,
-                        allow_legacy_reactivation=allow_legacy_reactivation,
-                    )
-                    synchronized += self._upsert_persona_candidates(
-                        connection,
-                        persona_id=persona_id,
-                        job_id=job_id,
-                        candidates=extract_profile_url_evidence_claims(observations),
-                        now=now,
-                        allow_legacy_reactivation=allow_legacy_reactivation,
-                    )
+                    for persona_id in personas_by_username.get(username_key, []):
+                        scoped_observations = [
+                            observation
+                            for observation in observations
+                            if persona_id
+                            in self._profile_source_persona_ids(
+                                investigation_spec,
+                                personas_by_username.get(username_key, []),
+                                (
+                                    observation.get("extra")
+                                    if isinstance(observation.get("extra"), dict)
+                                    else {}
+                                ).get("queried_profile_url")
+                                or observation.get("source_url"),
+                            )
+                        ]
+                        synchronized += self._upsert_persona_candidates(
+                            connection,
+                            persona_id=persona_id,
+                            job_id=job_id,
+                            candidates=extract_user_scanner_username_claims(
+                                scoped_observations
+                            ),
+                            now=now,
+                            allow_legacy_reactivation=allow_legacy_reactivation,
+                        )
+                        synchronized += self._upsert_persona_candidates(
+                            connection,
+                            persona_id=persona_id,
+                            job_id=job_id,
+                            candidates=extract_github_profile_claims(
+                                scoped_observations
+                            ),
+                            now=now,
+                            allow_legacy_reactivation=allow_legacy_reactivation,
+                        )
+                        synchronized += self._upsert_persona_candidates(
+                            connection,
+                            persona_id=persona_id,
+                            job_id=job_id,
+                            candidates=extract_profile_url_evidence_claims(
+                                scoped_observations
+                            ),
+                            now=now,
+                            allow_legacy_reactivation=allow_legacy_reactivation,
+                        )
             connection.execute(
                 update(cases).where(cases.c.id == case_id).values(updated_at=now)
             )
@@ -5848,46 +6115,33 @@ class CaseStore:
                     )
                 ).mappings()
             )
-            personas_by_name = {
-                str(row["display_name"]).strip().casefold(): row["id"]
-                for row in persona_rows
-            }
             investigation_spec = dict(job_row["options"] or {}).get(
                 "investigation_spec"
             )
-            target_persona_id = (
-                str(investigation_spec.get("target_persona_id") or "")
-                if isinstance(investigation_spec, dict)
-                else ""
+            grouped_persona_id, personas_by_username = self._job_persona_bindings(
+                investigation_spec, persona_rows
             )
-            grouped_persona_id = next(
-                (
-                    row["id"]
-                    for row in persona_rows
-                    if target_persona_id and row["id"] == target_persona_id
-                ),
-                None,
-            )
-            if (
-                grouped_persona_id is None
-                and isinstance(investigation_spec, dict)
-                and investigation_spec.get("processing_mode") == "same_subject"
-                and len(persona_rows) == 1
-            ):
-                grouped_persona_id = persona_rows[0]["id"]
             for candidate in candidates:
-                persona_id = grouped_persona_id or personas_by_name.get(
-                    candidate["username"].casefold()
+                persona_ids = (
+                    [grouped_persona_id]
+                    if grouped_persona_id
+                    else personas_by_username.get(candidate["username"].casefold(), [])
                 )
-                if not persona_id:
+                persona_ids = self._profile_source_persona_ids(
+                    investigation_spec,
+                    persona_ids,
+                    candidate["evidence"][0].get("source_url"),
+                )
+                if not persona_ids:
                     continue
-                synchronized += self._upsert_persona_candidates(
-                    connection,
-                    persona_id=persona_id,
-                    job_id=job_id,
-                    candidates=[candidate],
-                    now=now,
-                )
+                for persona_id in persona_ids:
+                    synchronized += self._upsert_persona_candidates(
+                        connection,
+                        persona_id=persona_id,
+                        job_id=job_id,
+                        candidates=[candidate],
+                        now=now,
+                    )
                 accepted_proposals.append(
                     {
                         "username": candidate["username"],

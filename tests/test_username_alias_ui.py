@@ -41,7 +41,7 @@ def test_profile_url_reranking_preserves_analyst_choices():
     assert "const aliasResetTypes = new Set(['full_name']);" in template
     assert "function refreshAliasesForIdentifierChanges(...types)" in template
     helper_start = template.index("function refreshAliasesForIdentifierChanges(")
-    helper_end = template.index("function profileHandle(", helper_start)
+    helper_end = template.index("function identifierValues(", helper_start)
     helper = template[helper_start:helper_end]
     assert "aliasResetTypes.has(type)" in helper
     assert "aliasSourceTypes.has(type)" in helper

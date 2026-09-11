@@ -1,6 +1,39 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+usage() {
+    cat <<'EOF'
+Usage: bash deploy/update.sh --commit <reviewed-full-P2-commit> [--check]
+
+Deploy only a clean checkout already at the explicitly reviewed 40-character
+P2 commit. This updater never fetches, pulls, or checks out a branch.
+--check performs only the code and running database preflight; it changes nothing.
+The existing openledger database must be running at revision b3e9d7c4a610.
+If it is stopped, inspect/start the existing P2 database separately, then retry.
+Older, missing, multiple, or later revisions require separate recovery review;
+the updater never downgrades, stamps, or deletes database data.
+See deploy/README.md before first activation on a restored server.
+EOF
+}
+
+if [[ $# -eq 1 && ( "$1" == "--help" || "$1" == "-h" ) ]]; then
+    usage
+    exit 0
+fi
+if [[ $# -lt 2 || $# -gt 3 || "$1" != "--commit" || ! "$2" =~ ^[0-9a-f]{40}$ ]]; then
+    usage >&2
+    exit 1
+fi
+APPROVED_COMMIT="$2"
+CHECK_ONLY=false
+if [[ $# -eq 3 ]]; then
+    if [[ "$3" != "--check" ]]; then
+        usage >&2
+        exit 1
+    fi
+    CHECK_ONLY=true
+fi
+
 if [[ ${EUID} -ne 0 ]]; then
     exec sudo bash "${BASH_SOURCE[0]}" "$@"
 fi
@@ -14,6 +47,47 @@ DATABASE_PASSWORD_FILE="${REPO_ROOT}/runtime/secrets/postgres_password"
 BACKUP_DIR="${REPO_ROOT}/runtime/backups"
 OPENLEDGER_APP_UID=10001
 OPENLEDGER_APP_GID=10001
+
+fail() {
+    echo "P2 update refused: $*" >&2
+    exit 1
+}
+
+verify_pinned_checkout() {
+    local current_commit
+    local checkout_status
+    current_commit="$(git rev-parse --verify HEAD)"
+    [[ "${current_commit}" == "${APPROVED_COMMIT}" ]] || \
+        fail "HEAD is not the reviewed commit ${APPROVED_COMMIT}. Follow the pinned checkout steps in deploy/README.md."
+    if ! checkout_status="$(GIT_OPTIONAL_LOCKS=0 git status --porcelain --untracked-files=all)"; then
+        fail "Could not verify that the repository is clean."
+    fi
+    [[ -z "${checkout_status}" ]] || \
+        fail "The repository has local changes. Review them before updating."
+    python3 "${DEPLOY_DIR}/check-p2-release.py"
+}
+
+verify_running_database() {
+    local database_container
+    local database_revision
+    # Probe the existing service directly. Compose interpolation can require a
+    # missing secret, and must not generate one or start services for this check.
+    database_container="$(docker ps --filter status=running \
+        --filter label=com.docker.compose.project=openledger \
+        --filter label=com.docker.compose.service=db --format '{{.ID}}')"
+    [[ "${database_container}" =~ ^[0-9a-f]{12,64}$ ]] || \
+        fail "Expected one running openledger database. Inspect/start the existing P2 database separately, then retry."
+    if ! database_revision="$(docker exec \
+        --env 'PGOPTIONS=-c default_transaction_read_only=on -c statement_timeout=5000' \
+        "${database_container}" psql -X -w -qAt -v ON_ERROR_STOP=1 \
+        -U openledger -d openledger \
+        -c 'SELECT version_num FROM public.alembic_version ORDER BY version_num;')"; then
+        fail "Could not read the existing database revision. No update was attempted."
+    fi
+    [[ "${database_revision}" == "b3e9d7c4a610" ]] || \
+        fail "Database must have exactly P2 revision b3e9d7c4a610. No migration, downgrade, or service change was attempted."
+    echo "Running database is at P2 revision b3e9d7c4a610."
+}
 
 ensure_database_password() {
     local password_file="${DATABASE_PASSWORD_FILE}"
@@ -63,23 +137,24 @@ ensure_searxng_secret() {
 }
 
 if [[ ! -f "${ENV_FILE}" ]]; then
-    echo "Missing ${ENV_FILE}. Run deploy/install.sh first."
+    echo "Missing ${ENV_FILE}. Restore the existing deployment configuration before updating."
     exit 1
 fi
 
 cd "${REPO_ROOT}"
-if [[ -n "$(git status --porcelain)" ]]; then
-    echo "The repository has local changes. Review them before updating."
-    git status --short
-    exit 1
-fi
+for prerequisite in git python3 docker openssl; do
+    command -v "${prerequisite}" >/dev/null 2>&1 || \
+        fail "Missing ${prerequisite}; install it separately before retrying."
+done
 
-git fetch origin
-git pull --ff-only origin main
-
-if ! command -v python3 >/dev/null 2>&1 || ! command -v openssl >/dev/null 2>&1; then
-    apt-get update
-    apt-get install -y openssl python3
+# These read-only checks precede ALL runtime writes, backups, builds, migrations,
+# package installs, and service mutations. P3 ancestry is intentionally irrelevant:
+# a forward rollback can have P3 parents while its approved tree is entirely P2.
+verify_pinned_checkout
+verify_running_database
+if [[ "${CHECK_ONLY}" == "true" ]]; then
+    echo "P2 preflight passed for ${APPROVED_COMMIT}. No changes made."
+    exit 0
 fi
 
 ensure_searxng_secret
@@ -90,7 +165,7 @@ fi
 
 compose() {
     docker compose "${COMPOSE_PROFILE_ARGS[@]}" \
-        --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+        --project-name openledger --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
 }
 
 compose config --quiet
@@ -110,21 +185,6 @@ chown -R "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" \
 chown "${OPENLEDGER_APP_UID}:${OPENLEDGER_APP_GID}" \
     "${REPO_ROOT}/runtime/web_settings.json"
 
-echo "Starting the private case database..."
-compose up -d db
-DATABASE_READY=false
-for _ in $(seq 1 30); do
-    if compose exec -T db pg_isready -U openledger -d openledger >/dev/null 2>&1; then
-        DATABASE_READY=true
-        break
-    fi
-    sleep 2
-done
-if [[ "${DATABASE_READY}" != "true" ]]; then
-    echo "The OpenLedger database did not become ready. No migration was attempted."
-    exit 1
-fi
-
 BACKUP_FILE="${BACKUP_DIR}/openledger-$(date -u +%Y%m%dT%H%M%SZ).dump"
 umask 077
 compose exec -T db \
@@ -137,6 +197,10 @@ if [[ ! -s "${BACKUP_FILE}" ]] || ! compose exec -T db \
 fi
 echo "Database backup written to ${BACKUP_FILE}."
 
+# Fail if a concurrent checkout or database change happened during backup.
+verify_pinned_checkout
+verify_running_database
 compose build --pull app
 compose up -d
 compose ps
+echo "P2 update completed from reviewed commit ${APPROVED_COMMIT}."

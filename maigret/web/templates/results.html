@@ -195,6 +195,43 @@
     </section>
     {% endif %}
 
+    {% if individual_reports %}
+    <section class="panel-card" id="source-coverage">
+        <header class="panel-header">
+            <div>
+                <h2>Source checks and candidate leads</h2>
+                <p>Account evidence and subject identity are separate. A blocked, excluded or inconclusive check does not establish that an account is absent.</p>
+            </div>
+        </header>
+        <div class="panel-body">
+            {% for report in individual_reports %}
+            <details class="reliability-suppressed" open>
+                <summary>@{{ report.username }} · major-platform checks</summary>
+                {% if report.major_platforms %}
+                <ul class="profile-list mt-2">
+                    {% for platform in report.major_platforms %}
+                    <li class="profile-item">
+                        <div class="profile-link">
+                            <span>
+                                {% if platform.url %}<a href="{{ platform.url }}" target="_blank" rel="noopener noreferrer">{{ platform.site_name }}</a>{% else %}<strong>{{ platform.site_name }}</strong>{% endif %}
+                                <small>{{ platform.reason or 'No further diagnostic detail was retained.' }}</small>
+                                {% if platform.detector_health %}<small>Detector health: {{ platform.detector_health }}. Subject identity remains unverified.</small>{% endif %}
+                            </span>
+                        </div>
+                        <span class="badge-soft {{ 'success' if platform.classification == 'supported' else 'warning' }}">{{ {'selected': 'No result returned', 'available': 'No match returned', 'unknown': 'Inconclusive'}.get(platform.classification or platform.status, (platform.classification or platform.status) | title) }}</span>
+                    </li>
+                    {% endfor %}
+                </ul>
+                {% else %}
+                <p class="form-text">No major-platform diagnostics were retained in this report. Omission does not establish whether a source was checked or an account exists.</p>
+                {% endif %}
+            </details>
+            {% endfor %}
+            <p class="form-text mb-0">Candidates require corroboration. Supplied profile URLs remain pending analyst context in Digital presence; they do not become verified accounts merely because they were supplied.</p>
+        </div>
+    </section>
+    {% endif %}
+
     {% if username_verifications %}
     <section class="panel-card">
         <header class="panel-header">

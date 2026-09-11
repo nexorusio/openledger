@@ -77,11 +77,31 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
 
                 <fieldset class="investigation-section">
+                    <legend class="form-label mb-2">Who are you investigating?</legend>
+                    <div class="mode-selector">
+                        <div class="mode-option">
+                            <input type="radio" name="processing_mode" id="mode-subject" value="same_subject" checked>
+                            <label for="mode-subject">
+                                <strong>{{ 'One existing Persona' if investigation_persona else 'One subject' }}</strong>
+                                <small>{{ 'Route every configured identifier and resulting proposal back to ' ~ investigation_persona.display_name if investigation_persona else 'Keep all entered identifiers and selected aliases under one Persona for review' }}</small>
+                            </label>
+                        </div>
+                        <div class="mode-option">
+                            <input type="radio" name="processing_mode" id="mode-independent" value="independent" {{ 'disabled' if investigation_persona }}>
+                            <label for="mode-independent">
+                                <strong>Independent subjects</strong>
+                                <small>{{ 'Start a new investigation to create separate Personas' if investigation_persona else 'Create one Persona per entered name or account; generated aliases stay with their source subject' }}</small>
+                            </label>
+                        </div>
+                    </div>
+                </fieldset>
+
+                <fieldset class="investigation-section">
                     <legend class="visually-hidden">Known identifiers</legend>
                     <div class="section-heading-row">
                         <div>
                             <h3 class="form-label mb-1">Known identifiers</h3>
-                            <p class="form-text mb-0">Use one row per value. A full name may contain spaces; it is never split into separate keywords.</p>
+                            <p class="form-text mb-0">Add the name, known usernames, and profile links for your subject. Each row has a different purpose; the routing summary below shows which collectors will use it.</p>
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-secondary" id="add-identifier">
                             <i data-lucide="plus"></i>
@@ -94,8 +114,7 @@
                         <div class="identifier-row">
                             <label class="visually-hidden" for="identifier-type-{{ loop.index }}">Identifier type</label>
                             <select class="form-select identifier-type" id="identifier-type-{{ loop.index }}" name="identifier_type" aria-label="Identifier type">
-                                <option value="username" {{ 'selected' if identifier.type == 'username' }}>Username</option>
-                                <option value="social_handle" {{ 'selected' if identifier.type == 'social_handle' }}>Social handle</option>
+                                <option value="username" {{ 'selected' if identifier.type in ['username', 'social_handle'] }}>Username or @handle</option>
                                 <option value="profile_url" {{ 'selected' if identifier.type == 'profile_url' }}>Profile URL</option>
                                 <option value="full_name" {{ 'selected' if identifier.type == 'full_name' }}>Full name</option>
                                 <option value="email" {{ 'selected' if identifier.type == 'email' }}>Email address</option>
@@ -119,7 +138,7 @@
                     <div class="form-check investigation-check">
                         <input class="form-check-input" type="checkbox" id="generate-name-variants" name="generate_name_variants" checked>
                         <label class="form-check-label" for="generate-name-variants">Plan ranked username aliases from full names</label>
-                        <div class="form-text">Builds a bounded, explainable set. Phone and email values are never permuted.</div>
+                        <div class="form-text">A full name is not a Maigret username. Only the aliases you select below join its username checks. Email and phone values never generate aliases.</div>
                     </div>
                     <div class="row g-3 mt-1 alias-context-fields">
                         <div class="col-md-6">
@@ -188,26 +207,6 @@
                     </div>
                 </fieldset>
 
-                <fieldset class="investigation-section">
-                    <legend class="form-label mb-2">Result grouping</legend>
-                    <div class="mode-selector">
-                        <div class="mode-option">
-                            <input type="radio" name="processing_mode" id="mode-subject" value="same_subject" checked>
-                            <label for="mode-subject">
-                                <strong>{{ 'One existing Persona' if investigation_persona else 'One subject' }}</strong>
-                                <small>{{ 'Route every configured identifier and resulting proposal back to ' ~ investigation_persona.display_name if investigation_persona else 'Scan identifiers separately, then place their claims under one reviewable persona' }}</small>
-                            </label>
-                        </div>
-                        <div class="mode-option">
-                            <input type="radio" name="processing_mode" id="mode-independent" value="independent" {{ 'disabled' if investigation_persona }}>
-                            <label for="mode-independent">
-                                <strong>Independent subjects</strong>
-                                <small>{{ 'Start a new investigation to create separate Personas' if investigation_persona else 'Create a separate persona for every exact or generated account identifier' }}</small>
-                            </label>
-                        </div>
-                    </div>
-                </fieldset>
-
                 <fieldset class="investigation-section coverage-filter-section">
                     <legend class="form-label mb-2">Case source filters</legend>
                     <p class="form-text mb-2">
@@ -235,8 +234,8 @@
                     <legend class="form-label mb-2">Cited public-web research</legend>
                     <div class="form-check investigation-check sensitive-context-check">
                         <input class="form-check-input" type="checkbox" id="allow-ai-context" name="allow_ai_context">
-                        <label class="form-check-label" for="allow-ai-context">Allow the configured AI service to use case identifiers for cited public-web research</label>
-                        <div class="form-text">Off by default. Without consent, names, emails, and phone numbers remain inside OpenLedger and are not included in the external AI request.</div>
+                        <label class="form-check-label" for="allow-ai-context">Allow the configured AI service to use case identifiers for assessments and cited public-web research</label>
+                        <div class="form-text">Off by default. Case context may be sent when an AI assessment or research request runs. Without consent, case context is withheld from AI; the optional collectors above have their own controls.</div>
                     </div>
                 </fieldset>
 
@@ -246,11 +245,26 @@
                             <span class="eyebrow">Before collection</span>
                             <h3 id="query-plan-title">Query plan</h3>
                         </div>
-                        <span class="query-plan-count" id="query-plan-count">0 account checks</span>
+                        <span class="query-plan-count" id="query-plan-count">0 username targets</span>
                     </div>
-                    <p id="query-plan-summary">Add an account identifier or a full name with variant generation enabled.</p>
+                    <p id="query-plan-summary">Add a username, a profile URL, or select aliases generated from a full name.</p>
                     <div class="query-plan-targets" id="query-plan-targets"></div>
-                    <p class="query-plan-note" id="query-plan-note">Every account candidate is checked independently. Correlation changes only how evidence is organized, never the underlying source result.</p>
+                    <div class="collector-routing-scroll">
+                        <table class="collector-routing" aria-label="Where your identifiers go">
+                            <thead><tr><th scope="col">Collector</th><th scope="col">Status</th><th scope="col">Inputs for this run</th></tr></thead>
+                            <tbody>
+                                {% for key, label in [('maigret', 'Username checks (Maigret)'), ('native', 'Native public profile search'), ('scanner-usernames', 'User Scanner · usernames'), ('scanner-email', 'User Scanner · email'), ('ai', 'AI assessment / research · case context')] %}
+                                <tr id="routing-{{ key }}">
+                                    <th scope="row">{{ label }}</th>
+                                    <td><strong class="routing-status"></strong><small class="routing-reason"></small></td>
+                                    <td class="routing-inputs"></td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                    <p class="query-plan-note">Username targets are inputs, not a count of websites or successful matches. Source coverage and case filters control Maigret sites; native search and User Scanner use their own platform scope.</p>
+                    <p class="query-plan-note" id="query-plan-note">One Persona receives the resulting claims for review. A found account does not establish identity.</p>
                 </section>
 
                 <fieldset class="investigation-section coverage-section">
@@ -285,8 +299,7 @@
                 <div class="identifier-row">
                     <label class="visually-hidden">Identifier type</label>
                     <select class="form-select identifier-type" name="identifier_type" aria-label="Identifier type">
-                        <option value="username">Username</option>
-                        <option value="social_handle">Social handle</option>
+                        <option value="username">Username or @handle</option>
                         <option value="profile_url">Profile URL</option>
                         <option value="full_name">Full name</option>
                         <option value="email">Email address</option>
@@ -344,9 +357,17 @@
     const includedSourceTags = document.getElementById('caseTags');
     const excludedSourceTags = document.getElementById('caseExcludedTags');
     const csrfToken = form.querySelector('input[name="csrf_token"]').value;
+    const collectorStatus = {{ investigation_collectors | default({}) | tojson }};
+    const scannerAvailable = {{ user_scanner_available | tojson }};
+    const aiConnected = {{ openai_connected | tojson }};
+    const aiWebEnabled = {{ web_settings.ai_web_enrichment | tojson }};
+    const focusedSiteLimit = {{ web_settings.top_sites | tojson }};
     const aliasSourceTypes = new Set(['username', 'social_handle', 'profile_url', 'full_name']);
     const aliasResetTypes = new Set(['full_name']);
     let exactTargetKeys = new Set();
+    let plannedExactTargets = [];
+    let exactPlanResolved = false;
+    let plannedTargetKeys = new Map();
     let aliasRefreshController = null;
     let aliasRefreshSequence = 0;
     let aliasRefreshPending = false;
@@ -356,12 +377,12 @@
     let plannedAliasKeysByComparison = new Map();
 
     const behavior = {
-        username: ['e.g. johndoe', 'Exact account check'],
-        social_handle: ['e.g. @johndoe', 'The @ prefix is removed; exact account check'],
-        profile_url: ['e.g. https://instagram.com/johndoe', 'Extract account handle; no URL is fetched'],
-        full_name: ['e.g. John Doe', 'Retain as one phrase; optional handle variants'],
-        email: ['e.g. name@example.com', 'Case context; optional silent registration evidence'],
-        phone: ['e.g. +628123456789', 'Normalized case context only; never permuted']
+        username: ['e.g. johndoe or @johndoe', 'Maigret username; also eligible for native search and optional User Scanner. The @ prefix is removed.'],
+        social_handle: ['e.g. johndoe or @johndoe', 'Maigret username; also eligible for native search and optional User Scanner. The @ prefix is removed.'],
+        profile_url: ['e.g. https://instagram.com/johndoe', 'Parsed locally into username targets. Parsing does not fetch the profile page.'],
+        full_name: ['e.g. John Doe', 'One phrase for native search when enabled. Only selected username aliases go to Maigret.'],
+        email: ['e.g. name@example.com', 'Optional User Scanner registration check; case context for AI only with consent. No Maigret or native search.'],
+        phone: ['e.g. +628123456789', 'Case context only; AI receives it only with consent. No Maigret, native search, or User Scanner check.']
     };
 
     function comparisonKey(value) {
@@ -390,7 +411,7 @@
             .map(row => row.querySelector('.identifier-value').value.trim())
             .filter(Boolean);
         return {
-            full_names: fullNames,
+            full_names: generateToggle.checked ? fullNames : [],
             nicknames: [aliasNicknameInput.value],
             contextual_numbers: [aliasContextNumberInput.value],
             profile_urls: profileUrls,
@@ -624,8 +645,12 @@
     function refreshAliasCandidates({ preserveAnalystChoices = false } = {}) {
         const sequence = ++aliasRefreshSequence;
         if (aliasRefreshController) aliasRefreshController.abort();
+        plannedExactTargets = [];
+        exactPlanResolved = false;
+        plannedTargetKeys = new Map();
         if (!preserveAnalystChoices) removedAliasChoices.clear();
-        if (!generateToggle.checked) {
+        if (!generateToggle.checked && !aliasPlanningPayload().profile_urls.length
+            && !exactIdentifierTargets().length) {
             plannedAliasKeysByComparison = new Map();
             exactTargetKeys = new Set(exactIdentifierTargets().map(comparisonKey));
             aliasRefreshPending = false;
@@ -644,10 +669,16 @@
             .then(payload => {
                 if (sequence !== aliasRefreshSequence) return;
                 exactTargetKeys = new Set(payload.exact_target_keys || []);
-                const plannedAliases = payload.aliases || [];
+                plannedExactTargets = payload.exact_targets || [];
+                exactPlanResolved = true;
+                plannedExactTargets.forEach((value, index) => {
+                    plannedTargetKeys.set(comparisonKey(value), payload.exact_target_keys[index]);
+                });
+                const plannedAliases = generateToggle.checked ? payload.aliases || [] : [];
                 plannedAliasKeysByComparison = new Map();
                 plannedAliases.forEach(candidate => {
                     const comparison = comparisonKey(candidate.value);
+                    plannedTargetKeys.set(comparison, candidate.key);
                     const keys = plannedAliasKeysByComparison.get(comparison)
                         || new Set();
                     keys.add(candidate.key);
@@ -680,34 +711,31 @@
         }
     }
 
-    function profileHandle(value) {
-        try {
-            const url = new URL(value);
-            if (!['http:', 'https:'].includes(url.protocol)) return '';
-            const segments = url.pathname.split('/').filter(Boolean);
-            return segments.length ? decodeURIComponent(segments[segments.length - 1]).replace(/^@+/, '') : '';
-        } catch (_) {
-            return '';
-        }
+    function identifierValues(types) {
+        return Array.from(list.querySelectorAll('.identifier-row'))
+            .filter(row => types.includes(row.querySelector('.identifier-type').value))
+            .map(row => row.querySelector('.identifier-value').value.trim()).filter(Boolean);
     }
 
     function queryTargets() {
         const output = [];
-        list.querySelectorAll('.identifier-row').forEach(row => {
-            const type = row.querySelector('.identifier-type').value;
-            const value = row.querySelector('.identifier-value').value.trim();
-            if (!value) return;
-            let candidates = [];
-            if (type === 'username' || type === 'social_handle') candidates = [value.replace(/^@+/, '')];
-            if (type === 'profile_url') candidates = [profileHandle(value)];
-            candidates.filter(Boolean).forEach(candidate => {
-                if (!output.some(item => comparisonKey(item) === comparisonKey(candidate))) output.push(candidate);
-            });
-        });
-        selectedAliases().forEach(candidate => {
-            if (!output.some(item => comparisonKey(item) === comparisonKey(candidate))) output.push(candidate);
+        const seen = new Set();
+        const exact = exactPlanResolved ? plannedExactTargets : exactIdentifierTargets();
+        [...exact, ...selectedAliases()].forEach(candidate => {
+            const key = plannedTargetKeys.get(comparisonKey(candidate)) || comparisonKey(candidate);
+            if (!seen.has(key)) {
+                seen.add(key);
+                output.push(candidate);
+            }
         });
         return output;
+    }
+
+    function showRoute(key, status, reason, values) {
+        const row = document.getElementById(`routing-${key}`);
+        row.querySelector('.routing-status').textContent = status;
+        row.querySelector('.routing-reason').textContent = reason;
+        row.querySelector('.routing-inputs').textContent = values.length ? values.join(' · ') : 'None';
     }
 
     function updateRow(row) {
@@ -720,9 +748,6 @@
     function updatePlan() {
         const planned = queryTargets();
         const grouped = document.getElementById('mode-subject').checked;
-        const contextual = Array.from(list.querySelectorAll('.identifier-row'))
-            .filter(row => ['full_name', 'email', 'phone'].includes(row.querySelector('.identifier-type').value)
-                && row.querySelector('.identifier-value').value.trim()).length;
         const emails = Array.from(list.querySelectorAll('.identifier-row'))
             .filter(row => row.querySelector('.identifier-type').value === 'email'
                 && row.querySelector('.identifier-value').value.trim()).length;
@@ -738,26 +763,66 @@
             vxtwitterToggle.disabled = !userScannerUsernameToggle.checked || !xSelected;
             if (vxtwitterToggle.disabled) vxtwitterToggle.checked = false;
         }
-        count.textContent = `${planned.length} account ${planned.length === 1 ? 'check' : 'checks'}`;
-        summary.textContent = planned.length
-            ? `${planned.length} exact account candidate${planned.length === 1 ? '' : 's'} will be checked independently${contextual ? `; ${contextual} context value${contextual === 1 ? '' : 's'} will remain attached to the case` : ''}.`
-            : 'Add an account identifier or a full name with variant generation enabled.';
-        targets.replaceChildren(...planned.slice(0, 16).map(value => {
+        count.textContent = `${planned.length} username target${planned.length === 1 ? '' : 's'}`;
+        summary.textContent = aliasRefreshPending
+            ? 'Updating the username plan with the server’s local parser and alias planner…'
+            : planned.length
+                ? 'These exact usernames and selected aliases feed the collectors enabled below. Names stay intact as case context.'
+                : 'Maigret needs a username: add an account handle or profile URL, or select aliases generated from a full name.';
+        targets.replaceChildren(...planned.map(value => {
             const chip = document.createElement('span');
             chip.className = 'query-target-chip';
             chip.textContent = value;
             return chip;
         }));
-        const scannerNote = userScannerToggle && userScannerToggle.checked
-            ? ' Silent User Scanner email registrations will enter the same pending evidence review.'
-            : '';
-        const usernameScannerNote = userScannerUsernameToggle && userScannerUsernameToggle.checked
-            ? ' Selected aliases will also receive bounded major-platform account checks; identity remains unverified.'
-            : '';
+        const exhaustive = document.getElementById('mode-exhaustive').checked;
+        const modeAllowed = exhaustive ? collectorStatus.exhaustive_enabled : collectorStatus.focused_enabled;
+        const discoveryAllowed = collectorStatus.discovery_enabled && collectorStatus.maigret_enabled && modeAllowed;
+        const unavailableReason = !collectorStatus.discovery_enabled ? 'Profile discovery is disabled by server policy.'
+            : !collectorStatus.maigret_enabled ? 'Maigret is disabled by server policy; this investigation cannot start.'
+                : 'This coverage mode is disabled by server policy.';
+        const included = sourceTags.filter(tag => tag.classList.contains('selected')).map(tag => tag.dataset.value);
+        const excluded = sourceTags.filter(tag => tag.classList.contains('excluded')).map(tag => tag.dataset.value);
+        const coverage = exhaustive ? 'Every eligible enabled site.' : `Up to ${focusedSiteLimit} ranked eligible sites.`;
+        const filterNote = `${included.length ? ` Include: ${included.join(', ')}.` : ''}${excluded.length ? ` Exclude: ${excluded.join(', ')}.` : ''}`;
+        showRoute('maigret', !discoveryAllowed ? 'Unavailable' : aliasRefreshPending ? 'Updating' : planned.length ? 'Enabled' : 'Needs a username',
+            !discoveryAllowed ? unavailableReason : `${coverage}${filterNote} Full names, emails, and phones are not username inputs.`,
+            discoveryAllowed ? planned : []);
+
+        const native = collectorStatus.native_search || { enabled: false, reason: 'Server configuration is unavailable.' };
+        const nativeInputs = [...planned, ...identifierValues(['full_name']).slice(0, 1).map(value => `"${value}"`)];
+        showRoute('native', !discoveryAllowed ? 'Unavailable' : !native.enabled ? 'Off' : nativeInputs.length ? 'Configured' : 'Needs inputs',
+            !discoveryAllowed ? unavailableReason : !native.enabled ? native.reason
+                : `${native.reason} Eligible inputs shown; the planner selects up to five seeds, reserving one for the first full-name phrase. Emails and phones are excluded.`,
+            discoveryAllowed && native.enabled ? nativeInputs : []);
+
+        const scannerAllowed = scannerAvailable && collectorStatus.scanner_enabled && discoveryAllowed;
+        const scannerReason = !scannerAvailable ? 'User Scanner is not installed in this deployment.'
+            : !discoveryAllowed ? unavailableReason : 'User Scanner is disabled by server policy.';
+        const usernameEnabled = scannerAllowed && userScannerUsernameToggle && userScannerUsernameToggle.checked;
+        const selectedPlatforms = userScannerPlatforms.filter(control => control.checked).map(control => control.value);
+        const allowedPlatforms = selectedPlatforms.filter(platform => platform !== 'x' || vxtwitterToggle.checked);
+        const platformReason = allowedPlatforms.length ? `Platforms: ${allowedPlatforms.join(', ')}.` : 'No permitted platforms selected.';
+        const xNote = selectedPlatforms.includes('x') && !vxtwitterToggle.checked ? ' X is blocked until its separate third-party consent is selected.' : '';
+        showRoute('scanner-usernames', !scannerAllowed ? 'Unavailable' : !usernameEnabled ? 'Off' : !allowedPlatforms.length ? 'No platforms' : planned.length ? 'Selected' : 'Needs a username',
+            !scannerAllowed ? scannerReason : !usernameEnabled ? 'Select username verification above to use this collector.'
+                : `${platformReason}${xNote} At most 16 username targets; account existence does not establish identity.`,
+            usernameEnabled && allowedPlatforms.length ? planned.slice(0, 16) : []);
+        const emailEnabled = scannerAllowed && userScannerToggle && userScannerToggle.checked;
+        const emailReason = !grouped ? 'Requires One subject mode.' : emails !== 1 ? 'Requires exactly one email address.' : 'Select email registration checks above to use this collector.';
+        showRoute('scanner-email', !scannerAllowed ? 'Unavailable' : emailEnabled ? 'Selected' : 'Off',
+            !scannerAllowed ? scannerReason : emailEnabled ? 'Selected non-notifying registration modules; positive results require review.' : emailReason,
+            emailEnabled ? identifierValues(['email']).map(value => value.toLowerCase()) : []);
+
+        const aiEnabled = aiConnected && aiContextToggle.checked;
+        showRoute('ai', !aiConnected ? 'Unavailable' : !aiContextToggle.checked ? 'Consent off' : 'Allowed when requested',
+            !aiConnected ? 'No AI service connection is configured.' : !aiContextToggle.checked ? 'Case identifiers are withheld from the AI service.'
+                : aiWebEnabled ? 'Case identifiers may be included when an AI assessment or research request runs. Consent does not start research.'
+                    : 'Cited web research is off in Settings. Consented identifiers may still be sent when an AI assessment of collected evidence is requested.',
+            aiEnabled ? identifierValues(['username', 'social_handle', 'profile_url', 'full_name', 'email', 'phone']) : []);
         const githubNote = githubEnrichmentToggle && githubEnrichmentToggle.checked
-            ? ' Claimed GitHub user profiles will be enriched through the public API and queued for review.'
-            : '';
-        note.textContent = `${grouped ? 'One persona will receive the resulting claims for review.' : 'Every account candidate will create a separate persona.'}${usernameScannerNote}${scannerNote}${githubNote} ${aiContextToggle.checked ? 'Approved context will be available to the configured AI service for cited public-web research.' : 'Subject context remains inside OpenLedger and is withheld from external AI requests.'}`;
+            ? ' Claimed GitHub user profiles will be enriched through the public API and queued for review.' : '';
+        note.textContent = `${grouped ? 'One Persona receives all resulting claims for review.' : 'Each entered name or account creates its own Persona; generated aliases stay with their source subject.'}${githubNote} A found account does not establish identity.`;
         if (aliasPlanError) {
             error.textContent = aliasPlanError;
             error.hidden = false;
@@ -830,6 +895,7 @@
                 tag.classList.add('selected');
             }
             updateSourceTagSelects();
+            updatePlan();
         });
     });
     [aiContextToggle, userScannerToggle, vxtwitterToggle, githubEnrichmentToggle, ...userScannerPlatforms].filter(Boolean)
@@ -844,7 +910,7 @@
             refreshAliasCandidates({ preserveAnalystChoices: true });
             updatePlan();
         }));
-    form.querySelectorAll('input[name="processing_mode"]').forEach(control => control.addEventListener('change', updatePlan));
+    form.querySelectorAll('input[name="processing_mode"], input[name="mode"]').forEach(control => control.addEventListener('change', updatePlan));
     form.addEventListener('submit', event => {
         if (aliasRefreshPending) {
             event.preventDefault();
@@ -860,7 +926,7 @@
         }
         if (!queryTargets().length) {
             event.preventDefault();
-            error.textContent = 'Add a username, social handle, profile URL, or a full name with username variants enabled.';
+            error.textContent = 'Add a username or @handle, a profile URL, or select at least one username alias from a full name.';
             error.hidden = false;
             error.scrollIntoView({ behavior: 'smooth', block: 'center' });
         }

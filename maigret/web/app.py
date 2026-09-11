@@ -25,6 +25,7 @@ import queue
 import re
 import secrets
 import shutil
+import stat
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -60,6 +61,7 @@ from maigret.web.case_store import (
     CaseStore,
     database_url_from_environment,
 )
+from maigret.web.external_evidence import MAX_DOCUMENT_BYTES
 from maigret.web.collector_adapters import (
     CLOUDFLARE_DNS_ENGINE,
     FR_BUSINESS_REGISTRY_ENGINE,
@@ -112,6 +114,7 @@ from maigret.web.execution_budget import ExecutionBudget
 from maigret.web.profile_discovery_policy import (
     ProfileDiscoveryPolicyError,
     govern_profile_discovery_options,
+    profile_discovery_flags,
 )
 from maigret.web.profile_search_backend import (
     ProfileSearchClient,
@@ -138,12 +141,14 @@ from maigret.web.username_aliases import (
 )
 from maigret.web.persona_intelligence import (
     build_case_chat_url_claims,
+    describe_case_chat_urls,
     extract_asserted_persona_urls,
     extract_explicit_public_urls,
     extract_case_chat_persona_claims,
     field_display_label,
     group_claims,
 )
+from maigret.web.chat_presentation import render_chat_content
 from maigret.web.persona_pdf import generate_persona_pdf, persona_pdf_filename
 from maigret.web.profile_reliability import (
     DetectorHealthRegistryError,
@@ -231,6 +236,7 @@ class StreamNotify:
         self.total = 0
         self.checked = 0
         self.sites = {}
+        self.source_coverage = []
         self.cancel_requested = False
         # Per-site results collected so far, in the shape build_reports()
         # expects. If the scan gets cancelled mid-way (Stop button), this is
@@ -245,6 +251,9 @@ class StreamNotify:
 
     def set_sites(self, sites):
         self.sites = sites
+
+    def set_source_coverage(self, coverage):
+        self.source_coverage[:] = coverage
 
     def update(self, result, is_similar=False):
         if self.cancellation_check and self.cancellation_check():
@@ -1185,6 +1194,55 @@ def select_sites_for_search(
     return ranked_sites
 
 
+def selected_source_coverage(db, sites, options, detector_health_registry):
+    """Snapshot major-source eligibility before collection, without probing."""
+    coverage = []
+    eligible = None
+    for site in db.sites:
+        if site.name.casefold() not in MAJOR_PLATFORM_NAMES:
+            continue
+        health = detector_health_for_site(detector_health_registry, site.name)
+        if site.name in sites:
+            status = 'selected'
+            reason = 'Selected for collection; no returned result has been retained.'
+        elif health == 'quarantined':
+            status = 'excluded'
+            reason = 'Not checked: detector is quarantined after canary failures.'
+        elif site.disabled:
+            status = 'excluded'
+            reason = 'Not checked: this detector is disabled in the source catalog.'
+        else:
+            # Reuse the authoritative selector to distinguish eligibility from
+            # ranking limits rather than maintaining a second filter policy.
+            if eligible is None:
+                eligible = select_sites_for_search(
+                    db,
+                    top_sites=1,
+                    all_sites=True,
+                    tags=options.get('tags', []),
+                    excluded_tags=options.get('excluded_tags', []),
+                    site_list=options.get('site_list', []),
+                    detector_health_registry=detector_health_registry,
+                )
+            status = 'excluded'
+            reason = (
+                'Not checked: outside the source limit for this run.'
+                if site.name in eligible
+                else 'Not checked: excluded by case source filters or saved site selection.'
+            )
+        coverage.append(
+            {
+                'site_name': site.name,
+                'status': status,
+                'reason': reason,
+                'detector_health': health,
+                'url': '',
+                'classification': None,
+            }
+        )
+    return coverage
+
+
 @governed_provider(MAIGRET_PROVIDER)
 async def maigret_search(username, options, query_notify=None):
     logger = setup_logger(logging.WARNING, 'maigret')
@@ -1218,6 +1276,7 @@ async def maigret_search(username, options, query_notify=None):
             safe_log_value(excluded_tags),
         )
 
+        detector_health_registry = get_detector_health_registry()
         sites = select_sites_for_search(
             db,
             top_sites=top_sites,
@@ -1225,7 +1284,13 @@ async def maigret_search(username, options, query_notify=None):
             tags=tags,
             excluded_tags=excluded_tags,
             site_list=site_list,
+            detector_health_registry=detector_health_registry,
         )
+
+        if query_notify is not None and hasattr(query_notify, 'set_source_coverage'):
+            query_notify.set_source_coverage(
+                selected_source_coverage(db, sites, options, detector_health_registry)
+            )
 
         logger.info('Found %d sites matching the tag criteria', len(sites))
 
@@ -1289,6 +1354,7 @@ MAJOR_PLATFORM_NAMES = {
     'instagram',
     'linkedin',
     'telegram',
+    'threads',
     'tiktok',
     'twitter',
     'youtube',
@@ -1780,7 +1846,16 @@ def load_persisted_job_result(session_folder: str):
     """Load and validate one persisted result without trusting its file contents."""
     try:
         metadata_path = get_session_metadata_path(session_folder)
-        with open(metadata_path, encoding='utf-8') as metadata_file:
+        expected = os.lstat(metadata_path)
+        if not stat.S_ISREG(expected.st_mode):
+            raise ValueError('Report session metadata must be a regular file')
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        with os.fdopen(os.open(metadata_path, flags), encoding='utf-8') as metadata_file:
+            actual = os.fstat(metadata_file.fileno())
+            if not stat.S_ISREG(actual.st_mode) or (
+                actual.st_dev, actual.st_ino
+            ) != (expected.st_dev, expected.st_ino):
+                raise ValueError('Report session metadata changed while opening')
             payload = json.load(metadata_file)
         if payload.get('schema_version') != SESSION_METADATA_SCHEMA_VERSION:
             raise ValueError('Unsupported report session metadata version')
@@ -2614,6 +2689,7 @@ def build_reports(
     session_key,
     *,
     collector_observations=None,
+    source_coverage=None,
 ):
     """Write per-username CSV/JSON/PDF/HTML reports + combined graph to disk.
 
@@ -2661,7 +2737,10 @@ def build_reports(
         candidate_profiles = []
         suppressed_profiles = []
         diagnostics = {'claimed': 0, 'available': 0, 'unknown': 0, 'illegal': 0}
-        major_platforms = []
+        major_platforms = {
+            item['site_name']: dict(item)
+            for item in (source_coverage or {}).get(username, [])
+        }
         for site_name, site_data in results.items():
             state, reason = result_status_details(site_data)
             diagnostics[state] = diagnostics.get(state, 0) + 1
@@ -2673,17 +2752,27 @@ def build_reports(
                 detector_health_registry=detector_health_registry,
             )
             if site_name.lower() in MAJOR_PLATFORM_NAMES:
-                major_platforms.append(
-                    {
-                        'site_name': site_name,
-                        'status': state,
-                        'reason': reason,
-                        'url': site_data.get('url_user', ''),
-                        'classification': (
-                            profile.get('classification') if profile else None
-                        ),
-                    }
-                )
+                major_platforms[site_name] = {
+                    'site_name': site_name,
+                    'status': state,
+                    'reason': (
+                        profile['classification_reason']
+                        if profile
+                        else reason
+                        or {
+                            'available': 'The detector returned no matching account. This does not prove absence.',
+                            'unknown': 'The detector could not determine account existence.',
+                            'illegal': 'The detector does not accept this username format.',
+                        }.get(state, 'No further diagnostic detail was returned.')
+                    ),
+                    'url': site_data.get('url_user', ''),
+                    'detector_health': detector_health_for_site(
+                        detector_health_registry, site_name
+                    ),
+                    'classification': (
+                        profile.get('classification') if profile else None
+                    ),
+                }
             if status and status.status == MaigretCheckStatus.CLAIMED:
                 raw_claimed_count += 1
                 if profile['classification'] == 'supported':
@@ -2715,7 +2804,7 @@ def build_reports(
                 'candidate_profiles': candidate_profiles,
                 'suppressed_profiles': suppressed_profiles,
                 'diagnostics': diagnostics,
-                'major_platforms': major_platforms,
+                'major_platforms': list(major_platforms.values()),
             }
         )
 
@@ -2843,9 +2932,12 @@ def parse_investigation_submission(form):
     usernames = parse_usernames(form)
     if not usernames:
         raise InvestigationInputError('Add at least one username or social handle.')
+    processing_mode = str(form.get('processing_mode', 'same_subject'))
+    if processing_mode not in {'same_subject', 'independent'}:
+        raise InvestigationInputError('Select a valid identifier processing mode.')
     plan = {
         'schema_version': 1,
-        'processing_mode': 'independent',
+        'processing_mode': processing_mode,
         'generate_name_variants': False,
         'allow_ai_context': False,
         'enable_user_scanner_email': False,
@@ -3088,6 +3180,7 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
     # Keep the partial collection reachable by the worker even if cancellation
     # lands between collector-specific exception handlers.
     job['general_results'] = general_results
+    source_coverage = job.setdefault('source_coverage', {})
     profile_search_result = await run_native_profile_search_phase(
         job, options, cancellation_check=cancellation_check
     )
@@ -3102,6 +3195,7 @@ async def _stream_search(job, usernames, options, cancellation_check=None):
             username.strip(),
             cancellation_check=cancellation_check,
         )
+        source_coverage[username.strip()] = notify.source_coverage
         task = asyncio.ensure_future(
             maigret_search(username.strip(), options, query_notify=notify)
         )
@@ -3490,6 +3584,7 @@ def finalize_stream_job(
     event_sink,
     *,
     collector_observations=None,
+    source_coverage=None,
     cancelled=False,
     interrupted=False,
     budget_exhausted=False,
@@ -3498,6 +3593,17 @@ def finalize_stream_job(
 ):
     """Persist one terminal scan result and publish its final progress event."""
     collector_observations = list(collector_observations or [])
+    source_coverage = {
+        name: coverage for name, coverage in (source_coverage or {}).items() if coverage
+    }
+    # A selected source with no returned result is still a reportable coverage
+    # outcome, including interrupted and failed provider requests.
+    if source_coverage:
+        general_results = list(general_results)
+        reported_names = {name for name, _, _ in general_results}
+        for username, coverage in source_coverage.items():
+            if coverage and username not in reported_names:
+                general_results.append((username, 'username', {}))
     done_event = {'type': 'done'}
     terminal_status = 'failed'
     partial_status = None
@@ -3531,6 +3637,8 @@ def finalize_stream_job(
                 if collector_observations
                 else {}
             )
+            if source_coverage:
+                report_kwargs['source_coverage'] = source_coverage
             result = build_reports(
                 general_results, usernames, job_id, **report_kwargs
             )
@@ -3651,6 +3759,7 @@ def run_stream_job(job_id, usernames, options):
         started_at,
         job['queue'],
         collector_observations=job.get('collector_observations'),
+        source_coverage=job.get('source_coverage'),
         cancelled=bool(job.get('cancelled')),
         budget_exhausted=budget_exhausted and not bool(job.get('cancelled')),
         execution_budget=execution_budget.as_dict(),
@@ -5403,6 +5512,7 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         started_at,
         sink,
         collector_observations=runtime_job.get("collector_observations"),
+        source_coverage=runtime_job.get("source_coverage"),
         cancelled=cancel_requested and not shutdown_requested,
         interrupted=shutdown_requested,
         budget_exhausted=budget_exhausted,
@@ -5673,6 +5783,32 @@ def persona_display_identifier_type(persona):
     return "full_name"
 
 
+def investigation_collector_status():
+    """Expose routing switches, never provider credentials or secret paths."""
+    flags = profile_discovery_flags()
+    native_search = {'enabled': False, 'reason': 'Disabled by server policy.'}
+    if flags['search_first_enabled']:
+        try:
+            config = load_profile_search_config()
+            native_search = {
+                'enabled': config.enabled,
+                'reason': (
+                    'Provider configured; credentials are checked at collection.'
+                    if config.enabled else 'No native search provider is enabled.'
+                ),
+            }
+        except ProfileSearchConfigurationError:
+            native_search['reason'] = 'Native search server configuration is incomplete.'
+    return {
+        'discovery_enabled': flags['profile_discovery_enabled'],
+        'focused_enabled': flags['focused_mode_enabled'],
+        'exhaustive_enabled': flags['exhaustive_mode_enabled'],
+        'maigret_enabled': flags['maigret_enabled'],
+        'scanner_enabled': flags['user_scanner_enabled'],
+        'native_search': native_search,
+    }
+
+
 def investigation_builder_context(persona=None):
     """Build the shared New investigation and Persona-rerun form context."""
     refresh_job_results_from_disk()
@@ -5765,6 +5901,7 @@ def investigation_builder_context(persona=None):
         'investigation_persona': persona,
         'initial_identifiers': initial_identifiers,
         'initial_alias_nicknames': initial_alias_nicknames,
+        'investigation_collectors': investigation_collector_status(),
     }
 
 
@@ -5851,19 +5988,23 @@ def api_username_aliases():
         confirmed_usernames=confirmed_usernames,
     )
     exact_target_keys = []
+    exact_targets = []
     for username in exact_usernames:
         try:
-            key = normalize_username(username).casefold()
+            normalized = normalize_username(username)
+            key = normalized.casefold()
         except InvestigationInputError:
             continue
         if key and key not in exact_target_keys:
             exact_target_keys.append(key)
+            exact_targets.append(normalized)
     return {
         'aliases': [
             {**candidate, 'key': str(candidate['value']).casefold()}
             for candidate in aliases
         ],
         'exact_target_keys': exact_target_keys,
+        'exact_targets': exact_targets,
     }
 
 
@@ -6851,7 +6992,22 @@ def case_chat_workspace(case_id):
         is_combined=is_combined,
         initial_prompt=initial_prompt,
         initial_research_enabled=initial_research_enabled,
+        render_chat_content=render_chat_content,
     )
+
+
+def bounded_case_chat_proposal_summary(summary):
+    """Fit redundant proposal previews around durable URL provenance and status."""
+    bounded = dict(summary)
+    previews = list(bounded.get("proposals") or [])
+    bounded["proposals"] = previews
+    original_count = len(previews)
+    while previews and len(json.dumps(
+        bounded, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")) > MAX_DOCUMENT_BYTES:
+        previews.pop()
+        bounded["proposal_previews_omitted"] = original_count - len(previews)
+    return bounded
 
 
 @app.route("/api/cases/<case_id>/chat", methods=["POST"])
@@ -6912,6 +7068,11 @@ def case_chat_message(case_id):
             case_context = case_store.get_case_chat_context(case_id)
             if not case_context:
                 return {"error": "That case does not exist."}, 404
+            if persona_id:
+                case_context["selected_persona"] = {
+                    "id": persona_id,
+                    "display_name": personas_by_id[persona_id]["display_name"],
+                }
         user_record = case_store.append_case_chat_message(
             case_id,
             role="user",
@@ -6979,6 +7140,13 @@ def case_chat_message(case_id):
             "count": 0,
             "kind": "relationship" if is_combined else "persona",
         }
+        url_evidence = describe_case_chat_urls(
+            explicit_public_urls,
+            [] if uncited_url_fallback else sources,
+            research_enabled=research_enabled,
+        )
+        if url_evidence:
+            initial_proposal_status["url_evidence"] = url_evidence
         if uncited_url_fallback:
             initial_proposal_status["research_status"] = (
                 "no_independent_citations"
@@ -7068,29 +7236,40 @@ def case_chat_message(case_id):
                 target_persona = personas_by_id[persona_id]['display_name']
                 diagnostics: Dict[str, Any] = {}
                 candidates = []
+                extraction_unavailable = False
                 if not uncited_url_fallback:
-                    raw_proposals = asyncio.run(
-                        get_case_chat_claim_proposals(
-                            api_key=api_key,
-                            target_persona=target_persona,
-                            user_message=message,
-                            assistant_answer=answer,
-                            sources=sources,
-                            model=model,
-                            **ai_endpoint_options(),
+                    try:
+                        raw_proposals = asyncio.run(
+                            get_case_chat_claim_proposals(
+                                api_key=api_key,
+                                target_persona=target_persona,
+                                user_message=message,
+                                assistant_answer=answer,
+                                sources=sources,
+                                model=model,
+                                **ai_endpoint_options(),
+                            )
                         )
-                    )
-                    candidates = extract_case_chat_persona_claims(
-                        raw_proposals,
-                        sources=sources,
-                        target_persona=target_persona,
-                        model=model,
-                        user_message=message,
-                        user_message_id=user_record['id'],
-                        assistant_message_id=assistant_record['id'],
-                        provided_by=actor,
-                        diagnostics=diagnostics,
-                    )
+                        candidates = extract_case_chat_persona_claims(
+                            raw_proposals,
+                            sources=sources,
+                            target_persona=target_persona,
+                            model=model,
+                            user_message=message,
+                            user_message_id=user_record['id'],
+                            assistant_message_id=assistant_record['id'],
+                            provided_by=actor,
+                            diagnostics=diagnostics,
+                        )
+                    except Exception as error:
+                        # Exact analyst attachments must survive an optional AI
+                        # proposal extraction failure.
+                        extraction_unavailable = True
+                        record_internal_error(
+                            "Case chat AI proposal extraction failed",
+                            error,
+                            case_id=case_id,
+                        )
                 url_candidates = build_case_chat_url_claims(
                     extract_asserted_persona_urls(message),
                     target_persona=target_persona,
@@ -7099,13 +7278,15 @@ def case_chat_message(case_id):
                     provided_by=actor,
                 )
                 known_fingerprints = {
-                    candidate["fingerprint"] for candidate in candidates
+                    candidate["fingerprint"] for candidate in url_candidates
                 }
-                candidates.extend(
+                # Retain exact analyst attachments first, including when the
+                # model returns the maximum number of other proposals.
+                candidates = (url_candidates + [
                     candidate
-                    for candidate in url_candidates
+                    for candidate in candidates
                     if candidate["fingerprint"] not in known_fingerprints
-                )
+                ])[:100]
                 diagnostics["analyst_supplied_urls"] = len(url_candidates)
                 diagnostics["accepted"] = len(candidates)
                 synchronized = case_store.sync_case_chat_persona_claims(
@@ -7117,6 +7298,7 @@ def case_chat_message(case_id):
                     "status": (
                         "pending_review"
                         if synchronized["count"]
+                        else "unavailable" if extraction_unavailable
                         else "no_supported_facts"
                     ),
                     "count": synchronized["count"],
@@ -7125,6 +7307,8 @@ def case_chat_message(case_id):
                     "diagnostics": diagnostics,
                     "proposals": synchronized["proposals"],
                 }
+                if extraction_unavailable:
+                    proposal_summary["extraction_status"] = "unavailable"
                 if uncited_url_fallback:
                     proposal_summary["research_status"] = (
                         "no_independent_citations"
@@ -7141,10 +7325,15 @@ def case_chat_message(case_id):
                     "kind": "persona",
                     "persona_id": persona_id,
                 }
+            if url_evidence:
+                proposal_summary["url_evidence"] = url_evidence
+            proposal_summary = bounded_case_chat_proposal_summary(proposal_summary)
             case_store.update_case_chat_message_proposals(
                 assistant_record["id"], proposal_summary
             )
             assistant_record["proposals"] = proposal_summary
+        # The same escaped Markdown renderer serves live replies and history.
+        assistant_record["content_html"] = str(render_chat_content(answer))
         return jsonify(
             user_message=user_record,
             assistant_message=assistant_record,
@@ -7317,6 +7506,11 @@ def persona_workspace(persona_id):
             if claim['field_name'] == 'occupation'
             else ''
         )
+    case = case_store.get_case(persona['case_id']) or {}
+    source_outcome_report = next(
+        (job for job in case.get('jobs', []) if job.get('individual_reports')),
+        None,
+    )
     return render_template(
         'persona.html',
         persona=persona,
@@ -7330,6 +7524,7 @@ def persona_workspace(persona_id):
         map_locations=map_locations,
         ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
         field_display_label=field_display_label,
+        source_outcome_report=source_outcome_report,
         map_tile_url=os.getenv(
             'OPENLEDGER_MAP_TILE_URL',
             'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
