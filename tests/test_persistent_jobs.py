@@ -1780,7 +1780,7 @@ def test_persona_rerun_preserves_exact_username_origin(client, persistent_store)
     page = client.get(f"/personas/{persona_id}/investigate").get_data(
         as_text=True
     )
-    assert '<option value="username" selected>Username</option>' in page
+    assert '<option value="username" selected>Username or @handle</option>' in page
     assert f'value="{username}"' in page
 
     with client.session_transaction() as browser_session:
@@ -1850,7 +1850,7 @@ def test_persona_prefill_ignores_another_personas_targeted_refresh(
     bob_builder = client.get(
         f"/personas/{personas['bob']}/investigate"
     ).get_data(as_text=True)
-    assert '<option value="username" selected>Username</option>' in bob_builder
+    assert '<option value="username" selected>Username or @handle</option>' in bob_builder
     assert '<option value="full_name" selected>' not in bob_builder
 
 

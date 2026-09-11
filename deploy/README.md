@@ -121,12 +121,16 @@ P2_RELEASE_SHA='REPLACE_WITH_REVIEWED_40_CHARACTER_P2_COMMIT'
 Only after that block succeeds, inspect the pinned release and run its preflight:
 
 ```bash
+[[ "$P2_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+test "$(git rev-parse HEAD)" = "$P2_RELEASE_SHA" &&
 bash deploy/update.sh --commit "$P2_RELEASE_SHA" --check
 ```
 
 Only after the preflight succeeds, apply that same reviewed release:
 
 ```bash
+[[ "$P2_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] &&
+test "$(git rev-parse HEAD)" = "$P2_RELEASE_SHA" &&
 bash deploy/update.sh --commit "$P2_RELEASE_SHA"
 ```
 
