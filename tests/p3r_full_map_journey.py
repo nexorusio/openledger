@@ -112,14 +112,18 @@ def _create_reviewed_locations(store, *, username: str, points: Iterable[tuple[s
     return persona_id
 
 
-def _map_snapshot(page, points: list[tuple[str, float, float]]) -> dict:
+def _map_snapshot(page) -> dict:
     return page.evaluate(
-        """points => {
+        """() => {
             const map = window.personaMap;
             const size = map.getSize();
-            const projected = points.map(([, latitude, longitude]) => {
-                const point = map.latLngToContainerPoint([latitude, longitude]);
-                return {x: point.x, y: point.y, reachable: point.x >= 0 && point.x <= size.x && point.y >= 0 && point.y <= size.y};
+            const projected = [];
+            map.eachLayer(layer => {
+                if (!(layer instanceof L.Marker)) return;
+                const coordinate = layer.getLatLng();
+                const point = map.latLngToContainerPoint(coordinate);
+                projected.push({coordinate, x: point.x, y: point.y,
+                    reachable: point.x >= 0 && point.x <= size.x && point.y >= 0 && point.y <= size.y});
             });
             return {
                 width: size.x,
@@ -130,7 +134,6 @@ def _map_snapshot(page, points: list[tuple[str, float, float]]) -> dict:
                 projected,
             };
         }""",
-        points,
     )
 
 
@@ -149,7 +152,7 @@ def _open_persona_map(page, base_url: str, persona_id: str, points: list[tuple[s
             && window.personaMap.getSize().x > 0
             && window.personaMap.getSize().y > 0"""
     )
-    return _map_snapshot(page, points)
+    return _map_snapshot(page)
 
 
 def test_leaflet_persona_map_handles_hidden_mobile_marker_ranges(served_full_app, monkeypatch):
@@ -184,6 +187,7 @@ def test_leaflet_persona_map_handles_hidden_mobile_marker_ranges(served_full_app
                     continue
                 assert snapshot["width"] > 0 and snapshot["height"] > 0
                 assert snapshot["markerCount"] == len(points)
+                assert len(snapshot["projected"]) == len(points)
                 assert all(point["reachable"] for point in snapshot["projected"])
         finally:
             browser.close()
@@ -217,14 +221,27 @@ def test_leaflet_persona_map_groups_duplicates_keeps_view_on_resize_and_wraps_da
             popup = page.locator(".leaflet-popup-content")
             assert "Jakarta office" in popup.inner_text()
             assert "Jakarta duplicate provenance" in popup.inner_text()
+            # Establish a deliberate analyst viewport after checking the popup;
+            # popup auto-pan is a separate user-triggered movement.
+            page.evaluate("() => window.personaMap.closePopup().setView([-6.3, 106.82], 9, {animate: false})")
             before_resize = page.evaluate("() => ({center: window.personaMap.getCenter(), zoom: window.personaMap.getZoom()})")
+            old_width = duplicate["width"]
             page.set_viewport_size({"width": 740, "height": 390})
-            page.wait_for_timeout(100)
+            page.wait_for_function("oldWidth => window.personaMap.getSize().x !== oldWidth", arg=old_width)
             after_resize = page.evaluate("() => ({center: window.personaMap.getCenter(), zoom: window.personaMap.getZoom()})")
-            assert after_resize == before_resize
+            assert after_resize["zoom"] == before_resize["zoom"]
+            # Leaflet rounds container centers to pixels during invalidation.
+            # A subpixel difference is harmless; the original drift was >180px.
+            center_drift = page.evaluate(
+                """([before, after]) => window.personaMap.project(before.center, before.zoom)
+                    .distanceTo(window.personaMap.project(after.center, after.zoom))""",
+                [before_resize, after_resize],
+            )
+            assert center_drift <= 1
 
             dateline = _open_persona_map(page, base_url, dateline_persona, dateline_points)
             assert dateline["markerCount"] == 2
+            assert len(dateline["projected"]) == 2
             assert all(point["reachable"] for point in dateline["projected"])
             assert dateline["zoom"] >= 4
         finally:

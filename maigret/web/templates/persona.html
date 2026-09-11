@@ -496,8 +496,19 @@
             maxZoom: 19,
             attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
         }).addTo(personaMap);
+        const longitudeBounds = shortestLongitudeBounds(points);
         groupedLocations(points).forEach((group) => {
-            const marker = L.marker(group.point).addTo(personaMap).bindPopup(buildPopup(group));
+            // Markers must use the same world copy as the initial bounds.
+            // Keep saved coordinates and popup provenance unchanged.
+            const [latitude, longitude] = group.point;
+            let displayLongitude = longitude;
+            if (longitudeBounds) {
+                const boundaryTolerance = 1e-9;
+                while (displayLongitude < longitudeBounds[0] - boundaryTolerance) displayLongitude += 360;
+                while (displayLongitude > longitudeBounds[1] + boundaryTolerance
+                    && displayLongitude - 360 >= longitudeBounds[0] - boundaryTolerance) displayLongitude -= 360;
+            }
+            const marker = L.marker([latitude, displayLongitude]).addTo(personaMap).bindPopup(buildPopup(group));
             if (group.locations.length > 1) marker.bindTooltip(`${group.locations.length} approved locations`, {direction: 'top'});
         });
         fitInitialView(personaMap, points);

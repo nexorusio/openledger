@@ -40,15 +40,18 @@ adds foreign keys using a PostgreSQL-specific operation. This is not evidence
 of a successful migration; the required PostgreSQL migration gate remains pending.
 
 The first PR CI run passed PostgreSQL migrations/check, 24 PostgreSQL integrity
-tests and two existing Chromium journeys. The new full gate then exposed fixture
-registration/flattened-result contract errors, compact JSON export metadata,
-and premature notifier closure during cancellation. The offline Python matrix
-reported the same three failures across 3.10–3.14: queued-cancel terminal-event
-expectation, partial stage timeout labeling and missing cancellation accounting.
-These findings have follow-up fixes; the 15 pipeline/alias tests pass locally,
-and the surrounding focused run passed 150 tests with two optional skips before
-the three alias expectations were corrected and rerun. A new full CI run is
-required; prior passing substeps are not final-tree acceptance.
+tests and two existing Chromium journeys. Subsequent runs exposed and verified
+repairs for fixture registration and flattened-result contracts, compact JSON
+export metadata, premature notifier closure during cancellation, per-stage
+timeout labeling, and retained-observation accounting during cooperative stop.
+The corrected offline suite passed on Python 3.10–3.14 and in the minimal-install
+job. The latest isolated worker/browser gate passed all five real-worker journeys
+and two of three browser/map journeys, then found that its resize assertion
+sampled a popup auto-pan before it settled. The corrected journey establishes an
+analyst viewport before resizing and inspects actual rendered marker coordinates;
+the map now places antimeridian markers in the same world copy as their fitted
+bounds. A fresh CI run is required; prior passing substeps are not final-tree
+acceptance.
 
 The mandatory full acceptance command is
 `.github/scripts/run_p3r_full_acceptance.sh <absolute-python-path>`.

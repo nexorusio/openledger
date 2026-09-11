@@ -72,6 +72,7 @@ def test_persona_map_filters_invalid_coordinates_groups_duplicates_and_uses_date
 
     dateline = _map_snapshot([_location(10, 179), _location(11, -179)])
     assert dateline["fitBounds"] == [[[10, 179], [11, 181]]]
+    assert dateline["markers"] == [[10, 179], [11, 181]]
 
 
 def test_live_source_stop_is_only_a_notice_and_runtime_phase_controls_terminal_badges():
