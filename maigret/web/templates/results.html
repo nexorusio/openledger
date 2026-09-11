@@ -5,9 +5,6 @@
 
 {% block content %}
 {% set partial_status = runtime_state.collection_status %}
-{% set graph_descriptor = graph_artifact if graph_artifact is mapping else none %}
-{% set graph_available = graph_descriptor.available if graph_descriptor is mapping else graph_file is string and graph_file %}
-{% set graph_filename = graph_descriptor.filename if graph_descriptor is mapping else graph_file %}
 <section class="page-heading">
     <div>
         <p class="eyebrow">{{ 'Partial investigation' if partial_status else 'Completed investigation' }}</p>
@@ -33,51 +30,6 @@
         This is a partial evidence set, not a completed coverage claim or an identity approval.
     </span>
 </div>
-{% endif %}
-
-{% set collection_accounting = runtime_state.collection_accounting if runtime_state.collection_accounting is mapping else none %}
-{% if collection_accounting and collection_accounting.schema_version == 1 %}
-{% set engine_labels = {'native': 'Native profile search', 'maigret': 'Maigret', 'github': 'GitHub', 'unfurl': 'Unfurl', 'wayback': 'Wayback', 'user_scanner_username': 'User Scanner usernames', 'user_scanner_email': 'User Scanner emails', 'native-profile-search': 'Native profile search', 'github-public-profile': 'GitHub', 'unfurl-url-analysis': 'Unfurl', 'wayback-cdx': 'Wayback', 'user-scanner-username': 'User Scanner usernames', 'user-scanner': 'User Scanner emails'} %}
-{% set unit_labels = {'site_checks': 'site checks', 'queries': 'queries', 'targets': 'targets', 'invocations': 'invocations'} %}
-{% set status_labels = {'running': 'Running', 'completed': 'Completed', 'partial': 'Partial', 'failed': 'Failed', 'cancelled': 'Cancelled', 'interrupted': 'Interrupted', 'unknown': 'Unknown', 'queued': 'Queued', 'skipped': 'Skipped', 'pending': 'Pending', 'not_selected': 'Not selected', 'skipped_no_targets': 'No targets', 'blocked_dependency': 'Blocked by dependency', 'not_started_budget': 'Not started: budget', 'timed_out': 'Timed out', 'cleanup_incomplete': 'Cleanup incomplete'} %}
-{% set reason_labels = {'budget_exhausted': 'Budget reached', 'cancelled': 'Cancelled', 'interrupted': 'Interrupted', 'provider_unavailable': 'Provider unavailable', 'provider_circuit_open': 'Provider circuit open', 'timeout': 'Timed out', 'failed': 'Failed', 'unavailable': 'Unavailable', 'unattempted': 'Unattempted', 'unknown': 'Unknown outcome', 'source_not_selected': 'Source not selected', 'no_eligible_targets': 'No eligible targets', 'dependency_not_ready': 'Dependency not ready', 'cancellation_requested': 'Cancellation requested', 'stage_budget_exhausted': 'Stage budget reached', 'overall_budget_exhausted': 'Overall budget reached', 'parent_cancelled': 'Parent cancelled', 'timed_out': 'Timed out', 'cleanup_incomplete': 'Cleanup incomplete', 'not_admitted': 'Not admitted'} %}
-<section class="panel-card mb-4" aria-labelledby="results-collection-accounting-heading">
-    <header class="panel-header">
-        <div>
-            <h2 id="results-collection-accounting-heading">Declared collection accounting</h2>
-            <p>Each source keeps its own unit. Accounted operations do not measure discovery accuracy or identity.</p>
-        </div>
-        <span class="badge-soft">{{ status_labels.get(collection_accounting.state, 'Unknown') if collection_accounting.known else 'Coverage unavailable' }}</span>
-    </header>
-    <div class="panel-body">
-        {% if not collection_accounting.known %}
-        <p class="form-text mb-3">Coverage accounting is unavailable for this legacy saved run.</p>
-        {% endif %}
-        <div class="table-responsive">
-            <table class="table table-sm mb-0">
-                <caption class="visually-hidden">Declared collection accounting by source engine</caption>
-                <thead><tr><th>Engine</th><th>Unit</th><th>Status</th><th>Reason</th><th>Terminal / planned</th><th>Errors</th><th>Timeouts</th><th>Unattempted</th><th>Unknown</th></tr></thead>
-                <tbody>
-                {% for stage in collection_accounting.stages if stage is mapping %}
-                    <tr>
-                        <td>{{ engine_labels.get(stage.get('engine_id'), 'Declared collection stage') }}</td>
-                        <td>{{ unit_labels.get(stage.get('unit'), 'operations') }}</td>
-                        <td>{{ status_labels.get(stage.get('status'), 'Unknown') }}</td>
-                        <td>{{ reason_labels.get(stage.get('reason'), '—') }}</td>
-                        <td>{{ stage.get('terminal', '—') if stage.get('terminal') is not none else '—' }} / {{ stage.get('planned', '—') if stage.get('planned') is not none else '—' }}</td>
-                        <td>{{ stage.get('errors', '—') if stage.get('errors') is not none else '—' }}</td>
-                        <td>{{ stage.get('timeouts', '—') if stage.get('timeouts') is not none else '—' }}</td>
-                        <td>{{ stage.get('unattempted', '—') if stage.get('unattempted') is not none else '—' }}</td>
-                        <td>{{ stage.get('unknown', '—') if stage.get('unknown') is not none else '—' }}</td>
-                    </tr>
-                {% else %}
-                    <tr><td colspan="9">No declared collection stages were recorded.</td></tr>
-                {% endfor %}
-                </tbody>
-            </table>
-        </div>
-    </div>
-</section>
 {% endif %}
 
 <section class="metric-grid" aria-label="Investigation summary">
@@ -142,7 +94,7 @@
 </section>
 
 <div class="results-grid">
-    {% if graph_available and graph_filename %}
+    {% if graph_file %}
     <section class="panel-card">
         <header class="panel-header">
             <div>
@@ -152,18 +104,13 @@
             <span class="badge-soft"><i data-lucide="network"></i> Interactive</span>
         </header>
         <div class="panel-body p-0">
-            <iframe src="{{ url_for('download_report', filename=graph_filename) }}"
+            <iframe src="{{ url_for('download_report', filename=graph_file) }}"
                 title="OpenLedger combined relationship graph"
                 sandbox="allow-scripts"
                 loading="lazy"
                 referrerpolicy="no-referrer"
                 style="width:100%; height:620px; border:0;"></iframe>
         </div>
-    </section>
-    {% elif graph_descriptor is mapping and not graph_descriptor.available %}
-    <section class="panel-card">
-        <header class="panel-header"><div><h2>Discovery evidence graph unavailable</h2></div></header>
-        <div class="panel-body"><p class="form-text mb-0">{{ graph_descriptor.message or 'The graph artifact was not available for this retained result.' }}</p></div>
     </section>
     {% endif %}
 
@@ -303,19 +250,11 @@
                         <span class="chevron collapsed" aria-hidden="true"></span>
                     </button>
                     <div id="report-{{ loop.index }}" class="report-content">
-                        {% set artifact_descriptors = report.artifacts if report.artifacts is mapping else none %}
-                        {% set artifact_specs = [('csv', 'CSV Report · raw', report.csv_file), ('json', 'JSON Report · raw', report.json_file), ('pdf', 'PDF Report · raw', report.pdf_file), ('html', 'HTML Report · raw', report.html_file)] %}
                         <div class="d-flex flex-wrap gap-2 mb-3">
-                            {% for artifact_key, artifact_label, legacy_filename in artifact_specs %}
-                                {% set descriptor = artifact_descriptors.get(artifact_key) if artifact_descriptors is mapping else none %}
-                                {% set artifact_available = descriptor.available if descriptor is mapping else legacy_filename is string and legacy_filename %}
-                                {% set artifact_filename = descriptor.filename if descriptor is mapping else legacy_filename %}
-                                {% if artifact_available and artifact_filename %}
-                                <a href="{{ url_for('download_report', filename=artifact_filename) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">{{ artifact_label }}</a>
-                                {% elif descriptor is mapping %}
-                                <span class="form-text">{{ artifact_label }} unavailable{% if descriptor.message %}: {{ descriptor.message }}{% endif %}</span>
-                                {% endif %}
-                            {% endfor %}
+                            <a href="{{ url_for('download_report', filename=report.csv_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">CSV Report · raw</a>
+                            <a href="{{ url_for('download_report', filename=report.json_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">JSON Report · raw</a>
+                            <a href="{{ url_for('download_report', filename=report.pdf_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">PDF Report · raw</a>
+                            <a href="{{ url_for('download_report', filename=report.html_file) }}" target="_blank" rel="noopener" class="btn btn-sm btn-outline-secondary">HTML Report · raw</a>
                         </div>
                         {% if report.major_platforms %}
                         <p class="form-label mb-2">Major-platform coverage</p>

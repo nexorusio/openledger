@@ -21,31 +21,17 @@ from maigret.web.case_store import (
     persona_claims,
     utcnow,
 )
-from maigret.web.investigation_input import build_unified_investigation_plan
 from maigret.web.persona_intelligence import extract_case_chat_persona_claims
 
 
 @pytest.fixture
-def store(tmp_path, monkeypatch):
-    monkeypatch.setenv("OPENLEDGER_GOVERNED_PIVOTS_ENABLED", "true")
+def store(tmp_path):
     instance = CaseStore(
         f"sqlite:///{tmp_path / 'openledger.db'}",
         create_schema=True,
     )
     yield instance
     instance.dispose()
-
-
-def _authorized_identity_enrichment(store, persona_id, claim_id, **kwargs):
-    requested_by = kwargs.pop("requested_by", "identity.analyst")
-    return store.create_identity_enrichment(
-        persona_id,
-        claim_id,
-        requested_by=requested_by,
-        purpose="Corroborate this approved identity within the assigned case.",
-        scope_confirmed=True,
-        **kwargs,
-    )
 
 
 def test_job_lifecycle_is_transactional_and_auditable(store):
@@ -108,234 +94,6 @@ def test_job_lifecycle_is_transactional_and_auditable(store):
     completed = store.get_job(job_id)
     assert completed["status"] == "completed"
     assert completed["found_count"] == 1
-
-
-def test_schema_v2_full_name_route_can_create_and_rerun_without_username_targets(
-    store, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    plan = build_unified_investigation_plan(
-        {"investigation_token": ["Alice Example"], "mode": "quick"}
-    )
-
-    job_id = store.create_investigation([], {"investigation_spec": plan})
-    queued = store.get_job(job_id)
-    route_plan = queued["options"]["investigation_spec"]["route_plan"]
-    case = store.get_case(queued["case_id"])
-
-    assert queued["usernames"] == []
-    assert [item["route"] for item in route_plan["effective_routes"]] == [
-        "native_profile_search"
-    ]
-    assert route_plan["execution_mode"] == "focused"
-    assert route_plan["budget_seconds"] == 600
-    assert case["title"] == "Alice Example"
-    assert [persona["display_name"] for persona in case["personas"]] == [
-        "Alice Example"
-    ]
-
-    claimed = store.claim_next("worker:full-name")
-    store.finish(
-        job_id,
-        {
-            "status": "completed",
-            "session_folder": f"search_{job_id}",
-            "usernames": [],
-            "individual_reports": [],
-            "found_count": 0,
-        },
-        worker_id=claimed["worker_id"],
-    )
-    refresh_id = store.repeat_persona_investigation(case["personas"][0]["id"])
-    refresh = store.get_job(refresh_id)
-
-    assert refresh["kind"] == "refresh"
-    assert refresh["usernames"] == []
-    assert refresh["options"]["investigation_spec"]["route_plan"][
-        "effective_routes"
-    ][0]["route"] == "native_profile_search"
-
-
-def test_schema_v1_store_contract_still_rejects_an_empty_username_set(store):
-    with pytest.raises(ValueError, match="At least one username"):
-        store.create_investigation([], {})
-
-
-def test_relationship_state_precedence_and_effective_route_summary(
-    store, monkeypatch
-):
-    assert store.build_relationship_state()["status"] == "no_scope"
-    assert store.build_relationship_state(case_id="missing")["status"] == "no_scope"
-
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    plan = build_unified_investigation_plan(
-        {"investigation_token": ["Alice Example"], "mode": "quick"}
-    )
-    job_id = store.create_investigation([], {"investigation_spec": plan})
-    job = store.get_job(job_id)
-
-    active = store.build_relationship_state(
-        case_id=job["case_id"], graph_ready=True
-    )
-    assert active["status"] == "active_collection"
-    assert active["latest_plan"] == {
-        "job_id": job_id,
-        "requested_mode": "quick",
-        "execution_mode": "focused",
-        "mode_label": "Quick Scan",
-        "effective_routes": ["native_profile_search"],
-        "effective_route_count": 1,
-        "skipped_route_count": 1,
-        "budget_seconds": 600,
-    }
-
-    store.claim_next("worker:relationship-state")
-    store.append_event(
-        job_id,
-        {"type": "provider_circuit_open", "provider": "test-provider"},
-    )
-    store.finish(job_id, {"status": "failed", "error": "bounded failure"})
-    assert store.build_relationship_state(
-        case_id=job["case_id"], graph_ready=True
-    )["status"] == "graph_ready"
-    failed = store.build_relationship_state(case_id=job["case_id"])
-    assert failed["status"] == "failed"
-    assert failed["reason"] == "failed_collection"
-
-
-@pytest.mark.parametrize(
-    ("terminal_status", "collection_status", "event", "expected_reason"),
-    [
-        ("budget_exhausted", None, None, "budget_limited"),
-        ("cancelled", None, None, "cancelled"),
-        ("interrupted", None, None, "interrupted"),
-        (
-            "completed",
-            None,
-            {"type": "collector_completed", "status": "partial"},
-            "partial_completion",
-        ),
-        (
-            "completed",
-            None,
-            {"type": "provider_circuit_open", "provider": "test"},
-            "blocked_provider",
-        ),
-        ("completed", "cancelled", None, "cancelled"),
-    ],
-)
-def test_relationship_state_distinguishes_terminal_and_degraded_collection(
-    store,
-    terminal_status,
-    collection_status,
-    event,
-    expected_reason,
-):
-    job_id = store.create_investigation(["alice"], {})
-    job = store.claim_next("worker:relationship-diagnostic")
-    if event:
-        store.append_event(job_id, event)
-    result = {"status": terminal_status, "usernames": ["alice"]}
-    if collection_status:
-        result["collection_status"] = collection_status
-    store.finish(job_id, result)
-
-    state = store.build_relationship_state(case_id=job["case_id"])
-
-    assert state["status"] == "degraded"
-    assert state["reason"] == expected_reason
-    assert expected_reason in state["diagnostics"]
-
-
-def test_relationship_state_moves_from_clean_empty_to_pending_and_graph_ready(store):
-    job_id = store.create_investigation(["alice", "bob"], {})
-    job = store.claim_next("worker:relationship-review")
-    result = {
-        "status": "completed",
-        "usernames": ["alice", "bob"],
-        "individual_reports": [
-            {
-                "username": username,
-                "claimed_profiles": [
-                    {
-                        "site_name": "Example",
-                        "url": f"https://example.test/{username}",
-                        "confidence": "strong",
-                        "evidence": {"company": "Nexorus"},
-                    }
-                ],
-            }
-            for username in ("alice", "bob")
-        ],
-    }
-    store.finish(job_id, result)
-    assert store.build_relationship_state(case_id=job["case_id"])["status"] == (
-        "clean_empty"
-    )
-
-    store.sync_persona_claims(job_id, result)
-    pending = store.build_relationship_state(case_id=job["case_id"])
-    assert pending["status"] == "pending_review"
-    assert pending["counts"]["pending_reviews"] == 4
-    assert store.build_relationship_graph(job["case_id"])["edges"] == []
-
-    case = store.get_case(job["case_id"])
-    refresh_id = store.repeat_persona_investigation(case["personas"][0]["id"])
-    store.claim_next("worker:failed-refresh")
-    store.finish(refresh_id, {"status": "failed", "error": "bounded failure"})
-    pending_after_failure = store.build_relationship_state(case_id=job["case_id"])
-    assert pending_after_failure["status"] == "pending_review"
-    assert "failed_collection" in pending_after_failure["diagnostics"]
-
-    for persona in case["personas"]:
-        company = next(
-            claim
-            for claim in store.get_persona(persona["id"])["claims"]
-            if claim["field_name"] == "company"
-        )
-        store.review_claim(company["id"], "approved", "analyst")
-    graph = store.build_relationship_graph(job["case_id"])
-    ready = store.build_relationship_state(
-        case_id=job["case_id"], graph_ready=bool(graph["edges"])
-    )
-    assert ready["status"] == "graph_ready"
-    assert len(graph["edges"]) == 2
-
-
-def test_relationship_state_marks_changed_combined_snapshot_as_stale(store):
-    source_case_ids = []
-    for username in ("alice", "bob"):
-        source_job_id = store.create_investigation([username], {})
-        source_job = store.claim_next(f"worker:{username}")
-        store.finish(
-            source_job_id,
-            {"status": "completed", "usernames": [username]},
-        )
-        source_case_ids.append(source_job["case_id"])
-    fusion_job_id = store.create_combined_investigation(
-        source_case_ids,
-        title="Stale relationship snapshot",
-        purpose="Verify stale snapshot presentation.",
-        created_by="analyst",
-    )
-    fusion_job = store.claim_next("worker:fusion")
-    snapshot = store.build_case_fusion_snapshot(fusion_job_id)
-    store.finish(
-        fusion_job_id,
-        {"status": "completed", "kind": "case_fusion", **snapshot},
-    )
-    with store.engine.begin() as connection:
-        connection.execute(
-            update(cases)
-            .where(cases.c.id == source_case_ids[0])
-            .values(updated_at=utcnow() + timedelta(seconds=1))
-        )
-
-    state = store.build_relationship_state(case_id=fusion_job["case_id"])
-
-    assert state["status"] == "degraded"
-    assert state["reason"] == "stale_snapshot"
-    assert "stale_snapshot" in state["diagnostics"]
 
 
 def test_case_personas_and_events_are_removed_with_terminal_job(store):
@@ -1697,7 +1455,6 @@ def test_approved_coordinates_are_validated_and_serialized(store):
         location["id"],
         "approved",
         "analyst",
-        note="Analyst verified the cited place point",
         latitude="-6.1754",
         longitude="106.8272",
     )
@@ -1749,14 +1506,12 @@ def test_ai_location_coordinates_remain_pending_until_human_approval(store):
     claim = store.get_persona(persona_id)["claims"][0]
     assert synced["diagnostics"]["accepted"] == 1
     assert claim["review_status"] == "pending"
-    assert claim["latitude"] is None
-    assert claim['legacy_coordinates']['latitude'] == pytest.approx(-6.1754)
+    assert claim["latitude"] == pytest.approx(-6.1754)
 
     store.review_claim(claim["id"], "approved", "analyst")
     approved = store.get_persona(persona_id)["claims"][0]
     assert approved["review_status"] == "approved"
-    assert approved["latitude"] is None
-    assert approved['coordinate_selection']['action'] == 'unmapped'
+    assert approved["latitude"] == pytest.approx(-6.1754)
 
 
 def test_ai_coordinates_do_not_silently_map_an_already_approved_location(store):
@@ -3114,7 +2869,7 @@ def _icij_identity_observation():
 
 def test_confirmed_name_enrichment_persists_only_pending_review_candidates(store):
     persona_id, name_claim_id = _approved_full_name(store)
-    enrichment_id = _authorized_identity_enrichment(store, persona_id, name_claim_id)
+    enrichment_id = store.create_identity_enrichment(persona_id, name_claim_id)
     job = store.claim_next("worker:identity")
 
     assert job["job_id"] == enrichment_id
@@ -3153,7 +2908,7 @@ def test_confirmed_name_enrichment_persists_only_pending_review_candidates(store
 
 def test_wikipedia_selection_accepts_only_a_stored_candidate_for_same_persona(store):
     persona_id, name_claim_id = _approved_full_name(store)
-    enrichment_id = _authorized_identity_enrichment(store, persona_id, name_claim_id)
+    enrichment_id = store.create_identity_enrichment(persona_id, name_claim_id)
     store.claim_next("worker:identity")
     store.finish(
         enrichment_id,
@@ -3170,15 +2925,13 @@ def test_wikipedia_selection_accepts_only_a_stored_candidate_for_same_persona(st
     )
 
     with pytest.raises(ValueError, match="not a stored candidate"):
-        _authorized_identity_enrichment(
-            store,
+        store.create_identity_enrichment(
             persona_id,
             name_claim_id,
             selected_wikipedia_page_id="999",
         )
     selected = store.get_job(
-        _authorized_identity_enrichment(
-            store,
+        store.create_identity_enrichment(
             persona_id,
             name_claim_id,
             selected_wikipedia_page_id="123",

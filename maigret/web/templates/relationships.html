@@ -65,19 +65,6 @@
     </div>
 </form>
 
-<section class="relationship-state relationship-state--{{ relationship_state.status }}" data-relationship-state="{{ relationship_state.status }}" data-relationship-reason="{{ relationship_state.reason }}" aria-live="polite">
-    <i data-lucide="{{ relationship_state.icon }}" aria-hidden="true"></i>
-    <div class="relationship-state-copy">
-        <strong>{{ relationship_state.title }}</strong>
-        <span>{{ relationship_state.message }}</span>
-        {% if relationship_state.metadata %}
-        <ul class="relationship-state-metadata" aria-label="Persisted relationship diagnostics">
-            {% for item in relationship_state.metadata %}<li>{{ item }}</li>{% endfor %}
-        </ul>
-        {% endif %}
-    </div>
-</section>
-
 {% if mode == 'persona' and graph.stats.truncated_count %}
 <div class="security-callout"><i data-lucide="info"></i><span>The graph shows the 120 highest-priority records; {{ graph.stats.truncated_count }} additional records remain available in the Persona profile.</span></div>
 {% endif %}
@@ -187,9 +174,14 @@
         <div id="relationshipGraphStatus" class="relationship-graph-status" aria-live="polite">Showing {{ graph.nodes | length }} nodes and {{ graph.edges | length }} evidence paths.</div>
         {% else %}
         <div class="relationship-empty">
-            <i data-lucide="{{ relationship_state.icon }}"></i>
-            <h3>{{ relationship_state.empty_title }}</h3>
-            <p>{{ relationship_state.empty_message }}</p>
+            <i data-lucide="{{ 'folder-search-2' if mode == 'persona' else 'share-2' }}"></i>
+            {% if mode == 'persona' %}
+            <h3>No reviewable evidence for this Persona yet</h3>
+            <p>Complete an investigation or run a cited AI assessment. New findings will enter as pending records with their sources attached.</p>
+            {% else %}
+            <h3>No shared approved attributes yet</h3>
+            <p>{% if combined_scope %}The selected source cases have no exact approved cross-case links in their latest snapshot. Review source findings or refresh after approvals change.{% else %}Select All cases or approve an exact matching location, affiliation, contact, account, occupation, website, vehicle, or ownership record on at least two Persona profiles.{% endif %}</p>
+            {% endif %}
         </div>
         {% endif %}
     </section>

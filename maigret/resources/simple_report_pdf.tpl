@@ -101,7 +101,7 @@
                                     {% endif %}
                                 </td>
                                 <td style="width:201px; position: relative;" valign="top">
-                                    <img alt="Photo unavailable in legacy PDF" style="width: 200px; height: 200px; object-fit: scale-down;" src="{{ pdf_placeholder_image }}" data-holder-rendered="true">
+                                    <img alt="Photo" style="width: 200px; height: 200px; object-fit: scale-down;" src="{{ v.status.ids_data.image or 'https://i.imgur.com/040fmbw.png' }}" data-holder-rendered="true">
                                 </td>
                             </tr>
                         </table>

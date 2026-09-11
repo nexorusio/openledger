@@ -1,14 +1,12 @@
 # Standard library imports
 import ast
 import asyncio
-import hashlib
 import logging
 import os
 import random
 import re
 import ssl
 import sys
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 from unittest.mock import Mock
 from urllib.parse import quote, urlparse
@@ -32,11 +30,7 @@ from . import errors
 from .activation import ParsingActivator, import_aiohttp_cookies
 from .error_detection import detect_error_page
 from .errors import CheckError
-from .executors import (
-    AsyncioQueueGeneratorExecutor,
-    DEFAULT_CLEANUP_SECONDS,
-    ExecutorCleanupIncompleteError,
-)
+from .executors import AsyncioQueueGeneratorExecutor
 from .result import MaigretCheckResult, MaigretCheckStatus, KeywordMatchStatus, SiteResult
 from .sites import MaigretDatabase, MaigretSite
 from .utils import ascii_data_display, get_random_user_agent, is_plausible_username
@@ -49,35 +43,6 @@ _DNS_ERROR_MARKERS = (
     "temporary failure in name resolution",  # glibc EAI_AGAIN
     "getaddrinfo failed",              # generic socket error
 )
-
-
-class _TaskNotifyGate:
-    """Reject updates produced after an executor task is terminal.
-
-    A checker may suppress cancellation while its transport/session cleanup is
-    still running.  It must not append a late stream or persistence update
-    after the executor has recorded timeout/cancelled for that task.
-    """
-
-    def __init__(self, notifier):
-        self._notifier = notifier
-        self._open = True
-
-    def close(self) -> None:
-        self._open = False
-
-    def update(self, *args, **kwargs):
-        if self._open:
-            return self._notifier.update(*args, **kwargs)
-        return None
-
-    def enrich(self, *args, **kwargs):
-        if self._open:
-            return self._notifier.enrich(*args, **kwargs)
-        return None
-
-    def __getattr__(self, name):
-        return getattr(self._notifier, name)
 
 
 def _is_dns_error(exc: Exception) -> bool:
@@ -1342,119 +1307,14 @@ async def maigret(
     if logger.level == logging.DEBUG:
         await debug_ip_request(clearweb_checker(), logger)
 
-    # The caller may supply a durable execution scope (the web job id).  CLI
-    # calls get an opaque per-run scope.  Raw usernames and site names are
-    # never placed in executor accounting events.
-    executor_kwargs = dict(kwargs)
-    execution_scope = str(executor_kwargs.pop('execution_id', None) or uuid.uuid4().hex)
-    cleanup_timeout = min(
-        DEFAULT_CLEANUP_SECONDS,
-        max(0.0, float(executor_kwargs.pop('cleanup_timeout', DEFAULT_CLEANUP_SECONDS))),
-    )
-
-    def opaque_task_id(*parts: object) -> str:
-        return hashlib.sha256(
-            '\x1f'.join(str(part) for part in parts).encode('utf-8')
-        ).hexdigest()
-
-    # The executor exposes only safe terminal dispositions.  The native
-    # result tuple stays out of that event, so retain the fallback result here
-    # for the existing notifier surface.  A normal completed check notifies
-    # inside check_site_for_username; a fallback notifies exactly once here.
-    fallback_notifications: Dict[str, Dict[str, Tuple[SiteResult, bool]]] = {}
-
-    def task_terminal(event) -> None:
-        if event.get('event_type') == 'cleanup':
-            cleanup_event = getattr(query_notify, 'task_cleanup_event', None)
-            if callable(cleanup_event):
-                cleanup_event(event)
-            return
-        disposition = event.get('disposition')
-        task_id = event.get('task_id')
-        durable_terminal = getattr(query_notify, 'task_terminal', None)
-        if callable(durable_terminal):
-            durable_terminal(event)
-        if disposition != 'completed' and task_id in fallback_notifications:
-            fallbacks = fallback_notifications[str(task_id)]
-            result, is_similar = fallbacks.get(
-                str(disposition), fallbacks['error']
-            )
-            try:
-                query_notify.update(result['status'], is_similar)
-            except asyncio.CancelledError:
-                # StreamNotify has already recorded its cancellation flag.
-                # The executor has just committed the durable task terminal
-                # event, so propagate cancellation from the outer loop below
-                # rather than emit a second terminal disposition here.
-                return
-            except Exception:
-                # The durable terminal record is already committed.  A UI
-                # projection failure is distinct from accounting failure and
-                # cannot rewrite that disposition or cause a duplicate event.
-                projection_failed = getattr(query_notify, 'task_projection_failed', None)
-                if callable(projection_failed):
-                    try:
-                        projection_failed({
-                            'schema_version': event['schema_version'],
-                            'task_id': event['task_id'],
-                            'reason': 'notifier_update_failed',
-                        })
-                    except Exception:
-                        logger.error(
-                            'Unable to record fallback projection failure', exc_info=True
-                        )
-                logger.error('Unable to project fallback check result', exc_info=True)
-
-    def task_planned(event) -> None:
-        durable_planned = getattr(query_notify, 'task_planned', None)
-        if callable(durable_planned):
-            durable_planned(event)
-
-    def task_plan(events) -> None:
-        """Persist a complete planned batch before this retry is admitted."""
-        durable_plan = getattr(query_notify, 'task_plan', None)
-        if callable(durable_plan):
-            durable_plan(events)
-            return
-        for event in events:
-            task_planned(event)
-
-    def fallback_result(site, sitename: str, message: str) -> SiteResult:
-        return {
-            'site': site,
-            'status': MaigretCheckResult(
-                username,
-                sitename,
-                '',
-                MaigretCheckStatus.UNKNOWN,
-                error=CheckError(message),
-            ),
-        }
-
     # setup parallel executor
     executor = AsyncioQueueGeneratorExecutor(
         logger=logger,
         in_parallel=max_connections,
         timeout=timeout + 0.5,
-        execution_id=execution_scope,
-        task_notify=task_terminal,
-        cleanup_timeout=cleanup_timeout,
         *args,
-        **executor_kwargs,
+        **kwargs,
     )
-
-    async def finish_executor_cleanup() -> bool:
-        cleanup_complete = await executor.drain_cleanup(
-            min(cleanup_timeout, executor.remaining_cleanup_budget)
-        )
-        cleanup_notify = getattr(query_notify, 'task_cleanup', None)
-        if callable(cleanup_notify):
-            cleanup_notify({
-                'schema_version': 1,
-                'cleanup_complete': cleanup_complete,
-                'pending_tasks': executor.pending_cleanup_count,
-            })
-        return cleanup_complete
 
     # make options objects for all the requests
     options: Dict[str, Any] = {}
@@ -1487,64 +1347,29 @@ async def maigret(
     attempts = retries + 1
     while attempts:
         tasks_dict = {}
-        planned_events = []
 
         for sitename, site in site_dict.items():
             if sitename not in sites:
                 continue
-            attempt = retries - attempts + 1
-            check_id = opaque_task_id(execution_scope, 'check', sitename, username)
-            task_id = opaque_task_id(execution_scope, 'task', check_id, attempt)
-            default_result = fallback_result(site, sitename, 'Request failed')
-            timeout_result = fallback_result(site, sitename, 'Request timeout')
-            unattempted_result = fallback_result(
-                site, sitename, 'Request was not attempted'
-            )
-            fallback_notifications[task_id] = {
-                'error': (default_result, site.similar_search),
-                'timeout': (timeout_result, site.similar_search),
-                'unattempted': (unattempted_result, site.similar_search),
-            }
-            task_metadata = {
-                'schema_version': 1,
-                'check_id': check_id,
-                'task_id': task_id,
-                'source_id': opaque_task_id(
-                    execution_scope, 'source', sitename
+            default_result: SiteResult = {
+                'site': site,
+                'status': MaigretCheckResult(
+                    username,
+                    sitename,
+                    '',
+                    MaigretCheckStatus.UNKNOWN,
+                    error=CheckError('Request failed'),
                 ),
-                'target_id': opaque_task_id(
-                    execution_scope, 'target', username
-                ),
-                'attempt': attempt,
             }
-            # A retry has a distinct opaque task id but a stable check id, so
-            # durable reconciliation can retain both the check and attempts.
-            planned_events.append(task_metadata)
-            task_notifier = _TaskNotifyGate(query_notify)
             tasks_dict[sitename] = (
                 check_site_for_username,
-                [site, username, options, logger, task_notifier],
+                [site, username, options, logger, query_notify],
                 {
                     'default': (sitename, default_result),
-                    '_executor_defaults': {
-                        'error': (sitename, default_result),
-                        'timeout': (sitename, timeout_result),
-                        'unattempted': (sitename, unattempted_result),
-                    },
-                    '_executor_task': task_metadata,
-                    '_executor_finalize': task_notifier.close,
-                    'retry': attempt,
+                    'retry': retries - attempts + 1,
                     'keywords': keywords,
                 },
             )
-
-        # This batch is recorded before executor admission.  Older notifiers
-        # can receive the same data one event at a time via task_planned().
-        try:
-            task_plan(planned_events)
-        except Exception:
-            await finish_executor_cleanup()
-            raise
 
         cur_results = []
         # ctrl_c=False is critical: alive_progress's default Ctrl+C handler
@@ -1570,19 +1395,11 @@ async def maigret(
                     # post-loop update but visible to the caller mid-flight.
                     all_results.update([result])
                     progress()
-                    if getattr(query_notify, 'cancel_requested', False) is True:
-                        raise asyncio.CancelledError
         except asyncio.CancelledError:
             # Re-raise so the caller's `except CancelledError` runs. The
             # partial `all_results` is already visible to the caller via the
             # output_container kwarg.
-            # Cancellation is terminal independently of whether the bounded
-            # cleanup drain succeeds.  Do not publish normal completion while
-            # a source coroutine can still be cleaning up.
-            await finish_executor_cleanup()
-            raise
-        except Exception:
-            await finish_executor_cleanup()
+            query_notify.finish()
             raise
 
         all_results.update(cur_results)
@@ -1598,11 +1415,6 @@ async def maigret(
             query_notify.warning(
                 f'Restarting checks for {len(sites)} sites... ({attempts} attempts left)'
             )
-
-    if not await finish_executor_cleanup():
-        raise ExecutorCleanupIncompleteError(
-            "executor cleanup did not finish before collection finalization"
-        )
 
     # notify caller that all queries are finished
     query_notify.finish()
