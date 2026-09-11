@@ -18,12 +18,14 @@ def test_builder_groups_first_and_accepts_legacy_handle_prefill(client, web_app)
         body = web_app.render_template('index.html', **context)
     assert body.index('Who are you investigating?') < body.index('Known identifiers')
     assert 'value="same_subject" checked' in body
-    assert '<option value="username" selected>Username or @handle</option>' in body
+    assert '<option value="username" selected>Username</option>' in body
     assert '<option value="social_handle"' not in body
+    assert '<option value="profile_url"' not in body
     assert 'value="@alice"' in body
     assert 'Investigation workspace' in body
     assert 'Username checks (Maigret)' in body
     assert 'Where your identifiers go' in body
+    assert 'One username target across eligible social sites' in body
     assert 'generated aliases stay with their source subject' in body
     assert '0 account checks' not in body
 

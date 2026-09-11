@@ -114,8 +114,7 @@
                         <div class="identifier-row">
                             <label class="visually-hidden" for="identifier-type-{{ loop.index }}">Identifier type</label>
                             <select class="form-select identifier-type" id="identifier-type-{{ loop.index }}" name="identifier_type" aria-label="Identifier type">
-                                <option value="username" {{ 'selected' if identifier.type in ['username', 'social_handle'] }}>Username or @handle</option>
-                                <option value="profile_url" {{ 'selected' if identifier.type == 'profile_url' }}>Profile URL</option>
+                                <option value="username" {{ 'selected' if identifier.type in ['username', 'social_handle', 'profile_url'] }}>Username</option>
                                 <option value="full_name" {{ 'selected' if identifier.type == 'full_name' }}>Full name</option>
                                 <option value="email" {{ 'selected' if identifier.type == 'email' }}>Email address</option>
                                 <option value="phone" {{ 'selected' if identifier.type == 'phone' }}>Phone number</option>
@@ -299,8 +298,7 @@
                 <div class="identifier-row">
                     <label class="visually-hidden">Identifier type</label>
                     <select class="form-select identifier-type" name="identifier_type" aria-label="Identifier type">
-                        <option value="username">Username or @handle</option>
-                        <option value="profile_url">Profile URL</option>
+                        <option value="username">Username</option>
                         <option value="full_name">Full name</option>
                         <option value="email">Email address</option>
                         <option value="phone">Phone number</option>
@@ -377,8 +375,8 @@
     let plannedAliasKeysByComparison = new Map();
 
     const behavior = {
-        username: ['e.g. johndoe or @johndoe', 'Maigret username; also eligible for native search and optional User Scanner. The @ prefix is removed.'],
-        social_handle: ['e.g. johndoe or @johndoe', 'Maigret username; also eligible for native search and optional User Scanner. The @ prefix is removed.'],
+        username: ['e.g. johndoe, @johndoe, or https://instagram.com/johndoe', 'One username target across eligible social sites. The @ prefix is removed; a complete profile URL is retained as source context and its handle becomes the username target.'],
+        social_handle: ['e.g. johndoe, @johndoe, or https://instagram.com/johndoe', 'One username target across eligible social sites. The @ prefix is removed; a complete profile URL is retained as source context and its handle becomes the username target.'],
         profile_url: ['e.g. https://instagram.com/johndoe', 'Parsed locally into username targets. Parsing does not fetch the profile page.'],
         full_name: ['e.g. John Doe', 'One phrase for native search when enabled. Only selected username aliases go to Maigret.'],
         email: ['e.g. name@example.com', 'Optional User Scanner registration check; case context for AI only with consent. No Maigret or native search.'],
@@ -394,7 +392,8 @@
         list.querySelectorAll('.identifier-row').forEach(row => {
             const type = row.querySelector('.identifier-type').value;
             const value = row.querySelector('.identifier-value').value.trim();
-            const candidate = type === 'username' || type === 'social_handle'
+            const isProfileUrl = /^https?:\/\//i.test(value);
+            const candidate = (type === 'username' || type === 'social_handle') && !isProfileUrl
                 ? value.replace(/^@+/, '')
                 : '';
             if (candidate && !exactTargets.some(item => comparisonKey(item) === comparisonKey(candidate))) exactTargets.push(candidate);
@@ -407,7 +406,13 @@
             .filter(row => row.querySelector('.identifier-type').value === 'full_name')
             .map(row => row.querySelector('.identifier-value').value.trim()).filter(Boolean);
         const profileUrls = Array.from(list.querySelectorAll('.identifier-row'))
-            .filter(row => row.querySelector('.identifier-type').value === 'profile_url')
+            .filter(row => {
+                const type = row.querySelector('.identifier-type').value;
+                const value = row.querySelector('.identifier-value').value.trim();
+                return type === 'profile_url'
+                    || ((type === 'username' || type === 'social_handle')
+                        && /^https?:\/\//i.test(value));
+            })
             .map(row => row.querySelector('.identifier-value').value.trim())
             .filter(Boolean);
         return {

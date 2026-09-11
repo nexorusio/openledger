@@ -91,14 +91,14 @@ def _normalize_text(value: Any, *, limit: int = MAX_CONTEXT_LENGTH) -> str:
 def normalize_username(value: Any) -> str:
     username = _normalize_text(value, limit=MAX_USERNAME_LENGTH + 1).lstrip("@").strip()
     if not username:
-        raise InvestigationInputError("Enter a username or social handle.")
+        raise InvestigationInputError("Enter a username, @handle, or profile URL.")
     if len(username) > MAX_USERNAME_LENGTH:
         raise InvestigationInputError(
             f"Usernames must be {MAX_USERNAME_LENGTH} characters or fewer."
         )
     if not is_plausible_username(username) or "#" in username:
         raise InvestigationInputError(
-            f"{value!s} is not a valid username or social handle."
+            f"{value!s} is not a valid username or @handle."
         )
     return username
 
@@ -305,6 +305,27 @@ def build_investigation_plan(
             target["alias_reason"] = alias_reason[:240]
         search_targets.append(target)
 
+    def add_identifier(identifier_type: str, value: str) -> None:
+        """Store one canonical identifier while retaining profile URL provenance."""
+        canonical_type = (
+            "username" if identifier_type == "social_handle" else identifier_type
+        )
+        comparison_value = (
+            value.casefold() if canonical_type != "profile_url" else value
+        )
+        if any(
+            item["type"] == canonical_type
+            and (
+                item["value"].casefold()
+                if canonical_type != "profile_url"
+                else item["value"]
+            )
+            == comparison_value
+            for item in identifiers
+        ):
+            return
+        identifiers.append({"type": canonical_type, "value": value})
+
     for identifier_type, raw_value in zip(types, values):
         identifier_type = identifier_type.strip()
         if not identifier_type and not str(raw_value).strip():
@@ -314,9 +335,16 @@ def build_investigation_plan(
         if not str(raw_value).strip():
             raise InvestigationInputError("Every identifier row needs a value.")
 
+        # The public form has one account input. Continue accepting historical
+        # type names, and detect complete profile URLs inside that same input.
+        if identifier_type in {"username", "social_handle"} and _normalize_text(
+            raw_value, limit=2000
+        ).casefold().startswith(("http://", "https://")):
+            identifier_type = "profile_url"
+
         if identifier_type in {"username", "social_handle"}:
             normalized = normalize_username(raw_value)
-            add_target(normalized, identifier_type, normalized)
+            add_target(normalized, "username", normalized)
         elif identifier_type == "profile_url":
             normalized = normalize_profile_url(raw_value)
             profile_usernames[normalized] = extract_profile_usernames(
@@ -334,7 +362,7 @@ def build_investigation_plan(
             normalized = normalize_email(raw_value)
         else:
             normalized = normalize_phone(raw_value)
-        identifiers.append({"type": identifier_type, "value": normalized})
+        add_identifier(identifier_type, normalized)
 
     alias_nicknames: List[str] = []
     alias_context_numbers: List[str] = []
@@ -491,7 +519,7 @@ def build_investigation_plan(
         raise InvestigationInputError("Add at least one investigation identifier.")
     if not search_targets:
         raise InvestigationInputError(
-            "Add a username, social handle, supported profile URL, or enable "
+            "Add a username, @handle, supported profile URL, or enable "
             "reviewable username variants for a name. Email and phone values are "
             "retained as context and are not sent to the username scanner."
         )
@@ -528,26 +556,13 @@ def build_investigation_plan(
         ]
     else:
         subject_groups = []
-        seen_subjects = set()
         selected_alias_keys = {
             str(candidate["value"]).casefold() for candidate in selected_aliases
         }
         for identifier in identifiers:
             identifier_type, value = identifier["type"], identifier["value"]
-            if identifier_type not in {
-                "username",
-                "social_handle",
-                "profile_url",
-                "full_name",
-            }:
+            if identifier_type not in {"username", "profile_url", "full_name"}:
                 continue
-            key = (
-                "username" if identifier_type == "social_handle" else identifier_type,
-                value.casefold(),
-            )
-            if key in seen_subjects:
-                continue
-            seen_subjects.add(key)
             if identifier_type == "full_name":
                 targets = [
                     target["value"]
@@ -560,17 +575,60 @@ def build_investigation_plan(
                     )
                     and target["value"].casefold() in selected_alias_keys
                 ]
-            elif identifier_type == "profile_url":
-                targets = profile_usernames[value]
-            else:
-                targets = [value]
-            subject_groups.append(
-                {
-                    "label": targets[0] if identifier_type == "profile_url" else value,
-                    "usernames": targets,
-                    "identifiers": [identifier],
-                }
+                subject_groups.append(
+                    {
+                        "label": value,
+                        "usernames": targets,
+                        "identifiers": [identifier],
+                    }
+                )
+                continue
+
+            targets = (
+                profile_usernames[value]
+                if identifier_type == "profile_url"
+                else [value]
             )
+            target_keys = {target.casefold() for target in targets}
+            matching_groups = [
+                group
+                for group in subject_groups
+                if group.get("account_group")
+                and target_keys.intersection(
+                    username.casefold() for username in group["usernames"]
+                )
+            ]
+            if not matching_groups:
+                subject_groups.append(
+                    {
+                        "label": targets[0],
+                        "usernames": list(targets),
+                        "identifiers": [identifier],
+                        "account_group": True,
+                    }
+                )
+                continue
+
+            primary = matching_groups[0]
+            for target in targets:
+                if target.casefold() not in {
+                    username.casefold() for username in primary["usernames"]
+                }:
+                    primary["usernames"].append(target)
+            if identifier not in primary["identifiers"]:
+                primary["identifiers"].append(identifier)
+            for merged in matching_groups[1:]:
+                for target in merged["usernames"]:
+                    if target.casefold() not in {
+                        username.casefold() for username in primary["usernames"]
+                    }:
+                        primary["usernames"].append(target)
+                for merged_identifier in merged["identifiers"]:
+                    if merged_identifier not in primary["identifiers"]:
+                        primary["identifiers"].append(merged_identifier)
+                subject_groups.remove(merged)
+        for group in subject_groups:
+            group.pop("account_group", None)
     return {
         "schema_version": SCHEMA_VERSION,
         "processing_mode": processing_mode,
@@ -595,6 +653,7 @@ def build_investigation_plan(
         "include_terms": parse_terms(form.get("include_terms", "")),
         "exclude_terms": parse_terms(form.get("exclude_terms", "")),
         "search_targets": search_targets,
+        "profile_url_usernames": profile_usernames,
     }
 
 
@@ -606,20 +665,102 @@ def search_usernames(plan: Dict[str, Any]) -> List[str]:
     ]
 
 
+def public_identifier_scope(plan: Any) -> Dict[str, List[Dict[str, Any]]]:
+    """Present account inputs as canonical usernames with URL provenance attached."""
+    if not isinstance(plan, dict):
+        return {"identifiers": [], "profile_urls": []}
+
+    canonical: List[Dict[str, str]] = []
+    seen = set()
+
+    def add(identifier_type: str, value: Any) -> None:
+        text = _normalize_text(
+            value, limit=2000 if identifier_type == "profile_url" else 500
+        )
+        if not text:
+            return
+        key = (identifier_type, text.casefold())
+        if key in seen:
+            return
+        seen.add(key)
+        canonical.append({"type": identifier_type, "value": text})
+
+    for target in list(plan.get("search_targets") or [])[:100]:
+        if not isinstance(target, dict) or target.get("source_type") not in {
+            "username",
+            "social_handle",
+            "profile_url",
+        }:
+            continue
+        try:
+            username = normalize_username(target.get("value"))
+        except InvestigationInputError:
+            continue
+        add("username", username)
+
+    profile_urls = []
+    seen_profile_urls = set()
+    profile_map = plan.get("profile_url_usernames")
+    profile_map = profile_map if isinstance(profile_map, dict) else {}
+    for identifier in list(plan.get("identifiers") or [])[:MAX_IDENTIFIERS]:
+        if not isinstance(identifier, dict):
+            continue
+        identifier_type = str(identifier.get("type") or "").strip().casefold()
+        value = identifier.get("value")
+        if identifier_type in {"username", "social_handle"}:
+            try:
+                add("username", normalize_username(value))
+            except InvestigationInputError:
+                continue
+        elif identifier_type == "profile_url":
+            try:
+                url = normalize_profile_url(value)
+            except (InvestigationInputError, ValueError):
+                continue
+            if url in seen_profile_urls:
+                continue
+            seen_profile_urls.add(url)
+            linked = []
+            for username in list(profile_map.get(url) or []):
+                try:
+                    normalized = normalize_username(username)
+                except InvestigationInputError:
+                    continue
+                if normalized.casefold() not in {item.casefold() for item in linked}:
+                    linked.append(normalized)
+                    add("username", normalized)
+            if not linked:
+                raw_linked = [
+                    target.get("value")
+                    for target in list(plan.get("search_targets") or [])[:100]
+                    if isinstance(target, dict)
+                    and target.get("source_type") == "profile_url"
+                    and target.get("source_value") == url
+                ] or extract_profile_usernames(url)
+                for username in raw_linked:
+                    try:
+                        normalized = normalize_username(username)
+                    except InvestigationInputError:
+                        continue
+                    if normalized.casefold() not in {
+                        item.casefold() for item in linked
+                    }:
+                        linked.append(normalized)
+                        add("username", normalized)
+            profile_urls.append({"url": url, "usernames": linked})
+        elif identifier_type in {"full_name", "email", "phone"}:
+            add(identifier_type, value)
+    return {"identifiers": canonical, "profile_urls": profile_urls}
+
+
 def public_ai_context(plan: Any) -> Dict[str, Any]:
     """Return bounded operator context only after explicit external-use consent."""
     if not isinstance(plan, dict) or not plan.get("allow_ai_context"):
         return {}
-    return {
+    scope = public_identifier_scope(plan)
+    context = {
         "subject_label": _normalize_text(plan.get("subject_label", "")),
-        "identifiers": [
-            {
-                "type": str(identifier.get("type", ""))[:40],
-                "value": _normalize_text(identifier.get("value", ""), limit=500),
-            }
-            for identifier in list(plan.get("identifiers") or [])[:MAX_IDENTIFIERS]
-            if isinstance(identifier, dict)
-        ],
+        "identifiers": scope["identifiers"],
         "include_terms": [
             _normalize_text(term, limit=120)
             for term in list(plan.get("include_terms") or [])[:MAX_TERMS]
@@ -629,6 +770,9 @@ def public_ai_context(plan: Any) -> Dict[str, Any]:
             for term in list(plan.get("exclude_terms") or [])[:MAX_TERMS]
         ],
     }
+    if scope["profile_urls"]:
+        context["supplied_profile_urls"] = scope["profile_urls"]
+    return context
 
 
 def grouped_subject(plan: Any) -> bool:

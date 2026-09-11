@@ -153,7 +153,7 @@ def test_shared_alias_does_not_merge_explicitly_distinct_subjects(store):
         )
 
 
-def test_distinct_profile_inputs_with_same_handle_keep_their_own_context(store):
+def test_profile_inputs_with_same_handle_merge_and_keep_all_source_context(store):
     urls = ["https://www.instagram.com/alice/", "https://www.linkedin.com/in/alice/"]
     plan = build_investigation_plan(
         {
@@ -164,21 +164,14 @@ def test_distinct_profile_inputs_with_same_handle_keep_their_own_context(store):
     )
     assert search_usernames(plan) == ["alice"]
     job_id, case = create(store, plan)
-    assert len(case["personas"]) == 2
-    retained = []
-    for persona in case["personas"]:
-        claims = store.get_persona(persona["id"])["claims"]
-        assert len(claims) == 1
-        retained.append(claims[0]["value"]["url"])
-    assert set(retained) == set(urls)
+    assert len(case["personas"]) == 1
+    claims = store.get_persona(case["personas"][0]["id"])["claims"]
+    assert {claim["value"]["url"] for claim in claims} == set(urls)
     store.sync_persona_claims(job_id, {"status": "completed", "individual_reports": []})
-    assert all(
-        len(store.get_persona(persona["id"])["claims"]) == 1
-        for persona in case["personas"]
-    )
+    assert len(store.get_persona(case["personas"][0]["id"])["claims"]) == 2
 
 
-def test_shared_handle_profile_enrichment_and_rerun_keep_source_ownership(store):
+def test_shared_handle_profile_enrichment_and_rerun_keep_one_account_subject(store):
     from maigret.web.collector_adapters import (
         UNFURL_VERSION,
         normalize_unfurl_url_analysis,
@@ -197,10 +190,12 @@ def test_shared_handle_profile_enrichment_and_rerun_keep_source_ownership(store)
     bindings = store.get_job(job_id)["options"]["investigation_spec"][
         "persona_bindings"
     ]
-    owners = {
-        binding["identifiers"][0]["value"]: binding["persona_id"]
-        for binding in bindings
-    }
+    assert len(bindings) == 1
+    owner = bindings[0]["persona_id"]
+    assert bindings[0]["identifiers"] == [
+        {"type": "profile_url", "value": linkedin},
+        {"type": "profile_url", "value": instagram},
+    ]
 
     def instagram_claims():
         return [
@@ -210,7 +205,8 @@ def test_shared_handle_profile_enrichment_and_rerun_keep_source_ownership(store)
                 claim["review_status"],
                 [evidence["source_url"] for evidence in claim["evidence"]],
             )
-            for claim in store.get_persona(owners[instagram])["claims"]
+            for claim in store.get_persona(owner)["claims"]
+            if claim["source_engine"] == "investigation_input"
         ]
 
     original_instagram_claims = instagram_claims()
@@ -249,7 +245,7 @@ def test_shared_handle_profile_enrichment_and_rerun_keep_source_ownership(store)
     assert instagram_claims() == original_instagram_claims
     assert any(
         claim["field_name"] == "full_name"
-        for claim in store.get_persona(owners[linkedin])["claims"]
+        for claim in store.get_persona(owner)["claims"]
     )
     ai = store.sync_ai_persona_claims(
         job_id,
@@ -269,17 +265,27 @@ def test_shared_handle_profile_enrichment_and_rerun_keep_source_ownership(store)
         model="mock-model",
     )
     assert ai["count"] == 1
-    assert instagram_claims() == original_instagram_claims
+    assert any(
+        claim["field_name"] == "company"
+        for claim in store.get_persona(owner)["claims"]
+    )
     store.claim_next("mock-worker")
     store.finish(job_id, result)
-    refresh_id = store.repeat_persona_investigation(owners[instagram])
+    refresh_id = store.repeat_persona_investigation(owner)
     refresh_spec = store.get_job(refresh_id)["options"]["investigation_spec"]
-    assert refresh_spec["identifiers"] == [{"type": "profile_url", "value": instagram}]
+    assert refresh_spec["identifiers"] == [
+        {"type": "profile_url", "value": linkedin},
+        {"type": "profile_url", "value": instagram},
+    ]
+    assert refresh_spec["profile_url_usernames"] == {
+        linkedin: ["alexexample"],
+        instagram: ["alexexample"],
+    }
     assert refresh_spec["search_targets"] == [
         {
             "value": "alexexample",
             "source_type": "profile_url",
-            "source_value": instagram,
+            "source_value": linkedin,
         }
     ]
 

@@ -11,6 +11,7 @@ from sqlalchemy import delete
 from maigret.web.case_store import CaseStore, investigation_jobs
 from maigret.web.persona_intelligence import extract_case_chat_persona_claims
 from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
+from maigret.web.investigation_input import build_investigation_plan, search_usernames
 from maigret.web import app as web_app_module
 
 
@@ -744,6 +745,40 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "AI proposes; the analyst decides" in persona_page
     assert "Review queue" in persona_page
     assert "Relationships" in persona_page
+
+
+def test_case_scope_displays_one_username_with_attached_profile_sources(
+    client, persistent_store
+):
+    instagram = "https://www.instagram.com/djhat_prtm/"
+    tiktok = "https://www.tiktok.com/@djhat_prtm"
+    plan = build_investigation_plan(
+        {
+            "identifier_type": [
+                "username",
+                "username",
+                "username",
+                "username",
+            ],
+            "identifier_value": ["djhat_prtm", "@djhat_prtm", instagram, tiktok],
+            "processing_mode": "independent",
+        }
+    )
+    job_id = persistent_store.create_investigation(
+        search_usernames(plan), {"investigation_spec": plan}
+    )
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+
+    page = client.get(f'/cases/{case["id"]}').get_data(as_text=True)
+
+    assert len(case["personas"]) == 1
+    assert page.count("<small>username</small>djhat_prtm") == 1
+    assert "<small>social handle</small>" not in page
+    assert "<small>profile url</small>" not in page
+    assert "Source links for these usernames" in page
+    assert f'href="{instagram}"' in page
+    assert f'href="{tiktok}"' in page
+    assert page.count("<small>@djhat_prtm</small>") == 2
 
 
 def test_pretriage_profile_claims_are_retired_until_a_fresh_rerun(
@@ -1780,7 +1815,7 @@ def test_persona_rerun_preserves_exact_username_origin(client, persistent_store)
     page = client.get(f"/personas/{persona_id}/investigate").get_data(
         as_text=True
     )
-    assert '<option value="username" selected>Username or @handle</option>' in page
+    assert '<option value="username" selected>Username</option>' in page
     assert f'value="{username}"' in page
 
     with client.session_transaction() as browser_session:
@@ -1850,7 +1885,7 @@ def test_persona_prefill_ignores_another_personas_targeted_refresh(
     bob_builder = client.get(
         f"/personas/{personas['bob']}/investigate"
     ).get_data(as_text=True)
-    assert '<option value="username" selected>Username or @handle</option>' in bob_builder
+    assert '<option value="username" selected>Username</option>' in bob_builder
     assert '<option value="full_name" selected>' not in bob_builder
 
 

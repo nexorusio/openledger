@@ -401,6 +401,8 @@ def extract_supplied_profile_claims(
         for target in list(investigation_spec.get("search_targets") or [])[:100]
         if isinstance(target, dict) and target.get("source_type") == "profile_url"
     ]
+    profile_map = investigation_spec.get("profile_url_usernames")
+    profile_map = profile_map if isinstance(profile_map, dict) else {}
     candidates = []
     seen = set()
     for identifier in list(investigation_spec.get("identifiers") or [])[:24]:
@@ -415,6 +417,11 @@ def extract_supplied_profile_claims(
             for target in targets
             if target.get("source_value") == url
         }
+        linked_names.update(
+            str(username).strip().lstrip("@").casefold()
+            for username in list(profile_map.get(url) or [])[:24]
+            if str(username).strip()
+        )
         if reference is not None:
             linked_names.add(reference.handle.casefold())
         if not same_subject and not bound_names.intersection(linked_names):

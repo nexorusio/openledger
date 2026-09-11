@@ -102,7 +102,7 @@ assert.equal(cell('native', 'inputs'), 'None');
 assert.equal(cell('scanner-usernames', 'inputs'), 'None');
 
 state.collectorStatus.exhaustive_enabled = true;
-identifiers = [row('profile_url', 'https://alice.wordpress.com/')];
+identifiers = [row('username', 'https://alice.wordpress.com/')];
 aliases = [];
 state.plannedExactTargets = ['alice'];
 state.exactPlanResolved = true;
@@ -135,13 +135,15 @@ let requests = 0;
 state.fetch = async (url, options) => {
     requests++;
     assert.equal(url, '/api/username-aliases');
-    assert.deepEqual(JSON.parse(options.body).full_names, []);
+    const payload = JSON.parse(options.body);
+    assert.deepEqual(payload.full_names, []);
+    if (requests === 1) assert.deepEqual(payload.profile_urls, ['https://alice.wordpress.com/']);
     const exact = requests === 1 ? ['Alice'] : ['Groß'];
     return {ok: true, json: async () => ({exact_targets: exact, exact_target_keys: requests === 1 ? ['alice'] : ['gross'], aliases: [{value: 'must-not-render'}]})};
 };
 vm.runInContext(plannerFunctions, state);
 (async () => {
-    identifiers = [row('profile_url', 'https://alice.wordpress.com/'), row('full_name', 'Alice Example')];
+    identifiers = [row('username', 'https://alice.wordpress.com/'), row('full_name', 'Alice Example')];
     await vm.runInContext('refreshAliasCandidates()', state);
     assert.equal(requests, 1);
     assert.deepEqual(Array.from(state.plannedExactTargets), ['Alice']);
