@@ -167,6 +167,7 @@ def test_index_renders(client):
     assert 'Case source filters' in body
     assert 'name="enable_github_profile_enrichment"' in body
     assert 'name="enable_archived_url_evidence"' in body
+    assert 'href="/static/openledger-icon-white.png"' in body
     assert 'e.g. John Doe' in body
     assert 'Jati Pratomo' not in body
     assert 'Nexorus, urban planning' not in body
@@ -634,6 +635,7 @@ def test_application_login_replaces_browser_authentication(client, web_app):
     assert login_page.status_code == 200
     body = login_page.get_data(as_text=True)
     assert 'Sign in to OpenLedger' in body
+    assert 'href="/static/openledger-icon-white.png"' in body
     assert 'name="username"' in body
     assert 'name="password"' in body
 
