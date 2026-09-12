@@ -63,6 +63,16 @@
         <i data-lucide="triangle-alert"></i>
         <span><strong>Operational notice</strong><span id="runtime-notice-list" class="d-block"></span></span>
     </div>
+    {% if job_kind not in ('case_fusion', 'identity_enrichment', 'affiliation') %}
+    <section class="pipeline-table-wrap mb-3" aria-labelledby="engine-progress-title">
+        <h3 id="engine-progress-title">Live engine progress</h3>
+        <p class="form-text">Each enabled engine remains visible while it runs. A completed or unavailable engine does not pause the rest of discovery.</p>
+        <table class="table pipeline-table" id="engine-progress-table">
+            <thead><tr><th>Engine</th><th>Status</th><th>Current activity</th><th>Result</th></tr></thead>
+            <tbody id="engine-progress-body"><tr id="engine-progress-empty"><td colspan="4">Waiting for the worker to start collection…</td></tr></tbody>
+        </table>
+    </section>
+    {% endif %}
     {% if job_kind == 'case_fusion' %}
     <div class="security-callout mb-0"><i data-lucide="shield-check"></i><span>Source cases and review decisions remain unchanged. Pending, uncertain, and rejected records are excluded from this snapshot.</span></div>
     {% else %}
@@ -304,6 +314,50 @@
         }
     }
 
+    function addCandidate(ev) {
+        // Candidate connections belong in the discovery graph as clearly
+        // unverified leads.  They are intentionally distinct from supported
+        // profiles and never become Persona facts without later approval.
+        ensureGraph();
+        const uId = 'u:' + String(ev.username || 'subject').toLowerCase();
+        addNode(uId, ev.username || 'subject', 'username');
+        const sId = 'candidate:' + String(ev.site || ev.url || candidateCount);
+        addNode(sId, shortLabel(ev.site || ev.url || 'candidate'), 'data', {
+            url: ev.url,
+            title: (ev.reason || 'Unverified candidate connection') + (ev.url ? '\\n' + ev.url : ''),
+            color: ev.classification === 'suppressed' ? '#b94a48' : '#d89524',
+        });
+        addEdge(uId, sId);
+        for (const [k, v] of Object.entries(ev.ids || {})) {
+            if (SKIP_ID.test(k) || String(v).length > 80) continue;
+            const vId = 'candidate-' + k + ':' + String(v).toLowerCase();
+            addNode(vId, shortLabel(v), 'data', { title: k + ': ' + v, color: '#d89524' });
+            addEdge(sId, vId);
+        }
+    }
+
+    const collectorRows = new Map();
+    function collectorLabel(key) {
+        return String(key || 'unknown engine').replaceAll('-', ' ').replaceAll('_', ' ');
+    }
+    function updateCollector(ev, status, activity, result) {
+        const key = String(ev.collector || ev.site || 'discovery');
+        let row = collectorRows.get(key);
+        if (!row) {
+            row = document.createElement('tr');
+            row.dataset.collector = key;
+            row.innerHTML = '<td></td><td></td><td></td><td></td>';
+            collectorRows.set(key, row);
+            document.getElementById('engine-progress-empty')?.remove();
+            document.getElementById('engine-progress-body').appendChild(row);
+        }
+        const cells = row.children;
+        cells[0].textContent = collectorLabel(key);
+        cells[1].textContent = status;
+        cells[2].textContent = activity || '—';
+        cells[3].textContent = result || '—';
+    }
+
     function finish(statusText, redirect, coverageComplete = true) {
         document.getElementById('live-status').textContent = statusText;
         const progress = document.getElementById('live-progress');
@@ -393,6 +447,7 @@
                 const pct = Math.min(ev.checked, ev.total) / ev.total * 100;
                 document.getElementById('live-progress').style.width = pct + '%';
             }
+            updateCollector({collector: 'maigret'}, 'running', ev.site || 'Checking sources', ev.checked + ' / ' + (ev.total || '?') + ' checked');
         } else if (ev.type === 'snapshot_published') {
             statusEl.textContent = 'Snapshot ready. Opening the combined case while AI synthesis continues in the background…';
             document.getElementById('live-progress').style.width = '100%';
@@ -405,10 +460,12 @@
         } else if (ev.type === 'candidate') {
             candidateCount++;
             document.getElementById('stat-candidates').textContent = candidateCount;
+            addCandidate(ev);
             statusEl.textContent = ev.site + ' returned a low-signal hit retained for review.';
         } else if (ev.type === 'suppressed') {
             suppressedCount++;
             document.getElementById('stat-suppressed').textContent = suppressedCount;
+            addCandidate({...ev, classification: 'suppressed'});
             statusEl.textContent = ev.site + ' returned an unreliable detector hit; it was suppressed.';
         } else if (ev.type === 'collector_started') {
             const startedMessages = {
@@ -425,6 +482,7 @@
                 'public-record-enrichment': 'Checking Wikipedia and ICIJ using the approved full name…',
             };
             statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
+            updateCollector(ev, 'running', statusEl.textContent, 'Collecting');
             const bar = document.getElementById('live-progress');
             bar.style.width = '100%';
             bar.classList.add('progress-bar-striped', 'progress-bar-animated');
@@ -468,6 +526,7 @@
                 'public-record-enrichment': 'Public-record checks completed. Every proposal remains pending review.',
             };
             statusEl.textContent = completedMessages[ev.collector] || 'Additional evidence collected.';
+            updateCollector(ev, String(ev.outcome || ev.status || 'completed').replaceAll('_', ' '), 'Finished', (ev.observations ?? ev.found ?? ev.candidates ?? 0) + ' observations / leads');
         } else if (ev.type === 'collector_error') {
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
             const errorMessages = {
@@ -483,6 +542,7 @@
                 'cloudflare-dns-context': 'DNS context was unavailable; registry and affiliation evidence remain usable.',
             };
             statusEl.textContent = ev.message || errorMessages[ev.collector] || 'One evidence source was unavailable; continuing…';
+            updateCollector(ev, 'unavailable', 'Finished with an error', statusEl.textContent);
         } else if (ev.type === 'provider_circuit_open') {
             const retry = Number(ev.retry_after_seconds || 0);
             const message = ev.message || (

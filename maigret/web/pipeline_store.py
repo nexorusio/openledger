@@ -2368,6 +2368,86 @@ class PipelineStore:
                     .offset(offset)
                 ).mappings()
             )
+            # The workspace is an operator *approval* surface, not a queue for
+            # manually processing every raw hypothesis.  Build a bounded list
+            # of the strongest consolidated findings from every group using the
+            # already-frozen assessment summaries.  This is intentionally a
+            # ranking, not a claimed calibrated numerical probability.
+            summaries = self._table("group_summaries")
+            decisions = self._table("operator_decisions")
+            latest_decision = (
+                select(
+                    decisions.c.group_id,
+                    func.max(decisions.c.sequence).label("sequence"),
+                )
+                .group_by(decisions.c.group_id)
+                .subquery()
+            )
+            shortlist_rows = connection.execute(
+                select(
+                    groups,
+                    summaries.c.normalized.label("summary_normalized"),
+                    summaries.c.assessment.label("summary_assessment"),
+                    summaries.c.observation_count.label("summary_observation_count"),
+                    decisions.c.decision.label("latest_decision_value"),
+                    decisions.c.created_at.label("latest_decision_at"),
+                )
+                .outerjoin(summaries, summaries.c.group_id == groups.c.id)
+                .outerjoin(
+                    latest_decision, latest_decision.c.group_id == groups.c.id
+                )
+                .outerjoin(
+                    decisions,
+                    (decisions.c.group_id == latest_decision.c.group_id)
+                    & (decisions.c.sequence == latest_decision.c.sequence),
+                )
+                .where(*criteria)
+            ).mappings()
+            shortlist = []
+            for row in shortlist_rows:
+                assessment = dict(row.get("summary_assessment") or {})
+                counts = dict(assessment.get("evidence_counts") or {})
+                support = int(counts.get("support_origin_families") or 0)
+                conflicts = int(assessment.get("contradiction_count") or 0) + int(
+                    assessment.get("group_conflict_count") or 0
+                )
+                # Only evidence that has already met the source-backed
+                # threshold may consume operator attention.  Everything else
+                # remains searchable in the evidence explorer and continues
+                # to be collected; it is not silently discarded.
+                if assessment.get("evidence_status") != "source_supported" or conflicts:
+                    continue
+                normalized = dict(row.get("summary_normalized") or row["normalized"])
+                observation_count = int(row.get("summary_observation_count") or 0)
+                recommendation = (
+                    "strongly_recommended" if support >= 2 else "recommended"
+                )
+                shortlist.append(
+                    {
+                        "id": row["id"],
+                        "kind": row["kind"],
+                        "normalized": normalized,
+                        "assessment": assessment,
+                        "observation_count": observation_count,
+                        "latest_decision": row.get("latest_decision_value"),
+                        "recommendation": recommendation,
+                        "support_origin_families": support,
+                        "ranking_explanation": (
+                            f"{support} independent retained source "
+                            f"{'family supports' if support == 1 else 'families support'} "
+                            "this finding; no unresolved contradiction is present."
+                        ),
+                        "ranking_key": (support, observation_count),
+                    }
+                )
+            shortlist.sort(
+                key=lambda item: (
+                    item["ranking_key"][0], item["ranking_key"][1], item["id"]
+                ),
+                reverse=True,
+            )
+            for item in shortlist:
+                item.pop("ranking_key", None)
             result = dict(
                 pipeline_id=PIPELINE_ID,
                 **state,
@@ -2382,6 +2462,8 @@ class PipelineStore:
                 group_count=connection.scalar(
                     select(func.count()).select_from(groups).where(*criteria)
                 ),
+                shortlist=shortlist[:50],
+                shortlist_count=len(shortlist),
                 limit=limit,
                 offset=offset,
                 history_offset=history_offset,
