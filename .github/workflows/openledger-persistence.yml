@@ -3,8 +3,8 @@ name: OpenLedger persistence safety
 on:
   push:
     branches: [main]
+  workflow_dispatch:
   pull_request:
-    branches: [main]
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -13,6 +13,7 @@ permissions:
 jobs:
   postgres-and-container:
     runs-on: ubuntu-latest
+    timeout-minutes: 50
     services:
       postgres:
         image: postgres:17-alpine
@@ -22,6 +23,10 @@ jobs:
           POSTGRES_PASSWORD: integration-only-password
         ports:
           - 5432:5432
+        volumes:
+          # Filesystem sockets remain reachable inside the test runner's private
+          # loopback-only network namespace. Migrations/containers retain TCP.
+          - /tmp/openledger-ci-postgres:/var/run/postgresql
         options: >-
           --health-cmd "pg_isready -U openledger_test -d openledger_test"
           --health-interval 5s
@@ -30,11 +35,18 @@ jobs:
 
     env:
       DATABASE_URL: postgresql+psycopg://openledger_test:integration-only-password@127.0.0.1:5432/openledger_test
+      OPENLEDGER_REQUIRE_POSTGRES: "true"
+      OPENLEDGER_TEST_PIPELINE_LOAD: "1"
+      OPENLEDGER_REQUIRE_BROWSER: "true"
+      PLAYWRIGHT_BROWSERS_PATH: /tmp/openledger-ci-browsers
+      OPENLEDGER_BROWSER_EVIDENCE_DIR: runtime/ci/browser
       OPENLEDGER_TEST_POSTGRES_URL: postgresql+psycopg://openledger_test:integration-only-password@127.0.0.1:5432/openledger_test
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -44,27 +56,63 @@ jobs:
       - name: Install test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libcairo2-dev
+          sudo apt-get install -y libcairo2-dev poppler-utils
           python -m pip install --upgrade pip poetry
           poetry install --with dev
+          poetry run python -m pip install playwright==1.55.0
+          poetry run python -m playwright install --with-deps chromium
 
       - name: Apply and verify database migrations
         run: |
-          poetry run alembic upgrade head
+          poetry run alembic upgrade e2e2b8d0a502
           poetry run alembic check
 
-      - name: Test PostgreSQL job and worker integrity
-        run: poetry run pytest -q tests/test_postgres_persistence.py
+      - name: Require PostgreSQL and complete pipeline acceptance with no skips
+        run: |
+          test -n "$OPENLEDGER_TEST_POSTGRES_URL"
+          mkdir -p runtime/ci
+          python deploy/check-p2-release.py
+          test_python="$(poetry env info --executable)"
+          offline_postgres_url='postgresql+psycopg://openledger_test:integration-only-password@/openledger_test?host=/tmp/openledger-ci-postgres'
+          test -S /tmp/openledger-ci-postgres/.s.PGSQL.5432
+          command -v pdftotext
+          mapfile -t acceptance_tests < <(python deploy/ci-test-selection.py)
+          test "${#acceptance_tests[@]}" -gt 0
+          # The existing runner resets the environment when dropping privilege;
+          # provide only the required test settings after that drop, explicitly.
+          bash .github/scripts/run_offline_tests.sh /usr/bin/env \
+            "DATABASE_URL=$offline_postgres_url" \
+            "OPENLEDGER_TEST_POSTGRES_URL=$offline_postgres_url" \
+            OPENLEDGER_REQUIRE_POSTGRES=true OPENLEDGER_TEST_PIPELINE_LOAD=1 \
+            OPENLEDGER_REQUIRE_BROWSER=true PLAYWRIGHT_BROWSERS_PATH=/tmp/openledger-ci-browsers \
+            OPENLEDGER_BROWSER_EVIDENCE_DIR=runtime/ci/browser \
+            "$test_python" -m pytest -q "${acceptance_tests[@]}" --junitxml=runtime/ci/engineering.xml
+          poetry run python deploy/check-ci-results.py runtime/ci/engineering.xml
+
+      - name: Rehearse isolated database backup restore and rollback refusal
+        run: poetry run python deploy/ci-rehearse-recovery.py
 
       - name: Validate deployment configuration
         env:
           DOMAIN: openledger.example.test
           FLASK_SECRET_KEY: integration-only-secret
           SEARXNG_SECRET: integration-only-searxng-secret
-        run: docker compose -f deploy/compose.yaml config --quiet
+        run: OPENLEDGER_RELEASE_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111 docker compose -f deploy/compose.yaml config --quiet
 
       - name: Build the production web and worker image
-        run: docker build --target web --tag openledger:persistence-test .
+        run: docker build --target web --build-arg OPENLEDGER_RELEASE_COMMIT="$(git rev-parse HEAD)" --build-arg OPENLEDGER_RELEASE_TREE="$(git rev-parse HEAD^{tree})" --build-arg OPENLEDGER_SOURCE_DIGEST="$(python3 deploy/source-fingerprint.py)" --tag openledger:persistence-test .
 
       - name: Verify the image runs unprivileged
         run: test "$(docker image inspect --format '{{.Config.User}}' openledger:persistence-test)" = "10001:10001"
+
+      - name: Verify actual app and worker readiness and old-schema refusal
+        run: poetry run python deploy/ci-verify-containers.py openledger:persistence-test
+
+      - name: Preserve reviewable release acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-pipeline-acceptance
+          path: runtime/ci/
+          if-no-files-found: error
+          retention-days: 14

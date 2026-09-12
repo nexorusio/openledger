@@ -22,26 +22,38 @@ def test_all_existing_safety_and_provider_flags_default_on():
 
 
 def test_only_explicit_false_values_disable_server_flags():
-    assert profile_discovery_flags(
-        environ={"OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED": "off"}
-    )["exhaustive_mode_enabled"] is False
-    assert profile_discovery_flags(
-        environ={"OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED": "typo"}
-    )["exhaustive_mode_enabled"] is True
+    assert (
+        profile_discovery_flags(
+            environ={"OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED": "off"}
+        )["exhaustive_mode_enabled"]
+        is False
+    )
+    assert (
+        profile_discovery_flags(
+            environ={"OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED": "typo"}
+        )["exhaustive_mode_enabled"]
+        is True
+    )
 
 
 @pytest.mark.parametrize("value", ["1", "true", "YES", "on"])
 def test_search_first_rollout_requires_an_explicit_true_value(value):
-    assert profile_discovery_flags(
-        environ={"OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": value}
-    )["search_first_enabled"] is True
+    assert (
+        profile_discovery_flags(
+            environ={"OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": value}
+        )["search_first_enabled"]
+        is True
+    )
 
 
 @pytest.mark.parametrize("value", ["", "0", "false", "typo"])
 def test_search_first_rollout_fails_closed(value):
-    assert profile_discovery_flags(
-        environ={"OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": value}
-    )["search_first_enabled"] is False
+    assert (
+        profile_discovery_flags(
+            environ={"OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED": value}
+        )["search_first_enabled"]
+        is False
+    )
 
 
 def test_legacy_modes_receive_canonical_server_policy():
@@ -98,10 +110,6 @@ def test_client_cannot_forge_flags_or_disable_safety_controls():
             {"OPENLEDGER_EXHAUSTIVE_DISCOVERY_ENABLED": "no"},
             "Exhaustive",
         ),
-        (
-            {"OPENLEDGER_MAIGRET_DISCOVERY_ENABLED": "off"},
-            "Maigret",
-        ),
     ],
 )
 def test_disabled_server_capability_refuses_new_scan(environment, message):
@@ -110,7 +118,7 @@ def test_disabled_server_capability_refuses_new_scan(environment, message):
         govern_profile_discovery_options({}, mode, environ=environment)
 
 
-def test_disabled_user_scanner_refuses_only_plans_that_request_it():
+def test_disabled_collector_is_recorded_without_rejecting_other_routes():
     environment = {"OPENLEDGER_USER_SCANNER_DISCOVERY_ENABLED": "false"}
     permitted = govern_profile_discovery_options(
         {"investigation_spec": {"enable_user_scanner_username": False}},
@@ -118,8 +126,14 @@ def test_disabled_user_scanner_refuses_only_plans_that_request_it():
     )
     assert permitted["execution_mode"] == "focused"
 
-    with pytest.raises(ProfileDiscoveryPolicyError, match="User Scanner"):
-        govern_profile_discovery_options(
+    for environment in (
+        {"OPENLEDGER_USER_SCANNER_DISCOVERY_ENABLED": "false"},
+        {"OPENLEDGER_MAIGRET_DISCOVERY_ENABLED": "off"},
+    ):
+        permitted = govern_profile_discovery_options(
             {"investigation_spec": {"enable_user_scanner_username": True}},
             environ=environment,
         )
+        assert permitted['execution_mode'] == 'focused'
+    # Per-source refusal is asserted in test_pipeline_query; the common handler
+    # must still accept compatible name/email/phone engines and manual research.

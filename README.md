@@ -177,12 +177,15 @@ sudo apt-get update
 sudo apt-get install -y git
 sudo git clone https://github.com/nexorusio/openledger.git /opt/openledger
 cd /opt/openledger
-sudo bash deploy/install.sh
+sudo bash deploy/install.sh --commit "$P2_RELEASE_SHA" \
+  --manifest /tmp/openledger-reviewed-release.json
 ```
 
-The installer configures Docker when needed, generates protected application
-and database secrets, asks for the initial administrator, builds the services,
-runs database migrations, and waits for the health check. After signing in,
+Prepare the reviewed commit, immutable Docker image and release manifest using
+the [P2 release preparation guide](deploy/README.md#prepare-one-reviewable-candidate-release-engineer).
+The installer generates protected application and database secrets, asks for
+the initial administrator, applies the exact migration, and verifies matching
+app/worker pipeline identities. After signing in,
 connect the existing OpenAI account from **Settings → Provider connections**.
 Google Places can be connected there only when Places API (New), billing, quota,
 and server/API restrictions are configured. Never place an API key in Git,
@@ -194,17 +197,23 @@ endpoints, map endpoints, and security notes, read the
 
 ### Update a deployed server
 
-Run updates only after the desired pull request has been merged to `main`:
+Run updates only after separate merge and deployment approval for the exact P2
+release commit. Prepare its immutable image and manifest using the
+[deployment guide](deploy/README.md#p2-end-to-end-pipeline-approved-docker-delivery),
+then check the candidate without changing the running stack:
 
 ```bash
 cd /opt/openledger
-sudo bash deploy/update.sh
+sudo bash deploy/update.sh --commit "$P2_RELEASE_SHA" \
+  --manifest /tmp/openledger-reviewed-release.json --check
 ```
 
-The updater refuses a dirty repository, pulls `main` with a fast-forward-only
-update, validates a PostgreSQL backup, rebuilds the application image, applies
-Alembic migrations, and restarts the stack while preserving accounts, settings,
-reports, database state, and the configured OpenAI key.
+After deployment approval, run the same command without `--check`. The updater
+requires the exact clean checkout, reviewed source fingerprint, immutable image
+and schema. It backs up state, applies the additive migration, and verifies that
+the app and worker both run `p2-e2e-v1`. Failed checks stop the update; there is
+no automatic previous-pipeline fallback. An unpinned `compose pull` or old image
+cannot satisfy this release contract.
 
 Check service state and logs with:
 
@@ -247,6 +256,7 @@ poetry run python .github/scripts/check_osint_sources.py --live
 DOMAIN=openledger.example.test \
 FLASK_SECRET_KEY=development-only-secret \
 SEARXNG_SECRET=development-only-searxng-secret \
+OPENLEDGER_RELEASE_IMAGE=sha256:0000000000000000000000000000000000000000000000000000000000000000 \
 docker compose -f deploy/compose.yaml config --quiet
 ```
 

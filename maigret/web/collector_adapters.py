@@ -6651,6 +6651,11 @@ async def _run_user_scanner_subprocess(
         stderr=asyncio.subprocess.PIPE,
         env=environment,
     )
+    from maigret.web.pipeline_http import current_runtime_payload
+
+    runtime_payload = current_runtime_payload()
+    if runtime_payload:
+        request = dict(request, _pipeline_runtime=runtime_payload)
     request_payload = json.dumps(request).encode("utf-8")
     communicate_task = asyncio.create_task(process.communicate(request_payload))
     started_at = asyncio.get_running_loop().time()
@@ -6682,6 +6687,9 @@ async def _run_user_scanner_subprocess(
         raise RuntimeError("User Scanner returned invalid JSON") from exc
     if not isinstance(envelope, dict) or envelope.get("schema_version") != 1:
         raise RuntimeError("User Scanner returned an unsupported result schema")
+    from maigret.web.pipeline_http import inherit_runtime_status
+
+    inherit_runtime_status(envelope.get("execution_control"))
     return envelope
 
 

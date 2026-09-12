@@ -80,6 +80,8 @@
                         {% endif %}
                         {% if result.status == 'completed' and result.kind == 'identity_enrichment' and result.persona_id %}
                         <a href="{{ url_for('persona_workspace', persona_id=result.persona_id) }}" class="btn btn-sm btn-outline-secondary">Open persona</a>
+                        {% elif result.status == 'completed' and result.review_url %}
+                        <a href="{{ result.review_url }}" class="btn btn-sm btn-outline-secondary">Open review</a>
                         {% elif result.status == 'completed' and result.kind not in ('affiliation', 'identity_enrichment') %}
                         <a href="{{ url_for('results', session_id=result.session_folder) }}" class="btn btn-sm btn-outline-secondary">Open findings</a>
                         {% elif result.status in ('queued', 'running', 'cancel_requested') %}

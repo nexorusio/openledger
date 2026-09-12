@@ -21,162 +21,149 @@ It runs:
 - inbound TCP 22, 80, and 443 permitted by the DigitalOcean firewall;
 - inbound UDP 443 permitted if HTTP/3 is desired.
 
-## First installation
+## P2 end-to-end pipeline: approved Docker delivery
 
-Run these commands from the DigitalOcean browser console or an SSH session:
+The supported updater selects exactly `p2-e2e-v1`. There is no legacy execution
+flag. A GitHub pull or a Docker restart is not release selection. Updating Docker
+Engine does not change application code. Use the approved release's instructions
+and its literal full commit, Git tree and immutable image ID below.
 
-    (
-        set -e
-        P2_RELEASE_SHA='REPLACE_WITH_REVIEWED_40_CHARACTER_P2_COMMIT'
-        [[ "$P2_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-        apt-get update
-        apt-get install -y git
-        git clone --no-checkout https://github.com/nexorusio/openledger.git /opt/openledger
-        cd /opt/openledger
-        git switch --detach "$P2_RELEASE_SHA"
-        bash deploy/install.sh
-    )
+**No production command is authorized merely because this guide exists.** Merge
+and deployment require their separate approvals after review and acceptance.
 
-Check that the detached checkout succeeded before running the installer. P2
-operators must use the reviewed P2 commit; the current `main` branch may contain
-P3. The installer itself does not select or approve a release.
+### What prevents the previous pipeline returning
 
-The installer asks for the domain, application username, application password,
-and default OpenAI model. Deployment secrets are written only to protected
-runtime files with mode 600. The plaintext password is discarded after a
-salted PBKDF2 hash is generated.
+- `deploy/update.sh` requires `--commit` and `--manifest`; missing pins stop it.
+- `app`, `worker` and `migrate` require the same immutable SHA256 image reference.
+  Compose has no app build directive, old application tag, or automatic pull.
+- The manifest binds full commit/tree, pipeline, engine contract, exact image ID,
+  and a source fingerprint checked on the checkout, inside Docker RUN, and at
+  runtime. Supplying a correct commit label on different source cannot pass.
+  The manifest also binds source/target schema and every migration SHA256. Its Git tree must be clean.
+- The exact allowed chain is `b3e9d7c4a610` → `e2e1a7c9d401` → `e2e2b8d0a502`.
+  The reviewed updater accepts either predecessor or the current target as the
+  existing database revision. The released app and worker require `e2e2b8d0a502`.
+  Multiple/unknown/P3 schemas and forbidden P3 implementation artifacts stop preflight.
+- A released web image contains an immutable build file. Both runtime startup and
+  health checks require its matching schema. Environment flags cannot bypass it.
+- Before success the updater compares the actual app and live worker heartbeat
+  with the manifest and checks both Docker container image IDs. Mixed versions
+  stop the app, worker and ingress; no automatic old-app rollback occurs.
+- After success the SHA256 pin is stored in the existing protected deployment
+  environment, so ordinary Compose restarts and search-provider maintenance use
+  that same reviewed image.
 
-Do not commit deploy/.env or runtime data.
+These are accident guards, not a signature system. They do not control arbitrary
+old scripts/source deliberately checked out or Docker commands run outside this
+supported process. Never invoke an updater still present in an older restored
+snapshot: first obtain and inspect the approved new updater and exact checkout.
 
-The `db` service is private to the Compose network, publishes no host port, and
-initializes with PostgreSQL data checksums. Its password is generated into
-`runtime/secrets/postgres_password` with mode 600.
-The `migrate` service applies explicit Alembic migrations before the application
-and worker start. The worker owns investigation execution, so closing or changing
-the browser page cannot terminate a running collection. PostgreSQL enforces a
-singleton worker lock to prevent two collectors from claiming the same queue.
-Stopping a collection preserves already-collected findings as a clearly marked
-partial result; a stopped job with no findings is retained as cancelled.
+### Prepare one reviewable candidate (release engineer)
 
-Every successful `deploy/update.sh --commit <full-P2-commit>` deployment writes
-and validates a mode-600, UTC-stamped PostgreSQL custom-format dump under
-`runtime/backups` before rebuilding or applying migrations. A refused update or
-`--check` preflight makes no runtime changes and does not create a backup.
-Copy these backups to encrypted off-Droplet storage under the applicable
-retention policy; a backup kept only on the same Droplet is not disaster
-recovery.
-
-A complete recovery set also needs `runtime/reports` and the protected settings
-and secret files. Back those up separately to encrypted, access-controlled
-storage; do not commit them to Git or package them into a container image.
-
-## Routine commands
-
-Show status:
-
-    cd /opt/openledger/deploy
-    docker compose ps
-
-Inspect logs:
-
-    cd /opt/openledger/deploy
-    docker compose logs --tail=200
-
-### Delivering an approved P2 update
-
-The P2 updater requires a full, explicitly reviewed 40-character commit SHA and
-an already clean checkout at that exact commit. It never fetches, pulls, or
-checks out `main`, a release branch, or a tag. Running it without a commit is an
-error. The supplied SHA is the operator's approval boundary; the `p2` marker in
-`deploy/release-channel`, known P3 artifact checks, and exact P2 migration-chain
-check are extra safeguards against a mistaken release, not cryptographic release
-authentication. P3 commits in Git history are permitted because a forward
-rollback can restore the P2 tree while retaining its P3 ancestors.
-
-**First activation after restoring a Droplet snapshot:** the updater in that
-snapshot is still the old script, which pulls `main`. Do not run it. Obtain the
-reviewed P2 release branch and its full SHA from the release instructions. Fetch
-that branch, verify the exact SHA, and switch to it before invoking the new
-updater. Review local changes first; do not reset or discard them automatically.
-
-The following preparation block stops on any error. Replace both placeholders
-with the reviewed release values before running it:
+After the candidate is committed, use its reviewed **literal** 40-character SHA.
+Do not derive the approved commit from `main`, a branch tip, `HEAD`, or `latest`.
+The manifest is external to tracked source to avoid a self-referential Git hash.
+No container registry or paid service is required; an immutable local image ID is
+supported. Docker build is preparation, not deployment.
 
 ```bash
 cd /opt/openledger
-P2_RELEASE_BRANCH='REPLACE_WITH_REVIEWED_P2_RELEASE_BRANCH'
-P2_RELEASE_SHA='REPLACE_WITH_REVIEWED_40_CHARACTER_P2_COMMIT'
-(
-    set -e
-    [[ "$P2_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]]
-    P2_CHECKOUT_STATUS=$(GIT_OPTIONAL_LOCKS=0 git status --porcelain --untracked-files=all)
-    test -z "$P2_CHECKOUT_STATUS"
-    git fetch origin "$P2_RELEASE_BRANCH"
-    test "$(git rev-parse FETCH_HEAD)" = "$P2_RELEASE_SHA"
-    git switch --detach "$P2_RELEASE_SHA"
-    test "$(git rev-parse HEAD)" = "$P2_RELEASE_SHA"
-)
+P2_RELEASE_SHA='REPLACE_WITH_REVIEWED_40_CHARACTER_COMMIT'
+P2_RELEASE_TREE='REPLACE_WITH_REVIEWED_40_CHARACTER_TREE'
+test "$(git rev-parse HEAD)" = "$P2_RELEASE_SHA"
+test "$(git rev-parse HEAD^{tree})" = "$P2_RELEASE_TREE"
+test -z "$(git --no-optional-locks status --porcelain --untracked-files=all)"
+python3 deploy/check-p2-release.py
+docker build --target web \
+  --build-arg OPENLEDGER_RELEASE_COMMIT="$P2_RELEASE_SHA" \
+  --build-arg OPENLEDGER_RELEASE_TREE="$P2_RELEASE_TREE" \
+  --build-arg OPENLEDGER_SOURCE_DIGEST="$(python3 deploy/source-fingerprint.py)" \
+  --iidfile /tmp/openledger-reviewed-image.id .
 ```
 
-Only after that block succeeds, inspect the pinned release and run its preflight:
+Alternatively, the preparation script performs those source checks, builds the
+image, captures its immutable ID, and creates the candidate manifest in one call:
 
 ```bash
-[[ "$P2_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] &&
-test "$(git rev-parse HEAD)" = "$P2_RELEASE_SHA" &&
-bash deploy/update.sh --commit "$P2_RELEASE_SHA" --check
+bash deploy/build-reviewed-release.sh --commit "$P2_RELEASE_SHA" \
+  --manifest /tmp/openledger-reviewed-release.json
 ```
 
-Only after the preflight succeeds, apply that same reviewed release:
+Inspect the image and full acceptance evidence. Substitute its exact `sha256:…`
+ID into this command; a tag is refused. Preserve the manifest alongside release
+acceptance evidence. It is not a cryptographic signature or deployment approval.
 
 ```bash
-[[ "$P2_RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] &&
-test "$(git rev-parse HEAD)" = "$P2_RELEASE_SHA" &&
-bash deploy/update.sh --commit "$P2_RELEASE_SHA"
+python3 deploy/release-manifest.py create \
+  --commit "$P2_RELEASE_SHA" \
+  --image 'REPLACE_WITH_REVIEWED_SHA256_IMAGE_ID' \
+  --manifest /tmp/openledger-reviewed-release.json
 ```
 
-Use the same sequence with a newly reviewed SHA for each later P2 release. Do
-not substitute `main`, `HEAD`, a short SHA, a branch name, or an automatically
-resolved latest commit for the reviewed literal SHA. `docker compose pull`,
-restarts, and Docker Engine upgrades do not select application source code; the
-supported app update is the pinned command above. Direct `git pull` or Compose
-build/deploy commands bypass these updater guards.
+The final release handoff must provide actual values; placeholders are not a
+request to deploy. If squash merge changes commit identity, verify tree equality,
+rebuild with the final approved commit and review its new image/manifest.
 
-Before any runtime writes, package installs, backups, builds, migrations, or
-service changes, the updater reads the existing running `openledger` database
-using a read-only SQL session. Its Alembic revision must be exactly the P2 head
-`b3e9d7c4a610`. A missing or stopped database, missing/empty version table,
-multiple heads, an older revision, or a later/P3 revision such as `c4f8a2d6e901`
-stops the update. If the database is stopped, inspect and start the existing P2
-database separately; the preflight never starts or creates a database for you.
-Older databases need a separately reviewed migration plan. A P3 database needs
-a separately reviewed recovery plan; this updater never downgrades, stamps, or
-deletes its data. The restored P2 snapshot should already be at the required
-revision, so this release needs no schema upgrade.
+### Activate only after separate deployment authorization
 
-Do not change the checkout or run another deployment during the update. The
-updater checks the commit, tree, and database revision again after verifying the
-backup and before building. It then builds the local application image and
-starts the existing Compose deployment; the ordinary migration service runs
-against the already verified P2 head.
+If the host has the old source, fetch the exact approved release, inspect local
+changes and switch to that full SHA first. Do not run the old `update.sh`, use an
+unqualified pull, reset local changes, or switch to `main`. If the checked-out
+source differs from the release manifest, stop and reconcile it.
 
-Profile discovery has server-owned Focused/Exhaustive budgets, durable
-cancellation and worker leases, provider circuit breakers, seven default-on P1
-operational flags, and a separate default-off native search-first capability.
-The same flag and provider settings must reach both the app and worker. The
-supported no-subscription path runs a pinned private SearXNG container only
-when explicitly enabled; it has no public port or paid API credential. For the
-exact capacity checks, staged enablement, validation, restart, and rollback
-commands, use the
-[profile discovery operations runbook](../docs/profile-discovery-operations.md).
+First run the read-only command with the supplied real release values:
 
-The first update from the original Basic Authentication deployment prompts for
-an application username and password before removing the proxy login. Existing
-reports, settings, and protected provider keys are preserved.
+```bash
+bash deploy/update.sh --commit "$P2_RELEASE_SHA" \
+  --manifest /tmp/openledger-reviewed-release.json --check
+```
 
-Reset a forgotten application password from the Droplet console:
+Only after approval for this same release and successful preflight:
 
-    cd /opt/openledger
-    bash deploy/reset-password.sh
+```bash
+bash deploy/update.sh --commit "$P2_RELEASE_SHA" \
+  --manifest /tmp/openledger-reviewed-release.json
+```
+
+The updater rechecks everything, locks concurrent supported updates, stops
+public ingress and drains app/worker, verifies they are stopped, creates a
+PostgreSQL custom dump and an evidence/settings/secret archive, validates archive
+indexes, rechecks source/schema, migrates to the exact target and starts the
+matching app/worker. It verifies both process identities and actual container
+images before reopening ingress. Records are under `runtime/backups/release-*`.
+No passwords, old evidence or database volumes are recreated to fix a failure.
+
+Archive index validation detects corrupt/empty backups; it is not a substitute
+for the release acceptance restore rehearsal on disposable PostgreSQL and file
+storage. Keep the restore rehearsal record with the candidate. Preserve an
+appropriately protected off-host copy of the recovery set.
+
+`--check` never creates files, credentials or backups, starts containers, builds,
+pulls images, or changes database state. It requires one already-running database
+and an already-loaded reviewed image. Inspect/start a stopped existing database
+or load the approved image separately; a preflight cannot choose those for you.
+
+### Failure and compatibility rollback
+
+A failed migration or mismatched runtime leaves app and worker stopped. Inspect
+the saved release record. Fix forward using a separately reviewed `p2-e2e-v1`
+compatibility release that understands `e2e2b8d0a502`. Never start the prior
+pipeline, run Alembic downgrade/stamp, remove volumes or automatically restore a
+backup. New evidence/decisions/versions must be retained. Recovery by database
+restore requires a separate post-backup data reconciliation plan and approval.
+
+### First installation
+
+Prepare Docker, the reviewed checkout, immutable image and manifest first. The
+installer now also requires both pins and refuses an existing configuration:
+
+```bash
+bash deploy/install.sh --commit "$P2_RELEASE_SHA" \
+  --manifest /tmp/openledger-reviewed-release.json
+```
+
+The installer sets up protected runtime credentials and applies the exact schema
+before starting the mandatory pipeline. Existing installations use the updater.
 
 ## Connect or change provider keys
 
@@ -304,3 +291,71 @@ reports, graph, and cached AI assessment from the mounted runtime directory.
 
 Use OpenLedger only for lawful, authorized investigations. AI summaries are
 analytical assistance and must be verified against the underlying profiles.
+
+## Required acceptance before a release is approved
+
+`OpenLedger persistence safety / postgres-and-container` must pass on the exact
+candidate commit. It checks a fresh PostgreSQL migration, migrates a separate
+legacy database with existing cases and evidence, checks the repeated backfill,
+exercises immutable QC on PostgreSQL, runs the complete `test_pipeline*` suite
+with the 50,000-observation load gate enabled, requires the real application
+journey through research and final projection, independently extracts PDF text
+to check every curated fact and observation,
+and rejects any skipped or missing mandatory test. It then builds the real image,
+starts both real app/worker entrypoints, compares their source/build/schema
+attestations, and verifies that both refuse the old schema even when an environment
+flag requests disabling release checks. The saved CI artifact contains test and
+container attestation evidence, not real cases or production secrets.
+
+All regression pytest jobs use the existing private loopback-only network
+namespace, which also isolates native transports and child processes. The
+PostgreSQL test job connects through its disposable service's filesystem socket
+and passes its required test environment explicitly after the privilege drop.
+Dependency installation, migrations and disposable-container checks remain
+separate from the offline regression process. A failed namespace setup fails the
+job; it cannot fall back to host-network tests.
+
+The workflow executes the exact PR head, including stacked P2 review branches.
+The continuation's verified starting commit is PR #55 head
+`f004e719d6bd23e79850379fba67956355736ce2`, whose tree
+`f84724316c3dea6d91a05dd64b6cf20cca45ad95` matches the audited P2 content. A later
+reviewed squash commit must have its tree reconciled explicitly before rebuilding
+and approving its new image/manifest; release selection never follows `main`.
+
+The workflow is mandatory in this release procedure. Configuring GitHub branch
+protection to require its check is a separate repository setting; this source
+change does not claim to have changed that setting or to have run remote CI.
+A machine without PostgreSQL or Docker cannot satisfy these gates with SQLite or
+mocked-host results. The current implementation environment lacked a Docker
+executable and could not install its PostgreSQL service; those local limitations
+must remain visible until the real CI/staging runs pass.
+
+An old `docker compose pull` command cannot obtain this new pipeline. Before any
+update, obtain the separately approved new source checkout, review the actual
+CI result and image, and use `build-reviewed-release.sh` plus the pinned manifest
+sequence above. A plain pull, old updater, or a restart of the existing image
+continues using that existing release. The new supported updater refuses missing
+pins and never substitutes the old pipeline if migration or readiness fails.
+
+
+### Reliability acceptance and disposable recovery
+
+The P2 reliability continuation adds nine tables for shared request/provider
+state, connector page/checkpoint/version/receipt records, and read projections.
+Both migration revisions embed their frozen schema. Existing evidence and
+curated manifests are preserved byte-for-byte; existing projection scopes are
+marked dirty for an explicit rebuild. A populated pipeline refuses downgrade.
+
+`openledger-persistence.yml` requires PostgreSQL engineering results without
+skips, real Chromium interaction with the Flask operator/QC screens, a disposable
+PostgreSQL 17 dump/restore rehearsal, and app/worker container identity checks.
+The container checks reject both earlier database revisions. The general Python
+regression workflow also runs when the PR targets `codex/rollback-to-p2`.
+
+`deploy/ci-rehearse-recovery.py` creates two fresh named CI databases, upgrades
+synthetic historical evidence, seeds all reliability ledger families, and
+compares every restored row and count. It verifies restored immutable guards and
+refuses a populated downgrade without changing data. It does not authorize a
+production restore, prove production data completeness, or run an old pipeline.
+CI retains JUnit, screenshots, database reconciliation and container attestations
+under `runtime/ci/`. A missing acceptance case or skip is a release failure.

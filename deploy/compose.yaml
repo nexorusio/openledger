@@ -57,13 +57,10 @@ services:
       - openledger
 
   migrate:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: web
-    image: openledger-maigret:application-auth
+    image: ${OPENLEDGER_RELEASE_IMAGE:?Use the reviewed P2 release manifest and updater}
+    pull_policy: never
     restart: "no"
-    entrypoint: ["alembic", "upgrade", "head"]
+    entrypoint: ["alembic", "upgrade", "e2e2b8d0a502"]
     environment:
       DATABASE_HOST: db
       DATABASE_NAME: openledger
@@ -80,13 +77,8 @@ services:
       - openledger
 
   app:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: web
-    # A distinct tag prevents a failed authentication migration from falling
-    # back to the older image that had no application-level login.
-    image: openledger-maigret:application-auth
+    image: ${OPENLEDGER_RELEASE_IMAGE:?Use the reviewed P2 release manifest and updater}
+    pull_policy: never
     restart: unless-stopped
     init: true
     environment:
@@ -96,6 +88,7 @@ services:
       SESSION_COOKIE_SECURE: "true"
       OPENLEDGER_PROXY_HOPS: "1"
       OPENLEDGER_TRUSTED_HOSTS: "${DOMAIN},127.0.0.1,localhost,app"
+      OPENLEDGER_RELEASE_REQUIRED: "true"
       WEB_SETTINGS_FILE: /app/web_settings.json
       AUTH_REQUIRED: "true"
       AUTH_FILE: /app/runtime/secrets/auth.json
@@ -149,15 +142,13 @@ services:
       - openledger
 
   worker:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: web
-    image: openledger-maigret:application-auth
+    image: ${OPENLEDGER_RELEASE_IMAGE:?Use the reviewed P2 release manifest and updater}
+    pull_policy: never
     restart: unless-stopped
     init: true
     entrypoint: ["python", "-m", "maigret.web.worker"]
     environment:
+      OPENLEDGER_RELEASE_REQUIRED: "true"
       WEB_SETTINGS_FILE: /app/web_settings.json
       OPENLEDGER_PROFILE_DISCOVERY_ENABLED: "${OPENLEDGER_PROFILE_DISCOVERY_ENABLED:-true}"
       OPENLEDGER_FOCUSED_DISCOVERY_ENABLED: "${OPENLEDGER_FOCUSED_DISCOVERY_ENABLED:-true}"
@@ -189,6 +180,12 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-m", "maigret.web.pipeline_release", "worker-health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     stop_grace_period: 90s
     security_opt:
       - no-new-privileges:true

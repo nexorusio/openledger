@@ -736,7 +736,7 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "window.prompt" not in deletion_script
     assert "window.alert" not in deletion_script
 
-    persona_page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    persona_page = client.get(f"/personas/{persona_id}?view=working").get_data(as_text=True)
     assert "Alice Example" in persona_page
     assert "90% confidence" in persona_page
     assert f'/personas/{persona_id}/export.pdf' in persona_page

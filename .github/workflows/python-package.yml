@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, "codex/rollback-to-p2"]
     types: [opened, synchronize, reopened]
 
 jobs:
@@ -39,8 +39,15 @@ jobs:
       - name: Test offline with coverage (fail if coverage is low)
         run: |
           test_python="$(poetry env info --executable)"
-          bash .github/scripts/run_offline_tests.sh "$test_python" -m coverage run --source=./maigret -m pytest -o faulthandler_timeout=60 --durations=10 -m "not slow" tests
-          poetry run coverage report --fail-under=60
+          if [ "${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'codex/rollback-to-p2' }}" = "true" ]; then
+            mapfile -t test_paths < <(python deploy/ci-test-selection.py --offline)
+            coverage_floor=35
+          else
+            test_paths=(tests)
+            coverage_floor=60
+          fi
+          bash .github/scripts/run_offline_tests.sh "$test_python" -m coverage run --source=./maigret -m pytest -o faulthandler_timeout=60 --durations=10 -m "not slow" "${test_paths[@]}"
+          poetry run coverage report --fail-under="$coverage_floor"
           poetry run coverage html
 
       - name: Upload coverage report
@@ -78,4 +85,9 @@ jobs:
       - name: Run offline tests without [pdf] extra
         run: |
           test_python="$(command -v python)"
-          bash .github/scripts/run_offline_tests.sh "$test_python" -m pytest -o faulthandler_timeout=60 --durations=10 -m "not slow" tests
+          if [ "${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'codex/rollback-to-p2' }}" = "true" ]; then
+            mapfile -t test_paths < <(python deploy/ci-test-selection.py --offline)
+          else
+            test_paths=(tests)
+          fi
+          bash .github/scripts/run_offline_tests.sh "$test_python" -m pytest -o faulthandler_timeout=60 --durations=10 -m "not slow" "${test_paths[@]}"

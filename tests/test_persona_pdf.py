@@ -561,6 +561,23 @@ def test_font_markup_keeps_join_controls_inside_the_script_fallback_run():
     assert markup == '<font name="DevanagariFallback">क्\u200dष</font>'
 
 
+def test_register_fonts_computes_primary_coverage_once_per_snapshot(monkeypatch):
+    monkeypatch.setattr(persona_pdf_module, "_font_paths", lambda: (None, None))
+    monkeypatch.setattr(persona_pdf_module, "_fallback_font_paths", lambda: ())
+    coverage_calls = []
+
+    def record_coverage(font_name):
+        coverage_calls.append(font_name)
+        return frozenset(range(32, 127))
+
+    monkeypatch.setattr(persona_pdf_module, "_font_coverage", record_coverage)
+
+    fonts = persona_pdf_module._register_fonts("A" * 5000 + "न" * 5000)
+
+    assert fonts == ("Helvetica", "Helvetica-Bold", ())
+    assert coverage_calls == ["Helvetica"]
+
+
 def test_mixed_rtl_paragraph_shapes_only_non_rtl_visual_words(
     monkeypatch,
 ):

@@ -13,6 +13,7 @@ import unicodedata
 from copy import deepcopy
 from datetime import datetime, timezone
 from glob import glob
+from functools import lru_cache
 from typing import Any, Dict, FrozenSet, Iterable, Mapping, Optional, Sequence, Tuple
 from urllib.parse import urlparse
 from xml.sax.saxutils import escape, quoteattr
@@ -91,6 +92,7 @@ def _font_paths() -> tuple[Optional[str], Optional[str]]:
     return regular, bold
 
 
+@lru_cache(maxsize=1)
 def _fallback_font_paths() -> tuple[str, ...]:
     """Return deterministic font candidates for code points missing from DejaVu."""
     preferred = (
@@ -119,6 +121,7 @@ def _fallback_font_paths() -> tuple[str, ...]:
     return tuple(dict.fromkeys(path for path in candidates if os.path.isfile(path)))
 
 
+@lru_cache(maxsize=64)
 def _font_coverage(font_name: str) -> FrozenSet[int]:
     face = getattr(pdfmetrics.getFont(font_name), "face", None)
     char_to_glyph = getattr(face, "charToGlyph", None)
@@ -150,10 +153,11 @@ def _register_fonts(
                 pdfmetrics.registerFont(TTFont("OpenLedgerSans-Bold", bold_path))
             regular_name, bold_name = "OpenLedgerSans", "OpenLedgerSans-Bold"
 
+        primary_coverage = _font_coverage(regular_name)
         missing = {
             ord(character)
             for character in required_text
-            if ord(character) not in _font_coverage(regular_name)
+            if ord(character) not in primary_coverage
         }
         for fallback_path in _fallback_font_paths():
             if not missing:

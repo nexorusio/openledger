@@ -406,6 +406,9 @@ case_store = (
     if app.config["DATABASE_URL"]
     else None
 )
+from maigret.web.pipeline_release import assert_runtime_ready, runtime_attestation
+
+assert_runtime_ready(case_store, role="app")
 
 # Search-wide defaults, editable from the Settings workspace. Persisted
 # to app.config["SETTINGS_FILE"] so they survive a process restart.
@@ -2355,6 +2358,10 @@ def get_csrf_token() -> str:
 
 @app.before_request
 def require_application_login():
+    if request.endpoint in {'connector_ingestion.submit_batch', 'connector_ingestion.get_batch'}:
+        # The blueprint always authenticates its scoped machine bearer identity,
+        # including when browser authentication is disabled for local development.
+        return None
     if not app.config.get('AUTH_REQUIRED'):
         return None
     if request.endpoint in {'login', 'healthz', 'static'}:
@@ -2729,6 +2736,10 @@ def synchronize_ai_evidence_proposals(
         usernames=result_data.get('usernames') or [],
         model=model,
     )
+    from maigret.web.pipeline_ingestion import ingest_legacy_claim_updates
+    if synchronized.get('case_id'):
+        for persona in (case_store.get_case(synchronized['case_id']) or {}).get('personas', []):
+            ingest_legacy_claim_updates(case_store, synchronized['case_id'], persona['id'])
     synchronized['status'] = (
         'pending_review' if synchronized['count'] else 'no_valid_proposals'
     )
@@ -2971,13 +2982,8 @@ def parse_investigation_submission(form):
             form,
             profile_url_resolver=resolve_profile_url_identifiers,
         )
-        if (
-            plan.get('enable_user_scanner_email')
-            or plan.get('enable_user_scanner_username')
-        ) and not user_scanner_available():
-            raise InvestigationInputError(
-                'User Scanner checks are unavailable in this deployment.'
-            )
+        # The common handler records unavailable providers per route; a missing
+        # username scanner cannot reject an otherwise compatible research case.
         return search_usernames(plan), plan
 
     # Backward compatibility for the documented /api/scan username payload.
@@ -3056,6 +3062,7 @@ def parse_search_options(form, investigation_plan=None):
     }
     if investigation_plan:
         options['investigation_spec'] = investigation_plan
+    options['requested_by'] = session.get('username') or 'local-operator'
     return govern_profile_discovery_options(options, form.get('mode'))
 
 
@@ -3706,7 +3713,9 @@ def finalize_stream_job(
             if partial_status:
                 done_event['status'] = 'partial'
                 done_event['reason'] = partial_status
-            done_event['redirect'] = f"/results/search_{job_id}"
+            # The retired report page is still retained for audit access, but
+            # completion events must not route current users back into it.
+            done_event['redirect'] = "/history"
         except Exception as error:
             public_error = record_internal_error(
                 'Investigation report generation failed', error, session=job_id
@@ -5443,7 +5452,11 @@ def combined_case_chat_context(case: Dict[str, Any]):
 
 
 def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=None):
-    """Execute a claimed database job independently from any browser request."""
+    """Dispatch by persisted pipeline identity; never fallback after a P2 failure."""
+    from maigret.web.pipeline_store import PipelineStore
+
+    # These are separate durable workflows, not profile-collection fallbacks.
+    # Select them by persisted job kind before generic P2 request detection.
     if job.get("kind") == "case_fusion_ai":
         return run_persistent_combined_ai_job(store, job, shutdown_check=shutdown_check)
     if job.get("kind") == "affiliation":
@@ -5454,6 +5467,19 @@ def run_persistent_job(store: CaseStore, job: Dict[str, Any], shutdown_check=Non
         )
     if job.get("kind") == "case_fusion":
         return run_persistent_case_fusion_job(store, job, shutdown_check=shutdown_check)
+
+    specification = (job.get("options") or {}).get("investigation_spec") or {}
+    p2_native = (
+        job.get("kind") == "connector_ingestion"
+        or specification.get("pipeline_id") == "p2-e2e-v1"
+        or bool(PipelineStore(store).requests_for_job(job["job_id"]))
+    )
+    if p2_native:
+        from maigret.web.pipeline_execution import execute_pipeline_job
+        from maigret.web.pipeline_release import assert_runtime_ready
+
+        assert_runtime_ready(store, role="worker")
+        return execute_pipeline_job(store, job, shutdown_check=shutdown_check)
     job_id = job["job_id"]
     usernames = job["usernames"]
     options = hydrate_persistent_options(job["options"])
@@ -5579,22 +5605,39 @@ def start_live_job(usernames, options):
         options.get('execution_mode') if isinstance(options, dict) else None,
     )
     if case_store is not None:
+        from maigret.web.pipeline_execution import source_configuration
+        options = dict(options, pipeline_source_status=source_configuration())
         return case_store.create_investigation(
             usernames,
             sanitize_persistent_options(options),
             kind='live',
         )
-    job_id = uuid.uuid4().hex
-    live_jobs[job_id] = {
-        'queue': queue.Queue(),
-        'cancelled': False,
-        'loop': None,
-        'task': None,
-        'options': dict(options),
-        'status': 'running',
-    }
-    Thread(target=run_stream_job, args=(job_id, usernames, options)).start()
-    return job_id
+    raise ProfileDiscoveryPolicyError(
+        'The P2 evidence pipeline requires persistent storage. Configure the '
+        'database and apply this release migration before starting research.'
+    )
+
+
+@app.route('/api/investigation-plan', methods=['POST'])
+def preview_investigation_plan():
+    """Preview exactly the server registry used by the persistent query handler."""
+    provided_token = request.headers.get('X-OpenLedger-CSRF', '') or request.form.get('csrf_token', '')
+    if not is_valid_csrf(provided_token):
+        return {'error': 'Invalid CSRF token.'}, 403
+    try:
+        from maigret.web.pipeline_query import build_query_plan
+        from maigret.web.pipeline_execution import source_configuration
+        _, specification = parse_investigation_submission(request.form)
+        options = parse_search_options(request.form, specification)
+        plan = build_query_plan(specification, source_status=source_configuration(),
+                                context={'collection_options': sanitize_persistent_options(options)})
+        return {'pipeline_id': 'p2-e2e-v1', 'plan': plan}
+    except InvestigationInputError as error:
+        return {'error': error.public_message}, 400
+    except ProfileDiscoveryPolicyError as error:
+        return {'error': error.public_message}, 503
+    except ValueError:
+        return {'error': 'The submitted inputs cannot form a valid investigation plan.'}, 400
 
 
 @app.route('/api/scan', methods=['POST'])
@@ -5676,9 +5719,13 @@ def scan_stream(job_id):
                                             and current["status"] == "completed"
                                             and current.get("persona_id")
                                             else (
-                                                f"/results/{current['session_folder']}"
-                                                if current["status"] == "completed"
-                                                else None
+                                                current.get("review_url")
+                                                or (
+                                                    f"/cases/{current['case_id']}/pipeline"
+                                                    if current["status"] == "completed"
+                                                    and current.get("case_id")
+                                                    else None
+                                                )
                                             )
                                         )
                                     ),
@@ -5964,14 +6011,15 @@ def index():
 
 @app.route('/healthz')
 def healthz():
-    if case_store is not None:
-        try:
+    try:
+        identity = runtime_attestation(case_store, role="app")
+        if case_store is not None:
             case_store.ping()
-        except Exception as error:
-            record_internal_error('Database health check failed', error)
-            return {'status': 'degraded', 'database': 'unavailable'}, 503
-        return {'status': 'ok', 'database': 'connected'}
-    return {'status': 'ok'}
+        return {'status': 'ok', 'database': 'connected' if case_store else 'unconfigured',
+                'pipeline': identity}
+    except Exception as error:
+        record_internal_error('Pipeline readiness check failed', error)
+        return {'status': 'degraded', 'pipeline': {'pipeline_id': 'p2-e2e-v1', 'status': 'unavailable'}}, 503
 
 
 @app.route('/api/sites')
@@ -7353,6 +7401,8 @@ def case_chat_message(case_id):
                     persona_id,
                     candidates,
                 )
+                from maigret.web.pipeline_ingestion import ingest_legacy_claim_updates
+                ingest_legacy_claim_updates(case_store, case_id, persona_id)
                 proposal_summary = {
                     "status": (
                         "pending_review"
@@ -7516,6 +7566,20 @@ def persona_workspace(persona_id):
     if not persona:
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
+    if request.args.get('view') != 'working':
+        from sqlalchemy import select
+        from maigret.web.pipeline_store import PipelineStore
+        pipeline = PipelineStore(case_store)
+        requests = pipeline._table("requests")
+        with case_store.engine.connect() as connection:
+            has_pipeline = connection.execute(
+                select(requests.c.id).where(
+                    requests.c.case_id == persona['case_id'],
+                    requests.c.persona_id == persona_id,
+                ).limit(1)
+            ).first() is not None
+        if has_pipeline:
+            return redirect(url_for('pipeline.workspace', case_id=persona['case_id'], persona_id=persona_id))
     active_claims = [
         claim
         for claim in persona['claims']
@@ -7623,10 +7687,29 @@ def export_persona_pdf(persona_id):
     if case_store is None:
         flash('Persona PDF export requires persistent storage.', 'warning')
         return redirect(url_for('history'))
-    persona, generated_at = case_store.get_persona_export_snapshot(persona_id)
+    persona = case_store.get_persona(persona_id)
     if not persona:
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
+    from sqlalchemy import select
+    from maigret.web.pipeline_store import PipelineStore
+    pipeline = PipelineStore(case_store)
+    requests = pipeline._table("requests")
+    with case_store.engine.connect() as connection:
+        has_pipeline = connection.execute(
+            select(requests.c.id).where(
+                requests.c.case_id == persona['case_id'],
+                requests.c.persona_id == persona_id,
+            ).limit(1)
+        ).first() is not None
+    if has_pipeline:
+        final = pipeline.get_final_version(persona['case_id'], persona_id)
+        if not final:
+            flash('Create a curated version and complete QC before exporting a final Persona.', 'warning')
+            return redirect(url_for('pipeline.workspace', case_id=persona['case_id'], persona_id=persona_id))
+        return redirect(url_for('pipeline.export_pdf', case_id=persona['case_id'],
+                                persona_id=persona_id, version_id=final['id']))
+    persona, generated_at = case_store.get_persona_export_snapshot(persona_id)
     try:
         pdf_bytes = generate_persona_pdf(
             persona,
@@ -7738,6 +7821,25 @@ def relationships_workspace():
     if selected_persona_id not in available_persona_ids:
         selected_persona_id = available_personas[0]["id"] if available_personas else ""
     if mode == "persona" and selected_persona_id:
+        if request.args.get('view') != 'working':
+            from sqlalchemy import select
+            from maigret.web.pipeline_store import PipelineStore
+            selected = next(item for item in available_personas if item['id'] == selected_persona_id)
+            pipeline = PipelineStore(case_store)
+            final = pipeline.get_final_version(selected['case_id'], selected_persona_id)
+            requests = pipeline._table("requests")
+            with case_store.engine.connect() as connection:
+                has_pipeline = connection.execute(
+                    select(requests.c.id).where(
+                        requests.c.case_id == selected['case_id'],
+                        requests.c.persona_id == selected_persona_id,
+                    ).limit(1)
+                ).first() is not None
+            if final:
+                return redirect(url_for('pipeline.graph', case_id=selected['case_id'],
+                                        persona_id=selected_persona_id, version_id=final['id']))
+            if has_pipeline:
+                return redirect(url_for('pipeline.workspace', case_id=selected['case_id'], persona_id=selected_persona_id))
         graph = case_store.build_persona_graph(selected_persona_id)
     elif mode == "persona":
         graph = {
@@ -8231,9 +8333,18 @@ def live_results(job_id):
             done_redirect = url_for(
                 "persona_workspace", persona_id=result["persona_id"]
             )
+        elif result.get("review_url"):
+            # P2 jobs land in the evidence/review workspace. The retained
+            # report artifact remains available for audit, but is not the
+            # completion destination for a current investigation.
+            done_redirect = result["review_url"]
+        elif result.get("case_id"):
+            done_redirect = url_for("pipeline.case_entry", case_id=result["case_id"])
         else:
             result = normalize_job_summary_entry(result)
-            done_redirect = url_for("results", session_id=result["session_folder"])
+            # A terminal job without a P2 review target is not allowed to
+            # silently fall back to the retired result presentation.
+            done_redirect = url_for("history")
 
     legacy_untriaged = bool(
         result
@@ -8313,7 +8424,11 @@ def status(timestamp):
                 _, result = loaded
                 job_results[timestamp] = result
         if result and result.get('status') == 'completed':
-            return redirect(url_for('results', session_id=result['session_folder']))
+            if result.get('review_url'):
+                return redirect(result['review_url'])
+            if result.get('case_id'):
+                return redirect(url_for('pipeline.case_entry', case_id=result['case_id']))
+            return redirect(url_for('history'))
         if result and result.get('status') == 'failed':
             error_msg = result.get('error', 'Unknown error occurred.')
             flash(f'Search failed: {error_msg}', 'danger')
@@ -8334,8 +8449,11 @@ def status(timestamp):
             return redirect(url_for('index'))
 
         if result['status'] == 'completed':
-            # Note: use the session_folder from the results to redirect
-            return redirect(url_for('results', session_id=result['session_folder']))
+            if result.get('review_url'):
+                return redirect(result['review_url'])
+            if result.get('case_id'):
+                return redirect(url_for('pipeline.case_entry', case_id=result['case_id']))
+            return redirect(url_for('history'))
         else:
             error_msg = result.get('error', 'Unknown error occurred.')
             flash(f'Search failed: {error_msg}', 'danger')
@@ -8352,7 +8470,16 @@ def status(timestamp):
 
 @app.route("/results/<session_id>")
 def results(session_id):
-    result_data = find_result_by_session(session_id)
+    # P2 jobs persist their terminal projection in the case store rather than
+    # generating a legacy report-session artifact. Resolve that durable job
+    # before treating the old session key as missing.
+    result_data = None
+    if case_store is not None and session_id.startswith("search_"):
+        stored = case_store.get_job(session_id.removeprefix("search_"))
+        if stored and stored.get("pipeline_id") == "p2-e2e-v1":
+            result_data = stored
+    if not result_data:
+        result_data = find_result_by_session(session_id)
 
     if not result_data:
         flash("No results found for this session ID.", "danger")
@@ -8361,6 +8488,16 @@ def results(session_id):
             safe_log_value(session_id),
         )
         return redirect(url_for("index"))
+
+    if result_data.get("pipeline_id") == "p2-e2e-v1":
+        review_url = result_data.get("review_url")
+        if review_url:
+            return redirect(review_url)
+        if result_data.get("case_id"):
+            return redirect(
+                url_for("pipeline.case_entry", case_id=result_data["case_id"])
+            )
+        return redirect(url_for("history"))
 
     if result_data.get("kind") == "identity_enrichment":
         persona_id = result_data.get("persona_id")
@@ -8683,6 +8820,35 @@ def download_report(filename):
             'Error serving report file', error, filename=filename
         )
         return "File not found", 404
+
+
+def _prepare_pipeline_workspace(case_id, persona_id):
+    from maigret.web.pipeline_ingestion import bootstrap_legacy_workspace
+    return bootstrap_legacy_workspace(case_store, case_id, persona_id)
+
+
+def _launch_pipeline_research(**kwargs):
+    from maigret.web.pipeline_execution import launch_research
+    return launch_research(case_store, **kwargs)
+
+
+def _submit_pipeline_evidence(**kwargs):
+    from maigret.web.pipeline_ingestion import submit_manual_evidence
+    return submit_manual_evidence(case_store, **kwargs)
+
+
+from maigret.web.pipeline_routes import register_pipeline_routes
+
+register_pipeline_routes(
+    app, get_case_store=lambda: case_store, current_auth_role=current_auth_role,
+    is_valid_csrf=is_valid_csrf, launch_research=_launch_pipeline_research,
+    prepare_workspace=_prepare_pipeline_workspace,
+    submit_manual_evidence=_submit_pipeline_evidence,
+)
+
+from maigret.web.pipeline_connector_routes import register_connector_ingestion_routes
+
+register_connector_ingestion_routes(app, get_case_store=lambda: case_store)
 
 
 if __name__ == "__main__":

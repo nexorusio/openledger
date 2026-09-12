@@ -30,6 +30,18 @@ ENV FLASK_HOST=0.0.0.0
 # run in the separate worker service; threads allow concurrent page, report,
 # and replayable streaming requests.
 FROM base AS web
+ARG OPENLEDGER_RELEASE_COMMIT
+ARG OPENLEDGER_RELEASE_TREE
+ARG OPENLEDGER_SOURCE_DIGEST
+ENV OPENLEDGER_RELEASE_REQUIRED=true
+LABEL org.opencontainers.image.revision="${OPENLEDGER_RELEASE_COMMIT}" \
+      io.openledger.tree="${OPENLEDGER_RELEASE_TREE}" \
+      io.openledger.source-digest="${OPENLEDGER_SOURCE_DIGEST}" \
+      io.openledger.pipeline="p2-e2e-v1" \
+      io.openledger.schema="e2e2b8d0a502" \
+      io.openledger.engine-contract="p2-e2e-v1"
+RUN OPENLEDGER_RELEASE_COMMIT="${OPENLEDGER_RELEASE_COMMIT}" OPENLEDGER_RELEASE_TREE="${OPENLEDGER_RELEASE_TREE}" OPENLEDGER_SOURCE_DIGEST="${OPENLEDGER_SOURCE_DIGEST}" \
+    python deploy/write-build-identity.py
 # Keep the optional web collector isolated from OpenLedger's declared Python
 # dependency graph and pin it to a safety-reviewed commit. Upgrades happen only
 # through a reviewed pin change, never by following a moving branch at build.

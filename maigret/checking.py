@@ -383,7 +383,9 @@ class AiodnsDomainResolver(CheckerBase):
         return None
 
     async def check(self) -> Tuple[Optional[str], int, Optional[CheckError]]:
-        status = 404
+        # Only an authoritative negative DNS response establishes absence.
+        # A resolver outage or timeout provides no account/domain conclusion.
+        status = 0
         error = None
         text = ''
 
@@ -391,8 +393,20 @@ class AiodnsDomainResolver(CheckerBase):
             res = await self.resolver.query(self.url, 'A')
             text = str(res[0].host)
             status = 200
-        except aiodns.error.DNSError:
-            pass
+        except aiodns.error.DNSError as exc:
+            code = exc.args[0] if exc.args else None
+            if code in {aiodns.error.ARES_ENOTFOUND, aiodns.error.ARES_ENODATA}:
+                status = 404
+            else:
+                error = CheckError(
+                    'Request timeout' if code == aiodns.error.ARES_ETIMEOUT
+                    else 'Connecting failure (DNS)',
+                    str(exc),
+                )
+        except (asyncio.TimeoutError, TimeoutError) as exc:
+            error = CheckError('Request timeout', str(exc))
+        except OSError as exc:
+            error = CheckError('Connecting failure (DNS)', str(exc))
         except Exception as e:
             self.logger.error(e, exc_info=True)
             error = CheckError('DNS resolve error', str(e))

@@ -144,17 +144,20 @@ def test_profile_url_rejects_embedded_credentials():
         normalize_profile_url("https://operator:secret@example.com/profile")
 
 
-def test_context_only_submission_requires_a_searchable_account_candidate():
-    with pytest.raises(InvestigationInputError, match="retained as context"):
-        build_investigation_plan(
-            {
-                "identifier_type": ["email", "phone"],
-                "identifier_value": ["jati@example.com", "+628123456789"],
-            }
-        )
+def test_email_and_phone_submission_creates_one_subject_without_username():
+    plan = build_investigation_plan(
+        {
+            "identifier_type": ["email", "phone"],
+            "identifier_value": ["jati@example.com", "+628123456789"],
+        }
+    )
+    assert search_usernames(plan) == []
+    assert plan["subject_label"] == "jati@example.com"
+    assert len(plan["subject_groups"]) == 1
+    assert len(plan["subject_groups"][0]["identifiers"]) == 2
 
 
-def test_user_scanner_email_collection_is_explicit_and_requires_grouping():
+def test_user_scanner_email_collection_is_explicit_and_retains_subject_scope():
     plan = build_investigation_plan(
         {
             "identifier_type": ["username", "email"],
@@ -166,29 +169,35 @@ def test_user_scanner_email_collection_is_explicit_and_requires_grouping():
 
     assert plan["enable_user_scanner_email"] is True
 
-    with pytest.raises(InvestigationInputError, match="One subject"):
-        build_investigation_plan(
-            {
-                "identifier_type": ["username", "email"],
-                "identifier_value": ["alice", "alice@example.test"],
-                "processing_mode": "independent",
-                "enable_user_scanner_email": "on",
-            }
-        )
+    separate = build_investigation_plan(
+        {
+            "identifier_type": ["username", "email"],
+            "identifier_value": ["alice", "alice@example.test"],
+            "processing_mode": "independent",
+            "enable_user_scanner_email": "on",
+        }
+    )
+    assert len(separate["subject_groups"]) == 2
+    assert separate["subject_groups"][1]["identifiers"] == [
+        {"type": "email", "value": "alice@example.test"}
+    ]
 
-    with pytest.raises(InvestigationInputError, match="one email"):
-        build_investigation_plan(
-            {
-                "identifier_type": ["username", "email", "email"],
-                "identifier_value": [
-                    "alice",
-                    "alice@example.test",
-                    "alias@example.test",
-                ],
-                "processing_mode": "same_subject",
-                "enable_user_scanner_email": "on",
-            }
-        )
+    multiple = build_investigation_plan(
+        {
+            "identifier_type": ["username", "email", "email"],
+            "identifier_value": [
+                "alice",
+                "alice@example.test",
+                "alias@example.test",
+            ],
+            "processing_mode": "same_subject",
+            "enable_user_scanner_email": "on",
+        }
+    )
+    assert len(multiple["subject_groups"]) == 1
+    assert (
+        len([item for item in multiple["identifiers"] if item["type"] == "email"]) == 2
+    )
 
 
 def test_github_profile_enrichment_is_explicit_and_available_in_both_modes():

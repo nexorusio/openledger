@@ -33,6 +33,7 @@ REQUIRED_SOURCE_KEYS = {
     "claim_candidates",
     "observation_only_fields",
     "maintenance",
+    "connector",
 }
 
 
@@ -64,7 +65,7 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
     today = today or date.today()
     with REGISTRY_PATH.open(encoding="utf-8") as registry_file:
         registry = json.load(registry_file)
-    _require(registry.get("schema_version") == 1, "unsupported registry schema")
+    _require(registry.get("schema_version") == 2, "unsupported registry schema")
     policy = registry.get("maintenance_policy")
     _require(isinstance(policy, dict), "maintenance_policy must be an object")
     review_interval = policy.get("review_interval_days")
@@ -93,7 +94,10 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
         )
         _require(source_id not in identifiers, f"duplicate source id: {source_id}")
         identifiers.add(source_id)
-        _require(source["status"] == "active", f"{source_id}: source is not active")
+        _require(
+            source["status"] in {"active", "disabled", "quarantined", "retired"},
+            f"{source_id}: invalid lifecycle status",
+        )
         _require(
             source["integration_mode"]
             in {
@@ -101,6 +105,10 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
                 "bounded_public_web",
                 "bundled_cli",
                 "bundled_library",
+                "pipeline_adapter",
+                "authenticated_api",
+                "authenticated_push",
+                "operator_submission",
             },
             f"{source_id}: unsupported integration mode",
         )
@@ -115,14 +123,15 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
         )
         access = source["access"]
         _require(isinstance(access, dict), f"{source_id}: access must be an object")
-        for key, expected in (
-            ("genuinely_free", True),
-            ("registration_required", False),
-            ("credentials_required", False),
-        ):
+        for key in ("genuinely_free", "registration_required", "credentials_required"):
             _require(
-                access.get(key) is expected,
-                f"{source_id}: access.{key} must be {expected}",
+                isinstance(access.get(key), bool),
+                f"{source_id}: access.{key} must be a boolean",
+            )
+        if source["integration_mode"] == "authenticated_api":
+            _require(
+                access["credentials_required"],
+                f"{source_id}: authenticated API must declare credentials",
             )
         trigger = source["trigger"]
         _require(isinstance(trigger, dict), f"{source_id}: trigger must be an object")
@@ -150,8 +159,8 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
         timeout = guardrails.get("timeout_seconds")
         response_cap = guardrails.get("maximum_response_bytes")
         _require(
-            isinstance(timeout, int) and 1 <= timeout <= 600,
-            f"{source_id}: timeout must be between 1 and 600 seconds",
+            isinstance(timeout, int) and 1 <= timeout <= 1800,
+            f"{source_id}: timeout must be between 1 and 1800 seconds",
         )
         _require(
             isinstance(response_cap, int) and 1 <= response_cap <= 10_000_000,
@@ -202,7 +211,9 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
             additional_origins = source.get("additional_endpoint_origins", [])
             _require(
                 isinstance(additional_origins, list)
-                and all(str(origin).startswith("https://") for origin in additional_origins),
+                and all(
+                    str(origin).startswith("https://") for origin in additional_origins
+                ),
                 f"{source_id}: additional endpoint origins must be HTTPS URLs",
             )
             if additional_origins:
@@ -213,8 +224,7 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
                 )
         elif source["integration_mode"] == "bounded_public_web":
             _require(
-                source["network_classification"]
-                == "operator_supplied_public_web",
+                source["network_classification"] == "operator_supplied_public_web",
                 f"{source_id}: unexpected public-web network classification",
             )
             _require(
@@ -251,9 +261,7 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
             )
             _require(
                 isinstance(maximum_total_response_bytes, int)
-                and maximum_response_bytes
-                <= maximum_total_response_bytes
-                <= 4000000,
+                and maximum_response_bytes <= maximum_total_response_bytes <= 4000000,
                 f"{source_id}: total response limit exceeds four megabytes",
             )
             _require(
@@ -264,7 +272,7 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
                 guardrails.get("sensitive_query_parameters_allowed") is False,
                 f"{source_id}: credential-like URL query parameters must be rejected",
             )
-        else:
+        elif source["integration_mode"] in {"bundled_cli", "bundled_library"}:
             _require(
                 source["network_classification"] == "offline_local",
                 f"{source_id}: bundled source must remain offline",
@@ -299,6 +307,13 @@ def load_and_validate_registry(*, today: date | None = None) -> dict:
                 0 <= (today - last_activity).days <= stale_after,
                 f"{source_id}: upstream activity is older than {stale_after} days",
             )
+    # Importing a wrapper never calls its provider. Fail this static audit when
+    # any declared collection/normalization/configuration function is missing.
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+    from maigret.web.connectors.registry import ConnectorRegistry
+
+    ConnectorRegistry(sources)
     return registry
 
 
@@ -432,7 +447,10 @@ def live_gleif_contract(source: dict) -> None:
                 str((row.get("attributes") or {}).get("lei") or ""),
             )
             and str(
-                (((row.get("attributes") or {}).get("entity") or {}).get("legalName") or {}).get("name")
+                (
+                    ((row.get("attributes") or {}).get("entity") or {}).get("legalName")
+                    or {}
+                ).get("name")
                 or ""
             ).casefold()
             == target.casefold()
@@ -562,12 +580,16 @@ def live_wikidata_contract(source: dict) -> None:
     )
     try:
         with opener.open(
-            Request(f"https://www.wikidata.org/w/api.php?{entity_query}", headers=headers),
+            Request(
+                f"https://www.wikidata.org/w/api.php?{entity_query}", headers=headers
+            ),
             timeout=30,
         ) as response:
             payload = response.read(1_000_001)
     except (HTTPError, URLError) as error:
-        raise RuntimeError(f"Wikidata entity contract request failed: {error}") from error
+        raise RuntimeError(
+            f"Wikidata entity contract request failed: {error}"
+        ) from error
     _require(len(payload) <= 1_000_000, "Wikidata entity response was oversized")
     entity = (json.loads(payload).get("entities") or {}).get(target)
     _require(isinstance(entity, dict), "Wikidata entity contract changed")
@@ -581,10 +603,14 @@ def live_wikidata_contract(source: dict) -> None:
         ) as response:
             payload = response.read(1_000_001)
     except (HTTPError, URLError) as error:
-        raise RuntimeError(f"Wikidata query contract request failed: {error}") from error
+        raise RuntimeError(
+            f"Wikidata query contract request failed: {error}"
+        ) from error
     _require(len(payload) <= 1_000_000, "Wikidata query response was oversized")
     bindings = (json.loads(payload).get("results") or {}).get("bindings")
-    _require(isinstance(bindings, list) and bindings, "Wikidata query returned no relation")
+    _require(
+        isinstance(bindings, list) and bindings, "Wikidata query returned no relation"
+    )
 
 
 def live_wikipedia_contract(source: dict) -> None:
@@ -620,7 +646,9 @@ def live_wikipedia_contract(source: dict) -> None:
         with build_opener(NoRedirectHandler()).open(request, timeout=20) as response:
             payload = response.read(1_000_001)
     except (HTTPError, URLError) as error:
-        raise RuntimeError(f"Wikipedia live contract request failed: {error}") from error
+        raise RuntimeError(
+            f"Wikipedia live contract request failed: {error}"
+        ) from error
     _require(len(payload) <= 1_000_000, "Wikipedia live response was oversized")
     pages = (json.loads(payload).get("query") or {}).get("pages")
     _require(isinstance(pages, list) and pages, "Wikipedia page contract changed")
@@ -633,9 +661,7 @@ def live_wikipedia_contract(source: dict) -> None:
 def live_icij_offshore_contract(source: dict) -> None:
     target = source["maintenance"].get("live_contract_target")
     _require(isinstance(target, str) and target, "ICIJ live target is missing")
-    body = json.dumps(
-        {"query": target, "type": "Officer", "limit": 5}
-    ).encode("utf-8")
+    body = json.dumps({"query": target, "type": "Officer", "limit": 5}).encode("utf-8")
     request = Request(
         "https://offshoreleaks.icij.org/api/v1/reconcile",
         data=body,
@@ -653,7 +679,9 @@ def live_icij_offshore_contract(source: dict) -> None:
         raise RuntimeError(f"ICIJ live contract request failed: {error}") from error
     _require(len(payload) <= 1_000_000, "ICIJ live response was oversized")
     results = json.loads(payload).get("result")
-    _require(isinstance(results, list) and results, "ICIJ reconciliation contract changed")
+    _require(
+        isinstance(results, list) and results, "ICIJ reconciliation contract changed"
+    )
     _require(
         any(
             item.get("name") == target
@@ -713,22 +741,23 @@ def main() -> int:
     try:
         registry = load_and_validate_registry()
         if args.live:
-            sources_by_id = {source["id"]: source for source in registry["sources"]}
-            live_github_contract(sources_by_id["github_public_profile"])
-            live_wayback_contract(sources_by_id["wayback_cdx"])
-            live_gleif_contract(sources_by_id["gleif_lei_registry"])
-            live_fr_company_registry_contract(
-                sources_by_id["fr_company_registry"]
-            )
-            live_cloudflare_dns_contract(
-                sources_by_id["cloudflare_dns_context"]
-            )
-            live_wikidata_contract(sources_by_id["wikidata_affiliation"])
-            live_wikipedia_contract(sources_by_id["wikipedia_public_biography"])
-            live_icij_offshore_contract(sources_by_id["icij_offshore_leaks"])
-            live_official_website_contract(
-                sources_by_id["official_website_public_content"]
-            )
+            for source in registry["sources"]:
+                if source["status"] != "active":
+                    continue
+                reference = source["maintenance"].get("live_probe")
+                if not reference:
+                    continue
+                if ":" in reference:
+                    from maigret.web.connectors.registry import resolve_callable
+
+                    probe = resolve_callable(reference)
+                else:
+                    probe = globals().get(reference)
+                    _require(
+                        callable(probe) and reference.startswith("live_"),
+                        "Invalid live contract probe",
+                    )
+                probe(source)
     except (OSError, ValueError, RuntimeError, StopIteration) as error:
         print(f"OSINT source audit failed: {error}", file=sys.stderr)
         return 1

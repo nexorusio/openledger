@@ -41,7 +41,7 @@
             {% elif claim.field_name == 'linked_profile_lead' %}
             <span class="badge-soft warning" title="A public link that has not been independently verified">Unverified pivot</span>
             {% endif %}
-            <span class="confidence-badge" title="Strength of the supporting evidence">{{ claim.confidence }}% confidence</span>
+            <span class="confidence-badge" title="Legacy heuristic; not a calibrated probability">{{ claim.confidence }} legacy evidence score</span>
             <span class="review-badge {{ claim.review_status }}">{{ claim.review_status | title }}</span>
         </div>
     </div>
@@ -174,9 +174,9 @@
         </span>
     </div>
     <div class="persona-profile-copy">
-        <p class="eyebrow">Evidence-backed persona</p>
+        <p class="eyebrow">Working evidence · Draft Persona</p>
         <h1>{{ persona.display_name }}</h1>
-        <p class="page-description">{{ persona.case_title }} · Claims become canonical only after analyst approval.</p>
+        <p class="page-description">{{ persona.case_title }} · Individual claim approvals remain working material. Only explicit version-level QC produces a final Persona.</p>
         <div class="persona-status-strip" aria-label="Persona evidence status">
             <span><strong>{{ review_counts.approved }}</strong> approved</span>
             <span><strong>{{ review_counts.pending }}</strong> pending</span>
@@ -185,9 +185,10 @@
         </div>
     </div>
     <div class="heading-actions persona-heading-actions">
+        <a href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}" class="btn btn-primary">Pipeline · Curate and QC</a>
         <a href="{{ url_for('case_workspace', case_id=persona.case_id) }}" class="btn btn-outline-secondary">Open case</a>
         <a href="{{ url_for('case_timeline_workspace', case_id=persona.case_id, persona_id=persona.id) }}" class="btn btn-outline-secondary"><i data-lucide="list-tree"></i> Timeline</a>
-        <a href="{{ url_for('relationships_workspace', mode='persona', case_id=persona.case_id, persona_id=persona.id) }}" class="btn btn-outline-secondary"><i data-lucide="share-2"></i> Evidence graph</a>
+        <a href="{{ url_for('relationships_workspace', mode='persona', case_id=persona.case_id, persona_id=persona.id, view='working') }}" class="btn btn-outline-secondary"><i data-lucide="share-2"></i> Working evidence graph</a>
         <a href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}" class="btn btn-primary"><i data-lucide="refresh-cw"></i> Configure investigation</a>
         {% if approved_full_name %}
             {% if identity_enrichment and identity_enrichment.status in ('queued', 'running', 'cancel_requested') %}
@@ -261,7 +262,7 @@
     <i data-lucide="chevron-right"></i>
     <div><span>2</span><strong>Review</strong><small>The analyst approves, rejects, or marks each claim uncertain.</small></div>
     <i data-lucide="chevron-right"></i>
-    <div><span>3</span><strong>Use</strong><small>Only approved claims populate the canonical map and relationships.</small></div>
+    <div><span>3</span><strong>Use</strong><small>Reviewed claims populate working maps and graphs. Final outputs require explicit version-level QC.</small></div>
 </section>
 
 <section class="persona-notice" aria-label="AI and evidence policy">

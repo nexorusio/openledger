@@ -8,7 +8,49 @@ import subprocess
 
 import pytest
 
-from tests.test_web import client, web_app  # noqa: F401
+from maigret.web import app as web_app_module
+
+
+@pytest.fixture
+def web_app(tmp_path):
+    web_app_module.app.config["TESTING"] = True
+    web_app_module.app.config["AUTH_REQUIRED"] = False
+    web_app_module.app.config["REPORTS_FOLDER"] = str(tmp_path / "reports")
+    web_app_module.app.config["SETTINGS_FILE"] = str(tmp_path / "settings.json")
+    yield web_app_module
+
+
+@pytest.fixture
+def client(web_app):
+    return web_app.app.test_client()
+
+
+# ``web_app`` deliberately replaces ``subprocess.Popen`` so a forgotten
+# collector fixture cannot launch a production adapter.  Preserve the original
+# callable before that fixture is activated and use it only for the explicit,
+# local mocked-DOM helper below.
+_ORIGINAL_POPEN = subprocess.Popen
+
+
+def _run_dom_fixture(command, *, timeout):
+    process = _ORIGINAL_POPEN(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        raise subprocess.TimeoutExpired(
+            command,
+            timeout,
+            output=stdout,
+            stderr=stderr,
+        )
+    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 def test_builder_groups_first_and_accepts_legacy_handle_prefill(client, web_app):
@@ -61,9 +103,9 @@ def test_builder_rendered_script_and_dynamic_routes(client, tmp_path):
     script = next(script for script in scripts if "const form = document.getElementById('investigation-builder')" in script)
     source = tmp_path / 'builder.js'
     source.write_text(script)
-    result = subprocess.run(
+    result = _run_dom_fixture(
         [node, str(Path(__file__).with_name('investigation_builder_dom.cjs')), str(source)],
-        capture_output=True, text=True, timeout=15,
+        timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert 'routing DOM scenarios passed' in result.stdout
