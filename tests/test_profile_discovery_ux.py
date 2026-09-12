@@ -62,6 +62,33 @@ def test_live_ux_exposes_runtime_and_recovery_states_without_auto_approval():
     ).read_text(encoding="utf-8")
 
 
+def test_live_graph_and_pipeline_workspace_keep_collection_separate_from_approval():
+    live = (ROOT / "maigret" / "web" / "templates" / "live.html").read_text(
+        encoding="utf-8"
+    )
+    pipeline = (
+        ROOT / "maigret" / "web" / "templates" / "pipeline_workspace.html"
+    ).read_text(encoding="utf-8")
+
+    # Discovery continues to render unverified candidate connections, while
+    # operator action is limited to the evidence-ranked shortlist.
+    for required in ("Live engine progress", "addCandidate(ev)", "updateCollector"):
+        assert required in live
+    assert "Automated ranked curated findings" in pipeline
+    assert "Approve curated finding" in pipeline
+    assert "Record decision" not in pipeline
+
+
+def test_active_case_has_a_safe_stop_then_archive_path():
+    case_template = (ROOT / "maigret" / "web" / "templates" / "case.html").read_text(
+        encoding="utf-8"
+    )
+    app = (ROOT / "maigret" / "web" / "app.py").read_text(encoding="utf-8")
+    assert "Stop and archive case" in case_template
+    assert "stop_and_archive_case_workspace" in case_template
+    assert '"/cases/<case_id>/stop-and-archive"' in app
+
+
 def test_partial_outcomes_are_distinct_in_history_and_results():
     history = (
         ROOT / "maigret" / "web" / "templates" / "history.html"

@@ -54,6 +54,7 @@ from maigret.sites import MaigretDatabase
 from maigret.report import generate_report_context
 from maigret.utils import is_country_tag, is_plausible_username
 from maigret.web.case_store import (
+    ACTIVE_STATUSES,
     ActiveInvestigationError,
     MAX_COMBINED_SOURCE_CASES,
     ReferencedCaseError,
@@ -7081,6 +7082,45 @@ def archive_case_workspace(case_id):
         "success" if archived else "info",
     )
     return redirect(url_for("cases_workspace"))
+
+
+@app.route("/cases/<case_id>/stop-and-archive", methods=["POST"])
+def stop_and_archive_case_workspace(case_id):
+    """Request a safe worker stop, then direct the operator to archive.
+
+    Evidence is never erased while a collector may still be writing it.  The
+    case page changes to Archive once the durable worker marks every job
+    terminal, so this replaces the previous dead-end archive error.
+    """
+    if not is_valid_csrf(request.form.get("csrf_token")):
+        flash("Your case session expired. Please try again.", "danger")
+        return redirect(url_for("cases_workspace"))
+    if case_store is None:
+        flash("The case workspace requires persistent storage.", "warning")
+        return redirect(url_for("cases_workspace"))
+    stored_case = case_store.get_case(case_id)
+    if not stored_case:
+        flash("That case no longer exists.", "info")
+        return redirect(url_for("cases_workspace"))
+    active = [
+        job for job in stored_case.get("jobs", [])
+        if job.get("status") in ACTIVE_STATUSES
+    ]
+    for job in active:
+        case_store.request_cancel(job["job_id"])
+    if active:
+        flash(
+            "Stop requested for the active discovery. Refresh this case after the worker confirms cancellation, then Archive case will be available. Saved partial evidence remains retained.",
+            "info",
+        )
+    else:
+        archived = case_store.archive_case(case_id)
+        flash(
+            "Case archived. Its evidence and review history remain preserved for audit.",
+            "success" if archived else "info",
+        )
+        return redirect(url_for("cases_workspace"))
+    return redirect(url_for("case_workspace", case_id=case_id))
 
 
 @app.route("/cases/<case_id>/chat")
