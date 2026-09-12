@@ -2375,6 +2375,8 @@ class PipelineStore:
             # ranking, not a claimed calibrated numerical probability.
             summaries = self._table("group_summaries")
             decisions = self._table("operator_decisions")
+            memberships = self._table("group_observations")
+            observations = self._table("observations")
             latest_decision = (
                 select(
                     decisions.c.group_id,
@@ -2388,7 +2390,20 @@ class PipelineStore:
                     groups,
                     summaries.c.normalized.label("summary_normalized"),
                     summaries.c.assessment.label("summary_assessment"),
+                    summaries.c.observations.label("summary_observations"),
                     summaries.c.observation_count.label("summary_observation_count"),
+                    select(memberships.c.group_id)
+                    .join(
+                        observations,
+                        observations.c.id == memberships.c.observation_id,
+                    )
+                    .where(
+                        memberships.c.group_id == groups.c.id,
+                        observations.c.engine == "manual_evidence",
+                        observations.c.retained.is_(True),
+                    )
+                    .exists()
+                    .label("has_manual_cited_evidence"),
                     decisions.c.decision.label("latest_decision_value"),
                     decisions.c.created_at.label("latest_decision_at"),
                 )
@@ -2411,16 +2426,27 @@ class PipelineStore:
                 conflicts = int(assessment.get("contradiction_count") or 0) + int(
                     assessment.get("group_conflict_count") or 0
                 )
+                summary_observations = list(row.get("summary_observations") or [])
+                manual_cited = bool(row.get("has_manual_cited_evidence")) or any(
+                    item.get("source_engine") == "manual_evidence"
+                    and dict(item.get("retention") or {}).get("final_eligible") is True
+                    for item in summary_observations
+                    if isinstance(item, dict)
+                )
                 # Only evidence that has already met the source-backed
-                # threshold may consume operator attention.  Everything else
-                # remains searchable in the evidence explorer and continues
-                # to be collected; it is not silently discarded.
-                if assessment.get("evidence_status") != "source_supported" or conflicts:
+                # threshold, or an operator's explicit source-cited proposal,
+                # may consume operator attention. Everything else remains
+                # searchable in the evidence explorer and continues to be
+                # collected; it is not silently discarded.
+                source_supported = assessment.get("evidence_status") == "source_supported"
+                if conflicts or not (source_supported or manual_cited):
                     continue
                 normalized = dict(row.get("summary_normalized") or row["normalized"])
                 observation_count = int(row.get("summary_observation_count") or 0)
                 recommendation = (
-                    "strongly_recommended" if support >= 2 else "recommended"
+                    "strongly_recommended"
+                    if support >= 2
+                    else ("recommended" if source_supported else "direct_review")
                 )
                 shortlist.append(
                     {
@@ -2436,6 +2462,8 @@ class PipelineStore:
                             f"{support} independent retained source "
                             f"{'family supports' if support == 1 else 'families support'} "
                             "this finding; no unresolved contradiction is present."
+                            if source_supported
+                            else "An operator-supplied claim cites retained source evidence and is ready for final review."
                         ),
                         "ranking_key": (support, observation_count),
                     }
