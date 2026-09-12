@@ -218,6 +218,17 @@ def test_new_terminal_case_preserves_query_lineage_and_all_jobs(store):
     assert store.get_job(second_job_id) is not None
 
 
+def test_terminal_p2_case_can_be_archived_without_erasing_lineage(store):
+    job_id = store.create_investigation(["alice"], {})
+    job = store.claim_next("worker:test")
+    store.finish(job_id, {"status": "cancelled", "usernames": job["usernames"]})
+
+    assert store.archive_case(job["case_id"]) is True
+    archived = store.get_case(job["case_id"])
+    assert archived["status"] == "archived"
+    assert store.get_job(job_id) is not None
+
+
 def test_case_delete_rechecks_exact_confirmation_inside_transaction(store):
     job_id = store.create_investigation(["alice"], {})
     job = store.claim_next("worker:test")
