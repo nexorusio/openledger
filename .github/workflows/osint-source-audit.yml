@@ -24,6 +24,8 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install OpenLedger dependencies
+        run: python -m pip install .
       - name: Validate governed source contracts
         run: python .github/scripts/check_osint_sources.py
 
@@ -37,5 +39,7 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install OpenLedger dependencies
+        run: python -m pip install .
       - name: Smoke-test public source contracts
         run: python .github/scripts/check_osint_sources.py --live
