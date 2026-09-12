@@ -8254,6 +8254,32 @@ class CaseStore:
             connection.execute(delete(cases).where(cases.c.id == case_id))
         return True
 
+    def archive_case(self, case_id: str, *, confirmation_name: Optional[str] = None) -> bool:
+        """Hide a completed case from active work without erasing its lineage."""
+        with self.engine.begin() as connection:
+            statement = select(cases.c.id, cases.c.title).where(cases.c.id == case_id)
+            if self.engine.dialect.name == "postgresql":
+                statement = statement.with_for_update()
+            stored_case = connection.execute(statement).mappings().first()
+            if not stored_case:
+                return False
+            if confirmation_name is not None and confirmation_name != stored_case["title"]:
+                raise ValueError("Case name confirmation does not match")
+            active_job = connection.scalar(
+                select(investigation_jobs.c.id).where(
+                    investigation_jobs.c.case_id == case_id,
+                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
+                ).limit(1)
+            )
+            if active_job:
+                raise ActiveInvestigationError("Cases with active investigations cannot be archived")
+            connection.execute(
+                update(cases).where(cases.c.id == case_id).values(
+                    status="archived", updated_at=datetime.now(timezone.utc)
+                )
+            )
+        return True
+
     @staticmethod
     def _serialize_job(row) -> Dict[str, Any]:
         result = dict(row.get("result") or {})

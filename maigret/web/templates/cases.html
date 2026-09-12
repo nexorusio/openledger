@@ -42,6 +42,7 @@
                     <td>
                         <div class="case-title-line">
                             <strong>{{ case.title }}</strong>
+                            {% if case.status == 'archived' %}<span class="badge-soft warning">Archived · evidence retained</span>{% endif %}
                             {% if case.case_type == 'combined' %}<span class="badge-soft">Combined · {{ case.source_case_count }} source cases</span>{% endif %}
                         </div>
                         <div class="form-text">{{ case.id }}</div>

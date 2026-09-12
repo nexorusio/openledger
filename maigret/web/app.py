@@ -7040,7 +7040,7 @@ def delete_case_workspace(case_id):
         return redirect(url_for("case_workspace", case_id=case_id))
     except (KeyError, OSError, ValueError) as error:
         record_internal_error("Failed to delete case", error, case_id=case_id)
-        flash("The case could not be deleted.", "danger")
+        flash(str(error), "warning")
         return redirect(url_for("case_workspace", case_id=case_id))
 
     if deleted:
@@ -7051,6 +7051,35 @@ def delete_case_workspace(case_id):
         )
     else:
         flash("That case no longer exists.", "info")
+    return redirect(url_for("cases_workspace"))
+
+
+@app.route("/cases/<case_id>/archive", methods=["POST"])
+def archive_case_workspace(case_id):
+    if not is_valid_csrf(request.form.get("csrf_token")):
+        flash("Your case session expired. Please try again.", "danger")
+        return redirect(url_for("cases_workspace"))
+    if case_store is None:
+        flash("The case workspace requires persistent storage.", "warning")
+        return redirect(url_for("history"))
+    stored_case = case_store.get_case(case_id)
+    if not stored_case:
+        flash("That case no longer exists.", "info")
+        return redirect(url_for("cases_workspace"))
+    try:
+        archived = case_store.archive_case(
+            case_id
+        )
+    except ActiveInvestigationError:
+        flash("Stop the active investigation before archiving this case.", "warning")
+        return redirect(url_for("case_workspace", case_id=case_id))
+    except ValueError as error:
+        flash(str(error), "warning")
+        return redirect(url_for("case_workspace", case_id=case_id))
+    flash(
+        "Case archived. Its evidence and review history remain preserved for audit.",
+        "success" if archived else "info",
+    )
     return redirect(url_for("cases_workspace"))
 
 
