@@ -64,7 +64,7 @@ jobs:
 
       - name: Apply and verify database migrations
         run: |
-          poetry run alembic upgrade e2e2b8d0a502
+          poetry run alembic upgrade e2e3c9d1f703
           poetry run alembic check
 
       - name: Require PostgreSQL and complete pipeline acceptance with no skips
