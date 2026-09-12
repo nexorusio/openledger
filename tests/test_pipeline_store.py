@@ -809,7 +809,7 @@ def test_backfill_page_size_changes_do_not_repeat_imports(pair):
     assert len(list(pipeline.iter_observations(scope[0], scope[1]))) == before
 
 
-def test_ordinary_deletion_returns_clear_retention_error_before_mutation(pair):
+def test_case_deletion_purges_pipeline_history_after_terminal_completion(pair):
     request, records, _, version = curated(pair)
     store, pipeline = pair
     approve(pipeline, version)
@@ -823,19 +823,14 @@ def test_ordinary_deletion_returns_clear_retention_error_before_mutation(pair):
     )
     with pytest.raises(ValueError, match="retained P2 pipeline"):
         store.delete_job(request["job_id"])
-    with pytest.raises(ValueError, match="retained P2 pipeline"):
-        store.delete_case(request["case_id"])
-    assert store.get_job(request["job_id"])
-    assert (
-        pipeline.get_final_version(request["case_id"], request["persona_id"])[
-            "content_hash"
-        ]
-        == version["content_hash"]
-    )
-    assert (
-        pipeline.list_observations(request["case_id"], request["persona_id"])[0]["id"]
-        == records[0]["id"]
-    )
+    assert store.delete_case(request["case_id"]) is True
+    assert store.get_job(request["job_id"]) is None
+    assert store.get_case(request["case_id"]) is None
+    with store.engine.connect() as connection:
+        assert connection.execute(
+            text("SELECT count(*) FROM pipeline_observations WHERE case_id = :case_id"),
+            {"case_id": request["case_id"]},
+        ).scalar_one() == 0
 
 
 def test_legitimate_worker_acknowledges_case_store_cancel_without_losing_evidence(pair):

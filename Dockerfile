@@ -38,7 +38,7 @@ LABEL org.opencontainers.image.revision="${OPENLEDGER_RELEASE_COMMIT}" \
       io.openledger.tree="${OPENLEDGER_RELEASE_TREE}" \
       io.openledger.source-digest="${OPENLEDGER_SOURCE_DIGEST}" \
       io.openledger.pipeline="p2-e2e-v1" \
-      io.openledger.schema="e2e2b8d0a502" \
+      io.openledger.schema="e2e3c9d1f703" \
       io.openledger.engine-contract="p2-e2e-v1"
 RUN OPENLEDGER_RELEASE_COMMIT="${OPENLEDGER_RELEASE_COMMIT}" OPENLEDGER_RELEASE_TREE="${OPENLEDGER_RELEASE_TREE}" OPENLEDGER_SOURCE_DIGEST="${OPENLEDGER_SOURCE_DIGEST}" \
     python deploy/write-build-identity.py

@@ -26,6 +26,7 @@ P2_REVISIONS = (
     "b3e9d7c4a610",
     "e2e1a7c9d401",
     "e2e2b8d0a502",
+    "e2e3c9d1f703",
 )
 P3_ARTIFACT_PATTERNS = (
     "maigret/web/artifact_execution.py",
@@ -87,7 +88,7 @@ def verify_p2_tree(root):
     expected = dict(zip(P2_REVISIONS, (None,) + P2_REVISIONS[:-1]))
     if revisions != expected:
         raise ValueError(
-            "Migration tree must be exactly the approved P2 chain ending at e2e2b8d0a502."
+            "Migration tree must be exactly the approved P2 chain ending at e2e3c9d1f703."
         )
 
 
@@ -96,4 +97,4 @@ if __name__ == "__main__":
         verify_p2_tree(Path(__file__).resolve().parents[1])
     except (OSError, ValueError, SyntaxError, KeyError, TypeError) as error:
         sys.exit(f"P2 update refused: {error}")
-    print("P2 release tree verified (pipeline p2-e2e-v1, schema e2e2b8d0a502).")
+    print("P2 release tree verified (pipeline p2-e2e-v1, schema e2e3c9d1f703).")

@@ -727,9 +727,9 @@
     },
     {
       "id": "wikipedia_public_biography",
-      "display_name": "Wikipedia confirmed-name biography enrichment",
+      "display_name": "Wikipedia full-name biography discovery",
       "status": "active",
-      "capability": "confirmed_person_biography_summary_and_lead_image",
+      "capability": "full_name_biography_candidate_and_lead_image",
       "integration_mode": "native_public_api",
       "catalog_reference": "https://osintframework.com/",
       "official_documentation": "https://www.mediawiki.org/wiki/API:Query",
@@ -744,9 +744,9 @@
       },
       "trigger": {
         "operator_opt_in_required": true,
-        "operator_opt_in_mechanism": "analyst_approval_of_full_name_or_explicit_persona_rerun",
-        "input_type": "approved_full_name_claim",
-        "accepted_target": "exact_analyst_approved_person_name",
+        "operator_opt_in_mechanism": "initial_full_name_input",
+        "input_type": "full_name_input",
+        "accepted_target": "operator_supplied_full_name_candidate",
         "maximum_targets_per_investigation": 1
       },
       "guardrails": {
@@ -788,9 +788,7 @@
           ],
           "label": "Wikipedia biography",
           "platforms": [],
-          "prerequisites": [
-            "approved_full_name"
-          ],
+          "prerequisites": [],
           "option": "",
           "timeout_seconds": 20,
           "retry_ceiling": 1,
@@ -810,9 +808,9 @@
     },
     {
       "id": "icij_offshore_leaks",
-      "display_name": "ICIJ Offshore Leaks exact-name alert",
+      "display_name": "ICIJ Offshore Leaks full-name candidate alert",
       "status": "active",
-      "capability": "confirmed_person_offshore_database_name_alert",
+      "capability": "full_name_offshore_database_candidate_alert",
       "integration_mode": "native_public_api",
       "catalog_reference": "https://osintframework.com/",
       "official_documentation": "https://offshoreleaks.icij.org/docs/reconciliation",
@@ -827,9 +825,9 @@
       },
       "trigger": {
         "operator_opt_in_required": true,
-        "operator_opt_in_mechanism": "analyst_approval_of_full_name_or_explicit_persona_rerun",
-        "input_type": "approved_full_name_claim",
-        "accepted_target": "exact_analyst_approved_person_name",
+        "operator_opt_in_mechanism": "initial_full_name_input",
+        "input_type": "full_name_input",
+        "accepted_target": "operator_supplied_full_name_candidate",
         "maximum_targets_per_investigation": 1
       },
       "guardrails": {
@@ -871,9 +869,7 @@
           ],
           "label": "ICIJ Offshore Leaks",
           "platforms": [],
-          "prerequisites": [
-            "approved_full_name"
-          ],
+          "prerequisites": [],
           "option": "",
           "timeout_seconds": 30,
           "retry_ceiling": 1,
@@ -1066,7 +1062,7 @@
       "guardrails": {
         "human_review_required": true,
         "automatic_approval_allowed": false,
-        "timeout_seconds": 60,
+        "timeout_seconds": 90,
         "maximum_response_bytes": 1000000
       },
       "claim_candidates": [
@@ -1100,7 +1096,7 @@
           ],
           "prerequisites": [],
           "option": "enable_user_scanner_username",
-          "timeout_seconds": 60,
+          "timeout_seconds": 90,
           "retry_ceiling": 1,
           "request_budget": 1,
           "retention": "bounded_source_evidence",
@@ -1142,7 +1138,7 @@
       "guardrails": {
         "human_review_required": true,
         "automatic_approval_allowed": false,
-        "timeout_seconds": 60,
+        "timeout_seconds": 300,
         "maximum_response_bytes": 1000000
       },
       "claim_candidates": [
@@ -1170,7 +1166,7 @@
           "platforms": [],
           "prerequisites": [],
           "option": "enable_user_scanner_email",
-          "timeout_seconds": 60,
+          "timeout_seconds": 300,
           "retry_ceiling": 1,
           "request_budget": 100,
           "retention": "bounded_source_evidence",

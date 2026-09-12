@@ -16,7 +16,7 @@ import json
 import threading
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
@@ -274,11 +274,43 @@ async def _maigret_adapter(task, context: CollectorContext):
     context.emit({"general_results": [general]})
     from maigret.web.pipeline_evidence import normalize_status
 
-    return {
-        "outcome": _aggregate_outcomes(
-            normalize_status(row)[0] for row in results.values()
+    counts = Counter(normalize_status(row)[0] for row in results.values())
+    failure_count = sum(
+        counts[value]
+        for value in (
+            "blocked",
+            "error",
+            "timeout",
+            "cancelled",
+            "inconclusive",
+            "partial",
         )
+    )
+    # A completed Maigret sweep with retained findings is usable even when a
+    # minority of independent sites are unavailable. Preserve those failures
+    # as coverage warnings instead of relabelling all findings "partial".
+    outcome = (
+        "found"
+        if counts["found"]
+        else "candidate" if counts["candidate"] else _aggregate_outcomes(counts)
+    )
+    result = {
+        "outcome": outcome,
+        "outcome_counts": dict(counts),
+        "warning_count": failure_count if outcome in {"found", "candidate"} else 0,
+        "display_status": (
+            "completed_with_warnings"
+            if failure_count and outcome in {"found", "candidate"}
+            else outcome
+        ),
     }
+    if failure_count:
+        result["diagnostic"] = (
+            f"{failure_count} site check"
+            f"{'s were' if failure_count != 1 else ' was'} unavailable; "
+            "retained site-level outcomes remain in the audit history."
+        )
+    return result
 
 
 def _aggregate_outcomes(outcomes):
@@ -439,6 +471,109 @@ def refresh_consolidation(store, case_id, persona_id):
     return assess_consolidated_groups(store, case_id, persona_id)
 
 
+async def rank_consolidated_findings(
+    store, pipeline, sink, job, persona_id, context
+):
+    """Run one bounded AI ranking pass after deterministic consolidation.
+
+    The model receives only retained, non-conflicting group summaries. It cannot create
+    evidence, approve a finding, or change a deterministic assessment.
+    """
+    controls = dict((context or {}).get("collection_controls") or {})
+    if controls.get("allow_ai_context") is not True:
+        return {"status": "not_requested", "ranked": 0, "shortlisted": 0}
+    app_module = _app()
+    api_key = app_module.get_openai_api_key()
+    if not api_key:
+        return {
+            "status": "unavailable",
+            "ranked": 0,
+            "shortlisted": 0,
+            "reason": "OpenAI ranking is enabled for this query but is not configured.",
+        }
+    candidates = pipeline.ai_ranking_candidates(job["case_id"], persona_id, limit=50)
+    if not candidates:
+        return {"status": "completed", "ranked": 0, "shortlisted": 0}
+    task_id = "openai-ranking:" + persona_id
+    sink.put(
+        {
+            "type": "collector_started",
+            "collector": "openai_ranking",
+            "task_id": task_id,
+            "pipeline_id": "p2-e2e-v1",
+        }
+    )
+    settings = app_module.load_settings()
+    model = settings.get("openai_model") or app_module.DEFAULT_SETTINGS["openai_model"]
+    try:
+        from maigret.ai import get_pipeline_group_rankings
+
+        persona = store.get_persona(persona_id) or {}
+        rankings = await get_pipeline_group_rankings(
+            api_key,
+            subject_label=persona.get("display_name") or persona_id,
+            groups=candidates,
+            model=model,
+            timeout_seconds=120,
+            **app_module.ai_endpoint_options(),
+        )
+        expected_ids = {item["group_id"] for item in candidates}
+        returned_ids = [str(item.get("group_id") or "") for item in rankings]
+        if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != expected_ids:
+            raise ValueError(
+                "OpenAI ranking response did not cover the exact candidate set"
+            )
+        applied = pipeline.apply_ai_rankings(
+            job["case_id"], persona_id, rankings, model=model
+        )
+    except Exception as exc:
+        diagnostic = app_module.record_internal_error(
+            "Post-collection OpenAI ranking failed",
+            exc,
+            session=job["job_id"],
+            persona_id=persona_id,
+        )
+        sink.put(
+            {
+                "type": "collector_completed",
+                "collector": "openai_ranking",
+                "task_id": task_id,
+                "outcome": "error",
+                "observations": 0,
+                "evidence_observations": 0,
+                "diagnostic": diagnostic,
+                "pipeline_id": "p2-e2e-v1",
+            }
+        )
+        return {
+            "status": "error",
+            "ranked": 0,
+            "shortlisted": 0,
+            "reason": diagnostic,
+        }
+    shortlisted = sum(1 for item in rankings if item.get("shortlisted") is True)
+    sink.put(
+        {
+            "type": "collector_completed",
+            "collector": "openai_ranking",
+            "task_id": task_id,
+            "outcome": "found",
+            "observations": 0,
+            "evidence_observations": 0,
+            "ranked_findings": applied["ranked"],
+            "shortlisted_findings": shortlisted,
+            "display_status": "completed",
+            "pipeline_id": "p2-e2e-v1",
+        }
+    )
+    return {
+        "status": "completed",
+        "ranked": applied["ranked"],
+        "shortlisted": shortlisted,
+        "model": model,
+    }
+
+
 async def _execute_requests(
     store, job, requests, contexts, *, adapters=None, shutdown_check=None
 ):
@@ -469,6 +604,18 @@ async def _execute_requests(
     )
     semaphore = asyncio.Semaphore(3)
     outcomes, collector_contexts = [], []
+    for task in queue:
+        if task.get("route_state") == "active":
+            sink.put(
+                {
+                    "type": "collector_planned",
+                    "collector": task["engine_id"],
+                    "task_id": task["id"],
+                    "platform": task.get("platform"),
+                    "input_type": task.get("input_type"),
+                    "pipeline_id": "p2-e2e-v1",
+                }
+            )
 
     async def execute_task(task):
         request = task.pop("_request")
@@ -520,6 +667,8 @@ async def _execute_requests(
                         "collector": task["engine_id"],
                         "task_id": task["id"],
                         "attempt_id": attempt["id"],
+                        "platform": task.get("platform"),
+                        "input_type": task.get("input_type"),
                         "pipeline_id": "p2-e2e-v1",
                     }
                 )
@@ -620,19 +769,23 @@ async def _execute_requests(
                     # group is drained, using the separate cancellation boundary.
                     outcomes.append("cancelled")
                     return
+                evidence_observation_count = context.observation_count
+                lifecycle_diagnostic = error or returned.get("diagnostic")
                 context.emit_observations(
                     [
                         {
                             "source_engine": task["engine_id"],
                             "source_record_id": "task-outcome",
                             "status": outcome,
-                            "reason": error or "Task completed",
+                            "reason": lifecycle_diagnostic or "Task completed",
                             "extra": {
                                 "task_id": task["id"],
                                 "route_state": task["route_state"],
                                 "input_type": task.get("input_type"),
                                 "platform": task.get("platform"),
-                                "observations": context.observation_count,
+                                "observations": evidence_observation_count,
+                                "outcome_counts": returned.get("outcome_counts", {}),
+                                "warning_count": int(returned.get("warning_count") or 0),
                                 "retry": retry_state,
                             },
                         }
@@ -650,8 +803,15 @@ async def _execute_requests(
                         "type": "collector_completed",
                         "collector": task["engine_id"],
                         "task_id": task["id"],
+                        "platform": task.get("platform"),
+                        "input_type": task.get("input_type"),
                         "outcome": outcome,
-                        "observations": context.observation_count,
+                        "observations": evidence_observation_count,
+                        "evidence_observations": evidence_observation_count,
+                        "outcome_counts": returned.get("outcome_counts", {}),
+                        "warning_count": int(returned.get("warning_count") or 0),
+                        "display_status": returned.get("display_status"),
+                        "diagnostic": lifecycle_diagnostic,
                         "pipeline_id": "p2-e2e-v1",
                     }
                 )
@@ -690,8 +850,23 @@ async def _execute_requests(
         # Persistence/ownership failure is fatal and must never look like empty
         # successful collection. Let the worker's fenced failure path own it.
         raise errors[0]
+    ranking_results = {}
     for request in requests:
-        refresh_consolidation(store, job["case_id"], request["persona_id"])
+        persona_id = request["persona_id"]
+        refresh_consolidation(store, job["case_id"], persona_id)
+        if (
+            persona_id not in ranking_results
+            and not operator_stopped()
+            and not shutting_down()
+        ):
+            ranking_results[persona_id] = await rank_consolidated_findings(
+                store,
+                pipeline,
+                sink,
+                job,
+                persona_id,
+                contexts.get(persona_id, {}),
+            )
     active = [
         task
         for request in requests
@@ -757,6 +932,7 @@ async def _execute_requests(
         "account_candidate_count": len(observed_accounts),
         "successful_source_task_count": outcomes.count("found")
         + outcomes.count("candidate"),
+        "ai_ranking": ranking_results,
         "individual_reports": [],
         "collector_observations": [],
         "error": (

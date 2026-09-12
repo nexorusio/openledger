@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Mapping
 
 PIPELINE_ID = "p2-e2e-v1"
-PIPELINE_SCHEMA_REVISION = "e2e2b8d0a502"
+PIPELINE_SCHEMA_REVISION = "e2e3c9d1f703"
 PIPELINE_CONTRACT_VERSION = 1
 ROUTE_STATES = frozenset({"active", "conditional", "unavailable", "excluded"})
 TASK_STATES = frozenset({"planned", "running", "completed", "cancelled"})

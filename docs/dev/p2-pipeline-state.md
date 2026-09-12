@@ -6,7 +6,7 @@ The user approved the complete plan in `p2-pipeline-approved-plan.md` on 11 Sept
 
 Base: PR #55 head `f004e719d6bd23e79850379fba67956355736ce2`, tree `f84724316c3dea6d91a05dd64b6cf20cca45ad95`.
 
-Required runtime identity: `p2-e2e-v1`. Required additive schema: `e2e2b8d0a502`, descending through `e2e1a7c9d401` from P2 `b3e9d7c4a610`.
+Required runtime identity: `p2-e2e-v1`. Required additive schema: `e2e3c9d1f703`, descending through `e2e2b8d0a502` and `e2e1a7c9d401` from P2 `b3e9d7c4a610`.
 
 The later user instruction supersedes the plan's temporary default-off release toggle: the released app and worker must require this pipeline and schema, with no automatic old-pipeline fallback. Source selection flags still control individual providers.
 
@@ -35,7 +35,7 @@ Persona navigation use the new workflow. They cannot create a Final Persona.
 
 The released runtime has no old-pipeline activation switch. App, worker and
 migration must share the manifest's immutable image, exact source fingerprint,
-`p2-e2e-v1` contract and `e2e2b8d0a502` schema. The supported updater refuses a
+`p2-e2e-v1` contract and `e2e3c9d1f703` schema. The supported updater refuses a
 floating image, stale source, mismatched commit/tree, unknown migration, or
 incompatible app/worker identity. It stops on failed validation instead of
 silently starting the earlier pipeline. Preparation/build is separate from
@@ -139,7 +139,7 @@ The critical review identified incomplete adapter execution/normalization
 contracts, process-local provider cooldowns, unmetered attempts, missing durable
 connector checkpoints/receipts, and expensive write-on-read projections. The
 user authorized parallel remediation of those findings. The schema advances
-additively to `e2e2b8d0a502`; the original `e2e1a7c9d401` definition is frozen.
+additively to `e2e3c9d1f703`; the original `e2e1a7c9d401` definition is frozen.
 Both earlier schema versions remain accepted sources for the reviewed updater,
 and both are refused by the new app/worker until migration completes.
 

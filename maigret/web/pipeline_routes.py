@@ -695,8 +695,13 @@ def register_pipeline_routes(
         graph_data = version_graph(projection)
         if request.path.startswith('/api/'):
             return jsonify(graph_data)
-        return render_template(
-            'pipeline_graph.html', projection=projection, graph=graph_data
+        return redirect(
+            url_for(
+                'pipeline.version_view',
+                case_id=case_id,
+                persona_id=persona_id,
+                version_id=version_id,
+            )
         )
 
     @bp.route('/cases/<case_id>/pipeline/<persona_id>/versions/<version_id>/export.pdf')

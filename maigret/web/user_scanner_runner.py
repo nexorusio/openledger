@@ -3,10 +3,96 @@
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import json
 import sys
+from pathlib import Path
 
 _USERNAME_PLATFORMS = ("facebook", "instagram", "threads", "tiktok", "x")
+
+
+def _diagnostic_result(
+    *, target: str, site_name: str, category: str, reason: str, stage: str
+) -> dict:
+    return {
+        "status": "Error",
+        "reason": reason,
+        "username": target,
+        "site_name": site_name,
+        "category": category,
+        "url": "",
+        "extra": {"scan_stage": stage, "seed_username": target},
+        "media": {},
+    }
+
+
+def _load_modules_tolerantly(
+    *, target: str, is_email: bool, requested_names: tuple[str, ...] | None = None
+) -> tuple[list, list[dict]]:
+    """Load usable pinned modules without one broken module aborting the engine."""
+    try:
+        from user_scanner.core.helpers import load_categories
+    except ImportError:
+        # Narrow compatibility path used by isolated contract fixtures and older
+        # pinned Scanner builds that expose only the public find_module helper.
+        if not requested_names:
+            raise
+        from user_scanner.core.helpers import find_module
+
+        modules, diagnostics = [], []
+        for name in requested_names:
+            try:
+                found = find_module(name, is_email=is_email, no_nsfw=True)
+            except Exception as exc:
+                diagnostics.append(
+                    _diagnostic_result(
+                        target=target,
+                        site_name=name.title(),
+                        category="Social",
+                        reason=f"Module unavailable ({type(exc).__name__})",
+                        stage="module_load",
+                    )
+                )
+            else:
+                modules.extend(found)
+        return modules, diagnostics
+
+    modules, diagnostics = [], []
+    requested = set(requested_names or ())
+    discovered = set()
+    for category, category_path in load_categories(is_email, True).items():
+        for path in sorted(Path(category_path).glob("*.py")):
+            if path.name == "__init__.py" or (requested and path.stem not in requested):
+                continue
+            discovered.add(path.stem)
+            try:
+                spec = importlib.util.spec_from_file_location(path.stem, str(path))
+                if spec is None or spec.loader is None:
+                    raise ImportError("module loader unavailable")
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                modules.append(module)
+            except Exception as exc:
+                diagnostics.append(
+                    _diagnostic_result(
+                        target=target,
+                        site_name=path.stem.replace("_", ".").title(),
+                        category=category.title(),
+                        reason=f"Module unavailable ({type(exc).__name__})",
+                        stage="module_load",
+                    )
+                )
+    for name in sorted(requested - discovered):
+        diagnostics.append(
+            _diagnostic_result(
+                target=target,
+                site_name=name.replace("_", ".").title(),
+                category="Social",
+                reason="Configured platform module is absent from the pinned package",
+                stage="module_missing",
+            )
+        )
+    return modules, diagnostics
 
 
 def _scan_email(request: dict) -> list[dict]:
@@ -14,10 +100,7 @@ def _scan_email(request: dict) -> list[dict]:
     if not email or len(email) > 254 or "@" not in email:
         raise ValueError("A valid email target is required")
 
-    from user_scanner.core.email_orchestrator import (
-        run_email_full_batch,
-        set_concurrency,
-    )
+    from user_scanner.core.email_orchestrator import run_email_module_batch, set_concurrency
     from user_scanner.core.helpers import ScanConfig, set_global_timeout
 
     set_concurrency(12)
@@ -29,9 +112,10 @@ def _scan_email(request: dict) -> list[dict]:
         verbose=False,
         timeout=15.0,
     )
+    modules, diagnostics = _load_modules_tolerantly(target=email, is_email=True)
     with contextlib.redirect_stdout(sys.stderr):
-        results = run_email_full_batch(email, config)
-    return [result.to_dict() for result in results]
+        results = run_email_module_batch(modules, email, config) if modules else []
+    return [result.to_dict() for result in results] + diagnostics
 
 
 def _scan_usernames(request: dict) -> list[dict]:
@@ -65,7 +149,7 @@ def _scan_usernames(request: dict) -> list[dict]:
     ]
 
     from user_scanner.core.cross_scan import CrossScanConfig, run_cross_scan
-    from user_scanner.core.helpers import ScanConfig, find_module, set_global_timeout
+    from user_scanner.core.helpers import ScanConfig, set_global_timeout
     from user_scanner.core.orchestrator import run_user_module, set_concurrency
 
     set_concurrency(12)
@@ -77,15 +161,13 @@ def _scan_usernames(request: dict) -> list[dict]:
         verbose=False,
         timeout=15.0,
     )
-    modules = [
-        module
-        for platform in active_platforms
-        for module in find_module(platform, is_email=False, no_nsfw=True)
-    ]
-    if len(modules) != len(active_platforms):
-        raise RuntimeError("A configured username platform module is unavailable")
+    modules, load_diagnostics = _load_modules_tolerantly(
+        target=usernames[0],
+        is_email=False,
+        requested_names=tuple(active_platforms),
+    )
 
-    serialized: list[dict] = []
+    serialized: list[dict] = list(load_diagnostics)
     with contextlib.redirect_stdout(sys.stderr):
         for username in usernames:
             direct = run_user_module(modules, username, config) if modules else []
@@ -97,21 +179,33 @@ def _scan_usernames(request: dict) -> list[dict]:
                         "confidence": "candidate",
                     }
                 )
-            cross = (
-                run_cross_scan(
-                    direct,
-                    config,
-                    CrossScanConfig(
-                        links="all",
-                        modules=tuple(active_platforms),
-                        emails="none",
-                        sweep=0,
-                        depth=1,
-                    ),
+            try:
+                cross = (
+                    run_cross_scan(
+                        direct,
+                        config,
+                        CrossScanConfig(
+                            links="all",
+                            modules=tuple(active_platforms),
+                            emails="none",
+                            sweep=0,
+                            depth=1,
+                        ),
+                    )
+                    if direct
+                    else []
                 )
-                if direct
-                else []
-            )
+            except Exception as exc:
+                cross = []
+                serialized.append(
+                    _diagnostic_result(
+                        target=username,
+                        site_name="User Scanner cross-scan",
+                        category="Social",
+                        reason=f"Cross-scan unavailable ({type(exc).__name__})",
+                        stage="cross_scan",
+                    )
+                )
             for result in cross:
                 result.update(
                     extra={

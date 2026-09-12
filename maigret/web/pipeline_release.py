@@ -16,7 +16,7 @@ import time
 
 PIPELINE_ID = "p2-e2e-v1"
 ENGINE_CONTRACT = "p2-e2e-v1"
-SCHEMA_REVISION = "e2e2b8d0a502"
+SCHEMA_REVISION = "e2e3c9d1f703"
 PREVIOUS_SCHEMA = "b3e9d7c4a610"
 BUILD_PATH = Path(__file__).resolve().parents[2] / "openledger-build.json"
 WORKER_PATH = Path("/tmp/openledger-worker-attestation.json")

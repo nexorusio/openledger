@@ -163,7 +163,7 @@ def test_postgres_allows_only_one_investigation_worker_lock(postgres_store):
     competing_store.dispose()
 
 
-def test_postgres_case_delete_requires_terminal_jobs_and_retains_pipeline_history(
+def test_postgres_case_delete_requires_terminal_jobs_then_purges_pipeline_history(
     postgres_store,
 ):
     job_id = postgres_store.create_investigation(["alice"], {})
@@ -176,10 +176,9 @@ def test_postgres_case_delete_requires_terminal_jobs_and_retains_pipeline_histor
         job_id,
         {"status": "cancelled", "usernames": job["usernames"]},
     )
-    with pytest.raises(ValueError, match="retained P2 pipeline"):
-        postgres_store.delete_case(case_id)
-    assert postgres_store.get_case(case_id) is not None
-    assert postgres_store.get_job(job_id) is not None
+    assert postgres_store.delete_case(case_id) is True
+    assert postgres_store.get_case(case_id) is None
+    assert postgres_store.get_job(job_id) is None
 
 
 def test_postgres_enforces_external_evidence_receipt_and_immutability_guards(

@@ -94,26 +94,6 @@
 </section>
 
 <div class="results-grid">
-    {% if graph_file %}
-    <section class="panel-card">
-        <header class="panel-header">
-            <div>
-                <h2>Discovery evidence graph</h2>
-                <p>Only detections with profile-specific account evidence appear in this graph.</p>
-            </div>
-            <span class="badge-soft"><i data-lucide="network"></i> Interactive</span>
-        </header>
-        <div class="panel-body p-0">
-            <iframe src="{{ url_for('download_report', filename=graph_file) }}"
-                title="OpenLedger combined relationship graph"
-                sandbox="allow-scripts"
-                loading="lazy"
-                referrerpolicy="no-referrer"
-                style="width:100%; height:620px; border:0;"></iframe>
-        </div>
-    </section>
-    {% endif %}
-
     <section class="panel-card ai-analysis-card" aria-labelledby="ai-analysis-heading">
         <header class="panel-header">
             <div>
@@ -332,7 +312,7 @@
                         {% if report.untriaged_profiles %}
                         <details class="reliability-suppressed mt-3">
                             <summary>Legacy untriaged hits ({{ report.untriaged_profiles | length }})</summary>
-                            <p class="form-text">Saved before reliability triage. These are raw leads, not findings, and are excluded from graph, AI evidence, and Personas until the investigation is rerun.</p>
+                            <p class="form-text">Saved before reliability triage. These are raw leads, not findings, and are excluded from AI evidence and Personas until the investigation is rerun.</p>
                             <ul class="profile-list">
                                 {% for profile in report.untriaged_profiles %}
                                 <li class="profile-item">
@@ -363,7 +343,7 @@
                         {% if report.suppressed_profiles %}
                         <details class="reliability-suppressed mt-3">
                             <summary>Suppressed detector hits ({{ report.suppressed_profiles | length }})</summary>
-                            <p class="form-text">Retained in raw reports, excluded from findings, graph, AI evidence and Personas.</p>
+                            <p class="form-text">Retained in raw reports, excluded from findings, AI evidence and Personas.</p>
                             <ul class="profile-list">
                                 {% for profile in report.suppressed_profiles %}
                                 <li class="profile-item">

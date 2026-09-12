@@ -122,3 +122,77 @@ def test_x_module_requires_explicit_vxtwitter_consent(monkeypatch):
     assert captured["find_module"] == ["x"]
     assert len(results) == 1
     assert results[0]["site_name"] == "X"
+
+
+def test_broken_unrelated_module_does_not_abort_usable_modules(
+    monkeypatch, tmp_path
+):
+    package = ModuleType("user_scanner")
+    package.__path__ = []
+    core = ModuleType("user_scanner.core")
+    core.__path__ = []
+    helpers = ModuleType("user_scanner.core.helpers")
+    category = tmp_path / "social"
+    category.mkdir()
+    (category / "working.py").write_text("NAME = 'working'\n", encoding="utf-8")
+    (category / "broken.py").write_text(
+        "raise RuntimeError('broken optional dependency')\n", encoding="utf-8"
+    )
+    helpers.load_categories = lambda is_email, no_nsfw: {"social": category}
+    monkeypatch.setitem(sys.modules, "user_scanner", package)
+    monkeypatch.setitem(sys.modules, "user_scanner.core", core)
+    monkeypatch.setitem(sys.modules, "user_scanner.core.helpers", helpers)
+
+    modules, diagnostics = user_scanner_runner._load_modules_tolerantly(
+        target="alice", is_email=True
+    )
+
+    assert [module.NAME for module in modules] == ["working"]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["site_name"] == "Broken"
+    assert diagnostics[0]["extra"]["scan_stage"] == "module_load"
+
+
+def test_email_scan_runs_usable_modules_and_retains_load_diagnostics(
+    monkeypatch, tmp_path
+):
+    captured = {}
+    package = ModuleType("user_scanner")
+    package.__path__ = []
+    core = ModuleType("user_scanner.core")
+    core.__path__ = []
+    helpers = ModuleType("user_scanner.core.helpers")
+    email_orchestrator = ModuleType("user_scanner.core.email_orchestrator")
+    category = tmp_path / "accounts"
+    category.mkdir()
+    (category / "working.py").write_text("NAME = 'working'\n", encoding="utf-8")
+    (category / "broken.py").write_text(
+        "raise RuntimeError('broken optional dependency')\n", encoding="utf-8"
+    )
+    helpers.load_categories = lambda is_email, no_nsfw: {"accounts": category}
+    helpers.ScanConfig = SimpleNamespace
+    helpers.set_global_timeout = lambda timeout: captured.update(timeout=timeout)
+
+    def run_email_module_batch(modules, email, _config):
+        captured.update(modules=list(modules), email=email)
+        return [_FakeResult(email, "Working")]
+
+    email_orchestrator.run_email_module_batch = run_email_module_batch
+    email_orchestrator.set_concurrency = lambda value: captured.update(
+        concurrency=value
+    )
+    for name, module in {
+        "user_scanner": package,
+        "user_scanner.core": core,
+        "user_scanner.core.helpers": helpers,
+        "user_scanner.core.email_orchestrator": email_orchestrator,
+    }.items():
+        monkeypatch.setitem(sys.modules, name, module)
+
+    results = user_scanner_runner._scan_email({"email": "Alice@Example.test"})
+
+    assert captured["email"] == "alice@example.test"
+    assert [module.NAME for module in captured["modules"]] == ["working"]
+    assert results[0]["status"] == "Found"
+    assert results[1]["site_name"] == "Broken"
+    assert results[1]["extra"]["scan_stage"] == "module_load"
