@@ -45,6 +45,47 @@ OUTCOMES = frozenset(
 )
 TRANSIENT_OUTCOMES = frozenset({"partial", "timeout", "error"})
 
+SHORTLIST_SECTIONS = (
+    ("identity", "Identity"),
+    ("contact", "Contact and location"),
+    ("digital", "Digital presence"),
+    ("affiliations", "Affiliations"),
+    ("records", "Assets and risk records"),
+)
+
+SHORTLIST_PREDICATE_SECTIONS = {
+    "full_name": "identity",
+    "name": "identity",
+    "alias": "identity",
+    "date_of_birth": "identity",
+    "photograph": "identity",
+    "email": "contact",
+    "phone": "contact",
+    "address": "contact",
+    "current_location": "contact",
+    "social_account": "digital",
+    "platform_identifier": "digital",
+    "linked_profile_lead": "digital",
+    "account_registration": "digital",
+    "website": "digital",
+    "occupation": "affiliations",
+    "company": "affiliations",
+    "organization": "affiliations",
+    "affiliation": "affiliations",
+    "company_ownership": "affiliations",
+}
+
+
+def _shortlist_section(kind, normalized):
+    if kind == "account":
+        return "digital"
+    predicate = str(
+        (normalized or {}).get("predicate")
+        or (normalized or {}).get("field_name")
+        or ""
+    ).casefold()
+    return SHORTLIST_PREDICATE_SECTIONS.get(predicate, "records")
+
 
 def task_can_retry(task):
     state = (task.get("spec") or {}).get("_execution") or {}
@@ -2419,6 +2460,7 @@ class PipelineStore:
                 .where(*criteria)
             ).mappings()
             shortlist = []
+            ai_ranked_group_count = 0
             for row in shortlist_rows:
                 assessment = dict(row.get("summary_assessment") or {})
                 counts = dict(assessment.get("evidence_counts") or {})
@@ -2433,21 +2475,45 @@ class PipelineStore:
                     for item in summary_observations
                     if isinstance(item, dict)
                 )
-                # Only evidence that has already met the source-backed
-                # threshold, or an operator's explicit source-cited proposal,
-                # may consume operator attention. Everything else remains
-                # searchable in the evidence explorer and continues to be
-                # collected; it is not silently discarded.
                 source_supported = assessment.get("evidence_status") == "source_supported"
-                if conflicts or not (source_supported or manual_cited):
-                    continue
                 normalized = dict(row.get("summary_normalized") or row["normalized"])
                 observation_count = int(row.get("summary_observation_count") or 0)
-                recommendation = (
-                    "strongly_recommended"
-                    if support >= 2
-                    else ("recommended" if source_supported else "direct_review")
-                )
+                ai_ranking = assessment.get("ai_ranking")
+                ai_ranking = ai_ranking if isinstance(ai_ranking, dict) else None
+                if ai_ranking:
+                    ai_ranked_group_count += 1
+                if conflicts or not (
+                    source_supported
+                    or manual_cited
+                    or (ai_ranking and ai_ranking.get("shortlisted") is True)
+                ):
+                    continue
+                if ai_ranking:
+                    if ai_ranking.get("shortlisted") is not True:
+                        continue
+                    priority = str(ai_ranking.get("priority") or "low").casefold()
+                    recommendation = "ai_" + priority + "_priority"
+                    ranking_explanation = str(ai_ranking.get("reason") or "").strip()
+                    ranking_key = (
+                        2,
+                        {"high": 3, "medium": 2, "low": 1}.get(priority, 0),
+                        support,
+                        observation_count,
+                    )
+                else:
+                    recommendation = (
+                        "strongly_recommended"
+                        if support >= 2
+                        else ("recommended" if source_supported else "direct_review")
+                    )
+                    ranking_explanation = (
+                        f"{support} independent retained source "
+                        f"{'family supports' if support == 1 else 'families support'} "
+                        "this finding; no unresolved contradiction is present."
+                        if source_supported
+                        else "An operator-supplied claim cites retained source evidence and is ready for final review."
+                    )
+                    ranking_key = (1, support, observation_count, 0)
                 shortlist.append(
                     {
                         "id": row["id"],
@@ -2457,25 +2523,34 @@ class PipelineStore:
                         "observation_count": observation_count,
                         "latest_decision": row.get("latest_decision_value"),
                         "recommendation": recommendation,
+                        "section": _shortlist_section(row["kind"], normalized),
+                        "ai_ranked": ai_ranking is not None,
                         "support_origin_families": support,
-                        "ranking_explanation": (
-                            f"{support} independent retained source "
-                            f"{'family supports' if support == 1 else 'families support'} "
-                            "this finding; no unresolved contradiction is present."
-                            if source_supported
-                            else "An operator-supplied claim cites retained source evidence and is ready for final review."
-                        ),
-                        "ranking_key": (support, observation_count),
+                        "evidence_status": assessment.get("evidence_status"),
+                        "ranking_explanation": ranking_explanation,
+                        "ranking_key": ranking_key,
                     }
                 )
             shortlist.sort(
                 key=lambda item: (
-                    item["ranking_key"][0], item["ranking_key"][1], item["id"]
+                    *item["ranking_key"], item["id"]
                 ),
                 reverse=True,
             )
             for item in shortlist:
                 item.pop("ranking_key", None)
+            display_shortlist = shortlist[:50]
+            shortlist_sections = [
+                {
+                    "key": key,
+                    "title": title,
+                    "items": [
+                        item for item in display_shortlist if item["section"] == key
+                    ],
+                }
+                for key, title in SHORTLIST_SECTIONS
+                if any(item["section"] == key for item in display_shortlist)
+            ]
             result = dict(
                 pipeline_id=PIPELINE_ID,
                 **state,
@@ -2490,8 +2565,10 @@ class PipelineStore:
                 group_count=connection.scalar(
                     select(func.count()).select_from(groups).where(*criteria)
                 ),
-                shortlist=shortlist[:50],
+                shortlist=display_shortlist,
                 shortlist_count=len(shortlist),
+                shortlist_sections=shortlist_sections,
+                ai_ranked_group_count=ai_ranked_group_count,
                 limit=limit,
                 offset=offset,
                 history_offset=history_offset,
@@ -2505,6 +2582,161 @@ class PipelineStore:
             result[kind + "_count"] = page["count"]
         result.update(case_id=case_id, persona_id=persona_id)
         return _json(result)
+
+    def ai_ranking_candidates(self, case_id, persona_id, *, limit=100):
+        """Return a bounded non-conflicting set for one AI ranking pass."""
+        limit = min(max(int(limit), 1), 100)
+        groups, summaries = self._table("groups"), self._table("group_summaries")
+        with self.engine.connect() as connection:
+            self._scope(connection, case_id, persona_id)
+            rows = connection.execute(
+                select(
+                    groups.c.id,
+                    groups.c.kind,
+                    summaries.c.normalized,
+                    summaries.c.assessment,
+                    summaries.c.observations,
+                    summaries.c.observation_count,
+                )
+                .join(summaries, summaries.c.group_id == groups.c.id)
+                .where(
+                    groups.c.case_id == case_id,
+                    groups.c.persona_id == persona_id,
+                )
+            ).mappings()
+            candidates = []
+            for row in rows:
+                assessment = dict(row["assessment"] or {})
+                conflicts = int(assessment.get("contradiction_count") or 0) + int(
+                    assessment.get("group_conflict_count") or 0
+                )
+                if conflicts or int(row["observation_count"] or 0) < 1:
+                    continue
+                counts = dict(assessment.get("evidence_counts") or {})
+                support = int(counts.get("support_origin_families") or 0)
+                source_rows = []
+                for observation in list(row["observations"] or [])[:3]:
+                    if not isinstance(observation, dict):
+                        continue
+                    source_rows.append(
+                        {
+                            key: observation.get(key)
+                            for key in (
+                                "engine",
+                                "status",
+                                "source_name",
+                                "source_url",
+                                "reason",
+                            )
+                            if observation.get(key) not in (None, "")
+                        }
+                    )
+                candidates.append(
+                    {
+                        "group_id": row["id"],
+                        "kind": row["kind"],
+                        "finding": row["normalized"],
+                        "support_origin_families": support,
+                        "evidence_status": assessment.get("evidence_status"),
+                        "missing_evidence": list(assessment.get("missing_evidence") or [])[
+                            :5
+                        ],
+                        "observation_count": int(row["observation_count"] or 0),
+                        "source_examples": source_rows,
+                        "_ranking_key": (
+                            support,
+                            int(row["observation_count"] or 0),
+                            row["id"],
+                        ),
+                    }
+                )
+        candidates.sort(key=lambda item: item["_ranking_key"], reverse=True)
+        for candidate in candidates:
+            candidate.pop("_ranking_key", None)
+        return _json(candidates[:limit])
+
+    def apply_ai_rankings(self, case_id, persona_id, rankings, *, model):
+        """Append model rankings to assessments without modifying source evidence."""
+        if not isinstance(rankings, list) or len(rankings) > 100:
+            raise ValueError("AI rankings must be a list of at most 100 records")
+        normalized = {}
+        for ranking in rankings:
+            if not isinstance(ranking, dict):
+                raise ValueError("AI ranking record must be an object")
+            group_id = str(ranking.get("group_id") or "")
+            priority = str(ranking.get("priority") or "").casefold()
+            reason = str(ranking.get("reason") or "").strip()
+            if (
+                not group_id
+                or group_id in normalized
+                or priority not in {"high", "medium", "low"}
+                or not isinstance(ranking.get("shortlisted"), bool)
+                or not reason
+            ):
+                raise ValueError("AI ranking record is incomplete or duplicated")
+            normalized[group_id] = {
+                "schema_version": 1,
+                "ranked_by": "openai",
+                "model": str(model)[:100],
+                "shortlisted": ranking["shortlisted"],
+                "priority": priority,
+                "reason": reason[:500],
+            }
+        changed = 0
+        groups = self._table("groups")
+        assessments = self._table("assessments")
+        with self.engine.begin() as connection:
+            self._scope(connection, case_id, persona_id, lock=True)
+            for group_id, ranking in normalized.items():
+                group = self._row(connection, groups, group_id)
+                self._check_scope(group, case_id, persona_id)
+                current = (
+                    connection.execute(
+                        select(assessments)
+                        .where(assessments.c.group_id == group_id)
+                        .order_by(
+                            assessments.c.created_at.desc(), assessments.c.id.desc()
+                        )
+                        .limit(1)
+                    )
+                    .mappings()
+                    .first()
+                )
+                if not current:
+                    raise ValueError("AI ranking requires a materialized assessment")
+                document = _json(current["document"])
+                assessment = dict(document.get("assessment") or {})
+                conflicts = int(assessment.get("contradiction_count") or 0) + int(
+                    assessment.get("group_conflict_count") or 0
+                )
+                if conflicts:
+                    raise ValueError("AI ranking cannot elevate conflicting evidence")
+                assessment["ai_ranking"] = ranking
+                document["assessment"] = assessment
+                evidence_hash = _digest(document)
+                if connection.scalar(
+                    select(assessments.c.id).where(
+                        assessments.c.group_id == group_id,
+                        assessments.c.evidence_hash == evidence_hash,
+                    )
+                ):
+                    continue
+                connection.execute(
+                    insert(assessments).values(
+                        id=_id(),
+                        case_id=case_id,
+                        persona_id=persona_id,
+                        group_id=group_id,
+                        evidence_hash=evidence_hash,
+                        document=document,
+                        created_at=_now(),
+                    )
+                )
+                self._refresh_group_summary(connection, group)
+                changed += 1
+            if changed:
+                self._bump(connection, persona_id)
+        return {"ranked": len(normalized), "changed": changed}
 
     def create_version(
         self,

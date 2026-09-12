@@ -32,6 +32,7 @@ jobs:
       - name: Check out OpenLedger
         uses: actions/checkout@v4
         with:
+          ref: dev
           fetch-depth: 0
 
       - name: Configure upstream
@@ -81,7 +82,7 @@ jobs:
           {
             echo "## Manual upstream resolution required"
             echo
-            echo "Maigret \`$UPSTREAM_SHA\` could not be merged into OpenLedger \`main\`."
+            echo "Maigret \`$UPSTREAM_SHA\` could not be merged into OpenLedger \`dev\`."
             echo
             echo "Conflicting files:"
             if [ -n "$conflicts" ]; then
@@ -90,7 +91,7 @@ jobs:
               echo "- Conflict list was empty; inspect the merge step log."
             fi
             echo
-            echo "Resolve this on a dedicated branch; do not overwrite OpenLedger \`main\`."
+            echo "Resolve this on a dedicated branch; do not overwrite OpenLedger \`dev\` or \`main\`."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "::error title=Manual upstream resolution required::Review the workflow summary for the conflicting files."
           exit 1
@@ -107,7 +108,7 @@ jobs:
           if [ -n "$pr" ]; then
             gh pr edit "$pr" --repo "$GITHUB_REPOSITORY" --title "Synchronize Maigret upstream" --body "$body"
           else
-            gh pr create --repo "$GITHUB_REPOSITORY" --base main --head "$SYNC_BRANCH" --title "Synchronize Maigret upstream" --body "$body"
+            gh pr create --repo "$GITHUB_REPOSITORY" --base dev --head "$SYNC_BRANCH" --title "Synchronize Maigret upstream" --body "$body"
           fi
           echo "pr_url=$(gh pr view "$SYNC_BRANCH" --repo "$GITHUB_REPOSITORY" --json url --jq .url)" >> "$GITHUB_OUTPUT"
 

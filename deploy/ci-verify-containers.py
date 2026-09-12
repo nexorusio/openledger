@@ -69,7 +69,7 @@ def main(image):
     expected = {
         "pipeline_id": "p2-e2e-v1",
         "engine_contract": "p2-e2e-v1",
-        "schema_revision": "e2e2b8d0a502",
+        "schema_revision": "e2e3c9d1f703",
         "commit": command("git", "rev-parse", "HEAD"),
         "tree": command("git", "rev-parse", "HEAD^{tree}"),
         "source_digest": manifest_module.source_digest(ROOT),
@@ -105,7 +105,7 @@ def main(image):
 
     try:
         for database, target in zip(
-            databases, ("e2e2b8d0a502", "b3e9d7c4a610", "e2e1a7c9d401")
+            databases, ("e2e3c9d1f703", "e2e2b8d0a502", "b3e9d7c4a610", "e2e1a7c9d401")
         ):
             with administrator.connect() as connection:
                 connection.exec_driver_sql(f'CREATE DATABASE "{database}"')
@@ -227,7 +227,7 @@ def main(image):
             )
             assert refused.returncode != 0, f"{role} accepted the previous schema"
             assert (
-                "Pipeline requires schema e2e2b8d0a502" in refused.stderr
+                "Pipeline requires schema e2e3c9d1f703" in refused.stderr
             ), f"{role} failed for an unrelated reason"
         record = ROOT / "runtime/ci/container-attestation.json"
         record.parent.mkdir(parents=True, exist_ok=True)

@@ -52,5 +52,5 @@ jobs:
         title: "Automated Sites List Update"
         body: "Automated changes to sites.md based on new Alexa rankings/statistics."
         branch: "auto/update-sites-list"
-        base: main
+        base: dev
         delete-branch: true

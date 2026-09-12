@@ -60,7 +60,7 @@ services:
     image: ${OPENLEDGER_RELEASE_IMAGE:?Use the reviewed P2 release manifest and updater}
     pull_policy: never
     restart: "no"
-    entrypoint: ["alembic", "upgrade", "e2e2b8d0a502"]
+    entrypoint: ["alembic", "upgrade", "e2e3c9d1f703"]
     environment:
       DATABASE_HOST: db
       DATABASE_NAME: openledger

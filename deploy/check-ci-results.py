@@ -9,7 +9,7 @@ REQUIRED_CASES = (
     "test_new_connector_needs_only_package_manifest_and_fixtures",
     "test_operator_and_machine_connectors_are_not_query_worker_fallbacks",
     "test_saved_versions_cannot_silently_use_a_different_parser",
-    "test_registered_wrapper_preserves_partial_outcomes_and_retry_policy",
+    "test_registered_wrapper_keeps_positive_result_and_surfaces_retry_warning",
     "test_browser_four_inputs_review_research_qc_and_final",
     "test_page_commit_advances_cursor_and_atomic_evidence",
     "test_crash_retry_resumes_checkpoint_and_deduplicates_page",

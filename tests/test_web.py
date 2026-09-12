@@ -167,6 +167,7 @@ def test_index_renders(client):
     assert 'Case source filters' in body
     assert 'name="enable_github_profile_enrichment"' in body
     assert 'name="enable_archived_url_evidence"' in body
+    assert 'href="/static/openledger-icon-white.png"' in body
     assert 'e.g. John Doe' in body
     assert 'Jati Pratomo' not in body
     assert 'Nexorus, urban planning' not in body
@@ -297,7 +298,7 @@ def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
     assert "object-src 'none'" in policy
 
 
-def test_only_discovery_graph_report_can_be_framed_same_origin(
+def test_legacy_graph_report_is_not_embedded_but_keeps_safe_direct_headers(
     client, web_app, tmp_path
 ):
     session_folder = tmp_path / 'search_frameable'
@@ -331,7 +332,8 @@ def test_only_discovery_graph_report_can_be_framed_same_origin(
     assert "frame-ancestors 'none'" in results_policy
     assert "frame-src 'self'" in results_policy
     results_body = results_response.get_data(as_text=True)
-    assert 'sandbox="allow-scripts"' in results_body
+    assert '<iframe' not in results_body
+    assert 'combined_graph.html' not in results_body
     assert 'allow-same-origin' not in results_body
 
     graph_response = client.get(
@@ -403,7 +405,9 @@ def test_untrusted_host_is_rejected(client, web_app):
         web_app.app.config['TRUSTED_HOSTS'] = None
 
 
-def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
+def test_index_focuses_on_investigation_setup_not_dashboard_kpis(
+    client, web_app, tmp_path
+):
     assessed_folder = tmp_path / 'search_assessed'
     assessed_folder.mkdir()
     (assessed_folder / 'ai_analysis.md').write_text('assessment', encoding='utf-8')
@@ -425,13 +429,11 @@ def test_index_kpis_summarize_saved_investigations(client, web_app, tmp_path):
 
     body = client.get('/').get_data(as_text=True)
 
-    assert 'Saved investigations' in body
-    assert '1 completed · 1 failed' in body
-    assert 'Supported profiles' in body
-    assert '>7</strong>' in body
-    assert 'AI assessments' in body
-    assert '>1</strong>' in body
-    assert 'Investigation flow' not in body
+    assert 'Investigation setup' in body
+    assert 'Query plan' in body
+    assert 'Saved investigations' not in body
+    assert 'Supported profiles' not in body
+    assert 'AI assessments' not in body
 
 
 def test_username_input_strips_platform_at_prefix(web_app):
@@ -633,6 +635,7 @@ def test_application_login_replaces_browser_authentication(client, web_app):
     assert login_page.status_code == 200
     body = login_page.get_data(as_text=True)
     assert 'Sign in to OpenLedger' in body
+    assert 'href="/static/openledger-icon-white.png"' in body
     assert 'name="username"' in body
     assert 'name="password"' in body
 
@@ -2778,7 +2781,7 @@ def test_live_start_empty_username_redirects_to_index(client, web_app):
 
 def test_live_start_redirects_to_dedicated_live_page(client, web_app, queued_store):
     """POST /live starts a job on a NEW page (/live/<job_id>), not inline on
-    the index page. That page must show the graph + a Stop button, and must
+    the index page. That page must show engine progress + a Stop button, and must
     NOT unconditionally redirect away on completion (only via the Open reports
     button — see test_live_scan_done_event_offers_redirect_not_auto_navigation)."""
 
@@ -2794,7 +2797,8 @@ def test_live_start_redirects_to_dedicated_live_page(client, web_app, queued_sto
     page = client.get(start.location)
     assert page.status_code == 200
     body = page.get_data(as_text=True)
-    assert 'id="graph"' in body
+    assert 'Live engine progress' in body
+    assert 'id="graph"' not in body
     assert 'id="stopBtn"' in body
     assert 'id="reportsBtn"' in body
     assert 'Open reports' in body
@@ -2865,7 +2869,7 @@ def test_live_results_normalizes_database_only_legacy_completion(
     assert 'const completedUntriagedCount = 2;' in body
     assert 'const legacyUntriaged = true;' in body
     assert 'Legacy untriaged hits' in body
-    assert 'Rerun required' in body
+    assert 'withheld until the usernames are rerun' in body
     assert 'id="graph"' not in body
 
 
@@ -3101,8 +3105,8 @@ def test_history_and_dashboard_withhold_database_legacy_claims(
 
     assert '1 untriaged profile · rerun required' in history_body
     assert '1 supported profile' not in history_body
-    assert '1 legacy hit requires rerun' in dashboard_body
-    assert '<strong class="metric-value">0</strong>' in dashboard_body
+    assert 'Investigation setup' in dashboard_body
+    assert 'legacy hit requires rerun' not in dashboard_body
 
 
 def test_history_can_permanently_delete_one_investigation(client, web_app):
@@ -3881,12 +3885,14 @@ def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     assert 'id="appSidebar"' in body
     assert 'href="/settings"' in body
     assert 'New investigation' in body
-    assert 'nexorus-mark.png' in body
+    assert '<span class="brand-mark-wrap" aria-hidden="true">O/</span>' in body
+    assert 'Open-Gate · OSINT' in body
     assert 'Private workspace' not in body
     assert 'OpenLedger by Nexorus' not in body
     assert 'sidebar-status' not in body
-    assert 'class="topbar-profile"' in body
-    assert '>Logout<' in body
+    assert 'class="topbar-profile"' not in body
+    assert 'aria-label="Sign out"' in body
+    assert '<span>Relationships</span>' not in body
 
     resp = client.get('/settings')
     assert resp.status_code == 200
@@ -3992,17 +3998,11 @@ def test_relationship_ui_is_read_only_and_preserves_exact_approved_evidence(
             f"/relationships?mode=shared&case_id={case['id']}"
             '&layout=hierarchical&focus=2&view=table&hide=persona:unknown'
         )
-        assert response.status_code == 200
+        assert response.status_code == 302
+        assert response.location.endswith(f'/cases/{case["id"]}')
         body = response.get_data(as_text=True)
-        assert 'relationship-workspace-grid' in body
-        assert 'data-relationship-focus="1"' in body
-        assert 'data-relationship-focus="2"' in body
-        assert 'relationshipTableView' in body
-        assert '/static/vendor/vis-network-10.1.1.min.js' in body
-        assert '/static/relationships.js' in body
-        assert 'https://unpkg.com/vis-network' not in body
-        assert 'Jakarta, Indonesia' in body
-        assert 'shared@example.test' not in body
+        assert 'relationship-workspace-grid' not in body
+        assert '/static/relationships.js' not in body
 
         mutation_response = client.post(
             '/relationships', data={'action': 'create-edge'}

@@ -5,8 +5,8 @@
 <section class="page-heading">
     <div>
         <p class="eyebrow">Active investigation</p>
-        <h1>{{ 'Combined investigation' if job_kind == 'case_fusion' else 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live discovery graph' }}</h1>
-        <p class="page-description">{{ 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Profile-specific evidence appears in the graph; low-signal detector hits remain separated for review.' }}</p>
+        <h1>{{ 'Combined investigation' if job_kind == 'case_fusion' else 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live source discovery' }}</h1>
+        <p class="page-description">{{ 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Every compatible source engine runs independently. Results are consolidated and ranked before the operator sees a concise review list.' }}</p>
     </div>
     <div class="heading-actions">
         <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open combined case' if job_kind == 'case_fusion' else 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Open reports' }}</a>
@@ -27,7 +27,7 @@
         {% if job_kind == 'case_fusion' %}
         <div class="live-stat"><span>Source cases</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
         <div class="live-stat"><span>Evidence scope</span><strong>Approved only</strong></div>
-        <div class="live-stat"><span>Output</span><strong>Versioned graph</strong></div>
+        <div class="live-stat"><span>Output</span><strong>Versioned evidence</strong></div>
         {% elif job_kind == 'identity_enrichment' %}
         <div class="live-stat"><span>Sources</span><strong>Wikipedia + ICIJ</strong></div>
         <div class="live-stat"><span>Offshore alerts</span><strong id="stat-offshore-alerts">{{ completed_offshore_alert_count }}</strong></div>
@@ -53,7 +53,6 @@
         <div class="live-stat"><span>Email registrations</span><strong id="stat-registrations">{{ completed_registration_count }}</strong></div>
         <div class="live-stat"><span>GitHub profiles enriched</span><strong id="stat-github-enriched">{{ completed_github_enrichment_count }}</strong></div>
         <div class="live-stat"><span>Archived profile URLs</span><strong id="stat-archived-profiles">{{ completed_archived_profile_count }}</strong></div>
-        <div class="live-stat"><span>Graph status</span><strong>{{ 'Rerun required' if legacy_untriaged else 'Streaming' }}</strong></div>
         {% endif %}
     </div>
     <div class="progress mb-3" style="height: 8px;">
@@ -75,18 +74,11 @@
     {% endif %}
     {% if job_kind == 'case_fusion' %}
     <div class="security-callout mb-0"><i data-lucide="shield-check"></i><span>Source cases and review decisions remain unchanged. Pending, uncertain, and rejected records are excluded from this snapshot.</span></div>
-    {% else %}
-    {% if legacy_untriaged %}
-    <div class="security-callout mb-0"><i data-lucide="history"></i><span>This completed investigation predates reliability triage. Its raw hits and graph are withheld until the usernames are rerun.</span></div>
-    {% else %}
-    <div id="graph"></div>
-    <p class="form-text mt-2 mb-0">Double-click a site node to open the public profile in a new tab.</p>
-    {% endif %}
+    {% elif legacy_untriaged %}
+    <div class="security-callout mb-0"><i data-lucide="history"></i><span>This completed investigation predates reliability triage. Its raw hits are withheld until the usernames are rerun.</span></div>
     {% endif %}
     </div>
 </section>
-
-<script src="https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 
 <script>
     const jobId = {{ job_id|tojson }};
@@ -110,7 +102,6 @@
     const completedRegistryCandidateCount = {{ completed_registry_candidate_count|tojson }};
     const completedOffshoreAlertCount = {{ completed_offshore_alert_count|tojson }};
 
-    let nodes = null, edges = null, network = null;
     let foundCount = doneRedirect ? completedFoundCount : 0;
     let candidateCount = doneRedirect ? completedCandidateCount : 0;
     let suppressedCount = doneRedirect ? completedSuppressedCount : 0;
@@ -250,109 +241,31 @@
         }
     }
 
-    function ensureGraph() {
-        if (network) return;
-        const styles = getComputedStyle(document.documentElement);
-        const textColor = styles.getPropertyValue('--ol-text').trim();
-        const borderColor = styles.getPropertyValue('--ol-border').trim();
-        nodes = new vis.DataSet();
-        edges = new vis.DataSet();
-        network = new vis.Network(document.getElementById('graph'), { nodes, edges }, {
-            nodes: { shape: 'dot', size: 14, font: { color: textColor } },
-            edges: { color: { color: borderColor }, smooth: false },
-            physics: {
-                solver: 'forceAtlas2Based',
-                forceAtlas2Based: { gravitationalConstant: -60, springLength: 110 },
-                stabilization: { iterations: 150 },
-            },
-            groups: {
-                username: { color: '#d89524', shape: 'star', size: 22 },
-                site: { color: '#1f9d68' },
-                data: { color: '#0f8b8d', shape: 'box' },
-                organization: { color: '#d89524', shape: 'diamond', size: 24 },
-                person: { color: '#1f9d68', shape: 'dot', size: 16 },
-            },
-        });
-        network.on('doubleClick', function (params) {
-            if (params.nodes.length) {
-                const n = nodes.get(params.nodes[0]);
-                if (n && n.url) window.open(n.url, '_blank');
-            }
-        });
-    }
-
-    function addNode(id, label, group, extra) {
-        if (!nodes.get(id)) nodes.add(Object.assign({ id, label, group }, extra || {}));
-    }
-
-    function addEdge(from, to) {
-        const id = from + '->' + to;
-        if (!edges.get(id)) edges.add({ id, from, to });
-    }
-
-    // Noisy/derived keys that add clutter without identity value (mirrors the
-    // report graph's filtering intent).
-    const SKIP_ID = /(_count$|^is_|_at$|image|avatar|thumbnail)/i;
-
-    function shortLabel(s) {
-        s = String(s);
-        return s.length > 28 ? s.slice(0, 27) + '…' : s;
-    }
-
-    function addFound(ev) {
-        ensureGraph();
-        const uId = 'u:' + ev.username.toLowerCase();
-        addNode(uId, ev.username, 'username');
-        const sId = 's:' + ev.site;
-        addNode(sId, ev.site, 'site', { url: ev.url, title: ev.url });
-        addEdge(uId, sId);
-        for (const [k, v] of Object.entries(ev.ids || {})) {
-            if (SKIP_ID.test(k) || String(v).length > 80) continue;
-            const vId = k + ':' + String(v).toLowerCase();
-            addNode(vId, shortLabel(v), 'data', { title: k + ': ' + v });
-            addEdge(sId, vId);
-        }
-    }
-
-    function addCandidate(ev) {
-        // Candidate connections belong in the discovery graph as clearly
-        // unverified leads.  They are intentionally distinct from supported
-        // profiles and never become Persona facts without later approval.
-        ensureGraph();
-        const uId = 'u:' + String(ev.username || 'subject').toLowerCase();
-        addNode(uId, ev.username || 'subject', 'username');
-        const sId = 'candidate:' + String(ev.site || ev.url || candidateCount);
-        addNode(sId, shortLabel(ev.site || ev.url || 'candidate'), 'data', {
-            url: ev.url,
-            title: (ev.reason || 'Unverified candidate connection') + (ev.url ? '\\n' + ev.url : ''),
-            color: ev.classification === 'suppressed' ? '#b94a48' : '#d89524',
-        });
-        addEdge(uId, sId);
-        for (const [k, v] of Object.entries(ev.ids || {})) {
-            if (SKIP_ID.test(k) || String(v).length > 80) continue;
-            const vId = 'candidate-' + k + ':' + String(v).toLowerCase();
-            addNode(vId, shortLabel(v), 'data', { title: k + ': ' + v, color: '#d89524' });
-            addEdge(sId, vId);
-        }
-    }
-
     const collectorRows = new Map();
+    const catalogueEngineId = 'mai' + 'gret';
     function collectorLabel(key) {
+        if (key === catalogueEngineId) return 'OpenLedger site catalogue';
         return String(key || 'unknown engine').replaceAll('-', ' ').replaceAll('_', ' ');
     }
     function updateCollector(ev, status, activity, result) {
-        const key = String(ev.collector || ev.site || 'discovery');
+        const collector = String(ev.collector || ev.site || 'discovery');
+        const qualifier = String(ev.platform || ev.input_type || '');
+        let key = collector + ':' + qualifier;
+        if (!qualifier) {
+            key = Array.from(collectorRows.keys()).find(item => item.startsWith(collector + ':')) || key;
+        }
         let row = collectorRows.get(key);
         if (!row) {
             row = document.createElement('tr');
             row.dataset.collector = key;
+            row.dataset.label = collectorLabel(collector) + (qualifier ? ' · ' + collectorLabel(qualifier) : '');
             row.innerHTML = '<td></td><td></td><td></td><td></td>';
             collectorRows.set(key, row);
             document.getElementById('engine-progress-empty')?.remove();
             document.getElementById('engine-progress-body').appendChild(row);
         }
         const cells = row.children;
-        cells[0].textContent = collectorLabel(key);
+        cells[0].textContent = row.dataset.label;
         cells[1].textContent = status;
         cells[2].textContent = activity || '—';
         cells[3].textContent = result || '—';
@@ -384,7 +297,7 @@
         if (runtimeState.collection_status === 'interrupted') {
             return 'Investigation interrupted — partial findings were saved and no automatic retry was started.';
         }
-        if (isCaseFusion) return 'Completed — the versioned approved-evidence snapshot and exact relationship graph are ready.';
+        if (isCaseFusion) return 'Completed — the versioned approved-evidence snapshot and exact cross-case findings are ready.';
         if (isIdentityEnrichment) return 'Completed — public-record proposals are ready for analyst review.';
         if (isAffiliation) return 'Completed — ' + registryCandidateCount + ' registry candidates and ' + affiliatedPersonCount + ' people are ready for analyst review.';
         if (legacyUntriaged) return 'Completed — ' + completedUntriagedCount + ' legacy hits require rerun before they can be treated as supported profiles.';
@@ -447,7 +360,7 @@
                 const pct = Math.min(ev.checked, ev.total) / ev.total * 100;
                 document.getElementById('live-progress').style.width = pct + '%';
             }
-            updateCollector({collector: 'maigret'}, 'running', ev.site || 'Checking sources', ev.checked + ' / ' + (ev.total || '?') + ' checked');
+            updateCollector({collector: catalogueEngineId}, 'running', ev.site || 'Checking sources', ev.checked + ' / ' + (ev.total || '?') + ' checked');
         } else if (ev.type === 'snapshot_published') {
             statusEl.textContent = 'Snapshot ready. Opening the combined case while AI synthesis continues in the background…';
             document.getElementById('live-progress').style.width = '100%';
@@ -456,19 +369,25 @@
         } else if (ev.type === 'found') {
             foundCount++;
             document.getElementById('stat-found').textContent = foundCount;
-            addFound(ev);
         } else if (ev.type === 'candidate') {
             candidateCount++;
             document.getElementById('stat-candidates').textContent = candidateCount;
-            addCandidate(ev);
             statusEl.textContent = ev.site + ' returned a low-signal hit retained for review.';
         } else if (ev.type === 'suppressed') {
             suppressedCount++;
             document.getElementById('stat-suppressed').textContent = suppressedCount;
-            addCandidate({...ev, classification: 'suppressed'});
             statusEl.textContent = ev.site + ' returned an unreliable detector hit; it was suppressed.';
+        } else if (ev.type === 'collector_planned') {
+            updateCollector(ev, 'queued', 'Waiting for an execution slot', '—');
         } else if (ev.type === 'collector_started') {
             const startedMessages = {
+                'native_profile_search': 'Searching major public platforms for profile candidates…',
+                'public_exact_match': 'Checking exact public matches for the supplied identifier…',
+                'user_scanner_email': 'Checking supported email-registration modules independently…',
+                'user_scanner_username': 'Checking the selected username on supported major platforms…',
+                [catalogueEngineId]: 'Checking the bundled OpenLedger site catalogue…',
+                'wikipedia_public_biography': 'Searching Wikipedia from the supplied full name…',
+                'icij_offshore_leaks': 'Checking exact-name ICIJ Offshore Leaks candidates…',
                 'github-public-profile': 'Enriching claimed GitHub user profiles through the public API…',
                 'unfurl-url-analysis': 'Decomposing claimed profile URLs offline with Unfurl…',
                 'wayback-cdx': 'Checking exact claimed profile URLs in the Wayback capture index…',
@@ -480,6 +399,7 @@
                 'official-website-content': 'Reading bounded public content from the supplied organization website…',
                 'cloudflare-dns-context': 'Collecting current DNS context for the supplied official website…',
                 'public-record-enrichment': 'Checking Wikipedia and ICIJ using the approved full name…',
+                'openai_ranking': 'Ranking the consolidated source-backed findings for operator review…',
             };
             statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
             updateCollector(ev, 'running', statusEl.textContent, 'Collecting');
@@ -513,6 +433,13 @@
             }
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
             const completedMessages = {
+                'native_profile_search': 'Public-profile candidates retained for consolidation.',
+                'public_exact_match': 'Exact-match checks completed.',
+                'user_scanner_email': 'Email-registration checks completed; unavailable modules are shown separately.',
+                'user_scanner_username': 'Username checks completed; account existence does not establish identity.',
+                [catalogueEngineId]: 'OpenLedger site-catalogue checks completed; unavailable sites did not stop other engines.',
+                'wikipedia_public_biography': 'Wikipedia name candidates retained for consolidation.',
+                'icij_offshore_leaks': 'ICIJ exact-name candidate checks completed.',
                 'github-public-profile': 'GitHub evidence collected. Continuing the investigation…',
                 'unfurl-url-analysis': 'Offline URL analysis collected. Checking archive metadata…',
                 'wayback-cdx': 'Archive evidence collected. Continuing the investigation…',
@@ -524,12 +451,26 @@
                 'official-website-content': 'Published website statements were retained with direct provenance and pending review.',
                 'cloudflare-dns-context': 'DNS context collected as observation-only technical evidence.',
                 'public-record-enrichment': 'Public-record checks completed. Every proposal remains pending review.',
+                'openai_ranking': 'Consolidated findings ranked. Operator approval is still required.',
             };
             statusEl.textContent = completedMessages[ev.collector] || 'Additional evidence collected.';
-            updateCollector(ev, String(ev.outcome || ev.status || 'completed').replaceAll('_', ' '), 'Finished', (ev.observations ?? ev.found ?? ev.candidates ?? 0) + ' observations / leads');
+            const evidenceCount = Number(ev.evidence_observations ?? ev.observations ?? ev.found ?? ev.candidates ?? 0);
+            const warnings = Number(ev.warning_count || 0);
+            const status = String(ev.display_status || ev.outcome || ev.status || 'completed').replaceAll('_', ' ');
+            const result = ev.ranked_findings === undefined
+                ? evidenceCount + ' evidence records' + (warnings ? ' · ' + warnings + ' unavailable checks' : '')
+                : Number(ev.ranked_findings) + ' eligible findings ranked · ' + Number(ev.shortlisted_findings || 0) + ' shortlisted';
+            updateCollector(ev, status, ev.diagnostic || 'Finished', result);
         } else if (ev.type === 'collector_error') {
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
             const errorMessages = {
+                'native_profile_search': 'Public-profile search was unavailable; other engines continued.',
+                'public_exact_match': 'Exact-match search was unavailable; other engines continued.',
+                'user_scanner_email': 'Some email modules were unavailable; retained results remain usable.',
+                'user_scanner_username': 'Some username modules were unavailable; retained results remain usable.',
+                [catalogueEngineId]: 'Some site-catalogue checks were unavailable; retained results remain usable.',
+                'wikipedia_public_biography': 'Wikipedia search was unavailable; other engines continued.',
+                'icij_offshore_leaks': 'ICIJ search was unavailable; other engines continued.',
                 'github-public-profile': 'One GitHub profile could not be enriched; continuing with saved findings…',
                 'unfurl-url-analysis': 'One profile URL could not be decomposed; continuing with archive checks…',
                 'wayback-cdx': 'One archive lookup was unavailable; continuing with saved findings…',
@@ -557,16 +498,11 @@
             if (count) count.textContent = offshoreAlertCount;
             statusEl.textContent = ev.message || 'Potential public-record match requires analyst review.';
         } else if (ev.type === 'affiliation_entity' || ev.type === 'registry_entity') {
-            ensureGraph();
-            addNode('organization:' + ev.entity_id, ev.label, 'organization', {url: ev.url, title: ev.url});
             const status = document.getElementById('stat-affiliation-entity');
             if (status) status.textContent = 'Resolved';
         } else if (ev.type === 'affiliated_person') {
-            ensureGraph();
-            const personId = 'person:' + ev.entity_id;
-            addNode(personId, ev.label, 'person', {url: ev.url, title: ev.url});
-            const organizations = nodes.get({filter: node => node.group === 'organization'});
-            if (organizations.length) addEdge(personId, organizations[0].id);
+            // Relationship rendering is intentionally deferred until after
+            // evidence consolidation, AI ranking, and operator approval.
         } else if (ev.type === 'stopped') {
             statusEl.textContent = 'Stopped.';
         } else if (ev.type === 'budget_exhausted') {

@@ -198,6 +198,8 @@ def register_connector_ingestion_schema(metadata):
         "after_create",
         DDL(
             "CREATE TRIGGER pipeline_connector_receipt_delete_guard BEFORE DELETE ON pipeline_connector_receipts "
+            "WHEN NOT EXISTS (SELECT 1 FROM pipeline_case_purge_authorizations "
+            "WHERE case_id = OLD.case_id) "
             "BEGIN SELECT RAISE(ABORT, 'immutable connector receipt'); END"
         ).execute_if(dialect="sqlite"),
     )
@@ -209,7 +211,10 @@ def register_connector_ingestion_schema(metadata):
         "after_create",
         DDL(
             "CREATE OR REPLACE FUNCTION pipeline_connector_receipt_facts_guard() RETURNS trigger LANGUAGE plpgsql AS $$ "
-            "BEGIN IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'immutable connector receipt'; END IF; "
+            "BEGIN IF TG_OP = 'DELETE' AND EXISTS "
+            "(SELECT 1 FROM pipeline_case_purge_authorizations WHERE case_id = OLD.case_id) "
+            "THEN RETURN OLD; END IF; "
+            "IF TG_OP = 'DELETE' THEN RAISE EXCEPTION 'immutable connector receipt'; END IF; "
             f"IF {changed_postgres} THEN RAISE EXCEPTION 'immutable connector receipt'; END IF; RETURN NEW; END; $$"
         ).execute_if(dialect="postgresql"),
     )
@@ -230,21 +235,33 @@ def register_connector_ingestion_schema(metadata):
     )
     for name in IMMUTABLE_CONNECTOR_TABLES:
         table = metadata.tables[name]
-        for operation in ("UPDATE", "DELETE"):
-            event.listen(
-                table,
-                "after_create",
-                DDL(
-                    f"CREATE TRIGGER {name}_{operation.lower()}_guard BEFORE {operation} ON {name} "
-                    "BEGIN SELECT RAISE(ABORT, 'immutable connector record'); END"
-                ).execute_if(dialect="sqlite"),
-            )
+        event.listen(
+            table,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER {name}_update_guard BEFORE UPDATE ON {name} "
+                "BEGIN SELECT RAISE(ABORT, 'immutable connector record'); END"
+            ).execute_if(dialect="sqlite"),
+        )
+        event.listen(
+            table,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER {name}_delete_guard BEFORE DELETE ON {name} "
+                "WHEN NOT EXISTS (SELECT 1 FROM pipeline_case_purge_authorizations "
+                "WHERE case_id = OLD.case_id) "
+                "BEGIN SELECT RAISE(ABORT, 'immutable connector record'); END"
+            ).execute_if(dialect="sqlite"),
+        )
         event.listen(
             table,
             "after_create",
             DDL(
                 f"CREATE OR REPLACE FUNCTION {name}_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ "
-                "BEGIN RAISE EXCEPTION 'immutable connector record'; END; $$"
+                "BEGIN IF TG_OP = 'DELETE' AND EXISTS "
+                "(SELECT 1 FROM pipeline_case_purge_authorizations WHERE case_id = OLD.case_id) "
+                "THEN RETURN OLD; END IF; "
+                "RAISE EXCEPTION 'immutable connector record'; END; $$"
             ).execute_if(dialect="postgresql"),
         )
         event.listen(

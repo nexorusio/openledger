@@ -3714,9 +3714,9 @@ def finalize_stream_job(
             if partial_status:
                 done_event['status'] = 'partial'
                 done_event['reason'] = partial_status
-            # The retired report page is still retained for audit access, but
-            # completion events must not route current users back into it.
-            done_event['redirect'] = "/history"
+            # Legacy collection still owns a durable report page. Current P2
+            # jobs supply review_url/case_id and never use this fallback.
+            done_event['redirect'] = f"/results/search_{job_id}"
         except Exception as error:
             public_error = record_internal_error(
                 'Investigation report generation failed', error, session=job_id
@@ -5937,7 +5937,10 @@ def investigation_builder_context(persona=None):
                 ai_assessments += 1
         except (KeyError, TypeError, ValueError):
             continue
-    initial_identifiers = [{"type": "username", "value": ""}]
+    initial_identifiers = [
+        {"type": identifier_type, "value": ""}
+        for identifier_type in ("full_name", "username", "email", "phone")
+    ]
     initial_alias_nicknames: list[str] = []
     if persona:
         display_identifier_type = persona_display_identifier_type(persona)
@@ -5988,6 +5991,17 @@ def investigation_builder_context(persona=None):
             )
             if len(initial_identifiers) >= 24:
                 break
+        configured_types = {
+            "username"
+            if identifier.get("type") in {"social_handle", "profile_url"}
+            else identifier.get("type")
+            for identifier in initial_identifiers
+        }
+        for identifier_type in ("full_name", "username", "email", "phone"):
+            if identifier_type not in configured_types:
+                initial_identifiers.append(
+                    {"type": identifier_type, "value": ""}
+                )
     return {
         'available_tags': get_available_tags(),
         'dashboard_metrics': {
@@ -6824,19 +6838,6 @@ def case_workspace(case_id):
         latest_options.get("investigation_spec")
     )
     case["google_places_live"] = load_case_google_places_live(case)
-    try:
-        stored_discovery = case_store.get_case_profile_search_discovery(case_id)
-    except ValueError as error:
-        record_internal_error(
-            'Profile-search audit integrity validation failed',
-            error,
-            case_id=case_id,
-        )
-        case["profile_search_integrity_error"] = True
-        stored_discovery = None
-    case["profile_search_discovery"] = public_profile_search_discovery(
-        stored_discovery
-    )
     return render_template("case.html", case=case)
 
 
@@ -6888,9 +6889,14 @@ def review_profile_search_candidate(case_id, audit_id, candidate_id):
                 'No Persona claim was created or changed by this decision.',
                 'success',
             )
-    anchor = 'profile-candidate-' + candidate_id.rsplit(':', 1)[-1]
+    persona_id = str(request.form.get('persona_id') or '').strip()
     return redirect(
-        url_for('case_workspace', case_id=case_id, _anchor=anchor)
+        url_for(
+            'pipeline.workspace',
+            case_id=case_id,
+            persona_id=persona_id,
+        )
+        + '#shortlist-digital'
     )
 
 
@@ -6947,16 +6953,15 @@ def review_combined_relationship(case_id, proposal_id):
     else:
         if decision == "approved":
             flash(
-                "Relationship approved and added to the combined graph. "
-                "Source cases were not changed.",
+                "Relationship approved in the combined-case evidence record. "
+                "Source cases were not changed and no diagram was published.",
                 "success",
             )
             return redirect(
                 url_for(
-                    "relationships_workspace",
-                    mode="shared",
+                    "case_workspace",
                     case_id=case_id,
-                    proposal_id=proposal_id,
+                    _anchor=f"proposal-{proposal_id}",
                 )
             )
         flash(
@@ -7084,13 +7089,14 @@ def archive_case_workspace(case_id):
     return redirect(url_for("cases_workspace"))
 
 
+@app.route("/cases/<case_id>/stop-and-delete", methods=["POST"])
 @app.route("/cases/<case_id>/stop-and-archive", methods=["POST"])
-def stop_and_archive_case_workspace(case_id):
-    """Request a safe worker stop, then direct the operator to archive.
+def stop_and_delete_case_workspace(case_id):
+    """Request a safe worker stop before the confirmed permanent delete.
 
-    Evidence is never erased while a collector may still be writing it.  The
-    case page changes to Archive once the durable worker marks every job
-    terminal, so this replaces the previous dead-end archive error.
+    The old URL remains a compatibility alias, but it no longer silently
+    archives a case.  A worker must be terminal before the explicit delete
+    confirmation can purge that case's evidence and report files.
     """
     if not is_valid_csrf(request.form.get("csrf_token")):
         flash("Your case session expired. Please try again.", "danger")
@@ -7110,16 +7116,11 @@ def stop_and_archive_case_workspace(case_id):
         case_store.request_cancel(job["job_id"])
     if active:
         flash(
-            "Stop requested for the active discovery. Refresh this case after the worker confirms cancellation, then Archive case will be available. Saved partial evidence remains retained.",
+            "Stop requested for the active discovery. Refresh after the worker confirms cancellation; Delete case will then be available.",
             "info",
         )
     else:
-        archived = case_store.archive_case(case_id)
-        flash(
-            "Case archived. Its evidence and review history remain preserved for audit.",
-            "success" if archived else "info",
-        )
-        return redirect(url_for("cases_workspace"))
+        flash("Collection is already stopped. Confirm Delete case to permanently remove it.", "info")
     return redirect(url_for("case_workspace", case_id=case_id))
 
 
@@ -7718,18 +7719,6 @@ def persona_workspace(persona_id):
             if claim['field_name'] == 'occupation'
             else ''
         )
-    case = case_store.get_case(persona['case_id']) or {}
-    case_personas = case.get('personas') or []
-    source_outcome_report = next(
-        (
-            job
-            for job in case.get('jobs', [])
-            if _source_report_belongs_to_persona(
-                job, persona_id, case_personas
-            )
-        ),
-        None,
-    )
     return render_template(
         'persona.html',
         persona=persona,
@@ -7743,7 +7732,6 @@ def persona_workspace(persona_id):
         map_locations=map_locations,
         ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
         field_display_label=field_display_label,
-        source_outcome_report=source_outcome_report,
         map_tile_url=os.getenv(
             'OPENLEDGER_MAP_TILE_URL',
             'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
@@ -7855,6 +7843,31 @@ def configure_persona_investigation(persona_id):
 
 @app.route("/relationships")
 def relationships_workspace():
+    selected_case_id = request.args.get("case_id", "").strip()
+    selected_persona_id = request.args.get("persona_id", "").strip()
+    flash(
+        "Relationship diagrams are not exposed in the operator interface. "
+        "Review cited findings in the case workspace instead.",
+        "info",
+    )
+    if selected_persona_id and case_store is not None:
+        selected_persona = case_store.get_persona(selected_persona_id)
+        if selected_persona:
+            return redirect(
+                url_for(
+                    "pipeline.workspace",
+                    case_id=selected_persona["case_id"],
+                    persona_id=selected_persona_id,
+                )
+            )
+    if selected_case_id and case_store is not None:
+        selected_case = case_store.get_case(selected_case_id)
+        if selected_case:
+            return redirect(url_for("case_workspace", case_id=selected_case_id))
+    return redirect(url_for("cases_workspace"))
+
+    # Retained below for schema/backward compatibility while historical graph
+    # projections are removed from the operator interface.
     if case_store is None:
         flash("The relationships workspace requires persistent storage.", "warning")
         return redirect(url_for("history"))
@@ -8280,24 +8293,6 @@ def review_persona_claim(claim_id):
     if not stored_persona_id:
         flash('That evidence record no longer exists.', 'warning')
         return redirect(url_for('cases_workspace'))
-    if (
-        decision == 'approved'
-        and reviewed_claim
-        and reviewed_claim.get('field_name') == 'full_name'
-        and reviewed_claim.get('review_status') != 'approved'
-    ):
-        try:
-            case_store.create_identity_enrichment(stored_persona_id, claim_id)
-        except ValueError as error:
-            flash(
-                f'Name approved, but public-record enrichment was not queued: {error}',
-                'warning',
-            )
-        else:
-            flash(
-                'Confirmed-name Wikipedia and Offshore Leaks checks were queued.',
-                'success',
-            )
     if generated_map_center:
         flash(
             'Record approved and mapped to the generated place centroid.',
@@ -8411,9 +8406,10 @@ def live_results(job_id):
             done_redirect = url_for("pipeline.case_entry", case_id=result["case_id"])
         else:
             result = normalize_job_summary_entry(result)
-            # A terminal job without a P2 review target is not allowed to
-            # silently fall back to the retired result presentation.
-            done_redirect = url_for("history")
+            done_redirect = url_for(
+                "results",
+                session_id=(result.get("session_folder") or f"search_{job_id}"),
+            )
 
     legacy_untriaged = bool(
         result
@@ -8497,7 +8493,14 @@ def status(timestamp):
                 return redirect(result['review_url'])
             if result.get('case_id'):
                 return redirect(url_for('pipeline.case_entry', case_id=result['case_id']))
-            return redirect(url_for('history'))
+            return redirect(
+                url_for(
+                    'results',
+                    session_id=(
+                        result.get('session_folder') or f'search_{timestamp}'
+                    ),
+                )
+            )
         if result and result.get('status') == 'failed':
             error_msg = result.get('error', 'Unknown error occurred.')
             flash(f'Search failed: {error_msg}', 'danger')
@@ -8522,7 +8525,14 @@ def status(timestamp):
                 return redirect(result['review_url'])
             if result.get('case_id'):
                 return redirect(url_for('pipeline.case_entry', case_id=result['case_id']))
-            return redirect(url_for('history'))
+            return redirect(
+                url_for(
+                    'results',
+                    session_id=(
+                        result.get('session_folder') or f'search_{timestamp}'
+                    ),
+                )
+            )
         else:
             error_msg = result.get('error', 'Unknown error occurred.')
             flash(f'Search failed: {error_msg}', 'danger')

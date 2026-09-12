@@ -140,7 +140,7 @@ def test_legal_entity_sources_are_jurisdiction_scoped_and_review_gated():
     assert dns["claim_candidates"] == []
 
 
-def test_confirmed_name_sources_are_credential_free_bounded_and_review_gated():
+def test_full_name_sources_start_at_intake_and_remain_review_gated():
     with open(
         os.path.join(ROOT, "config", "osint-sources.json"), encoding="utf-8"
     ) as registry_file:
@@ -150,9 +150,13 @@ def test_confirmed_name_sources_are_credential_free_bounded_and_review_gated():
     wikipedia = sources["wikipedia_public_biography"]
     offshore = sources["icij_offshore_leaks"]
     assert wikipedia["access"]["credentials_required"] is False
+    assert wikipedia["trigger"]["input_type"] == "full_name_input"
+    assert wikipedia["connector"]["capability"]["prerequisites"] == []
     assert wikipedia["guardrails"]["maximum_page_candidates"] == 5
     assert wikipedia["guardrails"]["ambiguous_page_requires_operator_selection"] is True
     assert offshore["access"]["credentials_required"] is False
+    assert offshore["trigger"]["input_type"] == "full_name_input"
+    assert offshore["connector"]["capability"]["prerequisites"] == []
     assert offshore["guardrails"]["maximum_exact_name_matches"] == 5
     assert offshore["guardrails"]["fuzzy_matches_create_alerts"] is False
     assert offshore["guardrails"]["independent_identity_confirmation_required"] is True

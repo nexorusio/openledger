@@ -8,7 +8,7 @@ Usage: bash deploy/update.sh --commit <reviewed-full-P2-commit> --manifest <revi
 Deploy only p2-e2e-v1 from an exact clean reviewed commit and immutable image.
 This updater never fetches, pulls, checks out, builds, or selects latest/main.
 --check performs read-only checkout, image, manifest and database checks.
-The running database must be b3e9d7c4a610, e2e1a7c9d401 or e2e2b8d0a502. A stopped database
+The running database must be b3e9d7c4a610, e2e1a7c9d401, e2e2b8d0a502 or e2e3c9d1f703. A stopped database
 must be inspected and started separately. No downgrade or legacy fallback exists.
 An application/worker mismatch stops BOTH runtimes and preserves the new schema.
 EOF
@@ -32,7 +32,7 @@ DEPLOY_DIR="${REPO_ROOT}/deploy"
 ENV_FILE="${DEPLOY_DIR}/.env"
 COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
 BACKUP_DIR="${REPO_ROOT}/runtime/backups"
-TARGET_SCHEMA=e2e2b8d0a502
+TARGET_SCHEMA=e2e3c9d1f703
 fail() { echo "P2 update refused: $*" >&2; exit 1; }
 cd "${REPO_ROOT}"
 [[ -f "${ENV_FILE}" ]] || fail "Restore the existing deployment configuration first."
@@ -71,8 +71,8 @@ verify_running_database() {
         -c 'SELECT version_num FROM public.alembic_version ORDER BY version_num;')"; then
         fail "Could not read the existing database revision."
     fi
-    [[ "${DATABASE_REVISION}" == "b3e9d7c4a610" || "${DATABASE_REVISION}" == "e2e1a7c9d401" || "${DATABASE_REVISION}" == "${TARGET_SCHEMA}" ]] || \
-        fail "Database must have exactly approved source b3e9d7c4a610, e2e1a7c9d401 or target ${TARGET_SCHEMA}; no downgrade is permitted."
+    [[ "${DATABASE_REVISION}" == "b3e9d7c4a610" || "${DATABASE_REVISION}" == "e2e1a7c9d401" || "${DATABASE_REVISION}" == "e2e2b8d0a502" || "${DATABASE_REVISION}" == "${TARGET_SCHEMA}" ]] || \
+        fail "Database must have exactly approved source b3e9d7c4a610, e2e1a7c9d401, e2e2b8d0a502 or target ${TARGET_SCHEMA}; no downgrade is permitted."
 }
 # All checks before --check exit are read-only. No service start, build, pull,
 # migration, credential bootstrap, generated files or database writes occur here.

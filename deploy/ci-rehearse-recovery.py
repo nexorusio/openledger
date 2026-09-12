@@ -17,7 +17,7 @@ from sqlalchemy import create_engine, text, update
 from sqlalchemy.exc import DBAPIError
 
 ROOT = Path(__file__).resolve().parents[1]
-TARGET = "e2e2b8d0a502"
+TARGET = "e2e3c9d1f703"
 
 
 def load_fixture():
@@ -87,7 +87,8 @@ def main():
             assert connection.scalar(text("SELECT version_num FROM alembic_version")) == TARGET
         restored_url = restored.url.render_as_string(hide_password=False)
         refused = migrate(restored_url, "downgrade", "e2e1a7c9d401", check=False)
-        assert refused.returncode != 0 and "preserve expanded schema" in refused.stderr
+        assert refused.returncode != 0, refused.stderr
+        assert "cannot be downgraded safely" in refused.stderr
         with restored.connect() as connection:
             assert fixture.snapshot(connection) == before, "Refused rollback changed evidence"
         protected = ["pipeline_observations", "pipeline_persona_versions", "pipeline_connector_pages", "pipeline_connector_record_versions", "pipeline_connector_receipts"]

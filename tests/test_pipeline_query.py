@@ -47,7 +47,16 @@ def query_for(plan, **kwargs):
     "kind,value,engines",
     [
         ("username", "test_person", {"maigret", "native_profile_search"}),
-        ("full_name", "Test Person", {"native_profile_search", "public_exact_match"}),
+        (
+            "full_name",
+            "Test Person",
+            {
+                "native_profile_search",
+                "public_exact_match",
+                "wikipedia_public_biography",
+                "icij_offshore_leaks",
+            },
+        ),
         ("email", "person+research@example.test", {"public_exact_match"}),
         ("phone", "+628123456789", {"public_exact_match"}),
     ],
@@ -199,23 +208,17 @@ def test_numeric_typed_correction_is_honored_and_ambiguous_phone_needs_country()
     )  # no guessed trunk/calling-code rewrite
 
 
-def test_name_sources_are_conditional_until_name_is_operator_approved():
+def test_name_sources_run_from_the_initial_operator_supplied_name():
     raw = plan_for(["full_name"], ["Test Person"])
     before = query_for(raw)
     after = query_for(raw, context={"approved_full_names": ["Test Person"]})
     for engine in ("wikipedia_public_biography", "icij_offshore_leaks"):
-        assert (
-            next(task for task in before["tasks"] if task["engine_id"] == engine)[
-                "route_state"
-            ]
-            == "conditional"
-        )
-        assert (
-            next(task for task in after["tasks"] if task["engine_id"] == engine)[
-                "route_state"
-            ]
-            == "active"
-        )
+        assert next(
+            task for task in before["tasks"] if task["engine_id"] == engine
+        )["route_state"] == "active"
+        assert next(
+            task for task in after["tasks"] if task["engine_id"] == engine
+        )["route_state"] == "active"
 
 
 def test_plan_is_reproducible_and_source_drift_requires_revalidation():

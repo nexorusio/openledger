@@ -83,6 +83,7 @@ def journey(tmp_path):
         "index",
         "history",
         "cases_workspace",
+        "combine_cases_workspace",
         "relationships_workspace",
         "settings_update",
         "security_settings",
@@ -173,7 +174,7 @@ def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     client = journey['client']
     workspace = client.get(base(journey))
     assert workspace.status_code == 200
-    assert b'Automated ranked curated findings' in workspace.data
+    assert b'Evidence-ranked curated findings' in workspace.data
     assert b'Record decision' not in workspace.data
     assert client.get(base(journey) + '/final').status_code == 404
     version = curate(journey)
@@ -446,7 +447,8 @@ def test_rendered_navigation_and_observation_pages_are_human_views(journey):
     )
     assert approve.find('input', {'name': 'qc_confirmed'}) is not None
     graph = client.get(base(journey) + '/versions/' + version['id'] + '/graph')
-    assert graph.status_code == 200 and b'pipeline-graph-data' in graph.data
+    assert graph.status_code == 302
+    assert graph.location.endswith(base(journey) + '/versions/' + version['id'])
 
 
 def test_withdrawal_requires_version_hash_and_changes_all_presentations(journey):

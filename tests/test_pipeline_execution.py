@@ -22,7 +22,7 @@ def runtime(tmp_path, monkeypatch):
     store.dispose()
 
 
-def enqueue(store, identifiers):
+def enqueue(store, identifiers, *, allow_ai_context=False):
     from maigret.web.pipeline_execution import source_configuration
 
     usernames = [item["value"] for item in identifiers if item["type"] == "username"]
@@ -37,6 +37,7 @@ def enqueue(store, identifiers):
                 "search_targets": [
                     {"value": value, "source_type": "username"} for value in usernames
                 ],
+                "allow_ai_context": allow_ai_context,
             },
         },
     )
@@ -86,6 +87,7 @@ async def found(task, context):
                 "source_record_id": "same-account",
                 "status": "found",
                 "source_url": "https://github.com/synthetic-person",
+                "origin_family": task["engine_id"] + ":synthetic-source",
                 "account": {
                     "platform": "github",
                     "canonical_url": "https://github.com/synthetic-person",
@@ -117,6 +119,69 @@ def test_real_query_and_attempts_reach_grouped_review_without_automatic_final(
         len(list(pipeline.iter_observations(job["case_id"], request["persona_id"])))
         >= 2
     )
+
+
+def test_opted_in_openai_ranking_runs_after_collection_and_groups_persona_sections(
+    runtime, monkeypatch
+):
+    import maigret.ai as ai
+
+    store, pipeline, app = runtime
+    sources(monkeypatch, {"maigret"})
+    monkeypatch.setattr(app, "get_openai_api_key", lambda: "test-key")
+    monkeypatch.setattr(app, "load_settings", lambda: {"openai_model": "test-model"})
+    monkeypatch.setattr(app, "ai_endpoint_options", lambda: {})
+    captured = {}
+
+    async def rank(api_key, *, subject_label, groups, model, **kwargs):
+        captured.update(
+            api_key=api_key,
+            subject_label=subject_label,
+            groups=groups,
+            model=model,
+        )
+        return [
+            {
+                "group_id": group["group_id"],
+                "shortlisted": True,
+                "priority": "high" if group["kind"] == "account" else "medium",
+                "reason": "Retained public-source evidence supports operator review.",
+            }
+            for group in groups
+        ]
+
+    monkeypatch.setattr(ai, "get_pipeline_group_rankings", rank)
+    job = enqueue(
+        store,
+        [{"type": "username", "value": "synthetic-person"}],
+        allow_ai_context=True,
+    )
+
+    result = execute_pipeline_job(store, job, adapters={"maigret_search": found})
+
+    request = pipeline.requests_for_job(job["job_id"])[0]
+    ranking = result["ai_ranking"][request["persona_id"]]
+    workspace = pipeline.get_workspace(job["case_id"], request["persona_id"])
+    assert ranking["status"] == "completed"
+    assert "model" in ranking, (
+        ranking,
+        [
+            {
+                "status": (group.get("assessment") or {}).get("evidence_status"),
+                "counts": (group.get("assessment") or {}).get("evidence_counts"),
+            }
+            for group in workspace["groups"]
+        ],
+    )
+    assert ranking["model"] == "test-model"
+    assert captured["api_key"] == "test-key"
+    assert workspace["ai_ranked_group_count"] == len(captured["groups"])
+    assert {section["key"] for section in workspace["shortlist_sections"]} >= {
+        "digital",
+        "affiliations",
+    }
+    assert all(item["ai_ranked"] for item in workspace["shortlist"])
+    assert pipeline.get_final_version(job["case_id"], request["persona_id"]) is None
 
 
 @pytest.mark.parametrize(
@@ -220,6 +285,51 @@ def test_native_negative_results_are_not_reported_as_findings(runtime, monkeypat
     assert result['status'] == 'completed'
     assert result['outcome_counts'].get('found', 0) == 0
     assert result['outcome_counts']['not_found'] == 1
+
+
+def test_maigret_findings_survive_unavailable_sites_as_coverage_warnings(
+    runtime, monkeypatch
+):
+    from maigret.result import MaigretCheckResult, MaigretCheckStatus
+    from maigret.web.pipeline_execution import _maigret_adapter
+
+    store, pipeline, app = runtime
+    sources(monkeypatch, {"maigret"})
+
+    async def mixed(username, options, query_notify):
+        return {
+            "Working Site": {
+                "status": MaigretCheckResult(
+                    username,
+                    "Working Site",
+                    "https://example.test/" + username,
+                    MaigretCheckStatus.CLAIMED,
+                ),
+                "url_user": "https://example.test/" + username,
+            },
+            "Unavailable Site": {
+                "status": MaigretCheckResult(
+                    username,
+                    "Unavailable Site",
+                    "https://unavailable.example/" + username,
+                    MaigretCheckStatus.UNKNOWN,
+                    error="request timed out",
+                ),
+                "url_user": "https://unavailable.example/" + username,
+            },
+        }
+
+    monkeypatch.setattr(app, "maigret_search", mixed)
+    job = enqueue(store, [{"type": "username", "value": "synthetic-person"}])
+
+    result = execute_pipeline_job(
+        store, job, adapters={"maigret_search": _maigret_adapter}
+    )
+
+    request = pipeline.requests_for_job(job["job_id"])[0]
+    task = next(item for item in request["tasks"] if item["engine"] == "maigret")
+    assert result["collection_status"] == "completed"
+    assert task["outcome"] == "found"
 
 
 def test_new_intake_persists_query_before_worker_and_rolls_back_invalid_plan(runtime):

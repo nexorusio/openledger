@@ -16,6 +16,7 @@ from maigret.ai import (
     get_combined_investigation_insights,
     get_enriched_ai_analysis,
     get_organization_context_proposals,
+    get_pipeline_group_rankings,
     validate_ai_api_base_url,
 )
 
@@ -31,6 +32,95 @@ def test_remote_ai_error_body_is_not_exposed():
         asyncio.run(_check_response(ErrorResponse()))
 
     assert "upstream secret" not in str(exc.value)
+
+
+def test_pipeline_ranking_sends_bounded_complete_candidate_records(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": json.dumps(
+                                    {
+                                        "rankings": [
+                                            {
+                                                "group_id": "group-1",
+                                                "shortlisted": True,
+                                                "priority": "high",
+                                                "reason": "Two retained sources support review.",
+                                            }
+                                        ]
+                                    }
+                                ),
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def post(self, url, *, json, headers):
+            captured.update(url=url, payload=json, headers=headers)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai.aiohttp, "ClientSession", FakeSession)
+    rankings = asyncio.run(
+        get_pipeline_group_rankings(
+            api_key="test-key",
+            subject_label="Synthetic subject",
+            groups=[
+                {
+                    "group_id": "group-1",
+                    "kind": "account",
+                    "finding": {"platform": "github", "handle": "synthetic"},
+                    "evidence_status": "source_supported",
+                    "support_origin_families": 2,
+                    "observation_count": 3,
+                    "missing_evidence": [],
+                    "source_examples": [
+                        {
+                            "source_name": "Public profile",
+                            "source_url": "https://example.test/synthetic",
+                        }
+                    ],
+                }
+            ],
+            model="test-model",
+        )
+    )
+
+    assert rankings[0]["group_id"] == "group-1"
+    structured_input = json.loads(captured["payload"]["input"])
+    assert structured_input["candidate_findings"][0]["finding"] == (
+        '{"platform": "github", "handle": "synthetic"}'
+    )
+    assert captured["payload"]["text"]["format"]["name"] == (
+        "openledger_pipeline_group_rankings"
+    )
+    assert "tools" not in captured["payload"]
 
 
 def test_ai_api_endpoint_defaults_to_the_fixed_openai_origin():

@@ -3,127 +3,66 @@
 {% block breadcrumb %}{{ 'Configure person investigation' if investigation_persona else 'New investigation' }}{% endblock %}
 
 {% block content %}
-<section class="page-heading">
+<section class="page-heading investigation-page-heading">
     <div>
-        <p class="eyebrow">{{ 'Persona intelligence' if investigation_persona else 'Username intelligence' }}</p>
-        <h1>{{ 'Investigate ' ~ investigation_persona.display_name if investigation_persona else 'Investigation workspace' }}</h1>
+        <p class="eyebrow">{{ 'Persona intelligence / configure' if investigation_persona else 'Identity discovery / new' }}</p>
+        <h1>{{ 'Investigate ' ~ investigation_persona.display_name if investigation_persona else 'Investigation setup' }}</h1>
         <p class="page-description">
             {% if investigation_persona %}
-            Configure identifiers, source coverage, enrichment, and cited public-web research
-            before collecting more evidence for this existing Persona.
+            Add identifiers and define the collection boundary for this existing Persona.
             {% else %}
-            Investigate a subject using a username, full name, email or phone,
-            review reliability-triaged profile leads, and generate a controlled AI-assisted assessment.
+            Define the subject, identifiers, and collection boundary.
             {% endif %}
         </p>
     </div>
-    <span class="badge-soft">
-        <i data-lucide="activity"></i>
-        Ready for investigation
-    </span>
+    <div class="heading-actions">
+        <a class="btn btn-outline-secondary" href="{{ url_for('history') }}">Investigation history</a>
+        <button type="submit" class="btn btn-primary" form="investigation-builder">
+            {{ 'Run investigation' if investigation_persona else 'Start investigation' }}
+            <i data-lucide="arrow-right"></i>
+        </button>
+    </div>
 </section>
 
 {% if error %}
 <div class="alert alert-danger">{{ error }}</div>
 {% endif %}
 
-<section class="metric-grid" aria-label="Investigation KPIs">
-    <article class="metric-card">
-        <span class="metric-icon"><i data-lucide="folder-search-2"></i></span>
-        <div class="metric-copy">
-            <span class="metric-label">Saved investigations</span>
-            <strong class="metric-value">{{ dashboard_metrics.investigations }}</strong>
-            <small class="metric-detail">{{ dashboard_metrics.completed }} completed · {{ dashboard_metrics.failed }} failed</small>
-        </div>
-    </article>
-    <article class="metric-card">
-        <span class="metric-icon"><i data-lucide="badge-check"></i></span>
-        <div class="metric-copy">
-            <span class="metric-label">Supported profiles</span>
-            <strong class="metric-value">{{ dashboard_metrics.profiles_found }}</strong>
-            <small class="metric-detail">
-                Evidence-triaged matches across saved investigations{% if dashboard_metrics.untriaged_profiles %}
-                · {{ dashboard_metrics.untriaged_profiles }} legacy hit{{ 's' if dashboard_metrics.untriaged_profiles != 1 else '' }} require{{ '' if dashboard_metrics.untriaged_profiles != 1 else 's' }} rerun{% endif %}
-            </small>
-        </div>
-    </article>
-    <article class="metric-card">
-        <span class="metric-icon"><i data-lucide="file-search-2"></i></span>
-        <div class="metric-copy">
-            <span class="metric-label">AI assessments</span>
-            <strong class="metric-value">{{ dashboard_metrics.ai_assessments }}</strong>
-            <small class="metric-detail">Saved assessments available for review</small>
-        </div>
-    </article>
-</section>
-
-<section>
-    <article class="panel-card">
-        <header class="panel-header">
-            <div>
-                <h2>{{ 'Configure this person investigation' if investigation_persona else 'Start a new investigation' }}</h2>
-                <p>
-                    {% if investigation_persona %}
-                    Add or amend known identifiers and choose the same governed collectors available for a new investigation.
-                    {% else %}
-                    Define the subject, account identifiers, and how results should be correlated.
-                    {% endif %}
-                </p>
-            </div>
-            <span class="badge-soft">Live</span>
-        </header>
+<section class="investigation-setup-shell">
+    <article class="panel-card investigation-builder-card">
         <div class="panel-body">
             <form method="POST" action="{{ url_for('configure_persona_investigation', persona_id=investigation_persona.id) if investigation_persona else url_for('live_start') }}" id="investigation-builder">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <input type="hidden" name="processing_mode" id="mode-subject" value="same_subject">
 
-                <fieldset class="investigation-section">
-                    <legend class="form-label mb-2">Who are you investigating?</legend>
-                    <div class="mode-selector">
-                        <div class="mode-option">
-                            <input type="radio" name="processing_mode" id="mode-subject" value="same_subject" checked>
-                            <label for="mode-subject">
-                                <strong>{{ 'One existing Persona' if investigation_persona else 'One subject' }}</strong>
-                                <small>{{ 'Route every configured identifier and resulting proposal back to ' ~ investigation_persona.display_name if investigation_persona else 'Keep all entered identifiers and selected aliases under one Persona for review' }}</small>
-                            </label>
-                        </div>
-                        <div class="mode-option">
-                            <input type="radio" name="processing_mode" id="mode-independent" value="independent" {{ 'disabled' if investigation_persona }}>
-                            <label for="mode-independent">
-                                <strong>Independent subjects</strong>
-                                <small>{{ 'Start a new investigation to create separate Personas' if investigation_persona else 'Create one Persona per entered name or account; generated aliases stay with their source subject' }}</small>
-                            </label>
-                        </div>
-                    </div>
-                </fieldset>
+                <div class="investigation-section-label">
+                    <span>01</span>
+                    <div><strong>Subject</strong><small>Known identifiers for one Persona</small></div>
+                </div>
 
                 <fieldset class="investigation-section">
                     <legend class="visually-hidden">Known identifiers</legend>
                     <div class="section-heading-row">
                         <div>
                             <h3 class="form-label mb-1">Known identifiers</h3>
-                            <p class="form-text mb-0">Add any known username, full name, email or phone. The Username field also accepts @handles and profile URLs. The query handler routes each input to compatible engines.</p>
+                            <p class="form-text mb-0">Enter full name and username together when both are known. Every identifier stays under this single Persona and routes to compatible engines.</p>
                         </div>
                         <button type="button" class="btn btn-sm btn-outline-secondary" id="add-identifier">
                             <i data-lucide="plus"></i>
-                            Add identifier
+                            Add another
                         </button>
                     </div>
 
                     <div class="identifier-list" id="identifier-list">
                         {% for identifier in initial_identifiers %}
-                        <div class="identifier-row">
-                            <label class="visually-hidden" for="identifier-type-{{ loop.index }}">Identifier type</label>
-                            <select class="form-select identifier-type" id="identifier-type-{{ loop.index }}" name="identifier_type" aria-label="Identifier type">
-                                <option value="username" {{ 'selected' if identifier.type in ['username', 'social_handle', 'profile_url'] }}>Username</option>
-                                <option value="full_name" {{ 'selected' if identifier.type == 'full_name' }}>Full name</option>
-                                <option value="email" {{ 'selected' if identifier.type == 'email' }}>Email address</option>
-                                <option value="phone" {{ 'selected' if identifier.type == 'phone' }}>Phone number</option>
-                            </select>
-                            <label class="visually-hidden" for="identifier-value-{{ loop.index }}">Identifier value</label>
+                        {% set ui_type = 'username' if identifier.type in ['username', 'social_handle', 'profile_url'] else identifier.type %}
+                        <div class="identifier-row identifier-row-fixed" data-identifier-type="{{ ui_type }}">
+                            <label class="identifier-field-label" for="identifier-value-{{ loop.index }}">{{ {'username': 'Username / social handle / profile URL', 'full_name': 'Full name', 'email': 'Email address', 'phone': 'Phone number'}[ui_type] }}</label>
+                            <input type="hidden" class="identifier-type" name="identifier_type" value="{{ ui_type }}">
                             <input class="form-control identifier-value" id="identifier-value-{{ loop.index }}" name="identifier_value"
-                                autocomplete="off" spellcheck="false" required value="{{ identifier.value }}">
+                                autocomplete="off" spellcheck="false" value="{{ identifier.value }}">
                             <span class="identifier-behavior">Exact account check</span>
-                            <button type="button" class="icon-button identifier-remove" aria-label="Remove identifier" {{ 'disabled' if initial_identifiers | length == 1 }}>
+                            <button type="button" class="icon-button identifier-remove" aria-label="Remove {{ ui_type | replace('_', ' ') }} identifier">
                                 <i data-lucide="x"></i>
                             </button>
                         </div>
@@ -166,6 +105,11 @@
                     </div>
                 </fieldset>
 
+                <div class="investigation-section-label collection-label">
+                    <span>02</span>
+                    <div><strong>Collection scope</strong><small>Choose only what this case requires</small></div>
+                </div>
+
                 {% if user_scanner_available %}
                 <fieldset class="investigation-section">
                     <legend class="form-label mb-2">User Scanner verification</legend>
@@ -188,7 +132,7 @@
                     <div class="form-check investigation-check">
                         <input class="form-check-input" type="checkbox" id="enable-user-scanner-email" name="enable_user_scanner_email">
                         <label class="form-check-label" for="enable-user-scanner-email">Check email registrations with User Scanner</label>
-                        <div class="form-text">Off by default. Runs only in One subject mode, skips notification-producing and adult modules, and stores positive registrations as pending evidence for analyst review.</div>
+                        <div class="form-text">Off by default. Runs within this one-Persona investigation, skips notification-producing and adult modules, and stores positive registrations as pending evidence for analyst review.</div>
                     </div>
                 </fieldset>
                 {% endif %}
@@ -242,10 +186,14 @@
                 <section class="query-plan" aria-labelledby="query-plan-title" aria-live="polite">
                     <div class="query-plan-heading">
                         <div>
-                            <span class="eyebrow">Before collection</span>
+                            <span class="eyebrow">Pre-collection check</span>
                             <h3 id="query-plan-title">Query plan</h3>
                         </div>
-                        <span class="query-plan-count" id="query-plan-count">0 query inputs</span>
+                        <span class="query-plan-count"><i data-lucide="shield-check"></i> governed</span>
+                    </div>
+                    <div class="query-readiness">
+                        <strong id="query-plan-count">0 targets</strong>
+                        <span>Compatible engines are recalculated from the identifiers and collection controls.</span>
                     </div>
                     <p id="query-plan-summary">Add any supported identifier to inspect the complete engine plan.</p>
                     <p class="query-plan-note"><strong>Username checks (Maigret)</strong> — One username target across eligible social sites.</p>
@@ -258,6 +206,11 @@
                     </div>
                     <p class="query-plan-note">P2 complete pipeline: every compatible engine has an explicit Active, Conditional, Unavailable or Excluded state. A source that is blocked or times out is not an absent account.</p>
                     <p class="query-plan-note" id="query-plan-note">One Persona receives the resulting claims for review. A found account does not establish identity.</p>
+                    <dl class="query-governance">
+                        <div><dt>Residential data</dt><dd>Blocked</dd></div>
+                        <div><dt>Human review</dt><dd>Required</dd></div>
+                        <div><dt>Final profile</dt><dd>Explicit QC</dd></div>
+                    </dl>
                 </section>
 
                 <fieldset class="investigation-section coverage-section">
@@ -283,14 +236,14 @@
 
                 <div class="alert alert-danger investigation-form-error" id="investigation-form-error" role="alert" hidden></div>
 
-                <button type="submit" id="startBtn" class="btn btn-primary investigation-submit">
+                <button type="submit" id="startBtn" class="btn btn-primary investigation-submit investigation-submit-mobile">
                     {{ 'Run configured investigation' if investigation_persona else 'Start investigation' }}
                 </button>
             </form>
 
             <template id="identifier-row-template">
-                <div class="identifier-row">
-                    <label class="visually-hidden">Identifier type</label>
+                <div class="identifier-row identifier-row-additional">
+                    <label class="identifier-field-label">Additional identifier</label>
                     <select class="form-select identifier-type" name="identifier_type" aria-label="Identifier type">
                         <option value="username">Username</option>
                         <option value="full_name">Full name</option>
@@ -298,7 +251,7 @@
                         <option value="phone">Phone number</option>
                     </select>
                     <label class="visually-hidden">Identifier value</label>
-                    <input class="form-control identifier-value" name="identifier_value" autocomplete="off" spellcheck="false" aria-label="Identifier value" required>
+                    <input class="form-control identifier-value" name="identifier_value" autocomplete="off" spellcheck="false" aria-label="Identifier value">
                     <span class="identifier-behavior">Exact account check</span>
                     <button type="button" class="icon-button identifier-remove" aria-label="Remove identifier">
                         <i data-lucide="x"></i>
@@ -810,7 +763,7 @@
 
     function updatePlan() {
         const planned = queryTargets();
-        const grouped = document.getElementById('mode-subject').checked;
+        const grouped = document.getElementById('mode-subject').value === 'same_subject';
         const inputs = identifierValues(['username', 'social_handle', 'profile_url', 'full_name', 'email', 'phone']);
         const emails = identifierValues(['email']).length;
         if (userScannerToggle) {
@@ -823,12 +776,12 @@
             vxtwitterToggle.disabled = !userScannerUsernameToggle.checked || !xSelected;
             if (vxtwitterToggle.disabled) vxtwitterToggle.checked = false;
         }
-        count.textContent = `${planned.length} username targets`;
+        count.textContent = `${planned.length} username ${planned.length === 1 ? 'target' : 'targets'}`;
         summary.textContent = inputs.length ? 'Checking compatible engines with the query handler…' : 'Add a username, full name, email or phone to inspect the complete pipeline plan.';
         targets.replaceChildren(...planned.map(value => {
             const chip = document.createElement('span'); chip.className = 'query-target-chip'; chip.textContent = value; return chip;
         }));
-        note.textContent = grouped ? 'One subject receives all resulting evidence. Operator curation and explicit QC are required before a final Persona exists.' : 'Independent subjects retain their own evidence, decisions and QC versions. Selected aliases stay with their originating subject.';
+        note.textContent = 'One Persona receives all resulting evidence. Operator curation and explicit QC are required before a final profile exists.';
         if (aliasPlanError) { error.textContent = aliasPlanError; error.hidden = false; }
         else { error.hidden = true; }
         requestPipelinePlan();

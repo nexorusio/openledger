@@ -19,9 +19,9 @@ sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[1]
 PIPELINE = "p2-e2e-v1"
-SCHEMA = "e2e2b8d0a502"
+SCHEMA = "e2e3c9d1f703"
 PREVIOUS_SCHEMA = "b3e9d7c4a610"
-ACCEPTED_SOURCE_SCHEMAS = [PREVIOUS_SCHEMA, "e2e1a7c9d401", SCHEMA]
+ACCEPTED_SOURCE_SCHEMAS = [PREVIOUS_SCHEMA, "e2e1a7c9d401", "e2e2b8d0a502", SCHEMA]
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 IMAGE = re.compile(r"(?:[a-zA-Z0-9._:/-]+@)?sha256:[0-9a-f]{64}\Z")
 

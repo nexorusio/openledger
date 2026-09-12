@@ -1183,6 +1183,13 @@ def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
         persistent_store.review_claim(claim["id"], "approved", "analyst")
 
     refresh_job_id = persistent_store.repeat_persona_investigation(persona_id)
+    # This regression models jobs created before the P2 lineage tables existed.
+    # Current investigations retain immutable pipeline requests, so remove those
+    # synthetic records before exercising the legacy-orphan migration path.
+    with persistent_store.engine.begin() as connection:
+        persistent_store._purge_pipeline_case_with_connection(
+            connection, case["id"]
+        )
     if preexisting_orphan:
         # Simulate a source job deleted before the reliability migration
         # existed. The upgrade sweep must recover this state on startup.
@@ -1731,7 +1738,8 @@ def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
     builder = client.get(f"/personas/{persona_id}/investigate")
     body = builder.get_data(as_text=True)
     assert builder.status_code == 200
-    assert "Configure this person investigation" in body
+    assert f"Investigate {subject}" in body
+    assert "Persona intelligence / configure" in body
     assert f'value="{subject}"' in body
     assert "Cited public-web research" in body
     assert "Case source filters" in body
@@ -1815,7 +1823,8 @@ def test_persona_rerun_preserves_exact_username_origin(client, persistent_store)
     page = client.get(f"/personas/{persona_id}/investigate").get_data(
         as_text=True
     )
-    assert '<option value="username" selected>Username</option>' in page
+    assert 'data-identifier-type="username"' in page
+    assert 'name="identifier_type" value="username"' in page
     assert f'value="{username}"' in page
 
     with client.session_transaction() as browser_session:
@@ -1885,8 +1894,9 @@ def test_persona_prefill_ignores_another_personas_targeted_refresh(
     bob_builder = client.get(
         f"/personas/{personas['bob']}/investigate"
     ).get_data(as_text=True)
-    assert '<option value="username" selected>Username</option>' in bob_builder
-    assert '<option value="full_name" selected>' not in bob_builder
+    assert 'data-identifier-type="username"' in bob_builder
+    assert 'value="bob"' in bob_builder
+    assert 'value="alice"' not in bob_builder
 
 
 def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
@@ -3923,7 +3933,7 @@ def test_identity_worker_degrades_sources_and_persists_review_gated_alerts(
     assert "Review ICIJ source" in page
 
 
-def test_approving_full_name_queues_confirmed_name_enrichment(
+def test_approving_full_name_does_not_queue_second_name_enrichment(
     client, persistent_store
 ):
     source_job_id = persistent_store.create_investigation(["alice"], {})
@@ -3967,12 +3977,4 @@ def test_approving_full_name_queues_confirmed_name_enrichment(
     )
 
     assert response.status_code == 302
-    enrichment = persistent_store.get_persona_identity_enrichment(persona_id)
-    assert enrichment["kind"] == "identity_enrichment"
-    assert enrichment["status"] == "queued"
-    assert enrichment["options"]["investigation_spec"]["confirmed_name"] == (
-        "Alice Example"
-    )
-    live_page = client.get(f"/live/{enrichment['job_id']}")
-    assert live_page.status_code == 200
-    assert "Confirmed-name enrichment" in live_page.get_data(as_text=True)
+    assert persistent_store.get_persona_identity_enrichment(persona_id) is None

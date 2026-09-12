@@ -4,18 +4,30 @@
     const sidebarToggle = document.getElementById('sidebarToggle');
     const sidebarClose = document.getElementById('sidebarClose');
     const sidebarBackdrop = document.getElementById('sidebarBackdrop');
-    const themeToggle = document.getElementById('themeToggle');
+    const workspaceClock = document.getElementById('workspaceClock');
     const desktopQuery = window.matchMedia('(min-width: 992px)');
 
-    function setTheme(theme) {
-        html.setAttribute('data-bs-theme', theme);
-        localStorage.setItem('openledger-theme', theme);
-        if (themeToggle) {
-            themeToggle.setAttribute(
-                'aria-label',
-                theme === 'dark' ? 'Use light theme' : 'Use dark theme'
-            );
-        }
+    function setOperationalTheme() {
+        html.setAttribute('data-bs-theme', 'dark');
+        localStorage.removeItem('openledger-theme');
+    }
+
+    function updateWorkspaceClock() {
+        if (!workspaceClock) return;
+        const parts = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Jakarta',
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).formatToParts(new Date());
+        const values = Object.fromEntries(
+            parts.filter(part => part.type !== 'literal')
+                .map(part => [part.type, part.value])
+        );
+        workspaceClock.textContent = `${values.day} ${values.month.toUpperCase()} ${values.year} · ${values.hour}:${values.minute} WIB`;
     }
 
     function closeMobileSidebar() {
@@ -36,8 +48,9 @@
         }
     }
 
-    const storedTheme = localStorage.getItem('openledger-theme');
-    setTheme(storedTheme || 'dark');
+    setOperationalTheme();
+    updateWorkspaceClock();
+    if (workspaceClock) window.setInterval(updateWorkspaceClock, 30000);
 
     if (
         shell &&
@@ -55,11 +68,6 @@
     if (sidebarClose) sidebarClose.addEventListener('click', closeMobileSidebar);
     if (sidebarBackdrop) {
         sidebarBackdrop.addEventListener('click', closeMobileSidebar);
-    }
-    if (themeToggle) {
-        themeToggle.addEventListener('click', function () {
-            setTheme(html.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark');
-        });
     }
     if (shell) desktopQuery.addEventListener('change', closeMobileSidebar);
 

@@ -25,7 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 
 PIPELINE_ID = "p2-e2e-v1"
-SCHEMA_REVISION = "e2e2b8d0a502"
+SCHEMA_REVISION = "e2e3c9d1f703"
 PREFIX = "pipeline_"
 IMMUTABLE_TABLES = (
     "pipeline_observations",
@@ -49,6 +49,22 @@ def register_pipeline_schema(metadata):
             if name.startswith(PREFIX)
         }
     document = JSON().with_variant(JSONB(), "postgresql")
+
+    # A row in this table exists only inside an explicit, terminal-case purge
+    # transaction. Immutable-record triggers consult it to permit deleting an
+    # entire case while continuing to reject every ordinary record mutation.
+    # It is never an operator-facing override and is removed by the case
+    # cascade (or transaction rollback).
+    case_purges = Table(
+        "pipeline_case_purge_authorizations",
+        metadata,
+        Column(
+            "case_id",
+            String(36),
+            ForeignKey("cases.id", ondelete="CASCADE"),
+            primary_key=True,
+        ),
+    )
 
     def identity():
         return Column("id", String(36), primary_key=True)
@@ -410,21 +426,33 @@ def register_pipeline_schema(metadata):
     # Database-enforced immutability protects history from old mutation routes.
     for name in IMMUTABLE_TABLES:
         table = metadata.tables[name]
-        for operation in ("UPDATE", "DELETE"):
-            event.listen(
-                table,
-                "after_create",
-                DDL(
-                    f"CREATE TRIGGER {name}_{operation.lower()}_guard BEFORE {operation} ON {name} "
-                    f"BEGIN SELECT RAISE(ABORT, 'immutable pipeline record'); END"
-                ).execute_if(dialect="sqlite"),
-            )
+        event.listen(
+            table,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER {name}_update_guard BEFORE UPDATE ON {name} "
+                "BEGIN SELECT RAISE(ABORT, 'immutable pipeline record'); END"
+            ).execute_if(dialect="sqlite"),
+        )
+        event.listen(
+            table,
+            "after_create",
+            DDL(
+                f"CREATE TRIGGER {name}_delete_guard BEFORE DELETE ON {name} "
+                "WHEN NOT EXISTS (SELECT 1 FROM pipeline_case_purge_authorizations "
+                "WHERE case_id = OLD.case_id) "
+                "BEGIN SELECT RAISE(ABORT, 'immutable pipeline record'); END"
+            ).execute_if(dialect="sqlite"),
+        )
         event.listen(
             table,
             "after_create",
             DDL(
                 f"CREATE OR REPLACE FUNCTION {name}_immutable() RETURNS trigger LANGUAGE plpgsql AS $$ "
-                "BEGIN RAISE EXCEPTION 'immutable pipeline record'; END; $$"
+                "BEGIN IF TG_OP = 'DELETE' AND EXISTS "
+                "(SELECT 1 FROM pipeline_case_purge_authorizations WHERE case_id = OLD.case_id) "
+                "THEN RETURN OLD; END IF; "
+                "RAISE EXCEPTION 'immutable pipeline record'; END; $$"
             ).execute_if(dialect="postgresql"),
         )
         event.listen(
@@ -445,4 +473,8 @@ def register_pipeline_schema(metadata):
     from maigret.web.pipeline_runtime_schema import register_runtime_schema
 
     extra = register_runtime_schema(metadata)
-    return {**{table.name: table for table in tables}, **extra}
+    return {
+        **{table.name: table for table in tables},
+        case_purges.name: case_purges,
+        **extra,
+    }

@@ -196,7 +196,7 @@ def test_active_job_cannot_be_deleted(store):
         store.delete_job(job_id)
 
 
-def test_new_terminal_case_preserves_query_lineage_and_all_jobs(store):
+def test_terminal_case_delete_purges_its_pipeline_lineage_and_all_jobs(store):
     first_job_id = store.create_investigation(["alice"], {})
     first_job = store.claim_next("worker:test")
     store.finish(
@@ -211,11 +211,10 @@ def test_new_terminal_case_preserves_query_lineage_and_all_jobs(store):
         {"status": "cancelled", "usernames": second_job["usernames"]},
     )
 
-    with pytest.raises(ValueError, match="retained P2 pipeline"):
-        store.delete_case(case["id"])
-    assert store.get_case(case["id"]) is not None
-    assert store.get_job(first_job_id) is not None
-    assert store.get_job(second_job_id) is not None
+    assert store.delete_case(case["id"]) is True
+    assert store.get_case(case["id"]) is None
+    assert store.get_job(first_job_id) is None
+    assert store.get_job(second_job_id) is None
 
 
 def test_terminal_p2_case_can_be_archived_without_erasing_lineage(store):

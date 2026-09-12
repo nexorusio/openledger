@@ -20,7 +20,10 @@ def _adapters():
 
 
 def _timeout(task):
-    return min(120, max(1, int(task.get("request_timeout_seconds", 30))))
+    # The reviewed manifest owns the per-engine deadline. The earlier 120-second
+    # compatibility cap and the Maigret per-site request timeout silently
+    # shortened User Scanner's whole-batch contract.
+    return min(420, max(1, int(task.get("timeout_seconds", 30))))
 
 
 def _emit(result, context):
@@ -34,10 +37,31 @@ def _emit(result, context):
     counts = Counter(normalize_status(row)[0] for row in rows if isinstance(row, dict))
     failed = set(counts) & {"blocked", "timeout", "error", "cancelled", "partial"}
     successful = set(counts) & {"found", "candidate", "not_found"}
+    # A positive result remains usable when independent modules fail. Surface
+    # the failed checks as warnings; do not downgrade retained findings to an
+    # opaque engine-wide "partial" status. Negative-only mixed batches remain
+    # partial because failed checks make an absence conclusion incomplete.
     outcome = (
-        "partial" if failed and successful else _runtime()._aggregate_outcomes(counts)
+        "found"
+        if counts.get("found") and failed
+        else "partial" if failed and successful else _runtime()._aggregate_outcomes(counts)
     )
-    result = {"outcome": outcome, "outcome_counts": dict(counts)}
+    warning_count = sum(counts[value] for value in failed) if outcome == "found" else 0
+    result = {
+        "outcome": outcome,
+        "outcome_counts": dict(counts),
+        "warning_count": warning_count,
+        "display_status": (
+            "completed_with_warnings" if warning_count else outcome
+        ),
+    }
+    if failed:
+        failed_count = sum(counts[value] for value in failed)
+        result["diagnostic"] = (
+            f"{failed_count} provider check"
+            f"{'s were' if failed_count != 1 else ' was'} unavailable; "
+            "recorded evidence retains the individual reasons."
+        )
     explicit = [
         row.get("retryable")
         for row in rows

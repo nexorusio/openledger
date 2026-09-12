@@ -62,7 +62,7 @@ def test_live_ux_exposes_runtime_and_recovery_states_without_auto_approval():
     ).read_text(encoding="utf-8")
 
 
-def test_live_graph_and_pipeline_workspace_keep_collection_separate_from_approval():
+def test_live_progress_and_pipeline_workspace_keep_collection_separate_from_approval():
     live = (ROOT / "maigret" / "web" / "templates" / "live.html").read_text(
         encoding="utf-8"
     )
@@ -70,12 +70,18 @@ def test_live_graph_and_pipeline_workspace_keep_collection_separate_from_approva
         ROOT / "maigret" / "web" / "templates" / "pipeline_workspace.html"
     ).read_text(encoding="utf-8")
 
-    # Discovery continues to render unverified candidate connections, while
+    # Discovery shows source execution without drawing premature relationships;
     # operator action is limited to the evidence-ranked shortlist.
-    for required in ("Live engine progress", "addCandidate(ev)", "updateCollector"):
+    for required in ("Live engine progress", "updateCollector"):
         assert required in live
-    assert "Automated ranked curated findings" in pipeline
-    assert "Approve curated finding" in pipeline
+    for forbidden in ('id="graph"', "addCandidate(ev)", "vis.Network"):
+        assert forbidden not in live
+    assert "shortlist_sections" in pipeline
+    assert 'section["items"]' in pipeline
+    assert "section.items" not in pipeline
+    assert "No raw-item QC is required" in pipeline
+    assert "Digital presence" not in live
+    assert "Approve finding" in pipeline
     assert "Record decision" not in pipeline
 
 
@@ -84,9 +90,9 @@ def test_active_case_has_a_safe_stop_then_archive_path():
         encoding="utf-8"
     )
     app = (ROOT / "maigret" / "web" / "app.py").read_text(encoding="utf-8")
-    assert "Stop and archive case" in case_template
-    assert "stop_and_archive_case_workspace" in case_template
-    assert '"/cases/<case_id>/stop-and-archive"' in app
+    assert "Stop collection" in case_template
+    assert "stop_and_delete_case_workspace" in case_template
+    assert '"/cases/<case_id>/stop-and-delete"' in app
 
 
 def test_partial_outcomes_are_distinct_in_history_and_results():

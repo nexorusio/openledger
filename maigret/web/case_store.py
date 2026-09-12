@@ -8130,6 +8130,27 @@ class CaseStore:
                     "deletion cannot erase the existing research lineage."
                 )
 
+    @staticmethod
+    def _purge_pipeline_case_with_connection(connection, case_id):
+        """Erase one case's P2 records inside its confirmed deletion transaction.
+
+        Pipeline records stay immutable for normal operation.  A case deletion
+        is different: once all workers are terminal and the operator confirms
+        the exact title, there must not be an undeletable test/research case.
+        The authorization row is transactional and enables only DELETE triggers
+        for this one case; a rollback restores both the records and the guard.
+        """
+        authorization = metadata.tables["pipeline_case_purge_authorizations"]
+        connection.execute(insert(authorization).values(case_id=case_id))
+        for table in reversed(metadata.sorted_tables):
+            if (
+                not table.name.startswith("pipeline_")
+                or table.name == authorization.name
+                or "case_id" not in table.c
+            ):
+                continue
+            connection.execute(delete(table).where(table.c.case_id == case_id))
+
     def delete_job(
         self, job_id: str, *, confirmation_name: Optional[str] = None
     ) -> bool:
@@ -8244,13 +8265,13 @@ class CaseStore:
                 raise ActiveInvestigationError(
                     "Cases with active investigations cannot be deleted"
                 )
-            self._assert_pipeline_lineage_retained_with_connection(connection, case_id)
             if stored_case["case_type"] == "standalone":
                 references = self._combined_case_references_with_connection(
                     connection, case_id
                 )
                 if references:
                     raise ReferencedCaseError(references)
+            self._purge_pipeline_case_with_connection(connection, case_id)
             connection.execute(delete(cases).where(cases.c.id == case_id))
         return True
 

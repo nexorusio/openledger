@@ -269,7 +269,7 @@ def test_saved_versions_cannot_silently_use_a_different_parser():
         asyncio.run(collect_registered(task, Context()))
 
 
-def test_registered_wrapper_preserves_partial_outcomes_and_retry_policy(monkeypatch):
+def test_registered_wrapper_keeps_positive_result_and_surfaces_retry_warning(monkeypatch):
     from maigret.web import collector_adapters
 
     async def rows(*args, **kwargs):
@@ -285,7 +285,9 @@ def test_registered_wrapper_preserves_partial_outcomes_and_retry_policy(monkeypa
             task_for(get_connector_registry().get("github_public_profile")), context
         )
     )
-    assert result["outcome"] == "partial"
+    assert result["outcome"] == "found"
+    assert result["display_status"] == "completed_with_warnings"
+    assert result["warning_count"] == 1
     assert result["retryable"] is True
     assert result["retry_after_seconds"] == 12
     assert len(context.emitted) == 2
