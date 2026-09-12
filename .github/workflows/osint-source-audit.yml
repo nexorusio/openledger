@@ -1,8 +1,10 @@
 name: Governed OSINT source audit
 
 on:
+  push:
+    branches: [main, dev]
   pull_request:
-    branches: [main]
+    branches: [main, dev]
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:

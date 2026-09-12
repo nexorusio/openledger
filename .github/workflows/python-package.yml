@@ -2,9 +2,9 @@ name: Linting and testing
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   pull_request:
-    branches: [main, "codex/rollback-to-p2"]
+    branches: [main, dev, "codex/rollback-to-p2"]
     types: [opened, synchronize, reopened]
 
 jobs:
