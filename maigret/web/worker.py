@@ -14,6 +14,9 @@ from maigret.web.case_store import (
     WORKER_HEARTBEAT_SECONDS,
     WORKER_STALE_AFTER_SECONDS,
 )
+from maigret.web.pipeline_release import (
+    assert_runtime_ready, publish_worker_attestation, remove_worker_attestation,
+)
 
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO"),
@@ -56,6 +59,15 @@ def monitor_stale_jobs(store, stop_event) -> None:
     """Interrupt expired jobs while the worker process remains alive."""
     while not stop_event.wait(WORKER_HEARTBEAT_SECONDS):
         try:
+            publish_worker_attestation(store)
+        except Exception as error:
+            record_internal_error("Worker runtime attestation failed", error)
+            # A process with a failed contract/schema check must stop active
+            # collection as well as refusing subsequent jobs.
+            stopping.set()
+            remove_worker_attestation()
+            return
+        try:
             interrupted = store.mark_stale_running(WORKER_STALE_AFTER_SECONDS)
             if interrupted:
                 logger.warning(
@@ -89,10 +101,21 @@ def execute_job(store, job, *, shutdown_check) -> None:
             error,
             session=job["job_id"],
         )
+        from maigret.web.pipeline_store import PipelineStore
+        pipeline = PipelineStore(store)
+        try:
+            for request in pipeline.requests_for_job(job["job_id"]):
+                pipeline.interrupt_request(
+                    request["id"], worker_id=job.get("worker_id"),
+                    reason="Worker execution failed; committed evidence retained",
+                )
+        except Exception as reconciliation_error:
+            record_internal_error("Worker failure reconciliation failed", reconciliation_error,
+                                  session=job["job_id"])
         store.finish(
             job["job_id"],
             {
-                "status": "failed",
+                "status": "interrupted",
                 "error": public_error,
                 "usernames": job["usernames"],
             },
@@ -106,6 +129,7 @@ def execute_job(store, job, *, shutdown_check) -> None:
 def run() -> int:
     if case_store is None:
         raise RuntimeError("DATABASE_URL is required by the OpenLedger worker")
+    assert_runtime_ready(case_store, role="worker")
 
     signal.signal(signal.SIGTERM, request_shutdown)
     signal.signal(signal.SIGINT, request_shutdown)
@@ -120,6 +144,7 @@ def run() -> int:
     watchdog_stop = threading.Event()
     watchdog_thread = None
     try:
+        publish_worker_attestation(case_store)
         interrupted = case_store.mark_stale_running(0)
         if interrupted:
             logger.warning(
@@ -171,6 +196,7 @@ def run() -> int:
         if watchdog_thread is not None:
             watchdog_thread.join(timeout=WORKER_HEARTBEAT_SECONDS)
         worker_lock.close()
+        remove_worker_attestation()
 
     logger.info("OpenLedger worker stopped")
     return 0

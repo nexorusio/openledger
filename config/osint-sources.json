@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "maintenance_policy": {
     "review_interval_days": 90,
     "stale_after_days": 365,
@@ -67,7 +67,39 @@
         "reviewed_at": "2026-08-31",
         "review_due_by": "2026-11-29",
         "live_contract_target": "octocat",
-        "owner": "OpenLedger maintainers"
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_github_contract"
+      },
+      "connector": {
+        "order": 5,
+        "capability": {
+          "engine_id": "github_public_profile",
+          "execution_key": "run_github_public_profile",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "username",
+            "profile_url"
+          ],
+          "label": "GitHub public profile",
+          "platforms": [],
+          "prerequisites": [
+            "github_profile_target"
+          ],
+          "option": "enable_github_profile_enrichment",
+          "timeout_seconds": 15,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_github",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "github_public_profile",
+        "execution_mode": "worker"
       }
     },
     {
@@ -120,6 +152,35 @@
         "review_due_by": "2026-11-29",
         "last_upstream_activity_at": "2026-08-23",
         "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 6,
+        "capability": {
+          "engine_id": "unfurl_url_analysis",
+          "execution_key": "run_unfurl_url_analysis",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "profile_url",
+            "public_url"
+          ],
+          "label": "Unfurl URL analysis",
+          "platforms": [],
+          "prerequisites": [],
+          "option": "enable_archived_url_evidence",
+          "timeout_seconds": 20,
+          "retry_ceiling": 1,
+          "request_budget": 0,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_url",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "unfurl_url_analysis",
+        "execution_mode": "worker"
       }
     },
     {
@@ -170,7 +231,37 @@
         "reviewed_at": "2026-08-31",
         "review_due_by": "2026-11-29",
         "live_contract_target": "https://example.com/",
-        "owner": "OpenLedger maintainers"
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_wayback_contract"
+      },
+      "connector": {
+        "order": 7,
+        "capability": {
+          "engine_id": "wayback_cdx",
+          "execution_key": "run_wayback_capture_index",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "profile_url",
+            "public_url"
+          ],
+          "label": "Wayback capture index",
+          "platforms": [],
+          "prerequisites": [],
+          "option": "enable_archived_url_evidence",
+          "timeout_seconds": 20,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_url",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "wayback_cdx",
+        "execution_mode": "worker"
       }
     },
     {
@@ -224,7 +315,39 @@
         "reviewed_at": "2026-08-31",
         "review_due_by": "2026-11-29",
         "live_contract_target": "Apple Inc.",
-        "owner": "OpenLedger maintainers"
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_gleif_contract"
+      },
+      "connector": {
+        "order": 11,
+        "capability": {
+          "engine_id": "gleif_lei_registry",
+          "execution_key": "run_gleif_legal_entity_search",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "organization"
+          ],
+          "label": "GLEIF legal entities",
+          "platforms": [],
+          "prerequisites": [
+            "approved_organization",
+            "legal_jurisdiction"
+          ],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_registry",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "gleif_lei_registry",
+        "execution_mode": "worker"
       }
     },
     {
@@ -263,7 +386,11 @@
         "human_review_required": true,
         "automatic_approval_allowed": false
       },
-      "claim_candidates": ["full_name", "company", "occupation"],
+      "claim_candidates": [
+        "full_name",
+        "company",
+        "occupation"
+      ],
       "observation_only_fields": [
         "siren",
         "siret",
@@ -281,7 +408,39 @@
         "reviewed_at": "2026-08-31",
         "review_due_by": "2026-11-29",
         "live_contract_target": "812339356",
-        "owner": "OpenLedger maintainers"
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_fr_company_registry_contract"
+      },
+      "connector": {
+        "order": 12,
+        "capability": {
+          "engine_id": "fr_company_registry",
+          "execution_key": "run_fr_business_registry_search",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "organization"
+          ],
+          "label": "French business registry",
+          "platforms": [],
+          "prerequisites": [
+            "approved_organization",
+            "fr_jurisdiction"
+          ],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_registry",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "fr_company_registry",
+        "execution_mode": "worker"
       }
     },
     {
@@ -315,7 +474,12 @@
         "maximum_record_types": 4,
         "maximum_records_per_type": 20,
         "maximum_records_total": 40,
-        "query_types": ["A", "AAAA", "MX", "NS"],
+        "query_types": [
+          "A",
+          "AAAA",
+          "MX",
+          "NS"
+        ],
         "website_content_fetched": false,
         "domain_variants_generated": false,
         "operating_location_inference_allowed": false,
@@ -336,7 +500,38 @@
         "reviewed_at": "2026-08-31",
         "review_due_by": "2026-11-29",
         "live_contract_target": "example.com",
-        "owner": "OpenLedger maintainers"
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_cloudflare_dns_contract"
+      },
+      "connector": {
+        "order": 13,
+        "capability": {
+          "engine_id": "cloudflare_dns_context",
+          "execution_key": "run_cloudflare_dns_context",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "official_website"
+          ],
+          "label": "Cloudflare DNS context",
+          "platforms": [],
+          "prerequisites": [
+            "official_website"
+          ],
+          "option": "enable_domain_context",
+          "timeout_seconds": 20,
+          "retry_ceiling": 1,
+          "request_budget": 6,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_name",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "cloudflare_dns_context",
+        "execution_mode": "worker"
       }
     },
     {
@@ -385,7 +580,11 @@
         "human_review_required": true,
         "automatic_approval_allowed": false
       },
-      "claim_candidates": ["full_name", "company", "occupation"],
+      "claim_candidates": [
+        "full_name",
+        "company",
+        "occupation"
+      ],
       "observation_only_fields": [
         "page_title",
         "organization_description",
@@ -399,7 +598,39 @@
         "reviewed_at": "2026-09-01",
         "review_due_by": "2026-11-30",
         "live_contract_target": "https://www.unistellar.co/",
-        "owner": "OpenLedger maintainers"
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_official_website_contract"
+      },
+      "connector": {
+        "order": 14,
+        "capability": {
+          "engine_id": "official_website_public_content",
+          "execution_key": "run_official_website_public_content",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "official_website"
+          ],
+          "label": "Official public website",
+          "platforms": [],
+          "prerequisites": [
+            "official_website",
+            "website_organization_binding"
+          ],
+          "option": "enable_domain_context",
+          "timeout_seconds": 20,
+          "retry_ceiling": 1,
+          "request_budget": 5,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_website",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "official_website_public_content",
+        "execution_mode": "worker"
       }
     },
     {
@@ -412,7 +643,9 @@
       "official_documentation": "https://www.mediawiki.org/wiki/Wikibase/API/en",
       "usage_terms": "https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use",
       "endpoint_origin": "https://www.wikidata.org",
-      "additional_endpoint_origins": ["https://query.wikidata.org"],
+      "additional_endpoint_origins": [
+        "https://query.wikidata.org"
+      ],
       "api_version": "MediaWiki-Action-API-and-SPARQL-1.1",
       "network_classification": "fixed_public_api",
       "access": {
@@ -428,7 +661,10 @@
       },
       "guardrails": {
         "fixed_network_origin": true,
-        "fixed_network_origins": ["https://www.wikidata.org", "https://query.wikidata.org"],
+        "fixed_network_origins": [
+          "https://www.wikidata.org",
+          "https://query.wikidata.org"
+        ],
         "redirects_allowed": false,
         "timeout_seconds": 30,
         "maximum_response_bytes": 1000000,
@@ -439,7 +675,11 @@
         "human_review_required": true,
         "automatic_approval_allowed": false
       },
-      "claim_candidates": ["full_name", "company", "platform_identifier:wikidata_item_id"],
+      "claim_candidates": [
+        "full_name",
+        "company",
+        "platform_identifier:wikidata_item_id"
+      ],
       "observation_only_fields": [
         "organization_description",
         "organization_instance_of",
@@ -451,7 +691,38 @@
         "reviewed_at": "2026-08-31",
         "review_due_by": "2026-11-29",
         "live_contract_target": "Q95",
-        "owner": "OpenLedger maintainers"
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_wikidata_contract"
+      },
+      "connector": {
+        "order": 10,
+        "capability": {
+          "engine_id": "wikidata_affiliation",
+          "execution_key": "run_wikidata_affiliation_discovery",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "organization"
+          ],
+          "label": "Wikidata affiliation",
+          "platforms": [],
+          "prerequisites": [
+            "approved_organization"
+          ],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 8,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_wikidata",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "wikidata_affiliation",
+        "execution_mode": "worker"
       }
     },
     {
@@ -489,13 +760,52 @@
         "human_review_required": true,
         "automatic_approval_allowed": false
       },
-      "claim_candidates": ["summary", "photograph", "platform_identifier:wikipedia_page_id"],
-      "observation_only_fields": ["wikipedia_title", "wikipedia_page_id", "exact_title_match"],
+      "claim_candidates": [
+        "summary",
+        "photograph",
+        "platform_identifier:wikipedia_page_id"
+      ],
+      "observation_only_fields": [
+        "wikipedia_title",
+        "wikipedia_page_id",
+        "exact_title_match"
+      ],
       "maintenance": {
         "reviewed_at": "2026-08-31",
         "review_due_by": "2026-11-29",
         "live_contract_target": "Albert Einstein",
-        "owner": "OpenLedger maintainers"
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_wikipedia_contract"
+      },
+      "connector": {
+        "order": 8,
+        "capability": {
+          "engine_id": "wikipedia_public_biography",
+          "execution_key": "run_wikipedia_person_enrichment",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "full_name"
+          ],
+          "label": "Wikipedia biography",
+          "platforms": [],
+          "prerequisites": [
+            "approved_full_name"
+          ],
+          "option": "",
+          "timeout_seconds": 20,
+          "retry_ceiling": 1,
+          "request_budget": 3,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_wikipedia",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "wikipedia_public_biography",
+        "execution_mode": "worker"
       }
     },
     {
@@ -535,13 +845,994 @@
         "human_review_required": true,
         "automatic_approval_allowed": false
       },
-      "claim_candidates": ["offshore_database_match"],
-      "observation_only_fields": ["reconciliation_score", "dataset_description", "node_id"],
+      "claim_candidates": [
+        "offshore_database_match"
+      ],
+      "observation_only_fields": [
+        "reconciliation_score",
+        "dataset_description",
+        "node_id"
+      ],
       "maintenance": {
         "reviewed_at": "2026-08-31",
         "review_due_by": "2026-11-29",
         "live_contract_target": "Emma Watson",
+        "owner": "OpenLedger maintainers",
+        "live_probe": "live_icij_offshore_contract"
+      },
+      "connector": {
+        "order": 9,
+        "capability": {
+          "engine_id": "icij_offshore_leaks",
+          "execution_key": "run_icij_offshore_match",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "full_name"
+          ],
+          "label": "ICIJ Offshore Leaks",
+          "platforms": [],
+          "prerequisites": [
+            "approved_full_name"
+          ],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_name",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "icij_offshore_leaks",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "maigret",
+      "display_name": "Maigret",
+      "status": "active",
+      "capability": "pipeline_query",
+      "integration_mode": "pipeline_adapter",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "username"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 1800,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
         "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 0,
+        "capability": {
+          "engine_id": "maigret",
+          "execution_key": "maigret_search",
+          "module": "maigret.web.app",
+          "input_types": [
+            "username"
+          ],
+          "label": "Maigret",
+          "platforms": [],
+          "prerequisites": [],
+          "option": "",
+          "timeout_seconds": 1800,
+          "retry_ceiling": 1,
+          "request_budget": 500,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_maigret",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "maigret",
+        "provider_key": "maigret",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "native_profile_search",
+      "display_name": "Major-platform public search",
+      "status": "active",
+      "capability": "pipeline_query",
+      "integration_mode": "pipeline_adapter",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": false,
+        "registration_required": false,
+        "credentials_required": false,
+        "cost_model": "provider_dependent"
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "username",
+          "full_name"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 1,
+        "capability": {
+          "engine_id": "native_profile_search",
+          "execution_key": "native_profile_search",
+          "module": "maigret.web.profile_search_orchestrator",
+          "input_types": [
+            "username",
+            "full_name"
+          ],
+          "label": "Major-platform public search",
+          "platforms": [
+            "facebook",
+            "instagram",
+            "threads",
+            "tiktok",
+            "x"
+          ],
+          "prerequisites": [],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_native",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "native_search",
+        "provider_key": "public_search",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "user_scanner_username",
+      "display_name": "User Scanner username",
+      "status": "active",
+      "capability": "pipeline_query",
+      "integration_mode": "pipeline_adapter",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "username"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 60,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 2,
+        "capability": {
+          "engine_id": "user_scanner_username",
+          "execution_key": "run_user_scanner_usernames",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "username"
+          ],
+          "label": "User Scanner username",
+          "platforms": [
+            "facebook",
+            "instagram",
+            "threads",
+            "tiktok",
+            "x"
+          ],
+          "prerequisites": [],
+          "option": "enable_user_scanner_username",
+          "timeout_seconds": 60,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_scanner_username",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "scanner",
+        "provider_key": "user_scanner",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "user_scanner_email",
+      "display_name": "User Scanner email",
+      "status": "active",
+      "capability": "pipeline_query",
+      "integration_mode": "pipeline_adapter",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "email"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 60,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 3,
+        "capability": {
+          "engine_id": "user_scanner_email",
+          "execution_key": "run_user_scanner_email",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "email"
+          ],
+          "label": "User Scanner email",
+          "platforms": [],
+          "prerequisites": [],
+          "option": "enable_user_scanner_email",
+          "timeout_seconds": 60,
+          "retry_ceiling": 1,
+          "request_budget": 100,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_scanner_email",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "scanner",
+        "provider_key": "user_scanner",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "public_exact_match",
+      "display_name": "Public exact-match search",
+      "status": "active",
+      "capability": "pipeline_query",
+      "integration_mode": "pipeline_adapter",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": false,
+        "registration_required": false,
+        "credentials_required": false,
+        "cost_model": "provider_dependent"
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "email",
+          "phone",
+          "full_name"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 4,
+        "capability": {
+          "engine_id": "public_exact_match",
+          "execution_key": "public_exact_match",
+          "module": "maigret.web.pipeline_public_search",
+          "input_types": [
+            "email",
+            "phone",
+            "full_name"
+          ],
+          "label": "Public exact-match search",
+          "platforms": [],
+          "prerequisites": [],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_public_exact",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "public_search",
+        "provider_key": "public_search",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "google_places_business_search",
+      "display_name": "Google Places business leads",
+      "status": "active",
+      "capability": "pipeline_query",
+      "integration_mode": "authenticated_api",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": false,
+        "registration_required": true,
+        "credentials_required": true
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "organization"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 15,
+        "capability": {
+          "engine_id": "google_places_business_search",
+          "execution_key": "run_google_places_business_search",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "organization"
+          ],
+          "label": "Google Places business leads",
+          "platforms": [],
+          "prerequisites": [
+            "approved_organization"
+          ],
+          "option": "enable_google_places_search",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "permitted_place_ids_and_status",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_places",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "google_places",
+        "provider_key": "google_places",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "google_places_live_details",
+      "display_name": "Google Places live details",
+      "status": "active",
+      "capability": "pipeline_operator",
+      "integration_mode": "authenticated_api",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": false,
+        "registration_required": true,
+        "credentials_required": true
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "place_id"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 16,
+        "capability": {
+          "engine_id": "google_places_live_details",
+          "execution_key": "run_google_places_live_details",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "place_id"
+          ],
+          "label": "Google Places live details",
+          "platforms": [],
+          "prerequisites": [
+            "operator_live_detail_request"
+          ],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "transient_display_only",
+          "trigger": "operator"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_live_places",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "google_places",
+        "provider_key": "google_places",
+        "execution_mode": "operator"
+      }
+    },
+    {
+      "id": "ai_cited_research",
+      "display_name": "Cited AI research",
+      "status": "active",
+      "capability": "pipeline_query",
+      "integration_mode": "authenticated_api",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": false,
+        "registration_required": true,
+        "credentials_required": true
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "research_question"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 60,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 17,
+        "capability": {
+          "engine_id": "ai_cited_research",
+          "execution_key": "ai_cited_research",
+          "module": "maigret.web.app",
+          "input_types": [
+            "research_question"
+          ],
+          "label": "Cited AI research",
+          "platforms": [],
+          "prerequisites": [
+            "approved_research_question"
+          ],
+          "option": "allow_ai_context",
+          "timeout_seconds": 60,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_ai",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "ai",
+        "provider_key": "cited_ai",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "case_chat_proposal",
+      "display_name": "Case chat evidence proposal",
+      "status": "active",
+      "capability": "pipeline_operator",
+      "integration_mode": "operator_submission",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "offline_local",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "operator_message"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 18,
+        "capability": {
+          "engine_id": "case_chat_proposal",
+          "execution_key": "case_chat_proposal",
+          "module": "maigret.web.app",
+          "input_types": [
+            "operator_message"
+          ],
+          "label": "Case chat evidence proposal",
+          "platforms": [],
+          "prerequisites": [
+            "operator_submission"
+          ],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "operator"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_operator_evidence",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "operator",
+        "provider_key": "case_chat_proposal",
+        "execution_mode": "operator"
+      }
+    },
+    {
+      "id": "external_evidence",
+      "display_name": "External evidence ingestion",
+      "status": "active",
+      "capability": "pipeline_operator",
+      "integration_mode": "operator_submission",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "offline_local",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "external_evidence"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 19,
+        "capability": {
+          "engine_id": "external_evidence",
+          "execution_key": "external_evidence",
+          "module": "maigret.web.external_evidence",
+          "input_types": [
+            "external_evidence"
+          ],
+          "label": "External evidence ingestion",
+          "platforms": [],
+          "prerequisites": [
+            "operator_submission"
+          ],
+          "option": "",
+          "timeout_seconds": 30,
+          "retry_ceiling": 1,
+          "request_budget": 0,
+          "retention": "bounded_source_evidence",
+          "trigger": "operator"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_operator_evidence",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "operator",
+        "provider_key": "external_evidence",
+        "execution_mode": "operator"
+      }
+    },
+    {
+      "id": "case_fusion_snapshot",
+      "display_name": "Combine approved case evidence",
+      "status": "active",
+      "capability": "pipeline_operator",
+      "integration_mode": "operator_submission",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "offline_local",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "case_reference"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 60,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 20,
+        "capability": {
+          "engine_id": "case_fusion_snapshot",
+          "execution_key": "case_fusion_snapshot",
+          "module": "maigret.web.pipeline_execution",
+          "input_types": [
+            "case_reference"
+          ],
+          "label": "Combine approved case evidence",
+          "platforms": [],
+          "prerequisites": [
+            "approved_case_selection"
+          ],
+          "option": "",
+          "timeout_seconds": 60,
+          "retry_ceiling": 1,
+          "request_budget": 0,
+          "retention": "bounded_source_evidence",
+          "trigger": "operator"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_fusion_snapshot",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "operator",
+        "provider_key": "case_fusion_snapshot",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "case_fusion_synthesis",
+      "display_name": "Combined-case snapshot synthesis",
+      "status": "active",
+      "capability": "pipeline_operator",
+      "integration_mode": "authenticated_api",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "provider_governed",
+      "access": {
+        "genuinely_free": false,
+        "registration_required": true,
+        "credentials_required": true
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "snapshot_reference"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 420,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 21,
+        "capability": {
+          "engine_id": "case_fusion_synthesis",
+          "execution_key": "case_fusion_synthesis",
+          "module": "maigret.web.pipeline_execution",
+          "input_types": [
+            "snapshot_reference"
+          ],
+          "label": "Combined-case snapshot synthesis",
+          "platforms": [],
+          "prerequisites": [
+            "validated_snapshot_reference"
+          ],
+          "option": "",
+          "timeout_seconds": 420,
+          "retry_ceiling": 0,
+          "request_budget": 2,
+          "retention": "bounded_source_evidence",
+          "trigger": "operator"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_fusion_synthesis",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "ai",
+        "provider_key": "cited_ai",
+        "execution_mode": "worker"
+      }
+    },
+    {
+      "id": "connector_feed",
+      "display_name": "Authenticated connector receipt ingestion",
+      "status": "active",
+      "capability": "machine_ingestion",
+      "integration_mode": "authenticated_push",
+      "catalog_reference": "https://github.com/nexorusio/openledger",
+      "official_documentation": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/docs/dev/connector-guide.md",
+      "usage_terms": "https://github.com/nexorusio/openledger/blob/codex/p2-end-to-end-pipeline/LICENSE",
+      "api_version": "openledger-adapter-1",
+      "network_classification": "authenticated_machine_receipt",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": true
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": [
+          "receipt_reference"
+        ],
+        "maximum_targets_per_investigation": 100
+      },
+      "guardrails": {
+        "human_review_required": true,
+        "automatic_approval_allowed": false,
+        "timeout_seconds": 30,
+        "maximum_response_bytes": 1000000
+      },
+      "claim_candidates": [
+        "generic_reviewed_claims"
+      ],
+      "observation_only_fields": [
+        "outcome",
+        "source_lineage"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-11",
+        "review_due_by": "2026-12-10",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 22,
+        "capability": {
+          "engine_id": "connector_feed",
+          "execution_key": "connector_feed",
+          "module": "maigret.web.pipeline_connector_ingestion",
+          "input_types": [
+            "receipt_reference"
+          ],
+          "label": "Authenticated connector receipt ingestion",
+          "platforms": [],
+          "prerequisites": [],
+          "option": "",
+          "timeout_seconds": 60,
+          "retry_ceiling": 2,
+          "request_budget": 0,
+          "retention": "bounded_source_evidence",
+          "trigger": "machine"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_feed",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "connector",
+        "provider_key": "connector_feed",
+        "execution_mode": "machine"
       }
     }
   ]

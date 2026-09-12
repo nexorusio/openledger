@@ -34,6 +34,38 @@ def store(tmp_path):
     instance.dispose()
 
 
+def test_explicit_profile_url_ownership_does_not_broadcast_unmatched_evidence():
+    alice, bob = "persona-alice", "persona-bob"
+    specification = {
+        "processing_mode": "independent",
+        "persona_bindings": [
+            {
+                "persona_id": alice,
+                "identifiers": [
+                    {"type": "profile_url", "value": "https://social.example/alice"}
+                ],
+            },
+            {
+                "persona_id": bob,
+                "identifiers": [
+                    {"type": "profile_url", "value": "https://social.example/bob"}
+                ],
+            },
+        ],
+    }
+
+    assert CaseStore._profile_source_persona_ids(
+        specification,
+        [alice, bob],
+        "https://social.example/alice",
+    ) == [alice]
+    assert CaseStore._profile_source_persona_ids(
+        specification,
+        [alice, bob],
+        "https://social.example/unknown",
+    ) == []
+
+
 def test_job_lifecycle_is_transactional_and_auditable(store):
     job_id = store.create_investigation(
         ["alice", "bob"],
@@ -141,10 +173,11 @@ def test_profile_source_ownership_matches_supported_url_equivalents_only():
     ) == []
 
 
-def test_case_personas_and_events_are_removed_with_terminal_job(store):
-    job_id = store.create_investigation(["alice"], {})
-    job = store.claim_next("worker:test")
-    store.finish(job_id, {"status": "cancelled", "usernames": job["usernames"]})
+def test_legacy_case_personas_and_events_are_removed_with_terminal_job(store):
+    job_id = "legacy-terminal-delete"
+    assert store.import_legacy_result(
+        job_id, {"status": "cancelled", "usernames": ["alice"]}
+    )
     assert store.delete_job(job_id) is True
     assert store.get_job(job_id) is None
 
@@ -163,7 +196,7 @@ def test_active_job_cannot_be_deleted(store):
         store.delete_job(job_id)
 
 
-def test_terminal_case_and_all_of_its_jobs_can_be_deleted(store):
+def test_new_terminal_case_preserves_query_lineage_and_all_jobs(store):
     first_job_id = store.create_investigation(["alice"], {})
     first_job = store.claim_next("worker:test")
     store.finish(
@@ -178,10 +211,11 @@ def test_terminal_case_and_all_of_its_jobs_can_be_deleted(store):
         {"status": "cancelled", "usernames": second_job["usernames"]},
     )
 
-    assert store.delete_case(case["id"]) is True
-    assert store.get_case(case["id"]) is None
-    assert store.get_job(first_job_id) is None
-    assert store.get_job(second_job_id) is None
+    with pytest.raises(ValueError, match="retained P2 pipeline"):
+        store.delete_case(case["id"])
+    assert store.get_case(case["id"]) is not None
+    assert store.get_job(first_job_id) is not None
+    assert store.get_job(second_job_id) is not None
 
 
 def test_case_delete_rechecks_exact_confirmation_inside_transaction(store):
@@ -1233,8 +1267,9 @@ def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store)
     graph = store.build_persona_graph(persona_id)
     assert all(node.get("label") != "alice@example.test" for node in graph["nodes"])
 
-    assert store.delete_job(job_id) is True
-    assert store.get_job(job_id) is None
+    with pytest.raises(ValueError, match="retained P2 pipeline"):
+        store.delete_job(job_id)
+    assert store.get_job(job_id) is not None
     assert store.get_case(case["id"]) is not None
     assert store.get_job(refresh_job_id) is not None
 
@@ -2032,9 +2067,15 @@ def test_combined_chat_relationship_proposals_retain_message_lineage(store):
     assert refreshed_run["proposals"] == []
 
 
-def test_combined_case_references_protect_sources_and_delete_independently(store):
-    first_case_id, _ = _create_case_with_company_claim(store, "alice", "Nexorus")
-    second_case_id, _ = _create_case_with_company_claim(store, "bob", "Nexorus")
+def test_combined_case_references_protect_legacy_sources_and_delete_independently(store):
+    assert store.import_legacy_result(
+        "legacy-combined-a", {"status": "completed", "usernames": ["alice"]}
+    )
+    assert store.import_legacy_result(
+        "legacy-combined-b", {"status": "completed", "usernames": ["bob"]}
+    )
+    first_case_id = store.get_job("legacy-combined-a")["case_id"]
+    second_case_id = store.get_job("legacy-combined-b")["case_id"]
     fusion_job_id = store.create_combined_investigation(
         [first_case_id, second_case_id],
         title="Protected sources",

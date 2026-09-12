@@ -1,0 +1,8 @@
+{% extends 'base.html' %}
+{% block title %}{{ kind | title }} history · OpenLedger{% endblock %}
+{% block content %}
+<section class="panel-card"><div class="panel-body"><h1>{{ kind | title }} history</h1><p>{{ data.count }} retained records for {{ persona.display_name }}. <a href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}">Return to working evidence</a></p>
+{% for item in data["items"] %}<details><summary>{{ item.id }} · {{ item.status | default(item.decision, true) | default(item.disposition, true) }} · {{ item.created_at }}</summary><pre>{{ item | tojson(indent=2) }}</pre>{% if kind == 'tasks' %}<a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind='attempts', parent_id=item.id) }}">All attempts</a>{% elif kind == 'requests' %}<a href="{{ url_for('pipeline.request_document', case_id=persona.case_id, persona_id=persona.id, request_id=item.id) }}">Exact recorded query plan</a>{% endif %}</details>{% else %}<p>No records on this page.</p>{% endfor %}
+<nav aria-label="History pages">{% if data.offset %}<a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind=kind, parent_id=parent_id, offset=[0, data.offset-data.limit] | max, limit=data.limit) }}">Previous</a>{% endif %}{% if data.has_next %}<a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind=kind, parent_id=parent_id, offset=data.offset+data.limit, limit=data.limit) }}">Next</a>{% endif %}</nav>
+</div></section>
+{% endblock %}

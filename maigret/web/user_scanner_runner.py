@@ -149,18 +149,23 @@ def main() -> int:
         # Importing this module patches httpx clients globally. This process exists
         # specifically to keep that mutation outside the OpenLedger worker.
         mode = str(request.get("mode") or "email").strip().casefold()
-        if mode == "email":
-            results = _scan_email(request)
-        elif mode == "username":
-            results = _scan_usernames(request)
-        else:
-            raise ValueError("Unsupported User Scanner mode")
+        from maigret.web.pipeline_http import inherited_transport_guard
+
+        with inherited_transport_guard(request.pop("_pipeline_runtime", None)) as runtime_guard:
+            if mode == "email":
+                results = _scan_email(request)
+            elif mode == "username":
+                results = _scan_usernames(request)
+            else:
+                raise ValueError("Unsupported User Scanner mode")
+            runtime_status = runtime_guard.finish({}) if runtime_guard else {}
         json.dump(
             {
                 "schema_version": 1,
                 "engine": "user-scanner",
                 "mode": mode,
                 "results": results,
+                "execution_control": runtime_status,
             },
             sys.stdout,
             ensure_ascii=False,
@@ -168,7 +173,7 @@ def main() -> int:
         sys.stdout.write("\n")
         return 0
     except Exception as exc:
-        print(f"user-scanner adapter error: {exc}", file=sys.stderr)
+        print(f"user-scanner adapter error: {type(exc).__name__}", file=sys.stderr)
         return 1
 
 

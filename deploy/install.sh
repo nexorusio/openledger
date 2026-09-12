@@ -23,6 +23,21 @@ compose() {
         --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
 }
 
+# The installer cannot select an application release or bootstrap an older image.
+if [[ $# -ne 4 || "$1" != "--commit" || ! "$2" =~ ^[0-9a-f]{40}$ || "$3" != "--manifest" ]]; then
+    echo 'Usage: bash deploy/install.sh --commit <reviewed-full-P2-commit> --manifest <reviewed-release.json>' >&2
+    exit 1
+fi
+APPROVED_COMMIT="$2"
+MANIFEST="$(realpath -e "$4")"
+cd "${REPO_ROOT}"
+export OPENLEDGER_RELEASE_IMAGE
+OPENLEDGER_RELEASE_IMAGE="$(python3 deploy/release-manifest.py verify --commit "${APPROVED_COMMIT}" --manifest "${MANIFEST}" --field image)"
+if [[ -f "${ENV_FILE}" ]]; then
+    echo 'Existing installation detected. Use the reviewed manifest with deploy/update.sh.' >&2
+    exit 1
+fi
+
 ensure_database_password() {
     local password_file="${REPO_ROOT}/runtime/secrets/postgres_password"
     local temporary_file
@@ -81,14 +96,6 @@ validate_domain() {
     return 0
 }
 
-if [[ -f "${ENV_FILE}" ]]; then
-    read -r -p "Existing deployment configuration found. Replace it? [y/N] " REPLACE_ENV
-    if [[ ! "${REPLACE_ENV}" =~ ^[Yy]$ ]]; then
-        echo "No changes made."
-        exit 0
-    fi
-fi
-
 read -r -p "Public domain [${DEFAULT_DOMAIN}]: " DOMAIN
 DOMAIN="${DOMAIN:-${DEFAULT_DOMAIN}}"
 if ! validate_domain "${DOMAIN}"; then
@@ -133,6 +140,7 @@ SEARXNG_SECRET="$(openssl rand -hex 32)"
 
 umask 077
 {
+    printf "OPENLEDGER_RELEASE_IMAGE='%s'\n" "${OPENLEDGER_RELEASE_IMAGE}"
     printf "DOMAIN='%s'\n" "${DOMAIN}"
     printf "FLASK_SECRET_KEY='%s'\n" "${FLASK_SECRET_KEY}"
     printf "SEARXNG_SECRET='%s'\n" "${SEARXNG_SECRET}"
@@ -149,8 +157,13 @@ unset FLASK_SECRET_KEY SEARXNG_SECRET
 echo "Validating the Compose configuration..."
 compose config --quiet
 
-echo "Building and starting OpenLedger. The first build can take several minutes..."
-compose up -d --build
+fail_closed() {
+    compose stop app worker caddy
+    echo 'Installation failed; no fallback to a previous pipeline is permitted.' >&2
+}
+trap fail_closed ERR
+echo "Starting the reviewed P2 pipeline image..."
+compose up -d --no-build
 
 echo "Waiting for the application health check..."
 READY=false
@@ -172,7 +185,11 @@ if [[ "${READY}" != "true" ]]; then
 fi
 
 echo
-echo "OpenLedger is running."
+compose exec -T app python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=3).read().decode())" > "${REPO_ROOT}/runtime/backups/install-app.json"
+compose exec -T worker python -m maigret.web.pipeline_release worker-health > "${REPO_ROOT}/runtime/backups/install-worker.json"
+python3 deploy/release-manifest.py runtime --commit "${APPROVED_COMMIT}" --manifest "${MANIFEST}" --app "${REPO_ROOT}/runtime/backups/install-app.json" --worker "${REPO_ROOT}/runtime/backups/install-worker.json"
+trap - ERR
+echo "OpenLedger p2-e2e-v1 app and worker are running from the reviewed release."
 echo "Open https://${DOMAIN} after DNS resolves and ports 80/443 are reachable."
 echo "Use the application username and password configured during installation."
 echo "Connect OpenAI from Settings after signing in."

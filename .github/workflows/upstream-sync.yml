@@ -169,15 +169,17 @@ jobs:
           poetry install --with dev
 
       - name: Run offline regression suite
-        run: poetry run pytest -m "not slow" tests
+        run: |
+          test_python="$(poetry env info --executable)"
+          bash .github/scripts/run_offline_tests.sh "$test_python" -m pytest -m "not slow" tests
 
       - name: Validate production configuration
         run: |
           bash -n deploy/install.sh deploy/update.sh deploy/configure-auth.sh deploy/reset-password.sh deploy/self-hosted-search.sh
-          DOMAIN=example.invalid FLASK_SECRET_KEY=test-secret SEARXNG_SECRET=test-searxng-secret docker compose -f deploy/compose.yaml config --quiet
+          DOMAIN=example.invalid FLASK_SECRET_KEY=test-secret SEARXNG_SECRET=test-searxng-secret OPENLEDGER_RELEASE_IMAGE=sha256:1111111111111111111111111111111111111111111111111111111111111111 docker compose -f deploy/compose.yaml config --quiet
 
       - name: Build production application image
-        run: docker build --target web --tag openledger:upstream-check .
+        run: docker build --target web --build-arg OPENLEDGER_RELEASE_COMMIT="$(git rev-parse HEAD)" --build-arg OPENLEDGER_RELEASE_TREE="$(git rev-parse HEAD^{tree})" --build-arg OPENLEDGER_SOURCE_DIGEST="$(python3 deploy/source-fingerprint.py)" --tag openledger:upstream-check .
 
   merge:
     needs: [synchronize, classify, regression]

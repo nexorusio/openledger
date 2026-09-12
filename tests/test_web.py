@@ -1,18 +1,23 @@
-"""Smoke tests for the Flask web interface in maigret.web.app.
+"""Flask regressions for mandatory durable P2 launch and historical views.
 
-The goal is to catch breakage in the basic user flow (render index, kick off
-search, redirect to results) without making real network calls. Heavy maigret
-internals are mocked; the report-generation smoke test keeps `save_graph_report`
-unmocked so regressions like `nt.options.groups = ...` (AttributeError on a
-plain dict) are caught automatically.
+New investigations must persist a query request and never use an ephemeral
+fallback. Historical report and collector compatibility helpers are invoked
+directly with mocked collectors; they do not redefine public launch behavior.
+Network transports and child processes are denied throughout these tests.
 """
 
 import asyncio
 import json
 import os
+import socket
+import subprocess
 import types
 
+import aiohttp
 import pytest
+import requests
+from curl_cffi import AsyncCurl, Curl
+from werkzeug.datastructures import MultiDict
 
 import maigret
 import maigret.report
@@ -21,6 +26,8 @@ from maigret.ai import AIEnrichmentContractError, _parse_responses_analysis
 from maigret.result import MaigretCheckResult, MaigretCheckStatus
 from maigret.web import app as web_app_module
 from maigret.web.case_store import CaseStore
+from maigret.web.pipeline_contract import ENGINE_REGISTRY, PIPELINE_ID
+from maigret.web.pipeline_store import PipelineStore
 
 CUR_PATH = os.path.dirname(os.path.realpath(__file__))
 TEST_DB = os.path.join(CUR_PATH, 'db.json')
@@ -39,7 +46,26 @@ class _SyncThread:
 
 
 @pytest.fixture
-def web_app(tmp_path):
+def web_app(tmp_path, monkeypatch):
+    # Web tests may only exercise explicitly supplied collector fixtures. A
+    # subprocess does not inherit a monkeypatched HTTP client or maigret.search.
+    # Deny both network sockets and process creation so a forgotten fixture fails
+    # locally instead of launching a production adapter against a public service.
+    def unexpected_external_operation(*args, **kwargs):
+        pytest.fail('Web regression attempted an unmocked network/process operation')
+
+    monkeypatch.setattr(socket.socket, 'connect', unexpected_external_operation)
+    monkeypatch.setattr(socket.socket, 'connect_ex', unexpected_external_operation)
+    monkeypatch.setattr(socket, 'getaddrinfo', unexpected_external_operation)
+    monkeypatch.setattr(
+        aiohttp.ClientSession, '_request', unexpected_external_operation
+    )
+    monkeypatch.setattr(requests.Session, 'request', unexpected_external_operation)
+    monkeypatch.setattr(Curl, 'perform', unexpected_external_operation)
+    monkeypatch.setattr(AsyncCurl, 'add_handle', unexpected_external_operation)
+    monkeypatch.setattr(subprocess, 'Popen', unexpected_external_operation)
+    monkeypatch.setattr(maigret, 'search', unexpected_external_operation)
+    monkeypatch.setattr(web_app_module, 'case_store', None)
     web_app_module.app.config['TESTING'] = True
     web_app_module.app.config['REPORTS_FOLDER'] = str(tmp_path)
     web_app_module.app.config['MAIGRET_DB_FILE'] = TEST_DB
@@ -74,6 +100,61 @@ def web_app(tmp_path):
 @pytest.fixture
 def client(web_app):
     return web_app.app.test_client()
+
+
+@pytest.fixture
+def queued_store(web_app, monkeypatch, tmp_path):
+    """A real durable queue; no worker or external collector is started."""
+    from maigret.web import pipeline_execution
+
+    store = CaseStore(f"sqlite:///{tmp_path / 'queued-web.db'}", create_schema=True)
+    monkeypatch.setattr(web_app, 'case_store', store)
+    monkeypatch.setattr(
+        pipeline_execution,
+        'source_configuration',
+        lambda: {
+            'discovery_enabled': True,
+            'focused_enabled': True,
+            'exhaustive_enabled': True,
+            'maigret_enabled': True,
+            'scanner_enabled': False,
+            'scanner_available': False,
+            'native_search': {'enabled': False},
+            'public_search': {'enabled': True},
+            'engines': {
+                engine: {'enabled': engine in {'maigret', 'public_exact_match'}}
+                for engine in ENGINE_REGISTRY
+            },
+        },
+    )
+
+    def previous_pipeline_must_not_run(*args, **kwargs):
+        pytest.fail('A web request selected the previous pipeline')
+
+    monkeypatch.setattr(web_app, 'run_stream_job', previous_pipeline_must_not_run)
+    monkeypatch.setattr(web_app, 'process_search_task', previous_pipeline_must_not_run)
+    yield store
+    store.dispose()
+
+
+def _run_legacy_collection_fixture(web_app, form):
+    """Exercise retained helper/report compatibility, never a launch endpoint.
+
+    The caller supplies all collector mocks. The fixture is explicitly historical;
+    durable queue tests independently prohibit the public routes from calling it.
+    """
+    job_id = 'legacy-helper-fixture'
+    with web_app.app.test_request_context('/historical-fixture'):
+        values = MultiDict(form)
+        usernames, specification = web_app.parse_investigation_submission(values)
+        options = web_app.parse_search_options(values, specification)
+    web_app.live_jobs[job_id] = {
+        'queue': web_app.queue.Queue(),
+        'cancelled': False,
+        'options': options,
+    }
+    web_app.run_stream_job(job_id, usernames, options)
+    return job_id
 
 
 def test_index_renders(client):
@@ -389,10 +470,15 @@ def test_country_filter_keeps_country_and_global_sources(web_app):
     ]
 
 
-def test_healthz(client):
+def test_healthz_reports_mandatory_pipeline_identity(client):
     resp = client.get('/healthz')
     assert resp.status_code == 200
-    assert resp.get_json() == {'status': 'ok'}
+    payload = resp.get_json()
+    assert payload['status'] == 'ok'
+    assert payload['database'] == 'unconfigured'
+    assert payload['pipeline']['pipeline_id'] == PIPELINE_ID
+    assert payload['pipeline']['engine_contract'] == PIPELINE_ID
+    assert payload['pipeline']['development'] is True
 
 
 def _csrf_token(client):
@@ -456,35 +542,40 @@ def test_typed_investigation_builder_creates_a_grouped_query_plan(
     assert '+628123456789' not in captured['usernames']
 
 
-def test_context_only_investigation_is_rejected_before_queueing(
-    client, web_app, monkeypatch
+def test_email_and_phone_investigation_is_durably_queued_without_username(
+    client, web_app, queued_store
 ):
-    monkeypatch.setattr(
-        web_app,
-        'start_live_job',
-        lambda *args, **kwargs: pytest.fail('invalid plan must not be queued'),
-    )
     response = client.post(
-        '/live',
-        data={
-            'csrf_token': _csrf_token(client),
-            'identifier_type': ['email', 'phone'],
-            'identifier_value': ['jati@example.com', '+628123456789'],
-            'processing_mode': 'same_subject',
-        },
-        follow_redirects=True,
+        '/api/scan',
+        data=MultiDict(
+            [
+                ('identifier_type', 'email'),
+                ('identifier_value', 'jati@example.com'),
+                ('identifier_type', 'phone'),
+                ('identifier_value', '+628123456789'),
+                ('processing_mode', 'same_subject'),
+            ]
+        ),
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
     )
-
     assert response.status_code == 200
-    body = response.get_data(as_text=True)
-    assert 'retained as context' in body
+    job_id = response.get_json()['job_id']
+    job = queued_store.get_job(job_id)
+    assert job['status'] == 'queued'
+    assert job['usernames'] == []
+    requests = PipelineStore(queued_store).requests_for_job(job_id)
+    assert len(requests) == 1
+    assert {item['type'] for item in requests[0]['inputs']} == {'email', 'phone'}
+    assert requests[0]['pipeline_id'] == PIPELINE_ID
+    assert web_app.live_jobs == {}
 
 
 def test_investigation_builder_explains_identifier_capabilities(client):
     body = client.get('/').get_data(as_text=True)
 
     assert 'Known identifiers' in body
-    assert 'One phrase for native search when enabled' in body
+    assert 'Routes to compatible name and public-record engines' in body
+    assert 'Only operator-selected aliases enter username checks' in body
     assert 'Email and phone values never generate aliases' in body
     assert 'Case source filters' in body
     assert 'Include terms' not in body
@@ -773,14 +864,45 @@ def test_search_empty_input_redirects_to_index(client):
     assert resp.location.rstrip('/').endswith('') or resp.location.endswith('/')
 
 
-def test_search_redirects_to_status(client, web_app, monkeypatch):
-    monkeypatch.setattr(web_app, 'run_stream_job', lambda *a, **kw: None)
-    monkeypatch.setattr(web_app, 'Thread', _SyncThread)
-
-    resp = client.post('/search', data={'usernames': 'soxoj'})
-
+def test_search_redirects_to_durable_queued_status(client, web_app, queued_store):
+    resp = client.post(
+        '/search',
+        data={
+            'usernames': 'soxoj',
+            'csrf_token': _csrf_token(client),
+        },
+    )
     assert resp.status_code == 302
     assert '/live/' in resp.location
+    job_id = resp.location.rsplit('/', 1)[-1]
+    assert queued_store.get_job(job_id)['status'] == 'queued'
+    assert PipelineStore(queued_store).requests_for_job(job_id)
+    assert web_app.live_jobs == {}
+
+
+@pytest.mark.parametrize('path', ['/search', '/live', '/api/scan'])
+def test_scan_launch_requires_database_without_previous_pipeline_fallback(
+    client, web_app, monkeypatch, path
+):
+    def previous_pipeline_must_not_run(*args, **kwargs):
+        pytest.fail('Missing storage selected the previous pipeline')
+
+    monkeypatch.setattr(web_app, 'run_stream_job', previous_pipeline_must_not_run)
+    monkeypatch.setattr(web_app, 'Thread', previous_pipeline_must_not_run)
+    response = client.post(
+        path,
+        data={'usernames': 'soxoj', 'csrf_token': _csrf_token(client)},
+        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+        follow_redirects=True,
+    )
+    if path == '/api/scan':
+        assert response.status_code == 503
+        message = response.get_json()['error']
+    else:
+        assert response.status_code == 200
+        message = response.get_data(as_text=True)
+    assert 'requires persistent storage' in message
+    assert web_app.live_jobs == {}
 
 
 def test_invalid_timestamp_redirects_to_index(client):
@@ -789,46 +911,52 @@ def test_invalid_timestamp_redirects_to_index(client):
     assert resp.location.endswith('/')
 
 
-def test_status_running_renders_status_page(client, web_app, monkeypatch):
-    """While the background job is still running, /status/<ts> returns 200."""
-
-    def never_completes(usernames, options, timestamp):
-        # leave background_jobs[timestamp]['completed'] as False
-        pass
-
-    monkeypatch.setattr(web_app, 'process_search_task', never_completes)
-    monkeypatch.setattr(web_app, 'Thread', _SyncThread)
-
-    post = client.post('/search', data={'usernames': 'soxoj'})
-    status_resp = client.get(post.location)
-
-    assert status_resp.status_code == 200
-
-
-def test_completed_search_redirects_to_results(client, web_app, monkeypatch):
-    """A completed legacy form scan stays visible before reports are opened."""
-
-    def fake_task(timestamp, usernames, options):
-        web_app.job_results[timestamp] = {
-            'status': 'completed',
-            'session_folder': f'search_{timestamp}',
-            'graph_file': f'search_{timestamp}/combined_graph.html',
-            'usernames': usernames,
-            'individual_reports': [],
-        }
-
-    monkeypatch.setattr(web_app, 'run_stream_job', fake_task)
-    monkeypatch.setattr(web_app, 'Thread', _SyncThread)
-
-    post = client.post('/search', data={'usernames': 'soxoj'})
+def test_status_queued_renders_status_page(client, queued_store):
+    post = client.post(
+        '/search',
+        data={
+            'usernames': 'soxoj',
+            'csrf_token': _csrf_token(client),
+        },
+    )
     assert post.status_code == 302
+    job_id = post.location.rsplit('/', 1)[-1]
+    assert queued_store.get_job(job_id)['status'] == 'queued'
+    status_resp = client.get(post.location)
+    assert status_resp.status_code == 200
+    assert job_id in status_resp.get_data(as_text=True)
 
-    live_resp = client.get(post.location)
+
+@pytest.mark.parametrize('view', ['persona', 'pdf', 'graph'])
+def test_default_persona_views_require_a_qc_approved_version(
+    client, queued_store, view
+):
+    job_id = queued_store.create_investigation(['alice'], {})
+    case_id = queued_store.get_job(job_id)['case_id']
+    persona_id = queued_store.get_case(case_id)['personas'][0]['id']
+    path = {
+        'persona': f'/personas/{persona_id}',
+        'pdf': f'/personas/{persona_id}/export.pdf',
+        'graph': f'/relationships?mode=persona&persona_id={persona_id}',
+    }[view]
+    response = client.get(path)
+    assert response.status_code == 302
+    assert response.location.endswith(f'/cases/{case_id}/pipeline/{persona_id}')
+    assert PipelineStore(queued_store).get_final_version(case_id, persona_id) is None
+
+
+def test_completed_legacy_result_remains_available_as_history(client, web_app):
+    web_app.job_results['historical'] = {
+        'status': 'completed',
+        'session_folder': 'search_historical',
+        'graph_file': 'search_historical/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [],
+    }
+    live_resp = client.get('/live/historical')
     assert live_resp.status_code == 200
-    timestamp = post.location.rsplit('/', 1)[-1]
-    assert f'/results/search_{timestamp}' in live_resp.get_data(as_text=True)
-
-    results_resp = client.get(f'/results/search_{timestamp}')
+    assert '/results/search_historical' in live_resp.get_data(as_text=True)
+    results_resp = client.get('/results/search_historical')
     assert results_resp.status_code == 200
     assert b'soxoj' in results_resp.data
 
@@ -837,29 +965,24 @@ def test_results_report_links_open_in_new_tab(client, web_app, monkeypatch):
     """CSV/JSON/PDF/HTML report links must open in a new tab, not navigate away
     from the results page."""
 
-    def fake_task(timestamp, usernames, options):
-        web_app.job_results[timestamp] = {
-            'status': 'completed',
-            'session_folder': f'search_{timestamp}',
-            'graph_file': f'search_{timestamp}/combined_graph.html',
-            'usernames': usernames,
-            'individual_reports': [
-                {
-                    'username': 'soxoj',
-                    'csv_file': f'search_{timestamp}/report_soxoj.csv',
-                    'json_file': f'search_{timestamp}/report_soxoj.json',
-                    'pdf_file': f'search_{timestamp}/report_soxoj.pdf',
-                    'html_file': f'search_{timestamp}/report_soxoj.html',
-                    'claimed_profiles': [],
-                }
-            ],
-        }
-
-    monkeypatch.setattr(web_app, 'run_stream_job', fake_task)
-    monkeypatch.setattr(web_app, 'Thread', _SyncThread)
-
-    post = client.post('/search', data={'usernames': 'soxoj'})
-    timestamp = post.location.rsplit('/', 1)[-1]
+    timestamp = 'historical'
+    web_app.job_results[timestamp] = {
+        'status': 'completed',
+        'profile_reliability_version': 1,
+        'session_folder': f'search_{timestamp}',
+        'graph_file': f'search_{timestamp}/combined_graph.html',
+        'usernames': ['soxoj'],
+        'individual_reports': [
+            {
+                'username': 'soxoj',
+                'claimed_profiles': [],
+                **{
+                    f'{kind}_file': f'search_{timestamp}/report_soxoj.{kind}'
+                    for kind in ('csv', 'json', 'pdf', 'html')
+                },
+            }
+        ],
+    }
     results_resp = client.get(f'/results/search_{timestamp}')
     body = results_resp.get_data(as_text=True)
 
@@ -1326,7 +1449,18 @@ def test_ai_analysis_creates_pending_cited_proposals_and_preserves_rejection(
         item for item in persona['claims'] if item['field_name'] == 'summary'
     )
     assert summary['review_status'] == 'pending'
-    persona_page = client.get(f'/personas/{persona_id}').get_data(as_text=True)
+    default_page = client.get(f'/personas/{persona_id}')
+    assert default_page.status_code == 302
+    assert '/pipeline/' in default_page.location
+    assert (
+        PipelineStore(store).get_final_version(
+            store.get_job(job_id)['case_id'], persona_id
+        )
+        is None
+    )
+    persona_page = client.get(f'/personas/{persona_id}?view=working').get_data(
+        as_text=True
+    )
     assert 'Alice Example is a research engineer.' in persona_page
     assert '2 accepted proposals' in persona_page
     assert '1 source' in persona_page
@@ -1836,9 +1970,7 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
 def test_persona_renders_reviewable_socid_account_intelligence(
     client, web_app, monkeypatch, tmp_path
 ):
-    store = CaseStore(
-        f"sqlite:///{tmp_path / 'socid-persona.db'}", create_schema=True
-    )
+    store = CaseStore(f"sqlite:///{tmp_path / 'socid-persona.db'}", create_schema=True)
     monkeypatch.setattr(web_app, 'case_store', store)
     try:
         job_id = store.create_investigation(['alice'], {})
@@ -1872,11 +2004,14 @@ def test_persona_renders_reviewable_socid_account_intelligence(
         }
         store.finish(job_id, result)
         store.sync_persona_claims(job_id, result)
-        persona_id = store.get_case(store.get_job(job_id)['case_id'])['personas'][
-            0
-        ]['id']
+        persona_id = store.get_case(store.get_job(job_id)['case_id'])['personas'][0][
+            'id'
+        ]
 
-        response = client.get(f'/personas/{persona_id}')
+        default = client.get(f'/personas/{persona_id}')
+        assert default.status_code == 302
+        assert '/pipeline/' in default.location
+        response = client.get(f'/personas/{persona_id}?view=working')
         assert response.status_code == 200
         body = response.get_data(as_text=True)
         assert 'stable-123' in body
@@ -1939,18 +2074,11 @@ def test_ai_assessment_survives_structured_proposal_failure(
     assert metadata['proposal_status'] == 'unavailable'
 
 
-def test_failed_task_redirects_to_index(client, web_app, monkeypatch):
-    def failing_task(timestamp, usernames, options):
-        web_app.job_results[timestamp] = {'status': 'failed', 'error': 'boom'}
-
-    monkeypatch.setattr(web_app, 'run_stream_job', failing_task)
-    monkeypatch.setattr(web_app, 'Thread', _SyncThread)
-
-    post = client.post('/search', data={'usernames': 'soxoj'})
-    live_resp = client.get(post.location)
-
+def test_failed_legacy_result_remains_visible_in_history(client, web_app):
+    web_app.job_results['historical-failure'] = {'status': 'failed', 'error': 'boom'}
+    live_resp = client.get('/live/historical-failure')
     assert live_resp.status_code == 200
-    assert '"status": "failed"' in live_resp.get_data(as_text=True)
+    assert '\"status\": \"failed\"' in live_resp.get_data(as_text=True)
 
 
 def test_download_report_serves_file_inside_reports_folder(client, web_app, tmp_path):
@@ -2039,7 +2167,7 @@ def test_search_passes_cloudflare_bypass_from_settings(client, web_app, monkeypa
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
     monkeypatch.setattr(web_app, 'Thread', _SyncThread)
 
-    client.post('/search', data={'usernames': 'testuser'})
+    asyncio.run(web_app.maigret_search('testuser', {}))
 
     assert (
         'cloudflare_bypass' in captured
@@ -2077,15 +2205,13 @@ def test_search_omits_cloudflare_bypass_when_disabled(client, web_app, monkeypat
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
     monkeypatch.setattr(web_app, 'Thread', _SyncThread)
 
-    client.post('/search', data={'usernames': 'testuser'})
+    asyncio.run(web_app.maigret_search('testuser', {}))
 
     assert captured.get('cloudflare_bypass') is None
 
 
-def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
-    """POST /api/scan starts a background scan; GET .../stream yields the per-site
-    'found' event and a terminating 'done' event. Guards the SSE + StreamNotify wiring.
-    """
+def test_legacy_collection_helper_streams_found_and_done(client, web_app, monkeypatch):
+    """Historical helper events remain readable with their retained reports."""
 
     async def fake_search(*args, **kwargs):
         notify = kwargs['query_notify']
@@ -2114,15 +2240,7 @@ def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    client.get('/')
-    start = client.post(
-        '/api/scan',
-        data={'usernames': 'soxoj'},
-        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
-    )
-    assert start.status_code == 200
-    job_id = start.get_json()['job_id']
-
+    job_id = _run_legacy_collection_fixture(web_app, [('usernames', 'soxoj')])
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
     events = [
         json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
@@ -2136,9 +2254,8 @@ def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
     assert '_extractor' not in found[0]['ids']
     assert found[0]['ids']['fullname'] == 'Soxoj'
 
-    # Regression guard: a completed live scan must still produce the same
-    # report files + profile list as the classic /search flow, and hand the
-    # browser a redirect to the results page that shows them.
+    # Historical reports keep their original navigation. Newly queued P2 jobs
+    # use the separate durable worker and direct operators to evidence review.
     done_event = next(e for e in events if e['type'] == 'done')
     assert done_event['redirect'] == f'/results/search_{job_id}'
 
@@ -2153,7 +2270,7 @@ def test_live_scan_streams_found_and_done(client, web_app, monkeypatch):
     assert 'CSV Report' in results_page
 
 
-def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
+def test_legacy_collection_helper_enriches_only_claimed_github_profile_after_opt_in(
     client, web_app, monkeypatch
 ):
     requested_targets = []
@@ -2191,9 +2308,7 @@ def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
         }
 
     monkeypatch.setattr(maigret, 'search', fake_search)
-    monkeypatch.setattr(
-        web_app, 'run_github_public_profile', fake_github_enrichment
-    )
+    monkeypatch.setattr(web_app, 'run_github_public_profile', fake_github_enrichment)
     monkeypatch.setattr(maigret.report, 'save_graph_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_csv_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
@@ -2201,19 +2316,15 @@ def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    client.get('/')
-    start = client.post(
-        '/api/scan',
-        data={
-            'identifier_type': 'username',
-            'identifier_value': 'alice',
-            'processing_mode': 'independent',
-            'enable_github_profile_enrichment': 'on',
-        },
-        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    job_id = _run_legacy_collection_fixture(
+        web_app,
+        [
+            ('identifier_type', 'username'),
+            ('identifier_value', 'alice'),
+            ('processing_mode', 'independent'),
+            ('enable_github_profile_enrichment', 'on'),
+        ],
     )
-    assert start.status_code == 200
-    job_id = start.get_json()['job_id']
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
     events = [
         json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
@@ -2227,9 +2338,7 @@ def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
         }
     ]
     collector_events = [
-        event
-        for event in events
-        if event.get('collector') == 'github-public-profile'
+        event for event in events if event.get('collector') == 'github-public-profile'
     ]
     assert [event['type'] for event in collector_events] == [
         'collector_started',
@@ -2243,7 +2352,7 @@ def test_live_scan_enriches_only_claimed_github_profile_after_opt_in(
     )
 
 
-def test_live_scan_analyzes_and_archives_only_supported_profile_urls(
+def test_legacy_collection_helper_analyzes_and_archives_only_supported_profile_urls(
     client, web_app, monkeypatch
 ):
     unfurl_targets = []
@@ -2312,19 +2421,15 @@ def test_live_scan_analyzes_and_archives_only_supported_profile_urls(
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    client.get('/')
-    start = client.post(
-        '/api/scan',
-        data={
-            'identifier_type': 'username',
-            'identifier_value': 'alice',
-            'processing_mode': 'independent',
-            'enable_archived_url_evidence': 'on',
-        },
-        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    job_id = _run_legacy_collection_fixture(
+        web_app,
+        [
+            ('identifier_type', 'username'),
+            ('identifier_value', 'alice'),
+            ('processing_mode', 'independent'),
+            ('enable_archived_url_evidence', 'on'),
+        ],
     )
-    assert start.status_code == 200
-    job_id = start.get_json()['job_id']
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
     events = [
         json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
@@ -2350,7 +2455,7 @@ def test_live_scan_analyzes_and_archives_only_supported_profile_urls(
     }
 
 
-def test_live_scan_does_not_enrich_suppressed_profile_hit(
+def test_legacy_collection_helper_does_not_enrich_suppressed_profile_hit(
     client, web_app, monkeypatch
 ):
     collector_calls = []
@@ -2384,22 +2489,17 @@ def test_live_scan_does_not_enrich_suppressed_profile_hit(
     monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
-    monkeypatch.setattr(
-        maigret.report, 'generate_report_context', lambda *a, **kw: {}
-    )
+    monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    client.get('/')
-    start = client.post(
-        '/api/scan',
-        data={
-            'identifier_type': 'username',
-            'identifier_value': 'alice',
-            'processing_mode': 'independent',
-            'enable_archived_url_evidence': 'on',
-        },
-        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    job_id = _run_legacy_collection_fixture(
+        web_app,
+        [
+            ('identifier_type', 'username'),
+            ('identifier_value', 'alice'),
+            ('processing_mode', 'independent'),
+            ('enable_archived_url_evidence', 'on'),
+        ],
     )
-    job_id = start.get_json()['job_id']
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
 
     assert collector_calls == []
@@ -2410,7 +2510,7 @@ def test_live_scan_does_not_enrich_suppressed_profile_hit(
     assert result['collector_observations'] == []
 
 
-def test_live_scan_does_not_send_candidate_to_url_only_collectors(
+def test_legacy_collection_helper_does_not_send_candidate_to_url_only_collectors(
     client, web_app, monkeypatch
 ):
     collector_calls = []
@@ -2444,22 +2544,17 @@ def test_live_scan_does_not_send_candidate_to_url_only_collectors(
     monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
-    monkeypatch.setattr(
-        maigret.report, 'generate_report_context', lambda *a, **kw: {}
-    )
+    monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    client.get('/')
-    start = client.post(
-        '/api/scan',
-        data={
-            'identifier_type': 'username',
-            'identifier_value': 'alice',
-            'processing_mode': 'independent',
-            'enable_archived_url_evidence': 'on',
-        },
-        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    job_id = _run_legacy_collection_fixture(
+        web_app,
+        [
+            ('identifier_type', 'username'),
+            ('identifier_value', 'alice'),
+            ('processing_mode', 'independent'),
+            ('enable_archived_url_evidence', 'on'),
+        ],
     )
-    job_id = start.get_json()['job_id']
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
 
     assert collector_calls == []
@@ -2681,18 +2776,11 @@ def test_live_start_empty_username_redirects_to_index(client, web_app):
     assert resp.location.endswith('/')
 
 
-def test_live_start_redirects_to_dedicated_live_page(client, web_app, monkeypatch):
+def test_live_start_redirects_to_dedicated_live_page(client, web_app, queued_store):
     """POST /live starts a job on a NEW page (/live/<job_id>), not inline on
     the index page. That page must show the graph + a Stop button, and must
     NOT unconditionally redirect away on completion (only via the Open reports
     button — see test_live_scan_done_event_offers_redirect_not_auto_navigation)."""
-
-    async def fake_search(*args, **kwargs):
-        notify = kwargs['query_notify']
-        notify.set_total(0)
-        return {}
-
-    monkeypatch.setattr(maigret, 'search', fake_search)
 
     client.get('/')
     start = client.post(
@@ -2714,9 +2802,8 @@ def test_live_start_redirects_to_dedicated_live_page(client, web_app, monkeypatc
     # No unconditional navigation on completion anymore.
     assert 'window.location.href = ev.redirect' not in body
 
-    # Drain the SSE stream so the background thread's queue is consumed and
-    # the job entry is cleaned up tidily.
-    client.get(f'/api/scan/{job_id}/stream')
+    assert queued_store.get_job(job_id)['status'] == 'queued'
+    assert web_app.live_jobs == {}
 
 
 def test_live_results_unknown_job_redirects_to_index(client, web_app):
@@ -2782,11 +2869,10 @@ def test_live_results_normalizes_database_only_legacy_completion(
     assert 'id="graph"' not in body
 
 
-def test_live_scan_done_event_offers_redirect_not_auto_navigation(
+def test_legacy_collection_helper_done_event_offers_redirect_not_auto_navigation(
     client, web_app, monkeypatch
 ):
-    """The SSE 'done' payload still carries the redirect URL (consumed by the
-    Open reports button), but nothing server- or client-side forces navigation."""
+    """Historical done events retain their explicit Open reports navigation."""
 
     async def fake_search(*args, **kwargs):
         notify = kwargs['query_notify']
@@ -2808,13 +2894,7 @@ def test_live_scan_done_event_offers_redirect_not_auto_navigation(
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    client.get('/')
-    start = client.post(
-        '/live',
-        data={'usernames': 'soxoj', 'csrf_token': _csrf_token(client)},
-    )
-    job_id = start.location.rsplit('/', 1)[1]
-
+    job_id = _run_legacy_collection_fixture(web_app, [('usernames', 'soxoj')])
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
     events = [
         json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
@@ -2829,7 +2909,7 @@ def test_live_scan_done_event_offers_redirect_not_auto_navigation(
     assert 'started_at' in result
 
 
-def test_live_scan_stop_mid_scan_keeps_already_collected_results(
+def test_legacy_collection_helper_stop_mid_scan_keeps_already_collected_results(
     client, web_app, monkeypatch
 ):
     """Regression: clicking Stop while a username's scan is still in-flight
@@ -2865,13 +2945,7 @@ def test_live_scan_stop_mid_scan_keeps_already_collected_results(
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    client.get('/')
-    start = client.post(
-        '/live',
-        data={'usernames': 'soxoj', 'csrf_token': _csrf_token(client)},
-    )
-    job_id = start.location.rsplit('/', 1)[1]
-
+    job_id = _run_legacy_collection_fixture(web_app, [('usernames', 'soxoj')])
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
     events = [
         json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
@@ -2896,7 +2970,7 @@ def test_live_scan_stop_mid_scan_keeps_already_collected_results(
 
 
 def test_real_report_generation_does_not_crash(client, web_app, monkeypatch):
-    """End-to-end with mocked maigret.search but REAL report generation.
+    """Historical helper with mocked maigret.search and real report generation.
 
     This is the regression guard for bugs inside `save_graph_report` and friends
     (e.g. `nt.options.groups = ...` raising AttributeError on a dict). If any of
@@ -2917,8 +2991,7 @@ def test_real_report_generation_does_not_crash(client, web_app, monkeypatch):
     monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
     monkeypatch.setattr(web_app, 'Thread', _SyncThread)
 
-    post = client.post('/search', data={'usernames': 'testuser'})
-    timestamp = post.location.rsplit('/', 1)[1]
+    timestamp = _run_legacy_collection_fixture(web_app, {'usernames': 'testuser'})
 
     assert timestamp in web_app.job_results, 'background task did not record any result'
     result = web_app.job_results[timestamp]
@@ -2929,7 +3002,9 @@ def test_real_report_generation_does_not_crash(client, web_app, monkeypatch):
     # Regression guard: pyvis's default cdn_resources="local" writes a lib/
     # folder relative to the process cwd instead of next to the graph HTML,
     # so the browser 404s fetching lib/bindings/utils.js from /reports/...
-    graph_path = os.path.join(web_app.app.config['REPORTS_FOLDER'], result['graph_file'])
+    graph_path = os.path.join(
+        web_app.app.config['REPORTS_FOLDER'], result['graph_file']
+    )
     with open(graph_path, encoding='utf-8') as f:
         graph_html = f.read()
     assert 'lib/bindings' not in graph_html
@@ -3461,7 +3536,7 @@ def test_ai_markdown_uses_user_scanner_evidence_without_leaking_withheld_email(w
     assert 'lookup_email' in approved
 
 
-def test_live_scan_runs_bounded_user_scanner_username_verification(
+def test_legacy_collection_helper_runs_bounded_user_scanner_username_verification(
     client, web_app, monkeypatch
 ):
     requested = {}
@@ -3556,25 +3631,20 @@ def test_live_scan_runs_bounded_user_scanner_username_verification(
     monkeypatch.setattr(maigret.report, 'save_json_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_pdf_report', lambda *a, **kw: None)
     monkeypatch.setattr(maigret.report, 'save_html_report', lambda *a, **kw: None)
-    monkeypatch.setattr(
-        maigret.report, 'generate_report_context', lambda *a, **kw: {}
-    )
+    monkeypatch.setattr(maigret.report, 'generate_report_context', lambda *a, **kw: {})
 
-    client.get('/')
-    start = client.post(
-        '/api/scan',
-        data={
-            'identifier_type': 'username',
-            'identifier_value': 'alice',
-            'processing_mode': 'independent',
-            'enable_user_scanner_username': 'on',
-            'user_scanner_platforms_present': '1',
-            'user_scanner_platform': ['instagram', 'x'],
-        },
-        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
+    job_id = _run_legacy_collection_fixture(
+        web_app,
+        [
+            ('identifier_type', 'username'),
+            ('identifier_value', 'alice'),
+            ('processing_mode', 'independent'),
+            ('enable_user_scanner_username', 'on'),
+            ('user_scanner_platforms_present', '1'),
+            ('user_scanner_platform', 'instagram'),
+            ('user_scanner_platform', 'x'),
+        ],
     )
-    assert start.status_code == 200
-    job_id = start.get_json()['job_id']
     body = client.get(f'/api/scan/{job_id}/stream').get_data(as_text=True)
     events = [
         json.loads(line[6:]) for line in body.splitlines() if line.startswith('data: ')
@@ -3587,9 +3657,7 @@ def test_live_scan_runs_bounded_user_scanner_username_verification(
         'cancelled': False,
     }
     collector_events = [
-        event
-        for event in events
-        if event.get('collector') == 'user-scanner-username'
+        event for event in events if event.get('collector') == 'user-scanner-username'
     ]
     assert [event['type'] for event in collector_events] == [
         'collector_started',
@@ -3773,10 +3841,12 @@ def test_parse_search_options_uses_saved_defaults_and_case_filters(web_app):
         }
     )
 
-    options = web_app.parse_search_options(
-        {},
-        {'tags': ['social', 'id'], 'excluded_tags': ['gaming']},
-    )
+    with web_app.app.test_request_context('/'):
+        web_app.session['username'] = 'case-operator'
+        options = web_app.parse_search_options(
+            {},
+            {'tags': ['social', 'id'], 'excluded_tags': ['gaming']},
+        )
 
     assert options['timeout'] == 20
     assert options['top_sites'] == 100
@@ -3786,10 +3856,12 @@ def test_parse_search_options_uses_saved_defaults_and_case_filters(web_app):
     assert options['site_list'] == ['GitHub']
     assert options['disable_extracting'] is True
     assert options['all_sites'] is False
+    assert options['requested_by'] == 'case-operator'
 
 
 def test_parse_search_options_full_mode_ignores_top_sites(web_app):
-    options = web_app.parse_search_options({'mode': 'full'})
+    with web_app.app.test_request_context('/'):
+        options = web_app.parse_search_options({'mode': 'full'})
     assert options['all_sites'] is True
 
 

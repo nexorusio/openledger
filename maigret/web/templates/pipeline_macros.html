@@ -1,0 +1,22 @@
+{% macro hypothesis(value, kind) %}
+<dl class="pipeline-manifest">
+{% if kind == 'account' %}
+ <div><dt>Platform</dt><dd>{{ value.platform | default('Unresolved platform', true) }}</dd></div>
+ <div><dt>Username</dt><dd>{{ value.handle | default('Not established', true) }}</dd></div>
+ <div><dt>Public profile</dt><dd>{% set link = value.canonical_url | default(value.url, true) | pipeline_public_url %}{% if link %}<a href="{{ link }}" rel="noopener noreferrer" target="_blank">{{ link }}</a>{% else %}No validated URL{% endif %}</dd></div>
+ <div><dt>Stable platform identifier</dt><dd>{{ value.stable_id | default('Not established', true) }}</dd></div>
+{% else %}
+ <div><dt>Claim</dt><dd>{{ value.predicate | default(value.field_name, true) | default('Unclassified', true) | replace('_', ' ') | title }}</dd></div>
+ <div><dt>Value</dt><dd>{% if value.value is mapping %}{% for key, detail in value.value.items() %}<div>{{ key | replace('_', ' ') | title }}: {{ detail }}</div>{% endfor %}{% else %}{{ value.value | default('Not established', true) }}{% endif %}</dd></div>
+ {% if value.qualifiers %}<div><dt>Qualifiers</dt><dd>{% for key, detail in value.qualifiers.items() %}<div>{{ key | replace('_', ' ') | title }}: {{ detail }}</div>{% endfor %}</dd></div>{% endif %}
+ {% if value.valid_from or value.valid_to %}<div><dt>Effective period</dt><dd>{{ value.valid_from | default('Unknown start', true) }} — {{ value.valid_to | default('Unknown end', true) }}</dd></div>{% endif %}
+{% endif %}
+</dl>
+{% if value.conflicts %}<div class="alert alert-warning">Conflicting evidence is attached to this hypothesis. Review the conflict and record a disposition before finalization.<details><summary>Inspect conflicts</summary><pre>{{ value.conflicts | tojson(indent=2) }}</pre></details></div>{% endif %}
+{% endmacro %}
+{% macro assessment(value) %}
+{% if value %}<p><strong>Evidence:</strong> {{ value.evidence_status | default('review_required', true) | replace('_', ' ') }}{% if value.evidence_counts %} · {{ value.evidence_counts.known_origin_families }} known original-source families{% endif %}.</p><p>{% if value.probability and value.probability.value is defined and value.probability.value is not none %}{{ value.probability.event | replace('_', ' ') }} probability: {{ (value.probability.value * 100) | round(1) }}%{% else %}Probability unavailable: {{ value.probability.reason if value.probability else 'No validated assessment is attached' }}{% endif %}</p><details class="pipeline-details"><summary>Assessment explanations and evidence dependencies</summary><pre>{{ value | tojson(indent=2) }}</pre></details>{% else %}<p class="pipeline-muted">Probability unavailable: no validated assessment is attached. Direct operator assessment remains available.</p>{% endif %}
+{% endmacro %}
+{% macro observation(entry) %}
+<article class="pipeline-group" id="observation-{{ entry.id }}"><h3>{{ entry.engine | default(entry.engine_id, true) | default('Source observation', true) }} · {{ entry.outcome | default('Recorded') | replace('_', ' ') }}</h3><dl class="pipeline-manifest"><div><dt>Observation ID</dt><dd><code>{{ entry.id }}</code></dd></div><div><dt>Recorded at</dt><dd>{{ entry.created_at | default(entry.observed_at, true) }}</dd></div><div><dt>Original-source family</dt><dd>{{ entry.origin_family | default('Dependence unknown', true) }}</dd></div><div><dt>Evidence retention</dt><dd>{{ 'Retained evidence' if entry.retained | default(true) else 'Source detail is not retained' }}</dd></div></dl>{% if entry.operator_disposition %}<p><strong>Excluded from supporting evidence:</strong> {{ entry.operator_disposition.reason }}</p>{% endif %}{% if entry.source_state %}<p><strong>Source state:</strong> {{ entry.source_state | replace('_', ' ') }}. Retained as historical provenance.</p>{% endif %}{% set link = (entry.source_url | default(entry.original_url, true)) | pipeline_public_url %}{% if link %}<p><a href="{{ link }}" rel="noopener noreferrer" target="_blank">{{ link }}</a></p>{% endif %}<details><summary>Full retained source record and lineage</summary><pre>{{ entry | tojson(indent=2) }}</pre></details></article>
+{% endmacro %}

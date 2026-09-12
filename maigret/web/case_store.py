@@ -969,6 +969,18 @@ class StaleCombinedSnapshotError(ValueError):
     """Raised when chat output no longer matches the active combined snapshot."""
 
 
+# Register additive P2 tables with the shared metadata, without a store import cycle.
+from maigret.web.pipeline_schema import register_pipeline_schema
+from maigret.web.pipeline_projection_schema import register_projection_schema
+
+register_pipeline_schema(metadata)
+from maigret.web.pipeline_connector_schema import register_connector_ingestion_schema
+
+register_connector_ingestion_schema(metadata)
+
+register_projection_schema(metadata)
+
+
 def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -1419,9 +1431,13 @@ class CaseStore:
         from maigret.web.persona_intelligence import extract_supplied_profile_claims
 
         normalized = [str(value).strip() for value in usernames if str(value).strip()]
-        if not normalized:
-            raise ValueError("At least one username is required")
         investigation_spec = options.get("investigation_spec")
+        identifiers = (
+            list(investigation_spec.get("identifiers") or [])
+            if isinstance(investigation_spec, dict) else []
+        )
+        if not normalized and not identifiers:
+            raise ValueError("At least one investigation identifier is required")
         grouped = (
             isinstance(investigation_spec, dict)
             and investigation_spec.get("processing_mode") == "same_subject"
@@ -1434,7 +1450,7 @@ class CaseStore:
         group_specs = (
             [
                 {
-                    "label": subject_label or normalized[0],
+                    "label": subject_label or (normalized[0] if normalized else str(identifiers[0].get("value") or "Subject")),
                     "usernames": normalized,
                     "identifiers": investigation_spec.get("identifiers", []),
                 }
@@ -1495,6 +1511,7 @@ class CaseStore:
             dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
         )
         specification["persona_bindings"] = persona_bindings
+        specification["pipeline_id"] = "p2-e2e-v1"
         if grouped:
             specification["target_persona_id"] = new_personas[0]["id"]
         else:
@@ -1569,6 +1586,9 @@ class CaseStore:
                     ),
                     now=now,
                 )
+            from maigret.web.pipeline_enqueue import enqueue_primary_requests
+            enqueue_primary_requests(self, connection, job_id=job_id, case_id=case_id,
+                                     options=stored_options, bindings=persona_bindings)
         self.append_event(job_id, {"type": "queued", "usernames": normalized})
         return job_id
 
@@ -2511,11 +2531,12 @@ class CaseStore:
                 )
             )
             queued_usernames = [value for value in queued_usernames if value]
-            if not queued_usernames:
-                raise ValueError("No searchable account identifiers are available")
             specification = (
                 dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
             )
+            if not queued_usernames and not specification.get("identifiers"):
+                raise ValueError("No investigation identifiers are available")
+            specification["pipeline_id"] = "p2-e2e-v1"
             if not explicit_plan and not grouped:
                 target_keys = {value.casefold() for value in queued_usernames}
                 source_label = str(
@@ -2607,6 +2628,10 @@ class CaseStore:
                 .where(cases.c.id == persona_row["case_id"])
                 .values(updated_at=now)
             )
+            from maigret.web.pipeline_enqueue import enqueue_primary_requests
+            enqueue_primary_requests(self, connection, job_id=job_id,
+                                     case_id=persona_row["case_id"], options=queued_options,
+                                     bindings=specification['persona_bindings'])
         self.append_event(
             job_id,
             {
@@ -7077,12 +7102,13 @@ class CaseStore:
         return run_id
 
     def complete_combined_analysis_run(
-        self, run_id: str, insights: Dict[str, Any]
+        self, run_id: str, insights: Dict[str, Any], *, connection=None
     ) -> int:
         """Persist validated insight output and pending relationship proposals."""
         now = utcnow()
         proposals = list(insights.get("proposals") or [])[:MAX_COMBINED_AI_PROPOSALS]
-        with self.engine.begin() as connection:
+        from contextlib import nullcontext
+        with (self.engine.begin() if connection is None else nullcontext(connection)) as connection:
             run_row = (
                 connection.execute(
                     select(combined_analysis_runs.c.status).where(
@@ -7836,11 +7862,7 @@ class CaseStore:
         with self.engine.begin() as connection:
             stale_rows = list(
                 connection.execute(
-                    select(
-                        investigation_jobs.c.id,
-                        investigation_jobs.c.kind,
-                        investigation_jobs.c.options,
-                    ).where(
+                    select(investigation_jobs).where(
                         investigation_jobs.c.status.in_(
                             ("running", "cancel_requested")
                         ),
@@ -7848,17 +7870,20 @@ class CaseStore:
                             investigation_jobs.c.heartbeat_at.is_(None),
                             investigation_jobs.c.heartbeat_at < cutoff,
                         ),
-                    )
+                    ).order_by(investigation_jobs.c.id).with_for_update()
                 ).mappings()
             )
+            from maigret.web.pipeline_store import PipelineStore
+            pipeline = PipelineStore(self)
+            for row in stale_rows:
+                pipeline.reconcile_interrupted_job(
+                    connection, row,
+                    reason="Worker lease expired; evidence retained. Resume this query within its original budgets or run new research in the same case.",
+                )
             result = connection.execute(
                 update(investigation_jobs)
                 .where(
-                    investigation_jobs.c.status.in_(("running", "cancel_requested")),
-                    or_(
-                        investigation_jobs.c.heartbeat_at.is_(None),
-                        investigation_jobs.c.heartbeat_at < cutoff,
-                    ),
+                    investigation_jobs.c.id.in_([row["id"] for row in stale_rows]),
                 )
                 .values(
                     status="interrupted",
@@ -8091,6 +8116,20 @@ class CaseStore:
                 )
         return retire_rows
 
+    @staticmethod
+    def _assert_pipeline_lineage_retained_with_connection(connection, case_id):
+        """Give old deletion routes a reviewable error before any retirement writes."""
+        for table_name in ("pipeline_requests", "pipeline_persona_versions"):
+            table = metadata.tables[table_name]
+            if connection.execute(
+                select(table.c.id).where(table.c.case_id == case_id).limit(1)
+            ).first():
+                raise ValueError(
+                    "This case has retained P2 pipeline evidence or review history. "
+                    "Archive the case or withdraw its final Persona version; ordinary "
+                    "deletion cannot erase the existing research lineage."
+                )
+
     def delete_job(
         self, job_id: str, *, confirmation_name: Optional[str] = None
     ) -> bool:
@@ -8118,6 +8157,7 @@ class CaseStore:
                 raise ValueError("Active investigations cannot be deleted")
             if confirmation_name is not None and confirmation_name != row["case_title"]:
                 raise ValueError("Case name confirmation does not match")
+            self._assert_pipeline_lineage_retained_with_connection(connection, row["case_id"])
             sibling_job = connection.scalar(
                 select(investigation_jobs.c.id)
                 .where(
@@ -8204,6 +8244,7 @@ class CaseStore:
                 raise ActiveInvestigationError(
                     "Cases with active investigations cannot be deleted"
                 )
+            self._assert_pipeline_lineage_retained_with_connection(connection, case_id)
             if stored_case["case_type"] == "standalone":
                 references = self._combined_case_references_with_connection(
                     connection, case_id

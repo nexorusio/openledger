@@ -1,20 +1,20 @@
 {% extends "base.html" %}
 {% set has_graph = graph.nodes and (mode == 'shared' or graph.stats.claim_count) %}
 
-{% block title %}Relationships | OpenLedger{% endblock %}
+{% block title %}Working evidence relationships | OpenLedger{% endblock %}
 {% block breadcrumb %}Relationships{% endblock %}
 
 {% block content %}
 <section class="page-heading relationship-page-heading">
     <div>
-        <p class="eyebrow">Evidence networks</p>
-        <h1>Relationship investigation</h1>
-        <p class="page-description">Explore reviewed evidence paths without changing the records that created them.</p>
+        <p class="eyebrow">Working evidence · {{ 'Cross-case correlations' if mode == 'shared' else 'Draft Persona' }}</p>
+        <h1>{{ 'Working cross-case correlations' if mode == 'shared' else 'Working evidence graph' }}</h1>
+        <p class="page-description">These are working investigative leads. Final Persona graphs are projected from an explicitly QC-approved version.</p>
     </div>
 </section>
 
 <nav class="relationship-mode-tabs" aria-label="Relationship workspace mode">
-    <a class="{{ 'active' if mode == 'persona' else '' }}" href="{{ url_for('relationships_workspace', mode='persona', case_id=selected_case_id, persona_id=selected_persona_id) }}" {{ 'aria-current=page' if mode == 'persona' }}>
+    <a class="{{ 'active' if mode == 'persona' else '' }}" href="{{ url_for('relationships_workspace', mode='persona', case_id=selected_case_id, persona_id=selected_persona_id, view='working') }}" {{ 'aria-current=page' if mode == 'persona' }}>
         <i data-lucide="contact-round"></i><span><strong>Persona evidence</strong><small>One person, attributes, and provenance</small></span>
     </a>
     <a class="{{ 'active' if mode == 'shared' else '' }}" href="{{ url_for('relationships_workspace', mode='shared', case_id=selected_case_id) }}" {{ 'aria-current=page' if mode == 'shared' }}>
@@ -40,6 +40,7 @@
 
 <form method="GET" action="{{ url_for('relationships_workspace') }}" class="panel-card relationship-scope-bar">
     <input type="hidden" name="mode" value="{{ mode }}">
+    <input type="hidden" name="view" value="working">
     <div class="relationship-scope-field">
         <label for="relationshipCase">Case scope</label>
         <select id="relationshipCase" name="case_id" onchange="this.form.submit()">

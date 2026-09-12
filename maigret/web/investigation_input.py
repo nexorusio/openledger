@@ -16,7 +16,7 @@ from maigret.web.username_aliases import (
     rank_username_aliases,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 IDENTIFIER_TYPES = {
     "username",
     "social_handle",
@@ -97,9 +97,7 @@ def normalize_username(value: Any) -> str:
             f"Usernames must be {MAX_USERNAME_LENGTH} characters or fewer."
         )
     if not is_plausible_username(username) or "#" in username:
-        raise InvestigationInputError(
-            f"{value!s} is not a valid username or @handle."
-        )
+        raise InvestigationInputError(f"{value!s} is not a valid username or @handle.")
     return username
 
 
@@ -116,10 +114,18 @@ def normalize_phone(value: Any) -> str:
         raise InvestigationInputError("Enter a phone number.")
     if re.search(r"[^0-9+().\-\s]", raw):
         raise InvestigationInputError(f"{value!s} is not a valid phone number.")
+    if "+" in raw and (not raw.startswith("+") or raw.count("+") != 1):
+        raise InvestigationInputError(
+            "The phone country prefix may contain one leading plus sign."
+        )
     digits = re.sub(r"\D", "", raw)
     if not 7 <= len(digits) <= 15:
         raise InvestigationInputError(
             "Phone numbers must contain between 7 and 15 digits."
+        )
+    if raw.startswith("+") and digits.startswith("0"):
+        raise InvestigationInputError(
+            "International phone country codes cannot begin with zero."
         )
     return f"+{digits}" if raw.startswith("+") else digits
 
@@ -137,12 +143,56 @@ def normalize_profile_url(value: Any) -> str:
 
 
 def _fallback_handle_from_profile_url(url: str) -> Optional[str]:
+    """Extract only a platform-defined profile path, never an arbitrary slug."""
     parsed = urlsplit(url)
+    hostname = (parsed.hostname or "").casefold().removeprefix("www.")
     segments = [unquote(segment) for segment in parsed.path.split("/") if segment]
-    if not segments:
+    direct_hosts = {
+        "instagram.com",
+        "threads.com",
+        "threads.net",
+        "x.com",
+        "twitter.com",
+        "github.com",
+        "facebook.com",
+        "m.facebook.com",
+    }
+    if hostname in direct_hosts and len(segments) == 1:
+        candidate = segments[0]
+    elif (
+        hostname == "tiktok.com" and len(segments) == 1 and segments[0].startswith("@")
+    ):
+        candidate = segments[0]
+    elif (
+        hostname in {"reddit.com", "old.reddit.com"}
+        and len(segments) == 2
+        and segments[0] in {"u", "user"}
+    ):
+        candidate = segments[1]
+    elif hostname == "linkedin.com" and len(segments) == 2 and segments[0] == "in":
+        candidate = segments[1]
+    else:
         return None
-    candidate = segments[-1].lstrip("@").strip()
-    if candidate.casefold() in _GENERIC_PROFILE_SEGMENTS:
+    candidate = candidate.lstrip("@").strip()
+    if candidate.casefold() in _GENERIC_PROFILE_SEGMENTS | {
+        "about",
+        "explore",
+        "home",
+        "login",
+        "search",
+        "settings",
+        "reel",
+        "reels",
+        "p",
+        "watch",
+        "share",
+        "profile.php",
+        "i",
+    }:
+        return None
+    # A numeric URL segment can be an opaque account ID. It is not a username
+    # seed for a cross-platform search unless the operator types it as Username.
+    if candidate.isdigit():
         return None
     try:
         return normalize_username(candidate)
@@ -168,11 +218,6 @@ def extract_profile_usernames(
     fallback = _fallback_handle_from_profile_url(url)
     if fallback and fallback not in resolved:
         resolved.append(fallback)
-    if not resolved:
-        raise InvestigationInputError(
-            "OpenLedger could not extract a username from this profile URL. "
-            "Add the account handle instead."
-        )
     return resolved
 
 
@@ -243,11 +288,6 @@ def build_investigation_plan(
     enable_user_scanner_username = "enable_user_scanner_username" in form
     enable_github_profile_enrichment = "enable_github_profile_enrichment" in form
     enable_archived_url_evidence = "enable_archived_url_evidence" in form
-    if enable_user_scanner_email and processing_mode != "same_subject":
-        raise InvestigationInputError(
-            "User Scanner email evidence requires One subject mode so observations "
-            "cannot be attached to the wrong Persona."
-        )
     requested_username_platforms = _form_list(form, "user_scanner_platform")
     if (
         enable_user_scanner_username
@@ -278,6 +318,9 @@ def build_investigation_plan(
             "A source category or country cannot be both included and excluded."
         )
     identifiers: List[Dict[str, Any]] = []
+    input_provenance: List[Dict[str, Any]] = []
+    unresolved_profile_urls: List[str] = []
+    phone_context: Dict[str, Dict[str, str]] = {}
     search_targets: List[Dict[str, Any]] = []
     full_names: List[str] = []
     confirmed_usernames: List[str] = []
@@ -328,6 +371,7 @@ def build_investigation_plan(
 
     for identifier_type, raw_value in zip(types, values):
         identifier_type = identifier_type.strip()
+        submitted_type = identifier_type
         if not identifier_type and not str(raw_value).strip():
             continue
         if identifier_type not in IDENTIFIER_TYPES:
@@ -350,6 +394,8 @@ def build_investigation_plan(
             profile_usernames[normalized] = extract_profile_usernames(
                 normalized, resolver=profile_url_resolver
             )
+            if not profile_usernames[normalized]:
+                unresolved_profile_urls.append(normalized)
             for username in profile_usernames[normalized]:
                 add_target(username, identifier_type, normalized)
                 confirmed_usernames.append(username)
@@ -362,7 +408,37 @@ def build_investigation_plan(
             normalized = normalize_email(raw_value)
         else:
             normalized = normalize_phone(raw_value)
+            country = str(form.get("phone_country", "")).strip().upper()
+            if country and not re.fullmatch(r"[A-Z]{2}", country):
+                raise InvestigationInputError(
+                    "Phone country must be a two-letter country code."
+                )
+            phone_context[normalized] = {
+                "country": country,
+                "normalization_state": (
+                    "international_literal"
+                    if normalized.startswith("+")
+                    else (
+                        "national_literal_with_country"
+                        if country
+                        else "country_required"
+                    )
+                ),
+            }
         add_identifier(identifier_type, normalized)
+        input_provenance.append(
+            {
+                "row": len(input_provenance),
+                "submitted_type": submitted_type,
+                "raw_value": str(raw_value)[:2000],
+                "type": (
+                    "username"
+                    if identifier_type == "social_handle"
+                    else identifier_type
+                ),
+                "value": normalized,
+            }
+        )
 
     alias_nicknames: List[str] = []
     alias_context_numbers: List[str] = []
@@ -517,12 +593,6 @@ def build_investigation_plan(
 
     if not identifiers:
         raise InvestigationInputError("Add at least one investigation identifier.")
-    if not search_targets:
-        raise InvestigationInputError(
-            "Add a username, @handle, supported profile URL, or enable "
-            "reviewable username variants for a name. Email and phone values are "
-            "retained as context and are not sent to the username scanner."
-        )
 
     email_identifier_count = sum(
         identifier["type"] == "email" for identifier in identifiers
@@ -530,11 +600,6 @@ def build_investigation_plan(
     if enable_user_scanner_email and email_identifier_count == 0:
         raise InvestigationInputError(
             "Add an email identifier before enabling User Scanner email checks."
-        )
-    if enable_user_scanner_email and email_identifier_count > 1:
-        raise InvestigationInputError(
-            "The initial User Scanner integration accepts one email per "
-            "investigation. Run additional addresses as separate cases."
         )
 
     full_name = next(
@@ -545,7 +610,9 @@ def build_investigation_plan(
         ),
         "",
     )
-    subject_label = full_name or search_targets[0]["value"]
+    subject_label = full_name or (
+        search_targets[0]["value"] if search_targets else identifiers[0]["value"]
+    )
     if processing_mode == "same_subject":
         subject_groups = [
             {
@@ -561,7 +628,14 @@ def build_investigation_plan(
         }
         for identifier in identifiers:
             identifier_type, value = identifier["type"], identifier["value"]
-            if identifier_type not in {"username", "profile_url", "full_name"}:
+            if identifier_type in {"email", "phone"}:
+                subject_groups.append(
+                    {
+                        "label": value,
+                        "usernames": [],
+                        "identifiers": [identifier],
+                    }
+                )
                 continue
             if identifier_type == "full_name":
                 targets = [
@@ -601,7 +675,7 @@ def build_investigation_plan(
             if not matching_groups:
                 subject_groups.append(
                     {
-                        "label": targets[0],
+                        "label": targets[0] if targets else value,
                         "usernames": list(targets),
                         "identifiers": [identifier],
                         "account_group": True,
@@ -643,6 +717,9 @@ def build_investigation_plan(
         "subject_label": subject_label,
         "subject_groups": subject_groups,
         "identifiers": identifiers,
+        "input_provenance": input_provenance,
+        "unresolved_profile_urls": unresolved_profile_urls,
+        "phone_context": phone_context,
         "alias_nicknames": alias_nicknames,
         "alias_context_numbers": alias_context_numbers,
         "alias_candidates": alias_candidates,

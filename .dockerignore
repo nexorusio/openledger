@@ -21,3 +21,6 @@ tests/
 !/requirements.txt
 !LICENSES/*.txt
 venv/
+
+# Build identity is generated from explicit reviewed build arguments.
+openledger-build.json

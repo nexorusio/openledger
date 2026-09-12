@@ -8,7 +8,7 @@ from typing import Any, Mapping, MutableMapping, Optional
 from maigret.web.execution_budget import apply_execution_budget
 
 PROFILE_DISCOVERY_POLICY_VERSION = "profile-discovery-routing-v2"
-PROFILE_DISCOVERY_JOB_KINDS = frozenset({"live", "refresh"})
+PROFILE_DISCOVERY_JOB_KINDS = frozenset({"live", "refresh", "research"})
 
 _FLAG_ENVIRONMENT = {
     "profile_discovery_enabled": "OPENLEDGER_PROFILE_DISCOVERY_ENABLED",
@@ -106,22 +106,12 @@ def govern_profile_discovery_options(
         raise ProfileDiscoveryPolicyError(
             f"{mode.title()} profile discovery is disabled by server policy."
         )
-    if not flags["maigret_enabled"]:
-        raise ProfileDiscoveryPolicyError(
-            "Maigret profile discovery is disabled by server policy."
-        )
-
     specification = governed.get("investigation_spec")
     if isinstance(specification, Mapping):
         specification = dict(specification)
-        user_scanner_requested = bool(
-            specification.get("enable_user_scanner_email")
-            or specification.get("enable_user_scanner_username")
-        )
-        if user_scanner_requested and not flags["user_scanner_enabled"]:
-            raise ProfileDiscoveryPolicyError(
-                "User Scanner verification is disabled by server policy."
-            )
+        # Individual provider switches are enforced by the common query
+        # handler. A disabled username engine must not block name/email/phone
+        # research or cause the old username-only pipeline to be selected.
         governed["investigation_spec"] = specification
 
     # Replace any client-supplied policy document with the server snapshot.
