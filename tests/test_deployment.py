@@ -132,7 +132,8 @@ def test_updater_starts_self_hosted_search_only_for_searxng_provider():
     assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER" in update_script
     assert "COMPOSE_PROFILE_ARGS=(--profile self-hosted-search)" in update_script
     assert 'docker compose "${COMPOSE_PROFILE_ARGS[@]}"' in update_script
-    assert "OPENLEDGER_COMPOSE_PROJECT=deploy" in update_script
+    assert "detect_compose_project()" in update_script
+    assert 'OPENLEDGER_COMPOSE_PROJECT="$(detect_compose_project)"' in update_script
     assert '--project-name "${OPENLEDGER_COMPOSE_PROJECT}"' in update_script
     assert "label=com.docker.compose.project=${OPENLEDGER_COMPOSE_PROJECT}" in update_script
 

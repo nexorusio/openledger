@@ -33,15 +33,30 @@ ENV_FILE="${DEPLOY_DIR}/.env"
 COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
 BACKUP_DIR="${REPO_ROOT}/runtime/backups"
 TARGET_SCHEMA=e2e2b8d0a502
-# Preserve the Compose project created by the documented legacy installer.
-# A different name would address a different database volume.
-OPENLEDGER_COMPOSE_PROJECT=deploy
 fail() { echo "P2 update refused: $*" >&2; exit 1; }
 cd "${REPO_ROOT}"
 [[ -f "${ENV_FILE}" ]] || fail "Restore the existing deployment configuration first."
 for prerequisite in git python3 docker tar flock; do
     command -v "${prerequisite}" >/dev/null 2>&1 || fail "Missing ${prerequisite}."
 done
+detect_compose_project() {
+    # Existing deployments predate the explicit project-name installer. Derive
+    # their actual Compose project from the one running database instead of
+    # guessing a new project and pointing the updater at an empty stack.
+    local projects=()
+    mapfile -t projects < <(docker ps --filter status=running \
+        --filter label=com.docker.compose.service=db \
+        --format '{{.Label "com.docker.compose.project"}}' | sed '/^$/d')
+    [[ ${#projects[@]} -eq 1 ]] || \
+        fail "Expected one running OpenLedger database with a Compose project label."
+    [[ "${projects[0]}" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]] || \
+        fail "Database Compose project label is invalid."
+    printf '%s\n' "${projects[0]}"
+}
+# Preserve the actual project used by this installation. New installs use
+# `deploy`; existing instances such as the production `openledger` project
+# remain on their original database volume.
+OPENLEDGER_COMPOSE_PROJECT="$(detect_compose_project)"
 verify_release() {
     python3 "${DEPLOY_DIR}/release-manifest.py" verify --commit "${APPROVED_COMMIT}" --manifest "${MANIFEST}" "$@"
 }
