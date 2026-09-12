@@ -39,7 +39,10 @@ jobs:
       - name: Test offline with coverage (fail if coverage is low)
         run: |
           test_python="$(poetry env info --executable)"
-          if [ "${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'codex/rollback-to-p2' }}" = "true" ]; then
+          # P2 deliberately has no legacy collection fallback. Detect the
+          # release contract from the checked-out tree rather than a temporary
+          # stacked-branch name, so the same maintained suite runs after merge.
+          if python deploy/check-p2-release.py; then
             mapfile -t test_paths < <(python deploy/ci-test-selection.py --offline)
             coverage_floor=35
           else
@@ -85,7 +88,9 @@ jobs:
       - name: Run offline tests without [pdf] extra
         run: |
           test_python="$(command -v python)"
-          if [ "${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'codex/rollback-to-p2' }}" = "true" ]; then
+          # Keep the minimal-install smoke gate aligned with the active
+          # pipeline contract; legacy-flow tests are not valid for P2.
+          if python deploy/check-p2-release.py; then
             mapfile -t test_paths < <(python deploy/ci-test-selection.py --offline)
           else
             test_paths=(tests)
