@@ -118,6 +118,8 @@ def test_install_and_example_keep_profile_search_disabled_by_default():
     assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER=disabled" in example
     assert "SEARXNG_SECRET=REPLACE_WITH_A_DIFFERENT" in example
     assert 'SEARXNG_SECRET="$(openssl rand -hex 32)"' in install_script
+    assert "OPENLEDGER_COMPOSE_PROJECT=deploy" in install_script
+    assert '--project-name "${OPENLEDGER_COMPOSE_PROJECT}"' in install_script
     assert "brave_search_api_key" not in install_script
     assert "OPENLEDGER_PROFILE_SEARCH_API_KEY=" not in example
 
@@ -131,6 +133,9 @@ def test_updater_starts_self_hosted_search_only_for_searxng_provider():
     assert "OPENLEDGER_PROFILE_SEARCH_PROVIDER" in update_script
     assert "COMPOSE_PROFILE_ARGS=(--profile self-hosted-search)" in update_script
     assert 'docker compose "${COMPOSE_PROFILE_ARGS[@]}"' in update_script
+    assert "OPENLEDGER_COMPOSE_PROJECT=deploy" in update_script
+    assert '--project-name "${OPENLEDGER_COMPOSE_PROJECT}"' in update_script
+    assert "label=com.docker.compose.project=${OPENLEDGER_COMPOSE_PROJECT}" in update_script
 
 
 def test_self_hosted_search_operator_flow_is_guarded_and_reversible():
@@ -151,7 +156,7 @@ def test_self_hosted_search_operator_flow_is_guarded_and_reversible():
     assert "trap fail_closed_shutdown ERR" in script
     assert "stop_and_verify_services app worker searxng" in script
     assert 'for service in "$@"' in script
-    assert "OPENLEDGER_COMPOSE_PROJECT=openledger" in script
+    assert "OPENLEDGER_COMPOSE_PROJECT=deploy" in script
     assert '--project-name "${OPENLEDGER_COMPOSE_PROJECT}"' in script
     assert "label=com.docker.compose.project=${OPENLEDGER_COMPOSE_PROJECT}" in script
     assert "label=com.docker.compose.service=${service}" in script
@@ -736,7 +741,7 @@ def test_p2_updater_accepts_reviewed_checkout_and_preserves_backup_order(
         if command[0] == "git"
     )
     assert all(
-        "--project-name" in command and "openledger" in command
+        "--project-name" in command and "deploy" in command
         for command in commands
         if command[:2] == ["docker", "compose"]
     )

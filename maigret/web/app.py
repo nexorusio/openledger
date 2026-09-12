@@ -7487,6 +7487,26 @@ def suggested_role_organization(value):
     return candidate
 
 
+def _source_report_belongs_to_persona(job, persona_id, case_personas):
+    """Keep legacy source-report links scoped to their recorded subject."""
+    if not job.get('individual_reports'):
+        return False
+    specification = (job.get('options') or {}).get('investigation_spec') or {}
+    target_persona_id = str(specification.get('target_persona_id') or '').strip()
+    if target_persona_id:
+        return target_persona_id == persona_id
+    bindings = specification.get('persona_bindings') or []
+    if bindings:
+        return any(
+            isinstance(binding, dict)
+            and binding.get('persona_id') == persona_id
+            for binding in bindings
+        )
+    # Old unscoped reports are safe only for single-subject cases. Guessing in
+    # a multi-subject case can expose a different Persona's checks.
+    return len(case_personas) == 1
+
+
 @app.route('/personas/<persona_id>')
 def persona_workspace(persona_id):
     if case_store is None:
@@ -7566,8 +7586,15 @@ def persona_workspace(persona_id):
             else ''
         )
     case = case_store.get_case(persona['case_id']) or {}
+    case_personas = case.get('personas') or []
     source_outcome_report = next(
-        (job for job in case.get('jobs', []) if job.get('individual_reports')),
+        (
+            job
+            for job in case.get('jobs', [])
+            if _source_report_belongs_to_persona(
+                job, persona_id, case_personas
+            )
+        ),
         None,
     )
     return render_template(

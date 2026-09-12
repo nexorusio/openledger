@@ -96,6 +96,51 @@ def test_job_lifecycle_is_transactional_and_auditable(store):
     assert completed["found_count"] == 1
 
 
+def test_profile_source_ownership_matches_supported_url_equivalents_only():
+    linkedin_persona = "linkedin-persona"
+    instagram_persona = "instagram-persona"
+    specification = {
+        "processing_mode": "independent",
+        "persona_bindings": [
+            {
+                "persona_id": linkedin_persona,
+                "identifiers": [
+                    {
+                        "type": "profile_url",
+                        "value": "https://www.linkedin.com/in/alice-example/?trk=given",
+                    }
+                ],
+            },
+            {
+                "persona_id": instagram_persona,
+                "identifiers": [
+                    {
+                        "type": "profile_url",
+                        "value": "https://www.instagram.com/alice_example/",
+                    }
+                ],
+            },
+        ],
+    }
+    persona_ids = [linkedin_persona, instagram_persona]
+
+    assert CaseStore._profile_source_persona_ids(
+        specification,
+        persona_ids,
+        "https://id.linkedin.com/in/alice-example?utm_source=search",
+    ) == [linkedin_persona]
+    assert CaseStore._profile_source_persona_ids(
+        specification,
+        persona_ids,
+        "https://instagram.com/alice_example/?utm_source=search",
+    ) == [instagram_persona]
+    assert CaseStore._profile_source_persona_ids(
+        specification,
+        persona_ids,
+        "https://id.linkedin.com/in/different-person",
+    ) == []
+
+
 def test_case_personas_and_events_are_removed_with_terminal_job(store):
     job_id = store.create_investigation(["alice"], {})
     job = store.claim_next("worker:test")

@@ -9,7 +9,9 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="${REPO_ROOT}/deploy/.env"
 COMPOSE_FILE="${REPO_ROOT}/deploy/compose.yaml"
 BACKUP_DIR="${REPO_ROOT}/runtime/backups"
-OPENLEDGER_COMPOSE_PROJECT=openledger
+# Match the project name used by install.sh and update.sh so optional search
+# maintenance cannot create or control a second Compose stack.
+OPENLEDGER_COMPOSE_PROJECT=deploy
 MINIMUM_AVAILABLE_MEMORY_KIB=786432
 MINIMUM_AVAILABLE_DISK_KIB=1048576
 

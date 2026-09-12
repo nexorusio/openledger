@@ -874,6 +874,48 @@ def test_results_report_links_open_in_new_tab(client, web_app, monkeypatch):
         assert 'target="_blank"' in tag, f'{label} link missing target="_blank"'
 
 
+def test_source_report_selection_stays_scoped_after_another_persona_rerun(web_app):
+    alice_id = "alice-persona"
+    bob_id = "bob-persona"
+    case_personas = [{"id": alice_id}, {"id": bob_id}]
+    jobs = [
+        {
+            "session_folder": "alice-rerun",
+            "individual_reports": [{"username": "alice"}],
+            "options": {
+                "investigation_spec": {"target_persona_id": alice_id}
+            },
+        },
+        {
+            "session_folder": "original-shared-run",
+            "individual_reports": [
+                {"username": "alice"},
+                {"username": "bob"},
+            ],
+            "options": {
+                "investigation_spec": {
+                    "persona_bindings": [
+                        {"persona_id": alice_id},
+                        {"persona_id": bob_id},
+                    ]
+                }
+            },
+        },
+    ]
+
+    selected = next(
+        job
+        for job in jobs
+        if web_app._source_report_belongs_to_persona(
+            job, bob_id, case_personas
+        )
+    )
+    assert selected["session_folder"] == "original-shared-run"
+    assert web_app._source_report_belongs_to_persona(
+        jobs[0], bob_id, case_personas
+    ) is False
+
+
 def test_ai_analysis_requires_csrf_token(client, web_app, monkeypatch):
     monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
     web_app.job_results['session1'] = {

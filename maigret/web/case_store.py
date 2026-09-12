@@ -1355,6 +1355,13 @@ class CaseStore:
             return persona_ids
 
         def url_key(value):
+            from maigret.web.persona_intelligence import (
+                supported_profile_identity_key,
+            )
+
+            profile_identity = supported_profile_identity_key(value)
+            if profile_identity is not None:
+                return ("supported_profile", *profile_identity)
             try:
                 parsed = urlsplit(str(value or ""))
             except ValueError:
@@ -1362,6 +1369,7 @@ class CaseStore:
             if parsed.scheme not in {"http", "https"} or not parsed.netloc:
                 return None
             return (
+                "exact_url",
                 parsed.scheme.casefold(),
                 parsed.netloc.casefold(),
                 parsed.path.rstrip("/") or "/",
@@ -1369,9 +1377,23 @@ class CaseStore:
             )
 
         key = url_key(source_url)
+        bindings = [
+            binding
+            for binding in investigation_spec.get("persona_bindings") or []
+            if isinstance(binding, dict)
+        ]
+        explicit_profile_bindings = [
+            binding
+            for binding in bindings
+            if any(
+                isinstance(identifier, dict)
+                and identifier.get("type") == "profile_url"
+                for identifier in binding.get("identifiers") or []
+            )
+        ]
         owners = {
             binding.get("persona_id")
-            for binding in investigation_spec.get("persona_bindings") or []
+            for binding in explicit_profile_bindings
             if any(
                 identifier.get("type") == "profile_url"
                 and key is not None
@@ -1379,11 +1401,13 @@ class CaseStore:
                 for identifier in binding.get("identifiers") or []
             )
         }
-        return (
-            [persona_id for persona_id in persona_ids if persona_id in owners]
-            if owners
-            else persona_ids
-        )
+        if not explicit_profile_bindings:
+            # Username-only independent investigations have no source URL
+            # ownership to apply; keep their seed-based routing intact.
+            return persona_ids
+        # Once explicit profile inputs exist, an unmatched URL is ambiguous and
+        # must not be broadcast to every subject in the case.
+        return [persona_id for persona_id in persona_ids if persona_id in owners]
 
     def create_investigation(
         self,

@@ -47,6 +47,10 @@ DATABASE_PASSWORD_FILE="${REPO_ROOT}/runtime/secrets/postgres_password"
 BACKUP_DIR="${REPO_ROOT}/runtime/backups"
 OPENLEDGER_APP_UID=10001
 OPENLEDGER_APP_GID=10001
+# Preserve the project name produced by the documented installer before it
+# began passing --project-name explicitly. Changing this value would select a
+# different database volume rather than update the installed application.
+OPENLEDGER_COMPOSE_PROJECT=deploy
 
 fail() {
     echo "P2 update refused: $*" >&2
@@ -73,7 +77,7 @@ verify_running_database() {
     # Probe the existing service directly. Compose interpolation can require a
     # missing secret, and must not generate one or start services for this check.
     database_container="$(docker ps --filter status=running \
-        --filter label=com.docker.compose.project=openledger \
+        --filter "label=com.docker.compose.project=${OPENLEDGER_COMPOSE_PROJECT}" \
         --filter label=com.docker.compose.service=db --format '{{.ID}}')"
     [[ "${database_container}" =~ ^[0-9a-f]{12,64}$ ]] || \
         fail "Expected one running openledger database. Inspect/start the existing P2 database separately, then retry."
@@ -165,7 +169,8 @@ fi
 
 compose() {
     docker compose "${COMPOSE_PROFILE_ARGS[@]}" \
-        --project-name openledger --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+        --project-name "${OPENLEDGER_COMPOSE_PROJECT}" \
+        --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
 }
 
 compose config --quiet

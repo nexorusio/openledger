@@ -582,6 +582,22 @@ def _linkedin_profile_path(value: Any) -> str:
     return f"/in/{slug}" if slug else ""
 
 
+def supported_profile_identity_key(value: Any) -> Optional[tuple[str, str]]:
+    """Return a platform-scoped account key for a safely parsed profile URL."""
+    try:
+        _, platform, reference = _supported_social_profile_reference(
+            str(value or "")
+        )
+    except ValueError:
+        return None
+    if platform and reference is not None:
+        return platform, str(reference.handle).casefold()
+    linkedin_path = _linkedin_profile_path(value)
+    if linkedin_path:
+        return "linkedin", linkedin_path.casefold()
+    return None
+
+
 def _linkedin_account_username(value: Any) -> Optional[str]:
     """Return None for other hosts, or a URL-derived/unknown LinkedIn username."""
     public_url = _public_url(value)
