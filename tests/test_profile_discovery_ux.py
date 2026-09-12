@@ -77,6 +77,8 @@ def test_live_progress_and_pipeline_workspace_keep_collection_separate_from_appr
     for forbidden in ('id="graph"', "addCandidate(ev)", "vis.Network"):
         assert forbidden not in live
     assert "shortlist_sections" in pipeline
+    assert 'section["items"]' in pipeline
+    assert "section.items" not in pipeline
     assert "No raw-item QC is required" in pipeline
     assert "Digital presence" not in live
     assert "Approve finding" in pipeline
