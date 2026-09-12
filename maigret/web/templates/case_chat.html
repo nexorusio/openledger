@@ -48,7 +48,7 @@
                     </span>
                     {% if message.research_enabled %}<span class="badge-soft">Public-web research</span>{% endif %}
                 </header>
-                <div class="case-chat-message-content">{{ message.content }}</div>
+                <div class="case-chat-message-content{% if message.role == 'assistant' %} formatted{% endif %}">{% if message.role == 'assistant' %}{{ render_chat_content(message.content) }}{% else %}{{ message.content }}{% endif %}</div>
                 {% if message.sources %}
                 <div class="case-chat-sources">
                     <strong>Sources</strong>
@@ -58,6 +58,30 @@
                         {% endfor %}
                     </ol>
                 </div>
+                {% endif %}
+                {% if message.proposals.url_evidence %}
+                <div class="case-chat-url-evidence">
+                    <strong>Supplied URLs</strong>
+                    <ul>
+                        {% for record in message.proposals.url_evidence %}
+                        <li>
+                            <a href="{{ record.supplied_url }}" target="_blank" rel="noopener noreferrer">{{ record.supplied_url }}</a>
+                            {% if record.citation_status in ['profile_url_cited', 'exact_url_cited'] or record.citation_urls %}
+                            <span>Matching URL cited in public-web research. Direct access and identity remain unverified.</span>
+                            {% for cited in record.citation_urls %}<a href="{{ cited }}" target="_blank" rel="noopener noreferrer">Cited URL: {{ cited }}</a>{% endfor %}
+                            {% if record.citation_count|default(record.citation_urls|length) > record.citation_urls|length %}<span>Some matching citation URLs are shown only in Sources.</span>{% endif %}
+                            {% elif record.citation_status == 'research_not_requested' %}
+                            <span>Retained as supplied context. Public-web research was not requested.</span>
+                            {% else %}
+                            <span>Retained as supplied context. No matching URL citation; this does not establish that the profile is absent or blocked.</span>
+                            {% endif %}
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endif %}
+                {% if message.proposals.extraction_status == 'unavailable' and message.proposals.status == 'pending_review' %}
+                <div class="case-chat-proposal-note warning">Supplied URLs were retained for review. Other AI fact proposals could not be extracted.</div>
                 {% endif %}
                 {% if message.proposals.research_status == 'no_independent_citations' %}
                 <div class="case-chat-proposal-note warning">

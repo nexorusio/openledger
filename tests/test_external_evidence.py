@@ -2,6 +2,7 @@ import math
 
 import pytest
 
+from maigret.web import external_evidence
 from maigret.web.external_evidence import (
     ExternalEvidenceValidationError,
     normalize_bounded_document,
@@ -106,6 +107,41 @@ def test_bounded_documents_reject_credentials_and_resource_exhaustion_values():
         )
     with pytest.raises(ExternalEvidenceValidationError, match="control characters"):
         normalize_bounded_document({"value": "safe\x00unsafe"}, "document")
+
+
+@pytest.mark.parametrize(
+    "credential_key",
+    [
+        "serviceAPIKeyValue",
+        "service.API-KEY:value",
+        "API__Key",
+        "APIKey",
+        "authorizationHEADER",
+        "SESSIONTokenValue",
+        "connectionSTRING",
+        "PRIVATEkey",
+        "paßword",
+    ],
+)
+def test_compact_credential_keys_remain_rejected(credential_key):
+    with pytest.raises(ExternalEvidenceValidationError, match="credential field"):
+        normalize_bounded_document({credential_key: "do-not-store"}, "document")
+
+
+@pytest.mark.parametrize(
+    "key", ["HTTPStatus", "APIResult", "public_key", "sourceID", "A" * 100]
+)
+def test_noncredential_keys_remain_accepted(key):
+    assert normalize_bounded_document({key: "safe"}, "document") == {key: "safe"}
+
+
+def test_document_key_limit_applies_before_credential_scan(monkeypatch):
+    def unexpected_scan(_key):
+        pytest.fail("An oversized key reached credential scanning")
+
+    monkeypatch.setattr(external_evidence, "_secret_key", unexpected_scan)
+    with pytest.raises(ExternalEvidenceValidationError, match="key is too large"):
+        normalize_bounded_document({"A" * 10_000: "safe"}, "document")
 
 
 @pytest.mark.parametrize("invalid_value", [None, [], "", 0, False])

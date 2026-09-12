@@ -9,6 +9,7 @@ from maigret.web.investigation_input import (
     search_usernames,
 )
 from maigret.web.username_aliases import rank_username_aliases
+from maigret.web.profile_search_planner import plan_profile_search_queries
 
 
 def test_full_name_stays_intact_and_generates_bounded_account_candidates():
@@ -58,7 +59,7 @@ def test_identifiers_are_typed_and_sensitive_context_is_not_scanned():
 
     assert search_usernames(plan) == ["jatipratomo"]
     assert plan["identifiers"] == [
-        {"type": "social_handle", "value": "jatipratomo"},
+        {"type": "username", "value": "jatipratomo"},
         {"type": "email", "value": "jati@example.com"},
         {"type": "phone", "value": "+6281234567890"},
         {"type": "full_name", "value": "Jati Pratomo"},
@@ -92,6 +93,50 @@ def test_profile_url_extracts_handle_without_fetching():
 
     assert search_usernames(plan) == ["jatipratomo"]
     assert plan["identifiers"][0]["value"] == ("https://www.instagram.com/jatipratomo/")
+
+
+def test_username_handle_and_profile_url_are_one_canonical_account_target():
+    url = "https://www.instagram.com/djhat_prtm/"
+    plan = build_investigation_plan(
+        {
+            "identifier_type": ["username", "username", "username"],
+            "identifier_value": ["djhat_prtm", "@djhat_prtm", url],
+            "processing_mode": "independent",
+            "allow_ai_context": "on",
+            "enable_user_scanner_username": "on",
+            "user_scanner_platform": ["instagram", "tiktok"],
+        }
+    )
+
+    assert search_usernames(plan) == ["djhat_prtm"]
+    assert plan["identifiers"] == [
+        {"type": "username", "value": "djhat_prtm"},
+        {"type": "profile_url", "value": url},
+    ]
+    assert plan["profile_url_usernames"] == {url: ["djhat_prtm"]}
+    assert plan["user_scanner_username_platforms"] == ["instagram", "tiktok"]
+    assert plan["subject_groups"] == [
+        {
+            "label": "djhat_prtm",
+            "usernames": ["djhat_prtm"],
+            "identifiers": plan["identifiers"],
+        }
+    ]
+    assert public_ai_context(plan)["identifiers"] == [
+        {"type": "username", "value": "djhat_prtm"}
+    ]
+    assert public_ai_context(plan)["supplied_profile_urls"] == [
+        {"url": url, "usernames": ["djhat_prtm"]}
+    ]
+    assert [
+        (query.platform, query.query_text)
+        for query in plan_profile_search_queries(
+            plan, platforms=["instagram", "tiktok"]
+        )
+    ] == [
+        ("instagram", 'site:instagram.com "djhat_prtm"'),
+        ("tiktok", 'site:tiktok.com "djhat_prtm"'),
+    ]
 
 
 def test_profile_url_rejects_embedded_credentials():

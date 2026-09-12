@@ -53,6 +53,7 @@
 </section>
 
 {% set latest_spec = case.jobs[0].options.investigation_spec if case.jobs and case.jobs[0].options and case.jobs[0].options.investigation_spec else none %}
+{% set identifier_scope = case.identifier_scope if case.identifier_scope else {'identifiers': [], 'profile_urls': []} %}
 {% set affiliation_job = case.jobs[0] if case.jobs and case.jobs[0].kind == 'affiliation' else none %}
 {% if affiliation_job %}
 {% set combined_affiliation_status = affiliation_job.affiliation_status | default(affiliation_job.discovery_status, true) | default(affiliation_job.status, true) %}
@@ -415,10 +416,19 @@
         <div>
             <span class="form-label">Known identifiers</span>
             <div class="scope-chip-list">
-                {% for identifier in latest_spec.identifiers %}
+                {% for identifier in identifier_scope.identifiers %}
                 <span class="scope-chip"><small>{{ identifier.type | replace('_', ' ') }}</small>{{ identifier.value }}</span>
                 {% endfor %}
             </div>
+            {% if identifier_scope.profile_urls %}
+            <span class="form-label mt-3">Source links for these usernames</span>
+            <div class="scope-chip-list">
+                {% for profile in identifier_scope.profile_urls %}
+                <span class="scope-chip"><small>{{ '@' ~ (profile.usernames | join(', @')) if profile.usernames else 'unresolved username' }}</small><a href="{{ profile.url }}" target="_blank" rel="noopener noreferrer">{{ profile.url }}</a></span>
+                {% endfor %}
+            </div>
+            <p class="form-text mb-0">Each supplied link supports a username target; it is retained as unverified source context rather than treated as another person.</p>
+            {% endif %}
         </div>
         <div>
             <span class="form-label">Case source coverage</span>

@@ -13,6 +13,15 @@ AUTH_FILE="${REPO_ROOT}/runtime/secrets/auth.json"
 DEFAULT_DOMAIN="openledger.nexorus.io"
 OPENLEDGER_APP_UID=10001
 OPENLEDGER_APP_GID=10001
+# Existing installations created from deploy/compose.yaml use Compose's
+# directory-derived project name. Pin it explicitly so future commands address
+# the same database volume instead of silently creating a second stack.
+OPENLEDGER_COMPOSE_PROJECT=deploy
+
+compose() {
+    docker compose --project-name "${OPENLEDGER_COMPOSE_PROJECT}" \
+        --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" "$@"
+}
 
 ensure_database_password() {
     local password_file="${REPO_ROOT}/runtime/secrets/postgres_password"
@@ -129,8 +138,6 @@ umask 077
     printf "SEARXNG_SECRET='%s'\n" "${SEARXNG_SECRET}"
     printf "OPENAI_MODEL='%s'\n" "${OPENAI_MODEL}"
     printf "OPENAI_API_BASE_URL='https://api.openai.com/v1'\n"
-    printf "OPENLEDGER_GOVERNED_PIVOTS_ENABLED='false'\n"
-    printf "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED='false'\n"
     printf "OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED='false'\n"
     printf "OPENLEDGER_PROFILE_SEARCH_PROVIDER='disabled'\n"
     printf "OPENLEDGER_PROFILE_SEARCH_TIMEOUT_SECONDS='10'\n"
@@ -140,27 +147,27 @@ chmod 0600 "${ENV_FILE}"
 unset FLASK_SECRET_KEY SEARXNG_SECRET
 
 echo "Validating the Compose configuration..."
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" config --quiet
+compose config --quiet
 
 echo "Building and starting OpenLedger. The first build can take several minutes..."
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" up -d --build
+compose up -d --build
 
 echo "Waiting for the application health check..."
 READY=false
 for _ in $(seq 1 60); do
-    if docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" exec -T app python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=3)" >/dev/null 2>&1; then
+    if compose exec -T app python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/healthz', timeout=3)" >/dev/null 2>&1; then
         READY=true
         break
     fi
     sleep 2
 done
 
-docker compose --env-file "${ENV_FILE}" -f "${COMPOSE_FILE}" ps
+compose ps
 
 if [[ "${READY}" != "true" ]]; then
     echo
     echo "OpenLedger did not become healthy within two minutes."
-    echo "Inspect logs with: cd ${DEPLOY_DIR} && docker compose logs --tail=200"
+    echo "Inspect logs with: cd ${DEPLOY_DIR} && docker compose --project-name ${OPENLEDGER_COMPOSE_PROJECT} logs --tail=200"
     exit 1
 fi
 

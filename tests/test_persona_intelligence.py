@@ -1,5 +1,11 @@
+import json
+
+import pytest
+
 from maigret.web.persona_intelligence import (
     build_case_chat_url_claims,
+    CASE_CHAT_CITATION_COPY_BYTES,
+    describe_case_chat_urls,
     extract_asserted_persona_urls,
     extract_ai_persona_claims,
     extract_case_chat_persona_claims,
@@ -9,6 +15,188 @@ from maigret.web.persona_intelligence import (
     field_display_label,
     group_claims,
 )
+
+
+def test_linkedin_regional_citation_retains_exact_urls_without_identity_promotion():
+    supplied = "https://www.linkedin.com/in/alice-example/"
+    cited = "https://id.linkedin.com/in/alice-example?utm_source=search"
+    records = describe_case_chat_urls(
+        [supplied], [{"url": cited}, {"url": cited}], research_enabled=True
+    )
+    assert records == [
+        {
+            "supplied_url": supplied,
+            "citation_urls": [cited],
+            "citation_count": 1,
+            "citation_status": "profile_url_cited",
+            "direct_access": "not_verified",
+            "identity_status": "unverified",
+        }
+    ]
+    claim = build_case_chat_url_claims(
+        [supplied],
+        target_persona="different_username",
+        user_message_id="user-1",
+        assistant_message_id="assistant-1",
+        provided_by="analyst",
+    )[0]
+    assert claim["value"] == {
+        "platform": "linkedin.com",
+        "url": supplied,
+        "username": "alice-example",
+    }
+    assert claim["evidence"][0]["details"]["independently_corroborated"] is False
+    assert claim["confidence"] == 50
+
+
+@pytest.mark.parametrize(
+    "path,expected_username",
+    [
+        ("/in/alice%2Dexample/", "alice-example"),
+        ("/in/%61lice_example", "alice_example"),
+        ("/in/alice-example/details/experience/", ""),
+        ("/company/alice-example", ""),
+        ("/in/alice%2Fexample", ""),
+        ("/in/alice%252Dexample", ""),
+        ("/in/%2e%2e/", ""),
+        ("/in/alice-example/../bob", ""),
+        ("/%69n/alice-example", ""),
+    ],
+)
+def test_all_linkedin_proposal_paths_derive_username_or_keep_it_unknown(
+    path, expected_username
+):
+    url = "https://www.linkedin.com" + path
+    sources = [{"url": url, "title": "Public profile"}]
+    raw = {
+        "username": "different_username",
+        "field_name": "social_account",
+        "value": url,
+        "confidence": 70,
+        "source_url": url,
+        "reason": "An explicit supplied URL.",
+        "evidence_basis": "user_statement",
+    }
+    claims = build_case_chat_url_claims(
+        [url],
+        target_persona="different_username",
+        user_message_id="u",
+        assistant_message_id="a",
+        provided_by="analyst",
+    )
+    claims += extract_ai_persona_claims(
+        [raw],
+        sources=sources,
+        usernames=["different_username"],
+        model="fixture",
+    )
+    claims += extract_case_chat_persona_claims(
+        [raw],
+        sources=sources,
+        target_persona="different_username",
+        model="fixture",
+        user_message=f"Add this {url}",
+        user_message_id="u",
+        assistant_message_id="a",
+        provided_by="analyst",
+    )
+    assert len(claims) == 3
+    assert all(
+        claim["value"]
+        == {
+            "url": url,
+            "platform": "linkedin.com",
+            "username": expected_username,
+        }
+        for claim in claims
+    )
+
+
+def test_linkedin_slug_escape_comparison_keeps_both_original_urls():
+    supplied = "https://www.linkedin.com/in/alice%2Dexample/"
+    cited = "https://id.linkedin.com/in/alice-example?ref=actual-citation"
+    record = describe_case_chat_urls(
+        [supplied], [{"url": cited}], research_enabled=True
+    )[0]
+    assert record["supplied_url"] == supplied
+    assert record["citation_urls"] == [cited]
+    assert record["citation_status"] == "profile_url_cited"
+
+
+def test_chat_citation_copy_budget_counts_serialized_bytes_without_losing_status():
+    supplied = [
+        f"https://{host}/in/alice/"
+        for host in (
+            "linkedin.com",
+            "www.linkedin.com",
+            "id.linkedin.com",
+            "uk.linkedin.com",
+            "ca.linkedin.com",
+        )
+    ]
+    sources = [
+        {"url": f"https://id.linkedin.com/in/alice?ref={index}" + "😀" * 1700}
+        for index in range(10)
+    ]
+    records = describe_case_chat_urls(supplied, sources, research_enabled=True)
+    assert [record["supplied_url"] for record in records] == supplied
+    assert all(record["citation_count"] == 10 for record in records)
+    assert all(record["citation_status"] == "profile_url_cited" for record in records)
+    assert any(not record["citation_urls"] for record in records)
+    copies_bytes = sum(
+        len(json.dumps(record["citation_urls"], ensure_ascii=False).encode("utf-8"))
+        for record in records
+    )
+    assert copies_bytes <= CASE_CHAT_CITATION_COPY_BYTES
+    actual_urls = {source["url"] for source in sources}
+    assert all(
+        url in actual_urls for record in records for url in record["citation_urls"]
+    )
+
+
+@pytest.mark.parametrize(
+    "cited",
+    [
+        "https://id.linkedin.com/in/bob-example",
+        "https://id.linkedin.com/company/alice-example",
+        "https://id.linkedin.com.evil.example/in/alice-example",
+        "https://linkedin.com@evil.example/in/alice-example",
+        "https://id.linkedin.com/in/alice-example/details",
+        "https://id.linkedin.com:8443/in/alice-example",
+        "https://id.linkedin.com:bad/in/alice-example",
+        "https://id.linkedin.com/company/../in/alice-example",
+        "https://id.linkedin.com/%69n/alice-example",
+        "https://id.linkedin.com/in/alice-example%2Fdetails",
+        "https://id.linkedin.com/in/alice-example/%2e%2e/bob-example",
+        "https://news.example/alice-example",
+    ],
+)
+def test_linkedin_url_comparison_does_not_match_different_or_lookalike_profiles(cited):
+    record = describe_case_chat_urls(
+        ["https://www.linkedin.com/in/alice-example/"],
+        [{"url": cited}],
+        research_enabled=True,
+    )[0]
+    assert record["citation_status"] == "not_cited"
+    assert record["citation_urls"] == []
+    assert record["direct_access"] == "not_verified"
+
+
+def test_supplied_url_is_not_corroborated_by_fallback_or_without_research():
+    supplied = "https://www.linkedin.com/in/alice-example/"
+    record = describe_case_chat_urls(
+        [supplied],
+        [],
+        research_enabled=True,
+    )[0]
+    assert record["citation_status"] == "not_cited"
+    record = describe_case_chat_urls(
+        [supplied],
+        [{"url": supplied}],
+        research_enabled=False,
+    )[0]
+    assert record["citation_status"] == "research_not_requested"
+    assert record["citation_urls"] == []
 
 
 def test_case_chat_extracts_exact_public_urls_without_private_targets():
@@ -24,9 +212,12 @@ def test_case_chat_requires_explicit_directive_before_attaching_persona_url():
     url = "https://news.example/story"
 
     assert extract_asserted_persona_urls(f"Add this {url}") == [url]
-    assert extract_asserted_persona_urls(
-        f"Does this article {url} support Alice's employment?"
-    ) == []
+    assert (
+        extract_asserted_persona_urls(
+            f"Does this article {url} support Alice's employment?"
+        )
+        == []
+    )
 
 
 def test_case_chat_builds_unverified_url_claim_with_exact_provenance():
@@ -429,9 +620,12 @@ def test_cited_public_contacts_are_exact_validated_and_pending_only():
     )
 
     assert {claim["field_name"] for claim in claims} == {"email", "phone"}
-    assert next(
-        claim for claim in claims if claim["field_name"] == "email"
-    )["display_value"] == "alice@university.example"
+    assert (
+        next(claim for claim in claims if claim["field_name"] == "email")[
+            "display_value"
+        ]
+        == "alice@university.example"
+    )
     assert all(
         claim["evidence"][0]["details"]["human_review_required"] is True
         for claim in claims

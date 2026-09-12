@@ -40,11 +40,8 @@ _SECRET_KEYS = {
     "secret",
     "session_token",
 }
-_SECRET_KEY_TOKEN_SEQUENCES = tuple(
-    tuple(secret_key.split("_")) for secret_key in _SECRET_KEYS
-)
 _COMPACT_SECRET_KEYS = {
-    "".join(tokens) for tokens in _SECRET_KEY_TOKEN_SEQUENCES
+    secret_key.replace("_", "") for secret_key in _SECRET_KEYS
 }
 
 
@@ -113,18 +110,9 @@ def parse_external_timestamp(value: Any, field_name: str) -> datetime:
 
 
 def _secret_key(key: str) -> bool:
-    separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key)
-    separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
-    normalized = re.sub(r"[^a-z0-9]+", "_", separated.casefold()).strip("_")
-    tokens = tuple(token for token in normalized.split("_") if token)
-    for secret_tokens in _SECRET_KEY_TOKEN_SEQUENCES:
-        width = len(secret_tokens)
-        if any(
-            tokens[index : index + width] == secret_tokens
-            for index in range(len(tokens) - width + 1)
-        ):
-            return True
-    compact = "".join(tokens)
+    # Separator and case boundaries are irrelevant to the compact substring
+    # check. Removing them directly avoids backtracking over long acronyms.
+    compact = re.sub(r"[^a-z0-9]", "", key.casefold())
     return any(secret in compact for secret in _COMPACT_SECRET_KEYS)
 
 

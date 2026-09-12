@@ -6,7 +6,6 @@ import hashlib
 import io
 import json
 import logging
-import math
 import os
 import re
 import threading
@@ -339,7 +338,6 @@ def build_persona_export_snapshot(
                     "latitude": claim.get("latitude"),
                     "longitude": claim.get("longitude"),
                     "approval_note": _approved_review_note(claim),
-                    "coordinate_selection": claim.get('coordinate_selection'),
                     "evidence": evidence_items,
                 }
                 field_claims.append(item)
@@ -381,33 +379,7 @@ def build_persona_export_snapshot(
                 claim_source_refs.append(reference)
         claim["source_refs"] = claim_source_refs
 
-    approved_sites = []
-    for site in persona.get('affiliation_sites') or []:
-        if site.get('review_status') != 'approved' or site.get('origin_review_status', 'approved') != 'approved':
-            continue
-        evidence = site.get('evidence') or {}
-        resolution = site.get('resolution') or {}
-        candidate = resolution.get('candidate') or {}
-        decision = next((record for record in site.get('history') or []
-                         if record.get('snapshot', {}).get('action') != 'lookup'), {})
-        reference = f"S{len(source_catalog) + 1:02d}"
-        source_catalog.append({'reference': reference, 'source_url': evidence.get('source_url') or '',
-            'source_name': evidence.get('organization') or 'Affiliation published address',
-            'evidence_type': 'Public organizational address', 'observed_at': evidence.get('retrieved_at') or ''})
-        value = evidence.get('address') or ''
-        if resolution.get('status') == 'resolved':
-            value += f" — {candidate.get('latitude')}, {candidate.get('longitude')} ({candidate.get('precision')}; {candidate.get('method')})"
-        else:
-            value += ' — unmapped'
-        approved_sites.append({'id': site['id'], 'field_name': 'affiliation_site', 'value': value,
-            'address_type': resolution.get('address_type') or evidence.get('address_type') or 'unknown',
-            'link_url': evidence.get('source_url'), 'source_refs': [reference], 'confidence': 0,
-            'reviewed_by': decision.get('reviewer'), 'reviewed_at': decision.get('created_at'),
-            'approval_note': decision.get('reason'), 'resolution': resolution,
-            'source_date': evidence.get('source_date'), 'is_person_location': False})
-        evidence_count += 1
     canonical_record = {
-        'affiliation_sites': approved_sites,
         "persona_id": str(persona.get("id") or ""),
         "case_id": str(persona.get("case_id") or ""),
         "case_title": _clean_text(persona.get("case_title")),
@@ -630,8 +602,6 @@ def build_investigation_report_view(
             else None
         ),
         "locations": locations,
-        "affiliation_sites": [_report_item(site, label='Affiliation site · ' + site['address_type'])
-                               for site in snapshot.get('affiliation_sites') or []],
         "addresses": address_items,
         "affiliations": _affiliation_items(claims),
         "contacts": contacts,
@@ -1433,8 +1403,6 @@ def _location_map_card(
     location: Mapping[str, Any],
     map_bytes: Optional[bytes],
     styles: Mapping[str, ParagraphStyle],
-    *,
-    location_count: int,
 ) -> Table:
     if map_bytes:
         visual: Any = ReportImage(
@@ -1465,15 +1433,10 @@ def _location_map_card(
     coordinates = ""
     if location.get("latitude") is not None and location.get("longitude") is not None:
         coordinates = (
-            f" | Approved coordinates: {location['latitude']}, {location['longitude']}"
+            f" | Approved center: {location['latitude']}, {location['longitude']}"
         )
     caption = _paragraph(
-        _location_map_caption(
-            location,
-            location_count=location_count,
-            map_available=bool(map_bytes),
-            coordinates=coordinates,
-        ),
+        f"{location.get('value') or 'Approved location'}{coordinates} | Sources: {_source_refs(location)}",
         styles["small"],
     )
     confidence = location.get("confidence")
@@ -1501,43 +1464,6 @@ def _location_map_card(
             ]
         ),
     )
-
-
-def _location_map_caption(
-    location: Mapping[str, Any],
-    *,
-    location_count: int,
-    map_available: bool,
-    coordinates: str,
-) -> str:
-    map_label = (
-        f"Map excerpt (1 of {location_count} approved locations)"
-        if map_available
-        else "Map unavailable"
-    )
-    return (
-        f"{map_label}: {location.get('value') or 'Approved location'}{coordinates} | "
-        f"Sources: {_source_refs(location)}"
-    )
-
-
-def _approved_location_coordinates(
-    location: Mapping[str, Any],
-) -> Optional[tuple[float, float]]:
-    """Return finite, range-valid coordinates from an approved location item."""
-    try:
-        latitude = float(location["latitude"])
-        longitude = float(location["longitude"])
-    except (KeyError, TypeError, ValueError):
-        return None
-    if not (
-        math.isfinite(latitude)
-        and math.isfinite(longitude)
-        and -90 <= latitude <= 90
-        and -180 <= longitude <= 180
-    ):
-        return None
-    return latitude, longitude
 
 
 def _audit_metadata(snapshot: Mapping[str, Any], styles: Mapping[str, Any]) -> Table:
@@ -1701,15 +1627,17 @@ def generate_persona_pdf(
         (
             location
             for location in report["locations"]
-            if _approved_location_coordinates(location) is not None
+            if location.get("latitude") is not None
+            and location.get("longitude") is not None
         ),
         None,
     )
     if mapped_location:
         try:
-            coordinates = _approved_location_coordinates(mapped_location)
-            if coordinates is not None:
-                map_bytes = render_location_map(*coordinates)
+            map_bytes = render_location_map(
+                float(mapped_location["latitude"]),
+                float(mapped_location["longitude"]),
+            )
         except Exception:
             map_bytes = None
 
@@ -1798,56 +1726,37 @@ def generate_persona_pdf(
             _section_header("Location", styles),
             Spacer(1, 1.5 * mm),
             _paragraph(
-                "All analyst-approved locations are listed below. A map, when available, is an explicitly labelled excerpt for one approved location and does not replace the complete list.",
+                "City and map information uses only analyst-approved location records and approved approximate coordinates.",
                 styles["section_intro"],
             ),
         ]
     )
     if mapped_location:
-        story.append(
-            _location_map_card(
-                mapped_location,
-                map_bytes,
-                styles,
-                location_count=len(report["locations"]),
-            )
-        )
-    elif report["locations"]:
-        story.append(
-            _paragraph(
-                "No map excerpt is available because none of the approved locations has usable approved coordinates. No coordinates were inferred for this report.",
-                styles["small"],
-            )
-        )
+        story.append(_location_map_card(mapped_location, map_bytes, styles))
+        remaining_locations = [
+            location
+            for location in report["locations"]
+            if location is not mapped_location
+        ]
     else:
-        story.append(
-            _location_map_card(
-                {
-                    "value": "No approved location",
-                    "confidence": 0,
-                    "source_refs": [],
-                },
-                None,
-                styles,
-                location_count=0,
+        remaining_locations = list(report["locations"])
+        if not remaining_locations:
+            story.append(
+                _location_map_card(
+                    {
+                        "value": "No approved city or map center",
+                        "confidence": 0,
+                        "source_refs": [],
+                    },
+                    None,
+                    styles,
+                )
             )
-        )
-    if report["locations"]:
-        story.extend(
-            [
-                Spacer(1, 2 * mm),
-                _paragraph("Complete approved location list", styles["section_intro"]),
-            ]
-        )
-    for item in [*report["locations"], *report["addresses"]]:
+    for item in [*remaining_locations, *report["addresses"]]:
         story.append(Spacer(1, 1.5 * mm))
         story.extend(_report_item_flowables(item, styles))
     story.append(Spacer(1, 4 * mm))
 
-    if report['affiliation_sites']:
-        _append_report_section(story, title='Reviewed affiliation sites',
-            introduction='Published organizational sites are separate from personal location or branch assignment. All approved sites, including unmapped records, are listed with their source and review.',
-            items=report['affiliation_sites'], empty_message='', styles=styles)
     _append_report_section(
         story,
         title="Affiliations and positions",

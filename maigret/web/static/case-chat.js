@@ -54,7 +54,13 @@
 
         const content = document.createElement('div');
         content.className = 'case-chat-message-content';
-        content.textContent = message.content || '';
+        if (message.role === 'assistant' && typeof message.content_html === 'string') {
+            // Only the server's escaped chat renderer supplies this field.
+            content.classList.add('formatted');
+            content.innerHTML = message.content_html;
+        } else {
+            content.textContent = message.content || '';
+        }
         article.appendChild(content);
 
         if (Array.isArray(message.sources) && message.sources.length) {
@@ -78,6 +84,55 @@
         }
 
         const proposalSummary = message.proposals || {};
+        if (Array.isArray(proposalSummary.url_evidence) && proposalSummary.url_evidence.length) {
+            const evidence = document.createElement('div');
+            evidence.className = 'case-chat-url-evidence';
+            const label = document.createElement('strong');
+            label.textContent = 'Supplied URLs';
+            const list = document.createElement('ul');
+            proposalSummary.url_evidence.forEach(function (record) {
+                const item = document.createElement('li');
+                const link = document.createElement('a');
+                link.href = record.supplied_url;
+                link.textContent = record.supplied_url;
+                link.target = '_blank';
+                link.rel = 'noopener noreferrer';
+                const status = document.createElement('span');
+                const citations = Array.isArray(record.citation_urls) ? record.citation_urls : [];
+                const citationCount = Number.isInteger(record.citation_count)
+                    ? record.citation_count : citations.length;
+                const wasCited = ['profile_url_cited', 'exact_url_cited'].includes(record.citation_status)
+                    || citations.length > 0;
+                status.textContent = wasCited
+                    ? 'Matching URL cited in public-web research. Direct access and identity remain unverified.'
+                    : record.citation_status === 'research_not_requested'
+                        ? 'Retained as supplied context. Public-web research was not requested.'
+                        : 'Retained as supplied context. No matching URL citation; this does not establish that the profile is absent or blocked.';
+                item.append(link, status);
+                citations.forEach(function (url) {
+                    const cited = document.createElement('a');
+                    cited.href = url;
+                    cited.textContent = 'Cited URL: ' + url;
+                    cited.target = '_blank';
+                    cited.rel = 'noopener noreferrer';
+                    item.appendChild(cited);
+                });
+                if (wasCited && citationCount > citations.length) {
+                    const omitted = document.createElement('span');
+                    omitted.textContent = 'Some matching citation URLs are shown only in Sources.';
+                    item.appendChild(omitted);
+                }
+                list.appendChild(item);
+            });
+            evidence.append(label, list);
+            article.appendChild(evidence);
+        }
+        if (proposalSummary.extraction_status === 'unavailable' && proposalSummary.status === 'pending_review') {
+            const note = document.createElement('div');
+            note.className = 'case-chat-proposal-note warning';
+            note.textContent = 'Supplied URLs were retained for review. Other AI fact proposals could not be extracted.';
+            article.appendChild(note);
+        }
         if (proposalSummary.research_status === 'no_independent_citations') {
             const note = document.createElement('div');
             note.className = 'case-chat-proposal-note warning';

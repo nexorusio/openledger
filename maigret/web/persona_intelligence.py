@@ -383,6 +383,106 @@ def _public_url(value: Any) -> str:
     return candidate
 
 
+def extract_supplied_profile_claims(
+    investigation_spec: Any, *, usernames: Iterable[str]
+) -> List[Dict[str, Any]]:
+    """Retain exact supplied URLs as context for their bound subject only.
+
+    Collection outcomes cannot establish or invalidate the analyst's input.
+    The store supplies usernames from its durable Persona binding; independent
+    subjects never inherit another subject's URL merely by sharing a case.
+    """
+    if not isinstance(investigation_spec, dict):
+        return []
+    bound_names = {str(name).strip().lstrip("@").casefold() for name in usernames}
+    same_subject = investigation_spec.get("processing_mode") == "same_subject"
+    targets = [
+        target
+        for target in list(investigation_spec.get("search_targets") or [])[:100]
+        if isinstance(target, dict) and target.get("source_type") == "profile_url"
+    ]
+    profile_map = investigation_spec.get("profile_url_usernames")
+    profile_map = profile_map if isinstance(profile_map, dict) else {}
+    candidates = []
+    seen = set()
+    for identifier in list(investigation_spec.get("identifiers") or [])[:24]:
+        if not isinstance(identifier, dict) or identifier.get("type") != "profile_url":
+            continue
+        url = _public_url(identifier.get("value"))
+        if not url or url in seen:
+            continue
+        host, platform, reference = _supported_social_profile_reference(url)
+        linked_names = {
+            str(target.get("value") or "").strip().lstrip("@").casefold()
+            for target in targets
+            if target.get("source_value") == url
+        }
+        linked_names.update(
+            str(username).strip().lstrip("@").casefold()
+            for username in list(profile_map.get(url) or [])[:24]
+            if str(username).strip()
+        )
+        if reference is not None:
+            linked_names.add(reference.handle.casefold())
+        if not same_subject and not bound_names.intersection(linked_names):
+            continue
+        seen.add(url)
+        # Invalid social routes (login, challenge, or generic content pages)
+        # remain supplied links, never an assertion of a social account.
+        linkedin_path = _linkedin_profile_path(url)
+        is_profile = reference is not None or bool(linkedin_path)
+        field_name = "social_account" if is_profile else "website"
+        value = (
+            {
+                "platform": platform or host,
+                "url": url,
+                "username": (
+                    reference.handle
+                    if reference is not None
+                    else linkedin_path.removeprefix("/in/")
+                ),
+            }
+            if is_profile
+            else url
+        )
+        evidence = {
+            "evidence_type": "operator_provided_identifier",
+            "source_name": "Analyst-supplied profile URL",
+            "source_url": url,
+            "details": {
+                "identifier_type": "profile_url",
+                "proposal_reason": (
+                    "The analyst supplied this URL. Account existence, content "
+                    "and ownership have not been independently verified."
+                ),
+                "human_review_required": True,
+                "operator_provided": True,
+                "analyst_supplied_url": True,
+                "unverified_user_statement": True,
+                "independently_corroborated": False,
+                "account_status": "unverified",
+                "identity_status": "unverified",
+            },
+        }
+        candidates.append(
+            {
+                "field_name": field_name,
+                "value": value,
+                "display_value": _display_value(value),
+                "normalized_value": _normalized_value(value),
+                "confidence": 50,
+                "fingerprint": claim_fingerprint(field_name, value),
+                "source_engine": "investigation_input",
+                "latitude": None,
+                "longitude": None,
+                "evidence": [
+                    dict(evidence, fingerprint=evidence_fingerprint(evidence))
+                ],
+            }
+        )
+    return candidates
+
+
 _EXPLICIT_PUBLIC_URL = re.compile(r"https?://[^\s<>\"']+", re.IGNORECASE)
 _PERSONA_URL_DIRECTIVE = re.compile(
     r"^\s*(?:please\s+)?(?:add|attach|save|record|associate|link)\b",
@@ -421,10 +521,9 @@ def extract_explicit_public_urls(value: Any, *, limit: int = 10) -> List[str]:
     for match in _EXPLICIT_PUBLIC_URL.finditer(text):
         candidate = match.group(0).rstrip(".,;!?")
         for closing, opening in ((")", "("), ("]", "["), ("}", "{")):
-            while (
-                candidate.endswith(closing)
-                and candidate.count(closing) > candidate.count(opening)
-            ):
+            while candidate.endswith(closing) and candidate.count(
+                closing
+            ) > candidate.count(opening):
                 candidate = candidate[:-1]
         public_url = _public_url(candidate)
         if not public_url or public_url in seen:
@@ -442,6 +541,143 @@ def extract_asserted_persona_urls(value: Any) -> List[str]:
     if not _PERSONA_URL_DIRECTIVE.search(text):
         return []
     return extract_explicit_public_urls(text)
+
+
+def _linkedin_profile_slug(value: Any) -> str:
+    """Read a slug only from a supported, explicit LinkedIn profile path."""
+    public_url = _public_url(value)
+    if not public_url:
+        return ""
+    parsed = urlparse(public_url)
+    hostname = (parsed.hostname or "").casefold().rstrip(".")
+    if not re.fullmatch(r"(?:(?:www|[a-z]{2})\.)?linkedin\.com", hostname):
+        return ""
+    try:
+        if parsed.port not in {None, 80 if parsed.scheme == "http" else 443}:
+            return ""
+    except ValueError:
+        return ""
+    match = re.fullmatch(
+        r"/in/((?:[A-Za-z0-9_-]|%[0-9A-Fa-f]{2}){1,200})/?", parsed.path
+    )
+    if not match:
+        return ""
+    # Decode unreserved escapes in the slug only. Encoded separators, traversal,
+    # alternate route prefixes and nested profile paths remain unsupported.
+    slug = re.sub(
+        r"%([0-9A-Fa-f]{2})",
+        lambda item: (
+            chr(int(item.group(1), 16))
+            if re.fullmatch(r"[A-Za-z0-9._~-]", chr(int(item.group(1), 16)))
+            else item.group(0)
+        ),
+        match.group(1),
+    )
+    return slug if re.fullmatch(r"[A-Za-z0-9_-]{1,200}", slug) else ""
+
+
+def _linkedin_profile_path(value: Any) -> str:
+    """Compare supported profile paths without asserting ownership or access."""
+    slug = _linkedin_profile_slug(value)
+    return f"/in/{slug}" if slug else ""
+
+
+def supported_profile_identity_key(value: Any) -> Optional[tuple[str, str]]:
+    """Return a platform-scoped account key for a safely parsed profile URL."""
+    try:
+        _, platform, reference = _supported_social_profile_reference(
+            str(value or "")
+        )
+    except ValueError:
+        return None
+    if platform and reference is not None:
+        return platform, str(reference.handle).casefold()
+    linkedin_path = _linkedin_profile_path(value)
+    if linkedin_path:
+        return "linkedin", linkedin_path.casefold()
+    return None
+
+
+def _linkedin_account_username(value: Any) -> Optional[str]:
+    """Return None for other hosts, or a URL-derived/unknown LinkedIn username."""
+    public_url = _public_url(value)
+    if not public_url:
+        return None
+    hostname = (urlparse(public_url).hostname or "").casefold().rstrip(".")
+    if hostname != "linkedin.com" and not hostname.endswith(".linkedin.com"):
+        return None
+    return _linkedin_profile_slug(public_url)
+
+
+# Citation copies share one byte budget across supplied URLs. Complete actual
+# citations remain in the chat message's Sources catalogue; counts/status below
+# describe that catalogue even when no duplicate URL fits in this metadata.
+CASE_CHAT_CITATION_COPY_BYTES = 8_000
+
+
+def describe_case_chat_urls(
+    urls: Iterable[str], sources: Iterable[Dict[str, Any]], *, research_enabled: bool
+) -> List[Dict[str, Any]]:
+    """Retain supplied URLs and exact citation provenance; never infer retrieval."""
+    citations = list(
+        dict.fromkeys(
+            safe_url
+            for source in list(sources or [])[:100]
+            if isinstance(source, dict)
+            for safe_url in [_public_url(source.get("url"))]
+            if safe_url
+        )
+    )
+    records = []
+    matches_by_record = []
+    for supplied_url in list(dict.fromkeys(urls))[:10]:
+        if not _public_url(supplied_url):
+            continue
+        profile_path = _linkedin_profile_path(supplied_url)
+        matching = [
+            cited
+            for cited in citations
+            if research_enabled
+            and (
+                cited == supplied_url
+                or (profile_path and profile_path == _linkedin_profile_path(cited))
+            )
+        ]
+        records.append(
+            {
+                "supplied_url": supplied_url,
+                "citation_urls": [],
+                "citation_count": len(matching),
+                "citation_status": (
+                    "profile_url_cited"
+                    if matching and profile_path
+                    else (
+                        "exact_url_cited"
+                        if matching
+                        else (
+                            "not_cited"
+                            if research_enabled
+                            else "research_not_requested"
+                        )
+                    )
+                ),
+                "direct_access": "not_verified",
+                "identity_status": "unverified",
+            }
+        )
+        matches_by_record.append(matching)
+    citation_bytes = 2 * len(records)  # Empty JSON arrays.
+    for position in range(10):
+        for record, matching in zip(records, matches_by_record):
+            if position >= len(matching):
+                continue
+            cited = matching[position]
+            size = len(json.dumps(cited, ensure_ascii=False).encode("utf-8"))
+            size += 2 if record["citation_urls"] else 0
+            if citation_bytes + size <= CASE_CHAT_CITATION_COPY_BYTES:
+                record["citation_urls"].append(cited)
+                citation_bytes += size
+    return records
 
 
 def build_case_chat_url_claims(
@@ -482,6 +718,10 @@ def build_case_chat_url_claims(
                     else str(target_persona).strip()[:500]
                 ),
             }
+            linkedin_username = _linkedin_account_username(public_url)
+            if linkedin_username is not None:
+                stored_value["platform"] = "linkedin.com"
+                stored_value["username"] = linkedin_username
         fingerprint = claim_fingerprint(field_name, stored_value)
         evidence: Dict[str, Any] = {
             "evidence_type": "analyst_provided_context",
@@ -1000,6 +1240,10 @@ def extract_ai_persona_claims(
                 "url": value,
                 "username": account_username,
             }
+            linkedin_username = _linkedin_account_username(value)
+            if linkedin_username is not None:
+                stored_value["platform"] = "linkedin.com"
+                stored_value["username"] = linkedin_username
         fingerprint = claim_fingerprint(field_name, stored_value)
         deduplication_key = (username.casefold(), fingerprint, source_url)
         if deduplication_key in seen:
@@ -1179,6 +1423,10 @@ def extract_case_chat_persona_claims(
                 "url": value,
                 "username": target_persona[:500],
             }
+            linkedin_username = _linkedin_account_username(value)
+            if linkedin_username is not None:
+                stored_value["platform"] = "linkedin.com"
+                stored_value["username"] = linkedin_username
         fingerprint = claim_fingerprint(field_name, stored_value)
         is_url_field = field_name in {"social_account", "website", "photograph"}
         hostname = (urlparse(value).hostname or "").removeprefix("www.")

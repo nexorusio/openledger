@@ -167,6 +167,18 @@ def test_required_web_enrichment_rejects_uncited_model_only_prose():
         )
 
 
+def test_required_web_enrichment_rejects_oversized_citation_without_altering_it():
+    oversized = "https://example.test/" + "x" * 2100
+    payload = {"output": [
+        {"type": "web_search_call", "status": "completed"},
+        {"type": "message", "content": [{"type": "output_text", "text": "An answer.",
+            "annotations": [{"type": "url_citation", "url": oversized}]}]},
+    ]}
+    assert _parse_responses_analysis(payload)["sources"] == []
+    with pytest.raises(AIEnrichmentContractError, match="no cited public sources"):
+        _parse_responses_analysis(payload, require_web_search=True)
+
+
 def test_enriched_analysis_request_requires_web_search_when_enabled(monkeypatch):
     captured = {}
 
@@ -290,7 +302,27 @@ def test_case_chat_request_sends_bounded_case_memory_and_requires_cited_research
             api_key="test-key",
             case_context={"id": "case-1", "personas": []},
             conversation=[
-                {"role": "user", "author": "analyst", "content": "Earlier question"}
+                {"role": "user", "author": "analyst", "content": "Earlier question"},
+                {
+                    "role": "assistant",
+                    "content": "A regional URL was cited.",
+                    "sources": [
+                        {
+                            "url": "https://id.linkedin.com/in/alice-example?ref=search",
+                            "title": "Public profile",
+                        }
+                    ],
+                    "proposals": {
+                        "url_evidence": [
+                            {
+                                "supplied_url": "https://www.linkedin.com/in/alice-example/",
+                                "citation_status": "profile_url_cited",
+                                "direct_access": "not_verified",
+                                "identity_status": "unverified",
+                            }
+                        ]
+                    },
+                },
             ],
             user_message="Research this subject",
             model="gpt-5.6-terra",
@@ -304,6 +336,144 @@ def test_case_chat_request_sends_bounded_case_memory_and_requires_cited_research
     assert captured["payload"]["tool_choice"] == "required"
     assert "Earlier question" in captured["payload"]["input"]
     assert "Research this subject" in captured["payload"]["input"]
+    context = json.loads(captured["payload"]["input"])
+    prior = context["conversation_history"][-1]
+    assert (
+        prior["sources"][0]["url"]
+        == "https://id.linkedin.com/in/alice-example?ref=search"
+    )
+    assert prior["url_evidence"][0]["identity_status"] == "unverified"
+    assert prior["url_evidence"][0]["direct_access"] == "not_verified"
+    assert "failed\ndirect retrieval" in captured["payload"]["instructions"]
+    assert (
+        "regional LinkedIn URLs only when actually returned by search"
+        in captured["payload"]["instructions"]
+    )
+
+
+@pytest.mark.parametrize("repetitions", [1, 8])
+def test_case_chat_memory_retains_exact_provenance_before_shortening_text(
+    monkeypatch, repetitions
+):
+    captured = {}
+    supplied = [
+        f"https://{host}/in/alice-example?ref=" + "s" * 1800
+        for host in ("www.linkedin.com", "uk.linkedin.com", "ca.linkedin.com")
+    ]
+    cited = "https://id.linkedin.com/in/alice-example?ref=" + "c" * 1800
+    content = "The cited public excerpt has limited evidence. " * 100
+    prior = {
+        "role": "assistant",
+        "content": content,
+        "sources": [{"url": cited, "title": "Actual public citation"}],
+        "proposals": {
+            "url_evidence": [
+                {
+                    "supplied_url": url,
+                    "citation_urls": [cited],
+                    "citation_count": 1,
+                    "citation_status": "profile_url_cited",
+                    "direct_access": "not_verified",
+                    "identity_status": "unverified",
+                }
+                for url in supplied
+            ]
+        },
+    }
+
+    class FakeResponse:
+        status = 200
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "The earlier source remains unverified.",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    class FakeSession:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        def post(self, _url, *, json, headers):
+            captured.update(json)
+            return FakeResponse()
+
+    monkeypatch.setattr(ai.aiohttp, "ClientSession", FakeSession)
+    asyncio.run(
+        get_case_chat_response(
+            api_key="fixture",
+            case_context={},
+            conversation=[prior] * repetitions,
+            user_message="What source did you cite?",
+            web_search_enabled=False,
+        )
+    )
+    history = json.loads(captured["input"])["conversation_history"]
+    assert history
+    assert len(json.dumps(history, ensure_ascii=False)) <= 30_000
+    newest = history[-1]
+    assert len(json.dumps(newest, ensure_ascii=False)) <= 10_000
+    assert newest["content_truncated"] is True
+    assert content.startswith(newest["content"])
+    assert len(newest["content"]) < 4000
+    assert newest["sources"] == prior["sources"]
+    assert newest["source_count"] == 1
+    assert [record["supplied_url"] for record in newest["url_evidence"]] == supplied
+    assert all(
+        record["citation_status"] == "profile_url_cited"
+        for record in newest["url_evidence"]
+    )
+    assert all(record["citation_count"] == 1 for record in newest["url_evidence"])
+    assert all(
+        record["direct_access"] == "not_verified" for record in newest["url_evidence"]
+    )
+    assert all(
+        record["identity_status"] == "unverified" for record in newest["url_evidence"]
+    )
+    assert all(
+        url == cited
+        for record in newest["url_evidence"]
+        for url in record["citation_urls"]
+    )
+    # Reducing a request must not mutate the durable message passed by the caller.
+    assert all(
+        record["citation_urls"] == [cited]
+        for record in prior["proposals"]["url_evidence"]
+    )
+
+
+def test_chat_history_does_not_create_a_different_url_by_truncating_sources():
+    cited = "https://example.test/actual"
+    entry = ai._bounded_chat_history_entry(
+        {
+            "role": "assistant",
+            "content": "An earlier answer.",
+            "sources": [{"url": "https://example.test/" + "x" * 2000}, {"url": cited}],
+        },
+        maximum_chars=10_000,
+    )
+    assert entry["sources"] == [{"url": cited, "title": ""}]
 
 
 def test_combined_case_chat_distinguishes_snapshot_review_and_inference(monkeypatch):
@@ -399,9 +569,10 @@ def test_combined_case_chat_distinguishes_snapshot_review_and_inference(monkeypa
     assert bounded_context["latest_ai_assessment"]["executive_summary"] == (
         "A possible link."
     )
-    assert bounded_context["latest_ai_assessment"]["proposals"][0]["sources"][0][
-        "url"
-    ] == "https://example.test/path?evidence=1&view=full"
+    assert (
+        bounded_context["latest_ai_assessment"]["proposals"][0]["sources"][0]["url"]
+        == "https://example.test/path?evidence=1&view=full"
+    )
     normalized_instructions = " ".join(captured["payload"]["instructions"].split())
     assert "approved AI relationship is still an analyst-approved hypothesis" in (
         normalized_instructions

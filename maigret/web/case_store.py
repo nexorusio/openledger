@@ -9,16 +9,9 @@ import math
 import os
 import re
 import uuid
-from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Optional
 from urllib.parse import quote, urlsplit
-from maigret.web.collection_accounting import (
-    public_collection_accounting, validate_task_batch, interrupted_collection_accounting,
-)
-from maigret.web.profile_checkpoint import (
-    reject_private_checkpoint_fields, validate_profile_observation,
-)
 
 from sqlalchemy import (
     JSON,
@@ -60,15 +53,10 @@ from maigret.web.external_evidence import (
     validate_locator_authority,
 )
 from maigret.web.execution_budget import execution_budget_spec_from_options
-from maigret.web.governed_pivots import build_governed_pivot_plan
-from maigret.web.investigation_input import (
-    investigation_has_effective_collection_route,
-)
 from maigret.web.profile_discovery_policy import (
     PROFILE_DISCOVERY_JOB_KINDS,
     ProfileDiscoveryPolicyError,
     govern_profile_discovery_options,
-    profile_discovery_flag_enabled,
 )
 from maigret.web.profile_reliability import PROFILE_RELIABILITY_VERSION
 from maigret.web.profile_search_facebook import parse_facebook_profile_url
@@ -79,9 +67,6 @@ from maigret.web.profile_search_x import parse_x_profile_url
 
 metadata = MetaData()
 json_document = JSON().with_variant(JSONB(), "postgresql")
-from maigret.web.location_records import declare_tables, append_selection, coordinate_projection, list_sites
-
-affiliation_sites, location_selections = declare_tables(metadata, json_document)
 LEGACY_PROFILE_CLAIM_ENGINES = frozenset(
     {
         "github_public_profile",
@@ -93,13 +78,6 @@ LEGACY_PROFILE_CLAIM_ENGINES = frozenset(
 LEGACY_UNTRIAGED_SOURCE_PREFIX = "legacy_untriaged:"
 RELIABILITY_MIGRATION_REVIEWER = "openledger-reliability-migration"
 LEGACY_EVIDENCE_MARKER = "_openledger_reliability"
-GOVERNED_PROFILE_PIVOT_SITES = (
-    "Facebook",
-    "Instagram",
-    "Threads",
-    "TikTok",
-    "Twitter",
-)
 
 
 def _legacy_untriaged_source(
@@ -824,7 +802,6 @@ MAX_PROFILE_SEARCH_AUDIT_BYTES = 12_000_000
 MAX_PROFILE_SEARCH_AUDITS_PER_JOB = 10
 MAX_PROFILE_SEARCH_UI_CANDIDATES = 100
 MAX_PROFILE_SEARCH_UI_REVIEWS = 500
-MAX_PROFILE_SEARCH_CORRELATED_EVIDENCE = 128
 PROFILE_SEARCH_PENDING_CLAIM_CONFIDENCE = 50
 PROFILE_SEARCH_PLATFORM_PARSERS = {
     "facebook": parse_facebook_profile_url,
@@ -847,26 +824,6 @@ RELATIONSHIP_FIELDS = {
     "company",
     "company_ownership",
     "vehicle_ownership",
-}
-MAX_RELATIONSHIP_STATE_CASES = 500
-MAX_RELATIONSHIP_STATE_JOBS = 500
-MAX_RELATIONSHIP_STATE_EVENTS = 2000
-MAX_RELATIONSHIP_STATE_AUDITS = 500
-RELATIONSHIP_STATE_DEGRADED_OUTCOMES = {
-    "blocked",
-    "circuit_open",
-    "error",
-    "failed",
-    "partial",
-    "provider_error",
-    "rate_limited",
-    "timed_out",
-    "unavailable",
-}
-RELATIONSHIP_STATE_BLOCKED_OUTCOMES = {
-    "blocked",
-    "circuit_open",
-    "rate_limited",
 }
 
 
@@ -921,12 +878,12 @@ def _persona_candidate_identity_match(candidate: Dict[str, Any]):
 
 
 def _profile_search_candidate_alias_identity(candidate: Dict[str, Any]):
-    """Derive a supported account identity only from its validated URL.
-
-    Supported-platform URL parsing is the shared trust boundary. Source labels
-    and user-supplied username fields are never used to merge claims.
-    """
-    if candidate.get("field_name") != "social_account":
+    """Derive a supported account identity only from its validated URL."""
+    if (
+        candidate.get("source_engine")
+        not in {"openai_web_research", "native_profile_search_review"}
+        or candidate.get("field_name") != "social_account"
+    ):
         return None
     value = candidate.get("value")
     candidate_url = (
@@ -940,20 +897,6 @@ def _profile_search_candidate_alias_identity(candidate: Dict[str, Any]):
             continue
         return profile_reference.handle.casefold(), parser
     return None
-
-
-def _persona_candidate_row_is_exact(
-    existing: Mapping[str, Any], candidate: Dict[str, Any]
-) -> bool:
-    """Distinguish an exact lookup hit from a supported-URL alias hit."""
-    if str(existing["fingerprint"]) == str(candidate["fingerprint"]):
-        return True
-    return bool(
-        candidate.get("source_engine")
-        in {"openai_web_research", "native_profile_search_review"}
-        and candidate.get("field_name") == "social_account"
-        and existing["display_value"] == candidate["display_value"]
-    )
 
 
 def _persona_candidate_claim_with_connection(
@@ -1076,7 +1019,7 @@ def _profile_search_document_sha256(document: Dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _profile_search_audit_document(result: Any, *, allow_running=False) -> tuple[Dict[str, Any], str]:
+def _profile_search_audit_document(result: Any) -> tuple[Dict[str, Any], str]:
     """Validate and fingerprint one bounded, review-safe search result."""
     from maigret.web.profile_search_orchestrator import (
         PROFILE_SEARCH_TERMINAL_ERROR_CODES,
@@ -1109,21 +1052,14 @@ def _profile_search_audit_document(result: Any, *, allow_running=False) -> tuple
     ):
         raise ValueError("Profile-search audit contains an invalid candidate")
     document = result.as_dict()
-    allowed_statuses = {"completed", "partial", "failed", "stopped"}
-    if allow_running:
-        allowed_statuses.add('running')
-    if result.status not in allowed_statuses:
+    if result.status not in {"completed", "partial", "failed", "stopped"}:
         raise ValueError("Invalid profile-search audit status")
-    if result.final != (result.status != 'running'):
-        raise ValueError('Profile-search final state is inconsistent')
     if result.stopped != (result.status == "stopped"):
         raise ValueError("Profile-search stop status is inconsistent")
     if not 0 <= result.planned_query_count <= MAX_PROFILE_SEARCH_QUERIES:
         raise ValueError("Profile-search audit exceeds the query limit")
     if not 0 <= result.executed_query_count <= result.planned_query_count:
         raise ValueError("Profile-search audit query counts are inconsistent")
-    if not 0 <= result.attempted_query_count <= result.planned_query_count:
-        raise ValueError('Profile-search attempted count is inconsistent')
     if not 0 <= result.error_count <= result.executed_query_count:
         raise ValueError("Profile-search audit error count is inconsistent")
     planned_by_id = {query.query_id: query for query in result.queries}
@@ -1206,32 +1142,6 @@ def _serialize_profile_search_audit(row: Any) -> Dict[str, Any]:
     }
 
 
-def _profile_search_correlation(
-    case_id: str, audit: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Correlate one verified immutable audit without creating assertions."""
-    from maigret.web.evidence_correlation import correlate_evidence
-    from maigret.web.evidence_correlation_profile_search import (
-        profile_search_audit_observations,
-    )
-
-    observations = profile_search_audit_observations(
-        case_id=case_id,
-        audit_id=str(audit["id"]),
-        document_sha256=str(audit["document_sha256"]),
-        document=dict(audit["document"]),
-        retrieved_at=str(audit["created_at"]),
-    )
-    if not observations:
-        return {
-            "schema_version": 1,
-            "case_id": case_id,
-            "clusters": [],
-            "relationships": [],
-        }
-    return correlate_evidence(observations)
-
-
 def _profile_search_candidate_from_document(
     document: Any, candidate_id: str
 ) -> Dict[str, Any]:
@@ -1290,7 +1200,9 @@ def _bounded_chat_sources(value: Any) -> list[Dict[str, str]]:
     for item in value[:100]:
         if not isinstance(item, dict):
             continue
-        candidate = str(item.get("url") or "").strip()[:2000]
+        candidate = str(item.get("url") or "")
+        if len(candidate) > 2000 or candidate != candidate.strip():
+            continue
         try:
             parsed = urlsplit(candidate)
         except ValueError:
@@ -1384,6 +1296,119 @@ class CaseStore:
             return None
         return WorkerLock(connection, advisory_lock_key=WORKER_LOCK_KEY)
 
+    @staticmethod
+    def _job_persona_bindings(investigation_spec, persona_rows):
+        """Resolve queued ownership by ID, with a fallback for historical jobs."""
+        specification = (
+            investigation_spec if isinstance(investigation_spec, dict) else {}
+        )
+        known_ids = {row["id"] for row in persona_rows}
+        target_id = str(specification.get("target_persona_id") or "")
+        grouped_id = target_id if target_id in known_ids else None
+        if "persona_bindings" in specification:
+            by_username: Dict[str, list[str]] = {}
+            for binding in specification.get("persona_bindings") or []:
+                if (
+                    not isinstance(binding, dict)
+                    or binding.get("persona_id") not in known_ids
+                ):
+                    continue
+                for username in binding.get("usernames") or []:
+                    key = str(username).strip().casefold()
+                    owners = by_username.setdefault(key, [])
+                    if binding["persona_id"] not in owners:
+                        owners.append(binding["persona_id"])
+            return grouped_id, by_username
+        if (
+            not target_id
+            and specification.get("processing_mode") == "same_subject"
+            and len(persona_rows) == 1
+        ):
+            grouped_id = persona_rows[0]["id"]
+        return grouped_id, {
+            str(row["display_name"]).strip().casefold(): [row["id"]]
+            for row in persona_rows
+        }
+
+    @staticmethod
+    def _persona_input_specification(investigation_spec, persona_id):
+        """Limit supplied context to its entered subject, even for shared handles."""
+        if not isinstance(investigation_spec, dict):
+            return {}
+        for binding in investigation_spec.get("persona_bindings") or []:
+            if binding.get("persona_id") == persona_id and "identifiers" in binding:
+                return dict(
+                    investigation_spec,
+                    processing_mode="same_subject",
+                    identifiers=binding["identifiers"],
+                )
+        return investigation_spec
+
+    @staticmethod
+    def _profile_source_persona_ids(investigation_spec, persona_ids, source_url):
+        """Respect explicit profile ownership when distinct subjects share a handle."""
+        if (
+            not isinstance(investigation_spec, dict)
+            or investigation_spec.get("processing_mode") != "independent"
+            or not source_url
+        ):
+            return persona_ids
+
+        def url_key(value):
+            from maigret.web.persona_intelligence import (
+                supported_profile_identity_key,
+            )
+
+            profile_identity = supported_profile_identity_key(value)
+            if profile_identity is not None:
+                return ("supported_profile", *profile_identity)
+            try:
+                parsed = urlsplit(str(value or ""))
+            except ValueError:
+                return None
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                return None
+            return (
+                "exact_url",
+                parsed.scheme.casefold(),
+                parsed.netloc.casefold(),
+                parsed.path.rstrip("/") or "/",
+                parsed.query,
+            )
+
+        key = url_key(source_url)
+        bindings = [
+            binding
+            for binding in investigation_spec.get("persona_bindings") or []
+            if isinstance(binding, dict)
+        ]
+        explicit_profile_bindings = [
+            binding
+            for binding in bindings
+            if any(
+                isinstance(identifier, dict)
+                and identifier.get("type") == "profile_url"
+                for identifier in binding.get("identifiers") or []
+            )
+        ]
+        owners = {
+            binding.get("persona_id")
+            for binding in explicit_profile_bindings
+            if any(
+                identifier.get("type") == "profile_url"
+                and key is not None
+                and url_key(identifier.get("value")) == key
+                for identifier in binding.get("identifiers") or []
+            )
+        }
+        if not explicit_profile_bindings:
+            # Username-only independent investigations have no source URL
+            # ownership to apply; keep their seed-based routing intact.
+            return persona_ids
+        # Once explicit profile inputs exist, an unmatched URL is ambiguous and
+        # must not be broadcast to every subject in the case.
+        return [persona_id for persona_id in persona_ids if persona_id in owners]
+
     def create_investigation(
         self,
         usernames: Iterable[str],
@@ -1391,17 +1416,12 @@ class CaseStore:
         *,
         kind: str = "live",
     ) -> str:
+        from maigret.web.persona_intelligence import extract_supplied_profile_claims
+
         normalized = [str(value).strip() for value in usernames if str(value).strip()]
-        stored_options = (
-            govern_profile_discovery_options(options)
-            if kind in PROFILE_DISCOVERY_JOB_KINDS
-            else dict(options)
-        )
-        investigation_spec = stored_options.get("investigation_spec")
-        if not normalized and not investigation_has_effective_collection_route(
-            investigation_spec
-        ):
+        if not normalized:
             raise ValueError("At least one username is required")
+        investigation_spec = options.get("investigation_spec")
         grouped = (
             isinstance(investigation_spec, dict)
             and investigation_spec.get("processing_mode") == "same_subject"
@@ -1411,13 +1431,75 @@ class CaseStore:
             if isinstance(investigation_spec, dict)
             else ""
         )
-        persona_seed = subject_label or (normalized[0] if normalized else "")
-        if not persona_seed:
-            raise ValueError("The investigation subject is required")
-        persona_names = [persona_seed] if grouped else normalized
+        group_specs = (
+            [
+                {
+                    "label": subject_label or normalized[0],
+                    "usernames": normalized,
+                    "identifiers": investigation_spec.get("identifiers", []),
+                }
+            ]
+            if grouped
+            else (
+                investigation_spec.get("subject_groups")
+                if isinstance(investigation_spec, dict)
+                else None
+            )
+        )
+        if group_specs is None:
+            group_specs = [
+                {"label": username, "usernames": [username]} for username in normalized
+            ]
+        if not isinstance(group_specs, list) or not group_specs:
+            raise ValueError("At least one subject group is required")
+        target_keys = {username.casefold() for username in normalized}
+        covered_keys = set()
+        new_personas = []
+        persona_bindings = []
+        for group in group_specs:
+            label = str(group.get("label") or "").strip()[:500]
+            usernames_for_persona = [
+                str(value).strip() for value in group.get("usernames", [])
+            ]
+            group_keys = {value.casefold() for value in usernames_for_persona}
+            if not label or not group_keys.issubset(target_keys):
+                raise ValueError("Invalid subject group")
+            covered_keys.update(group_keys)
+            persona_id = str(uuid.uuid4())
+            new_personas.append({"id": persona_id, "display_name": label})
+            persona_bindings.append(
+                {
+                    "persona_id": persona_id,
+                    "subject_label": label,
+                    "usernames": usernames_for_persona,
+                    **(
+                        {"identifiers": group["identifiers"]}
+                        if "identifiers" in group
+                        else {}
+                    ),
+                }
+            )
+        if covered_keys != target_keys:
+            raise ValueError("Every search target needs a subject group")
         now = utcnow()
         case_id = str(uuid.uuid4())
         job_id = str(uuid.uuid4())
+        stored_options = (
+            govern_profile_discovery_options(options)
+            if kind in PROFILE_DISCOVERY_JOB_KINDS
+            else dict(options)
+        )
+        # Capture ownership once, when the new Personas are created. Labels may
+        # later change after review; existing jobs and Personas are not rewritten.
+        specification = (
+            dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
+        )
+        specification["persona_bindings"] = persona_bindings
+        if grouped:
+            specification["target_persona_id"] = new_personas[0]["id"]
+        else:
+            specification.pop("target_persona_id", None)
+        stored_options["investigation_spec"] = specification
         budget = (
             execution_budget_spec_from_options(stored_options)
             if kind in PROFILE_DISCOVERY_JOB_KINDS
@@ -1427,9 +1509,7 @@ class CaseStore:
             stored_options["execution_mode"] = budget["mode"]
             stored_options["all_sites"] = budget["mode"] == "exhaustive"
             stored_options["execution_budget"] = dict(budget)
-        title = (subject_label if grouped and subject_label else ", ".join(normalized))[
-            :500
-        ]
+        title = ", ".join(persona["display_name"] for persona in new_personas)[:500]
         with self.engine.begin() as connection:
             connection.execute(
                 insert(cases).values(
@@ -1444,12 +1524,12 @@ class CaseStore:
                 insert(personas),
                 [
                     {
-                        "id": str(uuid.uuid4()),
+                        "id": persona["id"],
                         "case_id": case_id,
-                        "display_name": username,
+                        "display_name": persona["display_name"],
                         "created_at": now,
                     }
-                    for username in persona_names
+                    for persona in new_personas
                 ],
             )
             connection.execute(
@@ -1476,6 +1556,19 @@ class CaseStore:
                     updated_at=now,
                 )
             )
+            for binding in persona_bindings:
+                self._upsert_persona_candidates(
+                    connection,
+                    persona_id=binding["persona_id"],
+                    job_id=job_id,
+                    candidates=extract_supplied_profile_claims(
+                        self._persona_input_specification(
+                            specification, binding["persona_id"]
+                        ),
+                        usernames=binding["usernames"],
+                    ),
+                    now=now,
+                )
         self.append_event(job_id, {"type": "queued", "usernames": normalized})
         return job_id
 
@@ -1799,9 +1892,6 @@ class CaseStore:
         persona_id: str,
         source_claim_id: str,
         *,
-        requested_by: str,
-        purpose: str,
-        scope_confirmed: bool,
         selected_wikipedia_page_id: Optional[str] = None,
     ) -> str:
         """Queue governed public-record checks for one approved full-name claim."""
@@ -1825,12 +1915,9 @@ class CaseStore:
             claim = (
                 connection.execute(
                     select(
-                        persona_claims.c.id,
                         persona_claims.c.display_value,
-                        persona_claims.c.value,
                         persona_claims.c.field_name,
                         persona_claims.c.review_status,
-                        persona_claims.c.source_job_id,
                     ).where(
                         persona_claims.c.id == source_claim_id,
                         persona_claims.c.persona_id == persona_id,
@@ -1847,39 +1934,6 @@ class CaseStore:
                 raise ValueError(
                     "Public-record enrichment requires an approved full name"
                 )
-            if not profile_discovery_flag_enabled("governed_pivots_enabled"):
-                raise ValueError(
-                    "Governed evidence pivots are disabled by server policy"
-                )
-            requested_by = str(requested_by or "").strip()
-            pivot_plan = build_governed_pivot_plan(
-                {
-                    "id": str(claim["id"]),
-                    "case_id": str(persona_row["case_id"]),
-                    "persona_id": persona_id,
-                    "field_name": str(claim["field_name"]),
-                    "review_status": str(claim["review_status"]),
-                    "value": str(claim["display_value"] or ""),
-                },
-                case_id=str(persona_row["case_id"]),
-                persona_id=persona_id,
-                requested_by=requested_by,
-                purpose=purpose,
-                scope_confirmed=scope_confirmed,
-            )
-            if claim["source_job_id"]:
-                source_options = connection.scalar(
-                    select(investigation_jobs.c.options).where(
-                        investigation_jobs.c.id == claim["source_job_id"]
-                    )
-                )
-                if isinstance(source_options, Mapping) and isinstance(
-                    source_options.get("governed_pivot_plan"), Mapping
-                ):
-                    raise ValueError(
-                        "Governed pivots cannot expand beyond depth one"
-                    )
-            feature_snapshot = {"governed_pivots_enabled": True}
             if connection.scalar(
                 select(investigation_jobs.c.id)
                 .where(
@@ -1930,11 +1984,6 @@ class CaseStore:
                 "confirmed_name": confirmed_name[:300],
                 "selected_wikipedia_page_id": selected_page_id,
             }
-            stored_options = {
-                "investigation_spec": specification,
-                "governed_pivot_plan": pivot_plan,
-                "governed_pivot_feature_snapshot": feature_snapshot,
-            }
             connection.execute(
                 insert(investigation_jobs).values(
                     id=job_id,
@@ -1942,16 +1991,12 @@ class CaseStore:
                     kind="identity_enrichment",
                     status="queued",
                     usernames=[],
-                    options=stored_options,
+                    options={"investigation_spec": specification},
                     progress={"checked": 0, "total": 2, "found": 0},
                     result=None,
                     error=None,
                     cancel_requested=False,
                     attempts=0,
-                    budget_seconds=int(
-                        pivot_plan["execution_budget"]["total_seconds"]
-                    ),
-                    budget_policy_version=str(pivot_plan["policy_version"]),
                     created_at=now,
                     updated_at=now,
                 )
@@ -1967,333 +2012,9 @@ class CaseStore:
                 "type": "queued",
                 "target_type": "confirmed_person_name",
                 "persona_id": persona_id,
-                "reason": "governed_pivot",
-                "governed_pivot_plan": pivot_plan,
-                "governed_pivot_feature_snapshot": feature_snapshot,
             },
         )
         return job_id
-
-    def create_verified_link_pivot(
-        self,
-        persona_id: str,
-        source_claim_id: str,
-        requested_by: str,
-        *,
-        purpose: str,
-        scope_confirmed: bool,
-    ) -> str:
-        """Queue one bounded same-case refresh from an approved profile URL."""
-        source_claim_id = str(source_claim_id or "").strip()
-        requested_by = str(requested_by or "").strip()
-        if not profile_discovery_flag_enabled("governed_pivots_enabled"):
-            raise ValueError(
-                "Governed evidence pivots are disabled by server policy"
-            )
-        now, job_id = utcnow(), str(uuid.uuid4())
-        with self.engine.begin() as connection:
-            persona_statement = select(
-                personas.c.case_id,
-                personas.c.display_name,
-            ).where(personas.c.id == persona_id)
-            if self.engine.dialect.name == "postgresql":
-                persona_statement = persona_statement.with_for_update()
-            persona_row = connection.execute(persona_statement).mappings().first()
-            if not persona_row:
-                raise KeyError(persona_id)
-            claim = (
-                connection.execute(
-                    select(
-                        persona_claims.c.id,
-                        persona_claims.c.value,
-                        persona_claims.c.field_name,
-                        persona_claims.c.review_status,
-                        persona_claims.c.source_job_id,
-                    ).where(
-                        persona_claims.c.id == source_claim_id,
-                        persona_claims.c.persona_id == persona_id,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            if not claim:
-                raise ValueError(
-                    "Verified-link discovery requires an approved social account"
-                )
-            case_id = str(persona_row["case_id"])
-            pivot_plan = build_governed_pivot_plan(
-                {
-                    "id": str(claim["id"]),
-                    "case_id": case_id,
-                    "persona_id": persona_id,
-                    "field_name": str(claim["field_name"]),
-                    "review_status": str(claim["review_status"]),
-                    "value": claim["value"],
-                },
-                case_id=case_id,
-                persona_id=persona_id,
-                requested_by=requested_by,
-                purpose=purpose,
-                scope_confirmed=scope_confirmed,
-            )
-            if pivot_plan["pivot_kind"] != "verified_profile_discovery":
-                raise ValueError(
-                    "Verified-link discovery requires an approved social account"
-                )
-            if claim["source_job_id"]:
-                source_options = connection.scalar(
-                    select(investigation_jobs.c.options).where(
-                        investigation_jobs.c.id == claim["source_job_id"]
-                    )
-                )
-                if isinstance(source_options, Mapping) and isinstance(
-                    source_options.get("governed_pivot_plan"), Mapping
-                ):
-                    raise ValueError(
-                        "Governed pivots cannot expand beyond depth one"
-                    )
-            if connection.scalar(
-                select(investigation_jobs.c.id)
-                .where(
-                    investigation_jobs.c.case_id == case_id,
-                    investigation_jobs.c.status.in_(ACTIVE_STATUSES),
-                )
-                .limit(1)
-            ):
-                raise ValueError("This case already has an active investigation")
-            prior_rows = connection.execute(
-                select(
-                    investigation_jobs.c.options,
-                    investigation_jobs.c.status,
-                )
-                .where(
-                    investigation_jobs.c.case_id == case_id,
-                    investigation_jobs.c.kind == "refresh",
-                    investigation_jobs.c.status == "completed",
-                )
-                .order_by(
-                    investigation_jobs.c.created_at.desc(),
-                    investigation_jobs.c.id.desc(),
-                )
-                .limit(100)
-            ).mappings()
-            for prior in prior_rows:
-                prior_options = prior["options"]
-                prior_options = (
-                    prior_options if isinstance(prior_options, Mapping) else {}
-                )
-                prior_plan = prior_options.get("governed_pivot_plan")
-                prior_plan = prior_plan if isinstance(prior_plan, Mapping) else {}
-                prior_source = prior_plan.get("source_claim")
-                prior_source = (
-                    prior_source if isinstance(prior_source, Mapping) else {}
-                )
-                if (
-                    prior_plan.get("pivot_kind")
-                    == "verified_profile_discovery"
-                    and str(prior_source.get("id") or "") == source_claim_id
-                ):
-                    raise ValueError(
-                        "This approved profile pivot already completed; use the "
-                        "ordinary Persona rerun workflow for a new investigation"
-                    )
-            latest_job = (
-                connection.execute(
-                    select(investigation_jobs.c.options)
-                    .where(
-                        investigation_jobs.c.case_id == case_id,
-                        investigation_jobs.c.kind.in_(PROFILE_DISCOVERY_JOB_KINDS),
-                    )
-                    .order_by(
-                        investigation_jobs.c.created_at.desc(),
-                        investigation_jobs.c.id.desc(),
-                    )
-                    .limit(1)
-                )
-                .mappings()
-                .first()
-            )
-            if not latest_job:
-                raise ValueError(
-                    "The approved profile has no compatible source investigation"
-                )
-            target = pivot_plan["target"]
-            handle = str(target["handle"])
-            canonical_url = str(target["canonical_url"])
-            previous_options = dict(latest_job["options"] or {})
-            previous_specification = previous_options.get("investigation_spec")
-            previous_specification = (
-                previous_specification
-                if isinstance(previous_specification, Mapping)
-                else {}
-            )
-            investigation_specification = {
-                "schema_version": 1,
-                "investigation_type": "verified_link_pivot",
-                "processing_mode": "same_subject",
-                "generate_name_variants": False,
-                "allow_ai_context": False,
-                "enable_user_scanner_email": False,
-                "enable_user_scanner_username": False,
-                "user_scanner_username_platforms": [],
-                "allow_user_scanner_vxtwitter": False,
-                "enable_github_profile_enrichment": False,
-                "enable_archived_url_evidence": False,
-                "subject_label": str(persona_row["display_name"])[:500],
-                "identifiers": [
-                    {"type": "profile_url", "value": canonical_url}
-                ],
-                "alias_nicknames": [],
-                "alias_context_numbers": [],
-                "alias_candidates": [],
-                "tags": list(previous_specification.get("tags") or [])[:64],
-                "excluded_tags": list(
-                    previous_specification.get("excluded_tags") or []
-                )[:64],
-                "include_terms": [],
-                "exclude_terms": [],
-                "search_targets": [
-                    {
-                        "value": handle,
-                        "source_type": "profile_url",
-                        "source_value": canonical_url,
-                    }
-                ],
-                "target_persona_id": persona_id,
-            }
-            queued_options = dict(previous_options)
-            queued_options.update(
-                top_sites=len(GOVERNED_PROFILE_PIVOT_SITES),
-                all_sites=False,
-                disable_recursive_search=True,
-                disable_extracting=True,
-                with_domains=False,
-                site_list=list(GOVERNED_PROFILE_PIVOT_SITES),
-                investigation_spec=investigation_specification,
-                governed_pivot_plan=pivot_plan,
-            )
-            queued_options.pop("execution_budget", None)
-            queued_options.pop("profile_discovery_policy", None)
-            feature_snapshot = {"governed_pivots_enabled": True}
-            queued_options["governed_pivot_feature_snapshot"] = feature_snapshot
-            queued_options = govern_profile_discovery_options(
-                queued_options,
-                "focused",
-            )
-            budget = execution_budget_spec_from_options(queued_options)
-            connection.execute(
-                insert(investigation_jobs).values(
-                    id=job_id,
-                    case_id=case_id,
-                    kind="refresh",
-                    status="queued",
-                    usernames=[handle],
-                    options=queued_options,
-                    progress={"checked": 0, "total": None, "found": 0},
-                    result=None,
-                    error=None,
-                    cancel_requested=False,
-                    attempts=0,
-                    budget_seconds=int(budget["total_seconds"]),
-                    budget_policy_version=str(budget["policy_version"]),
-                    deadline_at=None,
-                    created_at=now,
-                    updated_at=now,
-                )
-            )
-            connection.execute(
-                update(cases).where(cases.c.id == case_id).values(updated_at=now)
-            )
-        self.append_event(
-            job_id,
-            {
-                "type": "queued",
-                "reason": "governed_verified_link_pivot",
-                "target_type": "verified_profile_link",
-                "target_persona_id": persona_id,
-                "governed_pivot_plan": pivot_plan,
-                "governed_pivot_feature_snapshot": feature_snapshot,
-            },
-        )
-        return job_id
-
-    def validate_governed_pivot_job(
-        self, job: Mapping[str, Any]
-    ) -> Optional[Dict[str, Any]]:
-        """Revalidate an approved pivot source immediately before execution."""
-        options = job.get("options")
-        options = options if isinstance(options, Mapping) else {}
-        stored_plan = options.get("governed_pivot_plan")
-        if not isinstance(stored_plan, Mapping):
-            return None
-        if not profile_discovery_flag_enabled("governed_pivots_enabled"):
-            raise ValueError(
-                "Governed evidence pivots are disabled by server policy"
-            )
-        source_claim = stored_plan.get("source_claim")
-        source_claim = source_claim if isinstance(source_claim, Mapping) else {}
-        claim_id = str(source_claim.get("id") or "")
-        persona_id = str(stored_plan.get("persona_id") or "")
-        case_id = str(job.get("case_id") or "")
-        if case_id != str(stored_plan.get("case_id") or ""):
-            raise ValueError("Governed pivot case scope changed before execution")
-        with self.engine.connect() as connection:
-            row = (
-                connection.execute(
-                    select(
-                        persona_claims.c.id,
-                        persona_claims.c.value,
-                        persona_claims.c.display_value,
-                        persona_claims.c.field_name,
-                        persona_claims.c.review_status,
-                        personas.c.case_id,
-                    )
-                    .select_from(
-                        persona_claims.join(
-                            personas,
-                            personas.c.id == persona_claims.c.persona_id,
-                        )
-                    )
-                    .where(
-                        persona_claims.c.id == claim_id,
-                        persona_claims.c.persona_id == persona_id,
-                        personas.c.case_id == case_id,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-        if not row:
-            raise ValueError("Governed pivot source is no longer available")
-        field_name = str(row["field_name"])
-        governance = stored_plan.get("governance")
-        governance = (
-            governance if isinstance(governance, Mapping) else {}
-        )
-        rebuilt_plan = build_governed_pivot_plan(
-            {
-                "id": str(row["id"]),
-                "case_id": case_id,
-                "persona_id": persona_id,
-                "field_name": field_name,
-                "review_status": str(row["review_status"]),
-                "value": (
-                    str(row["display_value"] or "")
-                    if field_name == "full_name"
-                    else row["value"]
-                ),
-            },
-            case_id=case_id,
-            persona_id=persona_id,
-            requested_by=str(stored_plan.get("requested_by") or ""),
-            purpose=str(governance.get("declared_purpose") or ""),
-            scope_confirmed=governance.get("scope_confirmed") is True,
-            depth=int(stored_plan.get("input_depth", -1)),
-        )
-        if dict(stored_plan) != rebuilt_plan:
-            raise ValueError("Governed pivot policy changed before execution")
-        return rebuilt_plan
 
     def select_affiliation_organization(
         self, case_id: str, candidate_key: str, reviewed_by: str
@@ -2732,19 +2453,26 @@ class CaseStore:
             )
             if active_job:
                 raise ValueError("This case already has an active investigation")
-            latest_job = (
-                connection.execute(
-                    select(
-                        investigation_jobs.c.options,
-                        investigation_jobs.c.usernames,
-                    )
-                    .where(investigation_jobs.c.case_id == persona_row["case_id"])
-                    .order_by(investigation_jobs.c.created_at.desc())
-                    .limit(1)
+            previous_jobs = connection.execute(
+                select(investigation_jobs.c.options, investigation_jobs.c.usernames)
+                .where(investigation_jobs.c.case_id == persona_row["case_id"])
+                .order_by(investigation_jobs.c.created_at.desc())
+            ).mappings()
+            latest_job = None
+            for previous_job in previous_jobs:
+                previous_spec = (
+                    dict(previous_job["options"] or {}).get("investigation_spec") or {}
                 )
-                .mappings()
-                .first()
-            )
+                previous_target = previous_spec.get("target_persona_id")
+                if previous_target and previous_target != persona_id:
+                    continue
+                if "persona_bindings" in previous_spec and not any(
+                    binding.get("persona_id") == persona_id
+                    for binding in previous_spec.get("persona_bindings") or []
+                ):
+                    continue
+                latest_job = previous_job
+                break
             explicit_plan = usernames is not None or options is not None
             if explicit_plan and (usernames is None or options is None):
                 raise ValueError(
@@ -2761,37 +2489,98 @@ class CaseStore:
                 and investigation_spec.get("processing_mode") == "same_subject"
             )
             display_name = str(persona_row["display_name"]).strip()
+            binding = next(
+                (
+                    item
+                    for item in (investigation_spec or {}).get("persona_bindings", [])
+                    if item.get("persona_id") == persona_id
+                ),
+                None,
+            )
             queued_usernames = (
                 [str(value).strip() for value in list(usernames or [])]
                 if explicit_plan
                 else (
-                    [str(value).strip() for value in latest_usernames]
-                    if grouped
-                    else [display_name]
+                    list(binding["usernames"])
+                    if binding is not None
+                    else (
+                        [str(value).strip() for value in latest_usernames]
+                        if grouped
+                        else [display_name]
+                    )
                 )
             )
             queued_usernames = [value for value in queued_usernames if value]
-            if explicit_plan:
-                specification = (
-                    dict(investigation_spec)
-                    if isinstance(investigation_spec, dict)
-                    else {}
-                )
-                specification.update(
-                    processing_mode="same_subject",
-                    subject_label=display_name,
-                    target_persona_id=persona_id,
-                )
-                queued_options["investigation_spec"] = specification
-            queued_options = govern_profile_discovery_options(queued_options)
-            investigation_spec = queued_options.get("investigation_spec")
-            if (
-                not queued_usernames
-                and not investigation_has_effective_collection_route(
-                    investigation_spec
-                )
-            ):
+            if not queued_usernames:
                 raise ValueError("No searchable account identifiers are available")
+            specification = (
+                dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
+            )
+            if not explicit_plan and not grouped:
+                target_keys = {value.casefold() for value in queued_usernames}
+                source_label = str(
+                    (binding or {}).get("subject_label") or display_name
+                ).casefold()
+                specification["search_targets"] = [
+                    target
+                    for target in specification.get("search_targets", [])
+                    if str(target.get("value") or "").casefold() in target_keys
+                ]
+                profile_urls = {
+                    target.get("source_value")
+                    for target in specification["search_targets"]
+                    if target.get("source_type") == "profile_url"
+                }
+                specification["identifiers"] = [
+                    identifier
+                    for identifier in specification.get("identifiers", [])
+                    if (
+                        identifier.get("type") in {"username", "social_handle"}
+                        and str(identifier.get("value") or "").casefold() in target_keys
+                    )
+                    or (
+                        identifier.get("type") == "full_name"
+                        and str(identifier.get("value") or "").casefold()
+                        == source_label
+                    )
+                    or (
+                        identifier.get("type") == "profile_url"
+                        and identifier.get("value") in profile_urls
+                    )
+                ]
+                if binding is not None and "identifiers" in binding:
+                    specification["identifiers"] = binding["identifiers"]
+                    if len(binding["identifiers"]) == 1:
+                        origin = binding["identifiers"][0]
+                        source_type = (
+                            "ranked_alias"
+                            if origin.get("type") == "full_name"
+                            else origin.get("type")
+                        )
+                        specification["search_targets"] = [
+                            dict(
+                                target,
+                                source_type=source_type,
+                                source_value=origin["value"],
+                            )
+                            for target in specification["search_targets"]
+                        ]
+            specification.update(
+                processing_mode="same_subject",
+                subject_label=display_name,
+                target_persona_id=persona_id,
+                subject_groups=[{"label": display_name, "usernames": queued_usernames}],
+                persona_bindings=[
+                    {
+                        "persona_id": persona_id,
+                        "subject_label": display_name,
+                        "usernames": queued_usernames,
+                        "identifiers": specification.get("identifiers", []),
+                    }
+                ],
+            )
+            queued_options["investigation_spec"] = specification
+            queued_options = govern_profile_discovery_options(queued_options)
             budget = execution_budget_spec_from_options(queued_options)
             connection.execute(
                 insert(investigation_jobs).values(
@@ -3025,19 +2814,6 @@ class CaseStore:
         runtime_guard: bool = False,
         worker_id: Optional[str] = None,
     ) -> int:
-        event = dict(event)
-        if event.get('type') == 'collection_accounting':
-            snapshot = public_collection_accounting(event.get('collection_accounting'))
-            if snapshot is None:
-                raise ValueError('Invalid collection accounting snapshot')
-            event = {'type': 'collection_accounting', 'collection_accounting': snapshot}
-        elif event.get('type') in {
-            'collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup'
-        }:
-            event = validate_task_batch(event)
-            event['event_key'] = hashlib.sha256(
-                json.dumps(event, sort_keys=True, separators=(',', ':')).encode()
-            ).hexdigest()
         now = utcnow()
         progress_updates: Dict[str, Any] = {}
         with self.engine.begin() as connection:
@@ -3047,7 +2823,7 @@ class CaseStore:
                 investigation_jobs.c.worker_id,
                 investigation_jobs.c.heartbeat_at,
             ).where(investigation_jobs.c.id == job_id)
-            if self.engine.dialect.name == "postgresql":
+            if runtime_guard and self.engine.dialect.name == "postgresql":
                 statement = statement.with_for_update()
             row = connection.execute(statement).mappings().first()
             if row is None:
@@ -3078,101 +2854,9 @@ class CaseStore:
                 if status == "cancel_requested" and event_type not in {
                     "stopped",
                     "done",
-                    "collection_accounting",
-                    "collection_task_terminal",
-                    "collection_task_cleanup",
-                    "lifecycle",
                 }:
                     return 0
             progress = dict(row["progress"] or {})
-            if event_type in {'collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup'}:
-                task_ids = {task['task_id'] for task in event['tasks']}
-                check_ids = {task['check_id'] for task in event['tasks']}
-                if self.engine.dialect.name == 'postgresql':
-                    prior_rows = connection.execute(text('''
-                        SELECT id, event FROM investigation_events
-                        WHERE job_id = :job_id
-                          AND event->>'type' IN ('collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup')
-                          AND EXISTS (SELECT 1 FROM jsonb_array_elements(event->'tasks') task
-                                      WHERE task->>'task_id' = ANY(:task_ids)
-                                         OR task->>'check_id' = ANY(:check_ids))
-                        ORDER BY id
-                    '''), {'job_id': job_id, 'task_ids': sorted(task_ids), 'check_ids': sorted(check_ids)}).mappings()
-                else:
-                    prior_rows = connection.execute(select(investigation_events.c.id, investigation_events.c.event).where(
-                        investigation_events.c.job_id == job_id,
-                        investigation_events.c.event['type'].as_string().in_(
-                            ['collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup']
-                        ),
-                    ).order_by(investigation_events.c.id)).mappings()
-                identities, prior_by_kind, last_id = {}, {}, 0
-                attempts, checks = {}, {}
-                identity_keys = ('schema_version', 'task_id', 'check_id', 'source_id', 'target_id', 'attempt')
-                for prior_row in prior_rows:
-                    previous = prior_row['event']
-                    for task in previous.get('tasks', []):
-                        identifier = task['task_id']
-                        if identifier not in task_ids and task['check_id'] not in check_ids:
-                            continue
-                        last_id = max(last_id, int(prior_row['id']))
-                        identities[identifier] = ({key: task[key] for key in identity_keys}, previous.get('stage_id', 'maigret'))
-                        prior_by_kind[(identifier, previous['type'])] = task
-                        attempts[(previous.get('stage_id', 'maigret'), task['check_id'], task['attempt'])] = identifier
-                        checks[task['check_id']] = (task['source_id'], task['target_id'])
-                new_tasks = []
-                for task in event['tasks']:
-                    identifier = task['task_id']
-                    identity = ({key: task[key] for key in identity_keys}, event['stage_id'])
-                    attempt_key = (event['stage_id'], task['check_id'], task['attempt'])
-                    if attempt_key in attempts and attempts[attempt_key] != identifier:
-                        raise ValueError('Duplicate logical collection attempt')
-                    if task['check_id'] in checks and checks[task['check_id']] != (task['source_id'], task['target_id']):
-                        raise ValueError('Conflicting collection check identity')
-                    attempts[attempt_key] = identifier
-                    checks[task['check_id']] = (task['source_id'], task['target_id'])
-                    if identifier in identities and identities[identifier] != identity:
-                        raise ValueError('Conflicting collection task identity')
-                    if event_type != 'collection_task_plan' and (identifier, 'collection_task_plan') not in prior_by_kind:
-                        raise ValueError('Collection task has no persisted plan')
-                    if event_type == 'collection_task_cleanup':
-                        prior_terminal = prior_by_kind.get((identifier, 'collection_task_terminal'))
-                        if prior_terminal is None or prior_terminal['cleanup_state'] not in {'pending', 'incomplete'}:
-                            raise ValueError('Collection cleanup has no pending terminal task')
-                    prior = prior_by_kind.get((identifier, event_type))
-                    if prior == task:
-                        continue
-                    if prior is not None:
-                        if event_type != 'collection_task_cleanup' or prior['cleanup_state'] == 'complete':
-                            raise ValueError('Conflicting collection terminal disposition')
-                    new_tasks.append(task)
-                if not new_tasks:
-                    return last_id
-                event['tasks'] = new_tasks
-                event.pop('event_key', None)
-                event['event_key'] = hashlib.sha256(json.dumps(
-                    event, sort_keys=True, separators=(',', ':')
-                ).encode()).hexdigest()
-            if event.get('event_key'):
-                previous = connection.execute(
-                    select(investigation_events.c.id).where(
-                        investigation_events.c.job_id == job_id,
-                        investigation_events.c.event['event_key'].as_string() == event['event_key'],
-                    ).limit(1)
-                ).scalar_one_or_none()
-                if previous is not None:
-                    return int(previous)
-            if event_type == 'collection_accounting':
-                snapshot = event['collection_accounting']
-                current = progress.get('collection_accounting') or {}
-                if current.get('revision', -1) >= snapshot['revision']:
-                    return 0
-                progress['collection_accounting'] = snapshot
-            if event_type == 'lifecycle':
-                if event.get('phase') not in {'collection', 'stopping', 'finalizing'}:
-                    raise ValueError('Invalid collection lifecycle phase')
-                if event.get('cleanup_state', 'unknown') not in {'unknown', 'pending', 'complete', 'incomplete', 'terminated'}:
-                    raise ValueError('Invalid collection cleanup state')
-                progress['lifecycle'] = {key: event.get(key) for key in ('phase', 'stop_cause', 'cleanup_state')}
             if event_type == "start":
                 progress["total"] = event.get("total")
                 progress["username"] = event.get("username")
@@ -3213,88 +2897,6 @@ class CaseStore:
                 .values(**progress_updates)
             )
         return event_id
-
-    def save_collection_checkpoint(self, job_id, result, *, worker_id):
-        """Commit permitted partial evidence and pending claims under one lease.
-
-        Accept only profile report fields and the existing profile collector
-        families. Native evidence validation remains source-specific.
-        """
-        allowed_fields = {
-            'status', 'session_folder', 'graph_file', 'usernames',
-            'individual_reports', 'found_count', 'candidate_count',
-            'suppressed_count', 'raw_claimed_count', 'untriaged_count',
-            'profile_reliability_version', 'collector_observations',
-            'collector_found_count', 'collector_registration_count',
-            'username_verification_found_count', 'username_verification_unknown_count',
-            'github_enrichment_count', 'archived_profile_count', 'collection_accounting',
-        }
-        if not isinstance(result, dict) or set(result) - allowed_fields:
-            raise ValueError('Collection checkpoint has unsupported report fields')
-        reject_private_checkpoint_fields(result)
-        result = dict(result)
-        if result.get('collection_accounting') is not None:
-            accounting = public_collection_accounting(result['collection_accounting'])
-            if accounting is None:
-                raise ValueError('Invalid collection checkpoint accounting')
-            result['collection_accounting'] = accounting
-        allowed_engines = {'github_public_profile', 'unfurl_url_analysis', 'wayback_cdx',
-                           'user_scanner_username', 'user_scanner_email'}
-        observations = result.get('collector_observations', [])
-        if not isinstance(observations, list) or any(
-                not isinstance(item, dict) or item.get('source_engine') not in allowed_engines
-                for item in observations):
-            raise ValueError('Collection checkpoint has an unsupported evidence policy')
-        for observation in observations:
-            validate_profile_observation(observation)
-        now = utcnow()
-        with self.engine.begin() as connection:
-            statement = select(investigation_jobs).where(investigation_jobs.c.id == job_id)
-            if self.engine.dialect.name == 'postgresql':
-                statement = statement.with_for_update()
-            row = connection.execute(statement).mappings().first()
-            if (row is None or row['kind'] not in PROFILE_DISCOVERY_JOB_KINDS or row['worker_id'] != worker_id
-                    or row['status'] not in {'running', 'cancel_requested'}
-                    or _heartbeat_expired(row['heartbeat_at'], now=now)):
-                return False
-            progress = dict(row['progress'] or {})
-            progress['collection_checkpoint'] = dict(result)
-            self.sync_persona_claims(job_id, result, connection=connection)
-            connection.execute(update(investigation_jobs).where(
-                investigation_jobs.c.id == job_id
-            ).values(progress=progress, updated_at=now))
-        return True
-
-    def get_collection_checkpoint(self, job_id):
-        """Read a committed partial report index for internal reconciliation."""
-        with self.engine.connect() as connection:
-            progress = connection.execute(select(investigation_jobs.c.progress).where(
-                investigation_jobs.c.id == job_id
-            )).scalar_one_or_none()
-        return dict((progress or {}).get('collection_checkpoint') or {})
-
-    def save_native_profile_checkpoint(self, job_id, result, *, worker_id):
-        """Replace one validated running snapshot without consuming audit history."""
-        document, digest = _profile_search_audit_document(result, allow_running=True)
-        now = utcnow()
-        with self.engine.begin() as connection:
-            statement = select(investigation_jobs).where(investigation_jobs.c.id == job_id)
-            if self.engine.dialect.name == 'postgresql':
-                statement = statement.with_for_update()
-            row = connection.execute(statement).mappings().first()
-            if (row is None or row['kind'] not in PROFILE_DISCOVERY_JOB_KINDS
-                    or row['worker_id'] != worker_id
-                    or row['status'] not in {'running', 'cancel_requested'}
-                    or _heartbeat_expired(row['heartbeat_at'], now=now)):
-                return False
-            progress = dict(row['progress'] or {})
-            progress['native_profile_checkpoint'] = {
-                'document': document, 'document_sha256': digest,
-            }
-            connection.execute(update(investigation_jobs).where(
-                investigation_jobs.c.id == job_id
-            ).values(progress=progress, updated_at=now))
-        return True
 
     def publish_case_fusion_snapshot(
         self,
@@ -3730,7 +3332,6 @@ class CaseStore:
             candidate["anchor_id"] = (
                 "profile-candidate-" + candidate_id.rsplit(":", 1)[-1]
             )
-        correlation = _profile_search_correlation(case_id, audit)
         return {
             "audit_id": audit["id"],
             "job_id": audit["job_id"],
@@ -3746,7 +3347,6 @@ class CaseStore:
             "executed_query_count": audit["executed_query_count"],
             "error_count": audit["error_count"],
             "candidates": candidates,
-            "correlation": correlation,
         }
 
     def review_profile_search_candidate(
@@ -3778,7 +3378,6 @@ class CaseStore:
                     profile_search_audits.c.job_id,
                     profile_search_audits.c.document,
                     profile_search_audits.c.document_sha256,
-                    profile_search_audits.c.created_at,
                 )
                 .join(
                     investigation_jobs,
@@ -3818,9 +3417,6 @@ class CaseStore:
             claim_id = None
             claim_review_status = None
             if decision == "proposed":
-                from maigret.web.evidence_correlation_contract import (
-                    canonical_profile_identity,
-                )
                 from maigret.web.persona_intelligence import (
                     claim_fingerprint,
                     evidence_fingerprint,
@@ -3833,55 +3429,14 @@ class CaseStore:
                     "url": profile_url,
                     "username": str(candidate["handle"]),
                 }
-                canonical_identity = canonical_profile_identity(profile_url)
-                if canonical_identity is None:
-                    raise ValueError(
-                        "Profile-search candidate has no supported identity"
-                    )
-                fingerprint = claim_fingerprint(
-                    "social_account", canonical_identity
-                )
-                correlation = _profile_search_correlation(
-                    case_id,
-                    {
-                        "id": str(audit["id"]),
-                        "document_sha256": str(audit["document_sha256"]),
-                        "document": document,
-                        "created_at": _as_iso(audit["created_at"]),
-                    },
-                )
-                matching_clusters = [
-                    cluster
-                    for cluster in correlation["clusters"]
-                    if cluster.get("canonical_profile_identity")
-                    == canonical_identity
-                ]
-                if len(matching_clusters) != 1:
-                    raise ValueError(
-                        "Profile-search correlation does not match candidate"
-                    )
-                cluster = matching_clusters[0]
-                observed = [
-                    observation
-                    for observation in cluster["observations"]
-                    if observation.get("outcome") == "observed"
-                ]
-                retained_observations = observed[
-                    :MAX_PROFILE_SEARCH_CORRELATED_EVIDENCE
-                ]
-                if not retained_observations:
-                    raise ValueError(
-                        "Profile-search candidate has no observed evidence"
-                    )
-                evidence_rows = []
-                for observation in retained_observations:
-                    citations = list(observation.get("citations") or [])
-                    source_url = (
-                        str(citations[0].get("url") or "")
-                        if citations
-                        else profile_url
-                    )
-                    details = {
+                fingerprint = claim_fingerprint("social_account", value)
+                evidence = {
+                    "evidence_type": "native_profile_search_candidate",
+                    "source_name": (
+                        f"Native profile search · {platform.title()}"
+                    )[:300],
+                    "source_url": profile_url,
+                    "details": {
                         "audit_id": str(audit["id"]),
                         "audit_sha256": str(audit["document_sha256"]),
                         "candidate_id": candidate_id,
@@ -3895,49 +3450,9 @@ class CaseStore:
                         "candidate_identity_unverified": True,
                         "human_review_required": True,
                         "proposed_by": reviewer,
-                        "correlation": {
-                            "observation_id": observation["observation_id"],
-                            "cluster_id": cluster["cluster_id"],
-                            "source_id": observation["source_id"],
-                            "source_version": observation["source_version"],
-                            "source_record_id": observation["source_record_id"],
-                            "outcome": observation["outcome"],
-                            "native_outcome": observation["native_outcome"],
-                            "native_status": observation["native_status"],
-                            "citations": citations,
-                            "retrieved_at": observation["retrieved_at"],
-                            "originating_query": observation[
-                                "originating_query"
-                            ],
-                            "originating_query_fingerprint": observation[
-                                "originating_query_fingerprint"
-                            ],
-                            "source_snapshot_sha256": observation[
-                                "source_snapshot_sha256"
-                            ],
-                            "source_snapshot_ref": observation[
-                                "source_snapshot_ref"
-                            ],
-                            "confidence": cluster["confidence"],
-                        },
-                    }
-                    evidence = {
-                        "evidence_type": "native_profile_search_candidate",
-                        "source_name": (
-                            "Native profile search · "
-                            + str(observation["source_id"])
-                        )[:300],
-                        "source_url": source_url,
-                        "details": details,
-                    }
-                    evidence["fingerprint"] = evidence_fingerprint(
-                        {
-                            "evidence_type": evidence["evidence_type"],
-                            "source_id": observation["source_id"],
-                            "canonical_profile_identity": canonical_identity,
-                        }
-                    )
-                    evidence_rows.append(evidence)
+                    },
+                }
+                evidence["fingerprint"] = evidence_fingerprint(evidence)
                 self._upsert_persona_candidates(
                     connection,
                     persona_id=str(persona["id"]),
@@ -3959,27 +3474,9 @@ class CaseStore:
                             "source_engine": "native_profile_search_review",
                             "source_record_id": candidate_id,
                             "native_status": "candidate_proposed",
-                            "evidence": evidence_rows,
+                            "evidence": [evidence],
                             "observation_details": {
                                 "audit_id": str(audit["id"]),
-                                "audit_sha256": str(audit["document_sha256"]),
-                                "correlation_cluster_id": cluster["cluster_id"],
-                                "correlation_observation_ids": [
-                                    observation["observation_id"]
-                                    for observation in retained_observations
-                                ],
-                                "correlation_observation_count": len(
-                                    observed
-                                ),
-                                "correlation_evidence_count": len(
-                                    retained_observations
-                                ),
-                                "correlation_evidence_truncated": (
-                                    len(observed) > len(retained_observations)
-                                ),
-                                "correlation_confidence": cluster[
-                                    "confidence"
-                                ],
                                 "candidate_identity_unverified": True,
                                 "human_review_required": True,
                             },
@@ -5457,7 +4954,6 @@ class CaseStore:
         )
         evidence_by_claim: Dict[str, list] = {}
         reviews_by_claim: Dict[str, list] = {}
-        coordinates_by_claim: Dict[str, list] = {}
         claim_ids = [claim_row["id"] for claim_row in claim_rows]
         if claim_ids:
             for evidence_row in connection.execute(
@@ -5482,9 +4978,6 @@ class CaseStore:
                 reviews_by_claim.setdefault(review_row["claim_id"], []).append(
                     review_row
                 )
-            for selection in connection.execute(select(location_selections).where(
-                location_selections.c.claim_id.in_(claim_ids)).order_by(location_selections.c.id.desc())).mappings():
-                coordinates_by_claim.setdefault(selection['claim_id'], []).append(selection)
         serialized_claims = []
         for claim_row in claim_rows:
             serialized_claims.append(
@@ -5492,7 +4985,6 @@ class CaseStore:
                     claim_row,
                     evidence_by_claim.get(claim_row["id"], []),
                     reviews_by_claim.get(claim_row["id"], []),
-                    coordinates_by_claim.get(claim_row["id"], []),
                 )
             )
         return {
@@ -5503,7 +4995,6 @@ class CaseStore:
             "display_name": row["display_name"],
             "created_at": _as_iso(row["created_at"]),
             "claims": serialized_claims,
-            "affiliation_sites": list_sites(self, persona_id, connection=connection),
         }
 
     def get_persona(self, persona_id: str) -> Optional[Dict[str, Any]]:
@@ -5521,7 +5012,6 @@ class CaseStore:
                 connection.execute(
                     select(
                         persona_claims.c.field_name,
-                        persona_claims.c.id,
                         persona_claims.c.value,
                         persona_claims.c.review_status,
                     )
@@ -5699,13 +5189,6 @@ class CaseStore:
                 legacy_source = _legacy_untriaged_source_details(
                     existing["source_engine"]
                 )
-                preserve_curated_alias = bool(
-                    not legacy_source
-                    and existing["review_status"] != "pending"
-                    and not _persona_candidate_row_is_exact(
-                        existing, candidate
-                    )
-                )
                 candidate_engine = str(candidate.get("source_engine") or "")
                 reactivate_from_profile = bool(
                     legacy_source
@@ -5734,20 +5217,14 @@ class CaseStore:
                     or existing["review_status"] == "pending"
                 ):
                     confidence = max(confidence, int(candidate["confidence"]))
-                if preserve_curated_alias:
-                    updated_values = {
-                        "last_seen_at": now,
-                        "updated_at": now,
-                    }
-                else:
-                    updated_values = {
-                        "value": candidate["value"],
-                        "display_value": candidate["display_value"],
-                        "normalized_value": candidate["normalized_value"],
-                        "confidence": confidence,
-                        "last_seen_at": now,
-                        "updated_at": now,
-                    }
+                updated_values = {
+                    "value": candidate["value"],
+                    "display_value": candidate["display_value"],
+                    "normalized_value": candidate["normalized_value"],
+                    "confidence": confidence,
+                    "last_seen_at": now,
+                    "updated_at": now,
+                }
                 if legacy_source and reactivate_from_profile:
                     restored_status, _original_engine = legacy_source
                     updated_values.update(
@@ -5799,10 +5276,8 @@ class CaseStore:
                         source_engine=candidate_engine,
                         source_job_id=job_id,
                     )
-                if (
-                    job_id is not None
-                    and not preserve_curated_alias
-                    and (not legacy_source or reactivate_legacy)
+                if job_id is not None and (
+                    not legacy_source or reactivate_legacy
                 ):
                     updated_values["source_job_id"] = job_id
                 if (
@@ -5882,54 +5357,6 @@ class CaseStore:
                             )
                         )
                     continue
-                if (
-                    evidence["evidence_type"]
-                    == "native_profile_search_candidate"
-                    and isinstance(evidence.get("details"), dict)
-                ):
-                    candidate_id = str(
-                        evidence["details"].get("candidate_id") or ""
-                    )
-                    legacy_rows = (
-                        connection.execute(
-                            select(
-                                claim_evidence.c.id,
-                                claim_evidence.c.details,
-                                claim_evidence.c.fingerprint,
-                            )
-                            .where(
-                                claim_evidence.c.claim_id == claim_id,
-                                claim_evidence.c.evidence_type
-                                == "native_profile_search_candidate",
-                            )
-                            .order_by(
-                                claim_evidence.c.observed_at.desc(),
-                                claim_evidence.c.id.desc(),
-                            )
-                        )
-                        .mappings()
-                        .all()
-                    )
-                    legacy = next(
-                        (
-                            row
-                            for row in legacy_rows
-                            if isinstance(row["details"], dict)
-                            and "correlation" not in row["details"]
-                            and str(
-                                row["details"].get("candidate_id") or ""
-                            )
-                            == candidate_id
-                        ),
-                        None,
-                    )
-                    if legacy is not None:
-                        # Preserve the immutable P2 row byte-for-byte. The new
-                        # audit/cluster context is retained by the claim
-                        # observation written below, while its evidence link
-                        # continues to name the existing row fingerprint.
-                        evidence["fingerprint"] = legacy["fingerprint"]
-                        continue
                 connection.execute(
                     insert(claim_evidence).values(
                         id=str(uuid.uuid4()),
@@ -6266,7 +5693,7 @@ class CaseStore:
                 )
         return {"wikipedia_claims": wikipedia_count, "offshore_alerts": offshore_count}
 
-    def sync_persona_claims(self, job_id: str, result: Dict[str, Any], *, connection=None) -> int:
+    def sync_persona_claims(self, job_id: str, result: Dict[str, Any]) -> int:
         """Upsert deterministic claims while preserving every human decision."""
         from maigret.web.collector_adapters import (
             extract_github_profile_claims,
@@ -6277,15 +5704,15 @@ class CaseStore:
         from maigret.web.persona_intelligence import (
             extract_investigation_identifier_claims,
             extract_persona_claims,
+            extract_supplied_profile_claims,
         )
 
         now = utcnow()
         synchronized = 0
         allow_legacy_reactivation = (
-            result.get("profile_reliability_version")
-            == PROFILE_RELIABILITY_VERSION
+            result.get("profile_reliability_version") == PROFILE_RELIABILITY_VERSION
         )
-        with (nullcontext(connection) if connection is not None else self.engine.begin()) as connection:
+        with self.engine.begin() as connection:
             job_row = (
                 connection.execute(
                     select(
@@ -6306,33 +5733,32 @@ class CaseStore:
                     )
                 ).mappings()
             )
-            personas_by_name = {
-                str(row["display_name"]).strip().casefold(): row["id"]
-                for row in persona_rows
-            }
             investigation_spec = dict(job_row["options"] or {}).get(
                 "investigation_spec"
             )
-            target_persona_id = (
-                str(investigation_spec.get("target_persona_id") or "")
-                if isinstance(investigation_spec, dict)
-                else ""
+            grouped_persona_id, personas_by_username = self._job_persona_bindings(
+                investigation_spec, persona_rows
             )
-            grouped_persona_id = next(
-                (
-                    row["id"]
-                    for row in persona_rows
-                    if target_persona_id and row["id"] == target_persona_id
-                ),
-                None,
-            )
-            if (
-                grouped_persona_id is None
-                and isinstance(investigation_spec, dict)
-                and investigation_spec.get("processing_mode") == "same_subject"
-                and len(persona_rows) == 1
-            ):
-                grouped_persona_id = persona_rows[0]["id"]
+            inputs_by_persona: Dict[str, list[str]] = {}
+            for username, persona_ids in personas_by_username.items():
+                for persona_id in persona_ids:
+                    inputs_by_persona.setdefault(persona_id, []).append(username)
+            if grouped_persona_id:
+                inputs_by_persona = {grouped_persona_id: list(personas_by_username)}
+            for persona_id, input_usernames in inputs_by_persona.items():
+                synchronized += self._upsert_persona_candidates(
+                    connection,
+                    persona_id=persona_id,
+                    job_id=job_id,
+                    candidates=extract_supplied_profile_claims(
+                        self._persona_input_specification(
+                            investigation_spec, persona_id
+                        ),
+                        usernames=input_usernames,
+                    ),
+                    now=now,
+                    allow_legacy_reactivation=allow_legacy_reactivation,
+                )
             if grouped_persona_id:
                 synchronized += self._upsert_persona_candidates(
                     connection,
@@ -6346,19 +5772,32 @@ class CaseStore:
                 )
             for report in result.get("individual_reports") or []:
                 username = str(report.get("username") or "").strip()
-                persona_id = grouped_persona_id or personas_by_name.get(
-                    username.casefold()
+                persona_ids = (
+                    [grouped_persona_id]
+                    if grouped_persona_id
+                    else personas_by_username.get(username.casefold(), [])
                 )
-                if not persona_id:
-                    continue
-                synchronized += self._upsert_persona_candidates(
-                    connection,
-                    persona_id=persona_id,
-                    job_id=job_id,
-                    candidates=extract_persona_claims(report),
-                    now=now,
-                    allow_legacy_reactivation=allow_legacy_reactivation,
-                )
+                for persona_id in persona_ids:
+                    scoped_report = dict(
+                        report,
+                        claimed_profiles=[
+                            profile
+                            for profile in report.get("claimed_profiles") or []
+                            if isinstance(profile, dict)
+                            and persona_id
+                            in self._profile_source_persona_ids(
+                                investigation_spec, persona_ids, profile.get("url")
+                            )
+                        ],
+                    )
+                    synchronized += self._upsert_persona_candidates(
+                        connection,
+                        persona_id=persona_id,
+                        job_id=job_id,
+                        candidates=extract_persona_claims(scoped_report),
+                        now=now,
+                        allow_legacy_reactivation=allow_legacy_reactivation,
+                    )
             collector_observations = [
                 observation
                 for observation in result.get("collector_observations") or []
@@ -6369,9 +5808,7 @@ class CaseStore:
                     connection,
                     persona_id=grouped_persona_id,
                     job_id=job_id,
-                    candidates=extract_user_scanner_claims(
-                        collector_observations
-                    ),
+                    candidates=extract_user_scanner_claims(collector_observations),
                     now=now,
                     allow_legacy_reactivation=allow_legacy_reactivation,
                 )
@@ -6389,9 +5826,7 @@ class CaseStore:
                     connection,
                     persona_id=grouped_persona_id,
                     job_id=job_id,
-                    candidates=extract_github_profile_claims(
-                        collector_observations
-                    ),
+                    candidates=extract_github_profile_claims(collector_observations),
                     now=now,
                     allow_legacy_reactivation=allow_legacy_reactivation,
                 )
@@ -6408,50 +5843,71 @@ class CaseStore:
             else:
                 observations_by_username: Dict[str, list] = {}
                 for observation in collector_observations:
-                    username_key = str(
-                        (
-                            observation.get("seed_username")
-                            or observation.get("subject_value")
-                            or ""
+                    username_key = (
+                        str(
+                            (
+                                observation.get("seed_username")
+                                or observation.get("subject_value")
+                                or ""
+                            )
+                            if observation.get("source_engine")
+                            == "user_scanner_username"
+                            else observation.get("subject_value") or ""
                         )
-                        if observation.get("source_engine")
-                        == "user_scanner_username"
-                        else observation.get("subject_value") or ""
-                    ).strip().casefold()
+                        .strip()
+                        .casefold()
+                    )
                     if username_key:
                         observations_by_username.setdefault(username_key, []).append(
                             observation
                         )
                 for username_key, observations in observations_by_username.items():
-                    persona_id = personas_by_name.get(username_key)
-                    if not persona_id:
-                        continue
-                    synchronized += self._upsert_persona_candidates(
-                        connection,
-                        persona_id=persona_id,
-                        job_id=job_id,
-                        candidates=extract_user_scanner_username_claims(
-                            observations
-                        ),
-                        now=now,
-                        allow_legacy_reactivation=allow_legacy_reactivation,
-                    )
-                    synchronized += self._upsert_persona_candidates(
-                        connection,
-                        persona_id=persona_id,
-                        job_id=job_id,
-                        candidates=extract_github_profile_claims(observations),
-                        now=now,
-                        allow_legacy_reactivation=allow_legacy_reactivation,
-                    )
-                    synchronized += self._upsert_persona_candidates(
-                        connection,
-                        persona_id=persona_id,
-                        job_id=job_id,
-                        candidates=extract_profile_url_evidence_claims(observations),
-                        now=now,
-                        allow_legacy_reactivation=allow_legacy_reactivation,
-                    )
+                    for persona_id in personas_by_username.get(username_key, []):
+                        scoped_observations = [
+                            observation
+                            for observation in observations
+                            if persona_id
+                            in self._profile_source_persona_ids(
+                                investigation_spec,
+                                personas_by_username.get(username_key, []),
+                                (
+                                    observation.get("extra")
+                                    if isinstance(observation.get("extra"), dict)
+                                    else {}
+                                ).get("queried_profile_url")
+                                or observation.get("source_url"),
+                            )
+                        ]
+                        synchronized += self._upsert_persona_candidates(
+                            connection,
+                            persona_id=persona_id,
+                            job_id=job_id,
+                            candidates=extract_user_scanner_username_claims(
+                                scoped_observations
+                            ),
+                            now=now,
+                            allow_legacy_reactivation=allow_legacy_reactivation,
+                        )
+                        synchronized += self._upsert_persona_candidates(
+                            connection,
+                            persona_id=persona_id,
+                            job_id=job_id,
+                            candidates=extract_github_profile_claims(
+                                scoped_observations
+                            ),
+                            now=now,
+                            allow_legacy_reactivation=allow_legacy_reactivation,
+                        )
+                        synchronized += self._upsert_persona_candidates(
+                            connection,
+                            persona_id=persona_id,
+                            job_id=job_id,
+                            candidates=extract_profile_url_evidence_claims(
+                                scoped_observations
+                            ),
+                            now=now,
+                            allow_legacy_reactivation=allow_legacy_reactivation,
+                        )
             connection.execute(
                 update(cases).where(cases.c.id == case_id).values(updated_at=now)
             )
@@ -6683,46 +6139,33 @@ class CaseStore:
                     )
                 ).mappings()
             )
-            personas_by_name = {
-                str(row["display_name"]).strip().casefold(): row["id"]
-                for row in persona_rows
-            }
             investigation_spec = dict(job_row["options"] or {}).get(
                 "investigation_spec"
             )
-            target_persona_id = (
-                str(investigation_spec.get("target_persona_id") or "")
-                if isinstance(investigation_spec, dict)
-                else ""
+            grouped_persona_id, personas_by_username = self._job_persona_bindings(
+                investigation_spec, persona_rows
             )
-            grouped_persona_id = next(
-                (
-                    row["id"]
-                    for row in persona_rows
-                    if target_persona_id and row["id"] == target_persona_id
-                ),
-                None,
-            )
-            if (
-                grouped_persona_id is None
-                and isinstance(investigation_spec, dict)
-                and investigation_spec.get("processing_mode") == "same_subject"
-                and len(persona_rows) == 1
-            ):
-                grouped_persona_id = persona_rows[0]["id"]
             for candidate in candidates:
-                persona_id = grouped_persona_id or personas_by_name.get(
-                    candidate["username"].casefold()
+                persona_ids = (
+                    [grouped_persona_id]
+                    if grouped_persona_id
+                    else personas_by_username.get(candidate["username"].casefold(), [])
                 )
-                if not persona_id:
+                persona_ids = self._profile_source_persona_ids(
+                    investigation_spec,
+                    persona_ids,
+                    candidate["evidence"][0].get("source_url"),
+                )
+                if not persona_ids:
                     continue
-                synchronized += self._upsert_persona_candidates(
-                    connection,
-                    persona_id=persona_id,
-                    job_id=job_id,
-                    candidates=[candidate],
-                    now=now,
-                )
+                for persona_id in persona_ids:
+                    synchronized += self._upsert_persona_candidates(
+                        connection,
+                        persona_id=persona_id,
+                        job_id=job_id,
+                        candidates=[candidate],
+                        now=now,
+                    )
                 accepted_proposals.append(
                     {
                         "username": candidate["username"],
@@ -6820,7 +6263,6 @@ class CaseStore:
         note: str = "",
         latitude: Optional[str] = None,
         longitude: Optional[str] = None,
-        *, clear_coordinates: bool = False, coordinate_metadata=None,
     ) -> Optional[str]:
         """Record an auditable human decision and return the persona id."""
         if decision not in {"pending", "approved", "rejected", "uncertain"}:
@@ -6829,10 +6271,6 @@ class CaseStore:
         if not reviewer:
             raise ValueError("A reviewer is required")
         coordinates = self._validated_coordinates(latitude, longitude)
-        if coordinates and not str(note or '').strip():
-            raise ValueError('Explain the source and meaning of the selected coordinates')
-        if coordinates and clear_coordinates:
-            raise ValueError('Choose coordinates or clear coordinates, not both')
         now = utcnow()
         with self.engine.begin() as connection:
             claim = (
@@ -6841,8 +6279,6 @@ class CaseStore:
                         persona_claims.c.persona_id,
                         persona_claims.c.field_name,
                         persona_claims.c.source_engine,
-                        persona_claims.c.latitude,
-                        persona_claims.c.longitude,
                         personas.c.case_id,
                     )
                     .select_from(
@@ -6852,7 +6288,6 @@ class CaseStore:
                         )
                     )
                     .where(persona_claims.c.id == claim_id)
-                    .with_for_update(of=persona_claims)
                 )
                 .mappings()
                 .first()
@@ -6887,35 +6322,10 @@ class CaseStore:
                     original_engine,
                 )
             if coordinates:
-                values.update(latitude=coordinates[0], longitude=coordinates[1])
-            elif clear_coordinates:
-                values.update(latitude=None, longitude=None)
-            if claim['field_name'] in {'address', 'current_location'}:
-                previous = connection.execute(select(location_selections.c.snapshot).where(
-                    location_selections.c.claim_id == claim_id).order_by(location_selections.c.id.desc()).limit(1)).scalar_one_or_none()
-                if coordinates:
-                    supplied = dict(coordinate_metadata or {})
-                    if supplied.get('method', 'analyst_selected') != 'analyst_selected':
-                        raise ValueError('Person coordinates require an explicit analyst selection')
-                    snapshot = {'action': 'select', 'latitude': coordinates[0], 'longitude': coordinates[1],
-                                'method': 'analyst_selected', 'precision': supplied.get('precision', 'analyst_specified'),
-                                'source_url': str(supplied.get('source_url') or '')[:2000],
-                                'source_claim_id': claim_id, 'validation': 'finite_range_only',
-                                'source_evidence': [dict(record) for record in connection.execute(
-                                    select(claim_evidence.c.id, claim_evidence.c.source_url, claim_evidence.c.source_name)
-                                    .where(claim_evidence.c.claim_id == claim_id)).mappings()]}
-                elif clear_coordinates:
-                    snapshot = {'action': 'clear', 'method': 'analyst_selected', 'source_claim_id': claim_id}
-                else:
-                    # Approval of text never adopts AI or legacy coordinates.
-                    snapshot = dict(previous or {'action': 'unmapped', 'method': 'legacy_unknown',
-                                                 'source_claim_id': claim_id})
-                if previous is None and claim.get('latitude') is not None:
-                    snapshot['previous_unreviewed_coordinates'] = {
-                        'latitude': claim.get('latitude'), 'longitude': claim.get('longitude'),
-                        'method': 'legacy_unknown'}
-                append_selection(connection, location_selections, claim_id=claim_id, decision=decision,
-                                 reviewer=reviewer, reason=note, snapshot=snapshot)
+                values.update(
+                    latitude=coordinates[0],
+                    longitude=coordinates[1],
+                )
             connection.execute(
                 update(persona_claims)
                 .where(persona_claims.c.id == claim_id)
@@ -8113,8 +7523,6 @@ class CaseStore:
                         "confidence": int(row["confidence"]),
                         "claim_id": str(row["claim_id"]),
                         "sources": evidence_by_claim.get(str(row["claim_id"]), [])[:10],
-                        "source_count": len(evidence_by_claim.get(str(row['claim_id']), [])),
-                        "provenance_url": f"/personas/{persona_id}#claim-{row['claim_id']}",
                     }
                 )
         nodes = list(persona_nodes.values()) + nodes
@@ -8128,519 +7536,6 @@ class CaseStore:
                 "connection_count": len(edges),
                 "field_counts": field_counts,
             },
-        }
-
-    def build_relationship_state(
-        self,
-        *,
-        case_id: Optional[str] = None,
-        persona_id: Optional[str] = None,
-        mode: str = "shared",
-        graph_ready: bool = False,
-    ) -> Dict[str, Any]:
-        """Summarize bounded persisted diagnostics without changing the graph."""
-        if mode not in {"persona", "shared"}:
-            raise ValueError("Relationship state mode must be persona or shared")
-
-        selected_case_id = str(case_id or "").strip() or None
-        selected_persona_id = str(persona_id or "").strip() or None
-        combined_scope = False
-        scope_kind = mode
-        scope_case_ids: list[str] = []
-        job_case_ids: list[str] = []
-        member_versions: Dict[str, str] = {}
-        scope_truncated = False
-        scope_exists = False
-
-        with self.engine.connect() as connection:
-            if mode == "persona":
-                persona_row = (
-                    connection.execute(
-                        select(personas.c.id, personas.c.case_id).where(
-                            personas.c.id == selected_persona_id
-                        )
-                    )
-                    .mappings()
-                    .first()
-                    if selected_persona_id
-                    else None
-                )
-                if persona_row and (
-                    not selected_case_id
-                    or selected_case_id == str(persona_row["case_id"])
-                ):
-                    selected_case_id = str(persona_row["case_id"])
-                    scope_case_ids = [selected_case_id]
-                    job_case_ids = list(scope_case_ids)
-                    scope_kind = "persona"
-                    scope_exists = True
-            elif selected_case_id:
-                case_row = (
-                    connection.execute(
-                        select(cases.c.id, cases.c.case_type).where(
-                            cases.c.id == selected_case_id
-                        )
-                    )
-                    .mappings()
-                    .first()
-                )
-                if case_row:
-                    scope_exists = True
-                    combined_scope = str(case_row["case_type"]) == "combined"
-                    if combined_scope:
-                        scope_kind = "combined_case"
-                        member_rows = list(
-                            connection.execute(
-                                select(
-                                    combined_case_members.c.source_case_id,
-                                    cases.c.updated_at,
-                                )
-                                .join(
-                                    cases,
-                                    cases.c.id
-                                    == combined_case_members.c.source_case_id,
-                                )
-                                .where(
-                                    combined_case_members.c.combined_case_id
-                                    == selected_case_id
-                                )
-                                .order_by(combined_case_members.c.position)
-                                .limit(MAX_COMBINED_SOURCE_CASES)
-                            ).mappings()
-                        )
-                        scope_case_ids = [
-                            str(row["source_case_id"]) for row in member_rows
-                        ]
-                        member_versions = {
-                            str(row["source_case_id"]): str(
-                                _as_iso(row["updated_at"]) or ""
-                            )
-                            for row in member_rows
-                        }
-                        job_case_ids = [selected_case_id, *scope_case_ids]
-                    else:
-                        scope_kind = "case"
-                        scope_case_ids = [selected_case_id]
-                        job_case_ids = list(scope_case_ids)
-            else:
-                case_rows = list(
-                    connection.execute(
-                        select(cases.c.id)
-                        .where(cases.c.case_type == "standalone")
-                        .order_by(cases.c.updated_at.desc(), cases.c.id)
-                        .limit(MAX_RELATIONSHIP_STATE_CASES + 1)
-                    ).mappings()
-                )
-                scope_truncated = len(case_rows) > MAX_RELATIONSHIP_STATE_CASES
-                scope_case_ids = [
-                    str(row["id"])
-                    for row in case_rows[:MAX_RELATIONSHIP_STATE_CASES]
-                ]
-                job_case_ids = list(scope_case_ids)
-                scope_kind = "all_cases"
-                scope_exists = bool(scope_case_ids)
-            if not scope_exists:
-                return {
-                    "schema_version": 1,
-                    "status": "no_scope",
-                    "reason": "no_scope",
-                    "scope": {
-                        "kind": scope_kind,
-                        "case_id": selected_case_id,
-                        "persona_id": selected_persona_id,
-                        "case_count": 0,
-                        "persona_count": 0,
-                        "truncated": scope_truncated,
-                    },
-                    "counts": {
-                        "active_jobs": 0,
-                        "failed_jobs": 0,
-                        "pending_reviews": 0,
-                        "uncertain_reviews": 0,
-                        "approved_reviews": 0,
-                        "rejected_reviews": 0,
-                        "legacy_untriaged": 0,
-                        "provider_issues": 0,
-                    },
-                    "latest_plan": None,
-                    "diagnostics": [],
-                    "diagnostics_truncated": False,
-                }
-
-            persona_scope = [personas.c.case_id.in_(scope_case_ids)]
-            if mode == "persona":
-                persona_scope.append(personas.c.id == selected_persona_id)
-            claim_scope = list(persona_scope)
-            if mode == "shared":
-                claim_scope.append(persona_claims.c.field_name.in_(RELATIONSHIP_FIELDS))
-            current_claim_scope = [
-                *claim_scope,
-                ~persona_claims.c.source_engine.like(
-                    f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}%"
-                ),
-            ]
-            claim_join = persona_claims.join(
-                personas, personas.c.id == persona_claims.c.persona_id
-            )
-
-            review_counts = {
-                status: int(
-                    connection.scalar(
-                        select(func.count())
-                        .select_from(claim_join)
-                        .where(
-                            *current_claim_scope,
-                            persona_claims.c.review_status == status,
-                        )
-                    )
-                    or 0
-                )
-                for status in ("pending", "uncertain", "approved", "rejected")
-            }
-            legacy_untriaged_count = int(
-                connection.scalar(
-                    select(func.count())
-                    .select_from(claim_join)
-                    .where(
-                        *claim_scope,
-                        persona_claims.c.source_engine.like(
-                            f"{LEGACY_UNTRIAGED_SOURCE_PREFIX}%"
-                        ),
-                    )
-                )
-                or 0
-            )
-            persona_count = int(
-                connection.scalar(
-                    select(func.count()).select_from(personas).where(*persona_scope)
-                )
-                or 0
-            )
-
-            job_rows = list(
-                connection.execute(
-                    select(investigation_jobs)
-                    .where(
-                        investigation_jobs.c.case_id.in_(job_case_ids),
-                        investigation_jobs.c.kind != "case_fusion_ai",
-                    )
-                    .order_by(
-                        investigation_jobs.c.created_at.desc(),
-                        investigation_jobs.c.id.desc(),
-                    )
-                    .limit(MAX_RELATIONSHIP_STATE_JOBS + 1)
-                ).mappings()
-            )
-            jobs_truncated = len(job_rows) > MAX_RELATIONSHIP_STATE_JOBS
-            bounded_job_rows = job_rows[:MAX_RELATIONSHIP_STATE_JOBS]
-            latest_by_case: Dict[str, Any] = {}
-            for row in bounded_job_rows:
-                latest_by_case.setdefault(str(row["case_id"]), row)
-            current_jobs = list(latest_by_case.values())
-            current_job_ids = [str(row["id"]) for row in current_jobs]
-
-            event_rows = (
-                list(
-                    connection.execute(
-                        select(
-                            investigation_events.c.job_id,
-                            investigation_events.c.event,
-                        )
-                        .where(investigation_events.c.job_id.in_(current_job_ids))
-                        .order_by(investigation_events.c.id.desc())
-                        .limit(MAX_RELATIONSHIP_STATE_EVENTS + 1)
-                    ).mappings()
-                )
-                if current_job_ids
-                else []
-            )
-            events_truncated = len(event_rows) > MAX_RELATIONSHIP_STATE_EVENTS
-            bounded_events = event_rows[:MAX_RELATIONSHIP_STATE_EVENTS]
-            audit_rows = (
-                list(
-                    connection.execute(
-                        select(
-                            profile_search_audits.c.job_id,
-                            profile_search_audits.c.status,
-                            profile_search_audits.c.document,
-                        )
-                        .where(profile_search_audits.c.job_id.in_(current_job_ids))
-                        .order_by(profile_search_audits.c.created_at.desc())
-                        .limit(MAX_RELATIONSHIP_STATE_AUDITS + 1)
-                    ).mappings()
-                )
-                if current_job_ids
-                else []
-            )
-            audits_truncated = len(audit_rows) > MAX_RELATIONSHIP_STATE_AUDITS
-            bounded_audits = audit_rows[:MAX_RELATIONSHIP_STATE_AUDITS]
-
-            completed_fusion = next(
-                (
-                    row
-                    for row in bounded_job_rows
-                    if combined_scope
-                    and str(row["case_id"]) == selected_case_id
-                    and str(row["kind"]) == "case_fusion"
-                    and str(row["status"]) == "completed"
-                ),
-                None,
-            )
-            proposal_counts = {
-                "pending": 0,
-                "uncertain": 0,
-                "approved": 0,
-                "rejected": 0,
-            }
-            if completed_fusion is not None:
-                proposal_rows = connection.execute(
-                    select(
-                        combined_relationship_proposals.c.review_status,
-                        func.count().label("review_count"),
-                    )
-                    .join(
-                        combined_analysis_runs,
-                        combined_analysis_runs.c.id
-                        == combined_relationship_proposals.c.analysis_run_id,
-                    )
-                    .where(
-                        combined_analysis_runs.c.combined_case_id
-                        == selected_case_id,
-                        combined_analysis_runs.c.job_id == completed_fusion["id"],
-                        combined_analysis_runs.c.status == "completed",
-                    )
-                    .group_by(combined_relationship_proposals.c.review_status)
-                ).mappings()
-                for row in proposal_rows:
-                    status = str(row["review_status"])
-                    if status in proposal_counts:
-                        proposal_counts[status] = int(row["review_count"] or 0)
-
-        active_jobs = sum(
-            str(row["status"]) in ACTIVE_STATUSES for row in current_jobs
-        )
-        failed_jobs = sum(str(row["status"]) == "failed" for row in current_jobs)
-        cancel_requested = any(
-            str(row["status"]) == "cancel_requested" for row in current_jobs
-        )
-        partial_completion = False
-        budget_limited = False
-        cancelled = False
-        interrupted = False
-        blocked_provider = False
-        degraded_provider = False
-        provider_issue_count = 0
-        plan_summaries = []
-
-        for row in current_jobs:
-            status = str(row["status"])
-            result = dict(row["result"] or {})
-            collection_status = str(result.get("collection_status") or "").casefold()
-            if status == "completed" and collection_status in {
-                "budget_exhausted",
-                "cancelled",
-                "interrupted",
-            }:
-                partial_completion = True
-            budget_limited = budget_limited or status == "budget_exhausted" or (
-                collection_status == "budget_exhausted"
-            )
-            cancelled = cancelled or status == "cancelled" or (
-                collection_status == "cancelled"
-            )
-            interrupted = interrupted or status == "interrupted" or (
-                collection_status == "interrupted"
-            )
-            if str(result.get("affiliation_status") or "").casefold() == "partial":
-                partial_completion = True
-            if list(result.get("source_errors") or []):
-                degraded_provider = True
-                provider_issue_count += 1
-            for observation in list(result.get("collector_observations") or [])[:500]:
-                if not isinstance(observation, Mapping):
-                    continue
-                outcome = str(observation.get("status") or "").casefold()
-                if outcome in RELATIONSHIP_STATE_BLOCKED_OUTCOMES:
-                    blocked_provider = True
-                    provider_issue_count += 1
-                elif outcome in RELATIONSHIP_STATE_DEGRADED_OUTCOMES:
-                    degraded_provider = True
-                    provider_issue_count += 1
-
-            options = row["options"] if isinstance(row["options"], Mapping) else {}
-            specification = options.get("investigation_spec")
-            specification = specification if isinstance(specification, Mapping) else {}
-            route_plan = specification.get("route_plan")
-            if isinstance(route_plan, Mapping):
-                effective_routes = [
-                    str(item.get("route") or "")[:64]
-                    for item in list(route_plan.get("effective_routes") or [])[:16]
-                    if isinstance(item, Mapping) and item.get("route")
-                ]
-                requested_mode = str(route_plan.get("requested_mode") or "").casefold()
-                execution_mode = str(route_plan.get("execution_mode") or "").casefold()
-                label_source = requested_mode or execution_mode
-                mode_label = {
-                    "quick": "Quick Scan",
-                    "focused": "Quick Scan",
-                    "full": "Full Scan",
-                    "exhaustive": "Full Scan",
-                }.get(label_source)
-                plan_summaries.append(
-                    {
-                        "job_id": str(row["id"]),
-                        "requested_mode": requested_mode or None,
-                        "execution_mode": execution_mode or None,
-                        "mode_label": mode_label,
-                        "effective_routes": effective_routes,
-                        "effective_route_count": len(effective_routes),
-                        "skipped_route_count": len(
-                            list(route_plan.get("skipped_routes") or [])[:32]
-                        ),
-                        "budget_seconds": route_plan.get("budget_seconds"),
-                    }
-                )
-
-        for row in bounded_events:
-            event_payload = row["event"]
-            event_payload = event_payload if isinstance(event_payload, Mapping) else {}
-            event_type = str(event_payload.get("type") or "").casefold()
-            event_status = str(event_payload.get("status") or "").casefold()
-            if event_type == "budget_exhausted":
-                budget_limited = True
-            if event_type == "provider_circuit_open" or (
-                event_status in RELATIONSHIP_STATE_BLOCKED_OUTCOMES
-            ):
-                blocked_provider = True
-                provider_issue_count += 1
-            elif event_type in {"collector_error", "error"} or (
-                event_status in RELATIONSHIP_STATE_DEGRADED_OUTCOMES
-            ):
-                degraded_provider = True
-                provider_issue_count += 1
-            if event_status == "partial":
-                partial_completion = True
-
-        for row in bounded_audits:
-            audit_status = str(row["status"] or "").casefold()
-            if audit_status == "partial":
-                partial_completion = True
-            if audit_status in {"partial", "failed"}:
-                degraded_provider = True
-                provider_issue_count += 1
-            document = row["document"] if isinstance(row["document"], Mapping) else {}
-            for run in list(document.get("runs") or [])[:100]:
-                if not isinstance(run, Mapping):
-                    continue
-                error = run.get("error")
-                error = error if isinstance(error, Mapping) else {}
-                outcome = str(error.get("code") or "").casefold()
-                if outcome in RELATIONSHIP_STATE_BLOCKED_OUTCOMES:
-                    blocked_provider = True
-                elif outcome in RELATIONSHIP_STATE_DEGRADED_OUTCOMES:
-                    degraded_provider = True
-
-        stale_snapshot = False
-        if combined_scope and completed_fusion is not None:
-            result = dict(completed_fusion["result"] or {})
-            snapshot = result.get("snapshot")
-            snapshot = snapshot if isinstance(snapshot, Mapping) else {}
-            snapshot_versions = {
-                str(item.get("id")): str(item.get("updated_at") or "")
-                for item in list(snapshot.get("source_cases") or [])
-                if isinstance(item, Mapping) and item.get("id")
-            }
-            stale_snapshot = bool(snapshot_versions) and (
-                set(snapshot_versions) != set(member_versions)
-                or any(
-                    snapshot_versions[source_case_id]
-                    != member_versions[source_case_id]
-                    for source_case_id in snapshot_versions.keys()
-                    & member_versions.keys()
-                )
-            )
-
-        review_counts["pending"] += proposal_counts["pending"]
-        review_counts["uncertain"] += proposal_counts["uncertain"]
-        review_counts["approved"] += proposal_counts["approved"]
-        review_counts["rejected"] += proposal_counts["rejected"]
-        pending_review_count = review_counts["pending"] + review_counts["uncertain"]
-
-        diagnostics = []
-        for enabled, code in (
-            (failed_jobs > 0, "failed_collection"),
-            (partial_completion, "partial_completion"),
-            (budget_limited, "budget_limited"),
-            (cancelled, "cancelled"),
-            (interrupted, "interrupted"),
-            (blocked_provider, "blocked_provider"),
-            (degraded_provider, "degraded_provider"),
-            (stale_snapshot, "stale_snapshot"),
-        ):
-            if enabled:
-                diagnostics.append(code)
-
-        if active_jobs:
-            state_status = "active_collection"
-            state_reason = "cancel_requested" if cancel_requested else "active_collection"
-        elif graph_ready:
-            state_status = "graph_ready"
-            state_reason = "qualifying_relationship"
-        elif pending_review_count:
-            state_status = "pending_review"
-            state_reason = "pending_review"
-        elif failed_jobs:
-            state_status = "failed"
-            state_reason = "failed_collection"
-        elif diagnostics:
-            state_status = "degraded"
-            state_reason = next(
-                code
-                for code in (
-                    "stale_snapshot",
-                    "budget_limited",
-                    "interrupted",
-                    "cancelled",
-                    "blocked_provider",
-                    "partial_completion",
-                    "degraded_provider",
-                )
-                if code in diagnostics
-            )
-        else:
-            state_status = "clean_empty"
-            state_reason = "no_qualifying_relationship"
-
-        return {
-            "schema_version": 1,
-            "status": state_status,
-            "reason": state_reason,
-            "scope": {
-                "kind": scope_kind,
-                "case_id": selected_case_id,
-                "persona_id": selected_persona_id,
-                "case_count": len(scope_case_ids),
-                "persona_count": persona_count,
-                "truncated": scope_truncated,
-            },
-            "counts": {
-                "active_jobs": active_jobs,
-                "failed_jobs": failed_jobs,
-                "pending_reviews": review_counts["pending"],
-                "uncertain_reviews": review_counts["uncertain"],
-                "approved_reviews": review_counts["approved"],
-                "rejected_reviews": review_counts["rejected"],
-                "legacy_untriaged": legacy_untriaged_count,
-                "provider_issues": provider_issue_count,
-            },
-            "latest_plan": plan_summaries[0] if plan_summaries else None,
-            "diagnostics": diagnostics,
-            "diagnostics_truncated": bool(
-                scope_truncated
-                or jobs_truncated
-                or events_truncated
-                or audits_truncated
-            ),
         }
 
     def build_persona_graph(self, persona_id: str) -> Dict[str, Any]:
@@ -8748,7 +7643,7 @@ class CaseStore:
         }
 
     @staticmethod
-    def _serialize_claim(claim_row, evidence_rows, review_rows, coordinate_rows=()) -> Dict[str, Any]:
+    def _serialize_claim(claim_row, evidence_rows, review_rows) -> Dict[str, Any]:
         legacy_untriaged = _legacy_untriaged_source_details(
             claim_row["source_engine"]
         )
@@ -8792,8 +7687,6 @@ class CaseStore:
             "normalized_value": claim_row["normalized_value"],
             "latitude": claim_row["latitude"],
             "longitude": claim_row["longitude"],
-            **(coordinate_projection(dict(claim_row), coordinate_rows)
-               if claim_row['field_name'] in {'address', 'current_location'} else {}),
             "evidence": active_evidence,
             "retired_evidence": retired_evidence,
             "reviews": [
@@ -8807,14 +7700,13 @@ class CaseStore:
             ],
         }
 
-    def request_cancel(self, job_id: str, *, requested_by='local-operator', origin='operator') -> bool:
+    def request_cancel(self, job_id: str) -> bool:
         now = utcnow()
-        event_types = []
+        event_type = None
         with self.engine.begin() as connection:
             statement = select(
                 investigation_jobs.c.status,
                 investigation_jobs.c.usernames,
-                investigation_jobs.c.options,
                 investigation_jobs.c.cancel_requested,
                 investigation_jobs.c.cancel_requested_at,
             ).where(investigation_jobs.c.id == job_id)
@@ -8838,8 +7730,6 @@ class CaseStore:
                     ),
                     "usernames": list(row["usernames"] or []),
                     "session_folder": f"search_{job_id}",
-                    "lifecycle": {"phase": "terminal", "stop_cause": "operator_cancel",
-                                  "cleanup_state": "not_required"},
                 }
                 connection.execute(
                     update(investigation_jobs)
@@ -8855,12 +7745,7 @@ class CaseStore:
                         updated_at=now,
                     )
                 )
-                options = row["options"]
-                options = options if isinstance(options, Mapping) else {}
-                if isinstance(options.get("governed_pivot_plan"), Mapping):
-                    event_types.append("cancel_requested")
-                event_types.append("cancelled")
-                event_types.append("done")
+                event_type = "cancelled"
             else:
                 connection.execute(
                     update(investigation_jobs)
@@ -8872,15 +7757,8 @@ class CaseStore:
                         updated_at=now,
                     )
                 )
-                event_types.append("cancel_requested")
-            for event_type in event_types:
-                event = {'type': event_type, 'stop_cause': 'operator_cancel',
-                         'requested_by': str(requested_by or 'local-operator')[:200],
-                         'origin': str(origin or 'operator')[:100], 'requested_at': now.isoformat()}
-                if event_type == 'done':
-                    event.update(status='cancelled', reason='operator_cancel')
-                connection.execute(insert(investigation_events).values(
-                    job_id=job_id, event=event, created_at=now))
+                event_type = "cancel_requested"
+        self.append_event(job_id, {"type": event_type})
         return True
 
     def is_cancel_requested(self, job_id: str) -> bool:
@@ -8916,9 +7794,6 @@ class CaseStore:
         result: Dict[str, Any],
         *,
         worker_id: Optional[str] = None,
-        synchronize_claims: bool = False,
-        publication=None,
-        terminal_event=None,
     ) -> bool:
         """Publish a terminal result once, optionally enforcing worker ownership."""
         status = str(result.get("status", "failed"))
@@ -8930,8 +7805,6 @@ class CaseStore:
                 investigation_jobs.c.id == job_id,
                 investigation_jobs.c.status.in_(("running", "cancel_requested")),
             ]
-            if status == 'completed' and result.get('collection_status') != 'cancelled':
-                conditions.append(investigation_jobs.c.status == 'running')
             if worker_id is not None:
                 conditions.extend(
                     (
@@ -8941,16 +7814,6 @@ class CaseStore:
                         >= now - timedelta(seconds=WORKER_STALE_AFTER_SECONDS),
                     )
                 )
-            if synchronize_claims or publication is not None or terminal_event is not None:
-                guard = select(investigation_jobs.c.id).where(*conditions)
-                if self.engine.dialect.name == 'postgresql':
-                    guard = guard.with_for_update()
-                if connection.execute(guard).scalar_one_or_none() is None:
-                    return False
-                if synchronize_claims:
-                    self.sync_persona_claims(job_id, result, connection=connection)
-                if publication is not None:
-                    publication()
             updated = connection.execute(
                 update(investigation_jobs)
                 .where(*conditions)
@@ -8963,40 +7826,34 @@ class CaseStore:
                     updated_at=now,
                 )
             )
-            if updated.rowcount and terminal_event is not None:
-                connection.execute(insert(investigation_events).values(
-                    job_id=job_id, event=dict(terminal_event), created_at=now,
-                ))
         return bool(updated.rowcount)
 
     def mark_stale_running(
-        self, stale_after_seconds: int = WORKER_STALE_AFTER_SECONDS,
-        *, job_id=None, worker_id=None, stop_cause='lease_lost',
+        self, stale_after_seconds: int = WORKER_STALE_AFTER_SECONDS
     ) -> int:
         cutoff = utcnow() - timedelta(seconds=max(0, stale_after_seconds))
         now = utcnow()
         with self.engine.begin() as connection:
-            stale_statement = select(
-                investigation_jobs.c.id, investigation_jobs.c.kind,
-                investigation_jobs.c.options, investigation_jobs.c.progress,
-            ).where(
-                investigation_jobs.c.status.in_(("running", "cancel_requested")),
-                or_(investigation_jobs.c.heartbeat_at.is_(None),
-                    investigation_jobs.c.heartbeat_at < cutoff),
+            stale_rows = list(
+                connection.execute(
+                    select(
+                        investigation_jobs.c.id,
+                        investigation_jobs.c.kind,
+                        investigation_jobs.c.options,
+                    ).where(
+                        investigation_jobs.c.status.in_(
+                            ("running", "cancel_requested")
+                        ),
+                        or_(
+                            investigation_jobs.c.heartbeat_at.is_(None),
+                            investigation_jobs.c.heartbeat_at < cutoff,
+                        ),
+                    )
+                ).mappings()
             )
-            if job_id is not None:
-                if not worker_id:
-                    raise ValueError('Scoped reconciliation requires the previous worker lease')
-                stale_statement = stale_statement.where(investigation_jobs.c.id == job_id,
-                                                        investigation_jobs.c.worker_id == worker_id)
-            if self.engine.dialect.name == 'postgresql':
-                stale_statement = stale_statement.with_for_update(skip_locked=True)
-            stale_rows = list(connection.execute(stale_statement).mappings())
-            stale_ids = [row['id'] for row in stale_rows]
             result = connection.execute(
                 update(investigation_jobs)
                 .where(
-                    investigation_jobs.c.id.in_(stale_ids),
                     investigation_jobs.c.status.in_(("running", "cancel_requested")),
                     or_(
                         investigation_jobs.c.heartbeat_at.is_(None),
@@ -9016,66 +7873,6 @@ class CaseStore:
                 for row in stale_rows
                 if str(row["kind"]) == "case_fusion"
             }
-            for row in stale_rows:
-                if row['kind'] not in PROFILE_DISCOVERY_JOB_KINDS:
-                    continue
-                progress = dict(row['progress'] or {})
-                native = dict((progress.get('native_profile_checkpoint') or {}).get('document') or {})
-                task_events = connection.scalars(select(investigation_events.c.event).where(
-                    investigation_events.c.job_id == row['id'],
-                    investigation_events.c.event['type'].as_string().in_(
-                        ['collection_task_plan', 'collection_task_terminal', 'collection_task_cleanup']
-                    ),
-                ).order_by(investigation_events.c.id))
-                accounting = interrupted_collection_accounting(
-                    progress.get('collection_accounting'), task_events, native,
-                )
-                retained = dict(progress.get('collection_checkpoint') or {})
-                message = ('The worker stopped; committed evidence remains available for review.'
-                           if retained else 'The worker stopped before a collection checkpoint was saved.')
-                if accounting is None:
-                    # Claim-to-first-event crashes have no justified task counts.
-                    # Persist an explicit unknown snapshot and one terminal event.
-                    accounting = {'schema_version': 1, 'revision': 0,
-                                  'state': 'interrupted', 'known': False, 'stages': []}
-                progress['collection_accounting'] = accounting
-                lifecycle = {'phase': 'terminal', 'stop_cause': stop_cause,
-                             'cleanup_state': 'terminated' if job_id else 'unknown'}
-                progress['lifecycle'] = lifecycle
-                retained['lifecycle'] = lifecycle
-                retained.update(status='interrupted', collection_status='interrupted',
-                                collection_accounting=accounting, collection_message=message)
-                connection.execute(update(investigation_jobs).where(
-                    investigation_jobs.c.id == row['id'],
-                    investigation_jobs.c.status == 'interrupted',
-                    investigation_jobs.c.worker_id.is_(None),
-                ).values(progress=progress, result=retained))
-                connection.execute(insert(investigation_events).values(
-                    job_id=row['id'], created_at=now,
-                    event={'type': 'done', 'status': 'interrupted',
-                           'reason': stop_cause, 'collection_accounting': accounting, 'lifecycle': lifecycle},
-                ))
-                if native and not connection.scalar(select(profile_search_audits.c.id).where(
-                    profile_search_audits.c.job_id == row['id']
-                ).limit(1)):
-                    # Promote the last validated checkpoint into one immutable
-                    # review audit. No provider is invoked during reconciliation.
-                    native['interrupted_query_count'] = native.get('interrupted_query_count', 0) + native.get('active_query_count', 0)
-                    native.update(active_query_count=0, final=True)
-                    stopped = native['executed_query_count'] < native['planned_query_count']
-                    status = ('stopped' if stopped else 'completed' if not native['error_count'] else
-                              'failed' if native['error_count'] == native['executed_query_count'] else 'partial')
-                    native.update(status=status, stopped=stopped)
-                    digest = hashlib.sha256(json.dumps(native, ensure_ascii=False, sort_keys=True,
-                                                       separators=(',', ':')).encode()).hexdigest()
-                    connection.execute(insert(profile_search_audits).values(
-                        id=str(uuid.uuid4()), job_id=row['id'], status=status, stopped=stopped,
-                        orchestration_version=native['orchestration_version'],
-                        planned_query_count=native['planned_query_count'],
-                        executed_query_count=native['executed_query_count'],
-                        error_count=native['error_count'], candidate_count=native['candidate_count'],
-                        document_sha256=digest, document=native, created_at=now,
-                    ))
             for row in stale_rows:
                 if str(row["kind"]) != "case_fusion_ai":
                     continue
@@ -9458,12 +8255,6 @@ class CaseStore:
         payload["deadline_at"] = _as_iso(row.get("deadline_at"))
         payload["usernames"] = list(row["usernames"] or result.get("usernames") or [])
         payload["progress"] = dict(row["progress"] or {})
-        payload["progress"].pop('collection_checkpoint', None)
-        payload["progress"].pop('native_profile_checkpoint', None)
-        if not payload.get('collection_accounting'):
-            accounting = public_collection_accounting(payload['progress'].get('collection_accounting'))
-            if accounting is not None:
-                payload['collection_accounting'] = accounting
         payload["session_folder"] = result.get("session_folder", f"search_{row['id']}")
         payload["started_at"] = result.get("started_at") or payload["started_at"]
         return payload

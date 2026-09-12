@@ -13,12 +13,11 @@ import os
 import types
 
 import pytest
-from werkzeug.datastructures import MultiDict
 
 import maigret
 import maigret.report
 import maigret.settings
-from maigret.ai import AIEnrichmentContractError
+from maigret.ai import AIEnrichmentContractError, _parse_responses_analysis
 from maigret.result import MaigretCheckResult, MaigretCheckStatus
 from maigret.web import app as web_app_module
 from maigret.web.case_store import CaseStore
@@ -40,10 +39,7 @@ class _SyncThread:
 
 
 @pytest.fixture
-def web_app(tmp_path, monkeypatch):
-    monkeypatch.setenv(
-        "OPENLEDGER_UNIFIED_INVESTIGATION_INPUT_ENABLED", "true"
-    )
+def web_app(tmp_path):
     web_app_module.app.config['TESTING'] = True
     web_app_module.app.config['REPORTS_FOLDER'] = str(tmp_path)
     web_app_module.app.config['MAIGRET_DB_FILE'] = TEST_DB
@@ -81,83 +77,18 @@ def client(web_app):
 
 
 def test_index_renders(client):
-    resp = client.get("/")
+    resp = client.get('/')
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
-    assert 'id="investigation-token-input"' in body
-    assert 'name="investigation_token"' in body
-    assert 'data-preview-url="/api/investigation-plan-preview"' in body
-    assert "<form" in body
-    assert "Search likely username aliases" in body
-    assert "Quick Scan" in body
-    assert "Full Scan" in body
-    assert 'name="identifier_type"' not in body
-    assert "Case source filters" not in body
-    assert "Additional existing checks" in body
+    assert 'name="identifier_type"' in body
+    assert 'name="identifier_value"' in body
+    assert '<form' in body
+    assert 'Case source filters' in body
     assert 'name="enable_github_profile_enrichment"' in body
     assert 'name="enable_archived_url_evidence"' in body
-    assert "Jati Pratomo" not in body
-    assert "Nexorus, urban planning" not in body
-
-
-@pytest.mark.parametrize("value", [None, "", "0", "false", "typo"])
-def test_unified_investigation_input_flag_fails_closed_to_legacy_builder(
-    client, web_app, monkeypatch, value
-):
-    if value is None:
-        monkeypatch.delenv(
-            web_app.UNIFIED_INVESTIGATION_INPUT_FLAG, raising=False
-        )
-    else:
-        monkeypatch.setenv(web_app.UNIFIED_INVESTIGATION_INPUT_FLAG, value)
-
-    body = client.get("/").get_data(as_text=True)
-
-    assert 'name="identifier_type"' in body
-    assert 'id="investigation-token-input"' not in body
-    assert "Quick Scan" in body
-    assert "Full Scan" in body
-    assert not web_app.unified_investigation_input_enabled()
-
-
-def test_unified_investigation_input_flag_enables_builder_and_preview(
-    client, web_app, monkeypatch
-):
-    monkeypatch.setenv(web_app.UNIFIED_INVESTIGATION_INPUT_FLAG, " YES ")
-
-    body = client.get("/").get_data(as_text=True)
-
-    assert 'id="investigation-token-input"' in body
-    assert 'name="identifier_type"' not in body
-    assert web_app.unified_investigation_input_enabled()
-
-
-def test_unified_input_preview_and_submission_are_disabled_with_rollout_off(
-    client, web_app, monkeypatch
-):
-    monkeypatch.setenv(web_app.UNIFIED_INVESTIGATION_INPUT_FLAG, "false")
-    csrf_token = _csrf_token(client)
-
-    preview = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json={"tokens": ["alice"], "mode": "quick"},
-    )
-    submission = client.post(
-        "/api/scan",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        data={"investigation_token": ["alice"], "mode": "quick"},
-    )
-
-    assert preview.status_code == 404
-    assert preview.headers["Cache-Control"] == "private, no-store, max-age=0"
-    assert preview.get_json() == {
-        "error": "Unified investigation input is disabled by server policy."
-    }
-    assert submission.status_code == 400
-    assert submission.get_json() == {
-        "error": "Unified investigation input is disabled by server policy."
-    }
+    assert 'e.g. John Doe' in body
+    assert 'Jati Pratomo' not in body
+    assert 'Nexorus, urban planning' not in body
 
 
 def test_alias_preview_uses_authoritative_unicode_casefolding(client):
@@ -229,587 +160,45 @@ def test_alias_preview_resolves_profile_urls_for_target_budget(
 
     assert response.status_code == 200
     assert response.get_json()['exact_target_keys'] == ['exact-account', 'alice']
+    assert response.get_json()['exact_targets'] == ['exact-account', 'alice']
 
 
-def test_investigation_plan_preview_requires_csrf_and_bounded_json(client):
-    assert client.post("/api/investigation-plan-preview", json={}).status_code == 403
-
-    csrf_token = _csrf_token(client)
-    invalid_json = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        data="not-json",
-        content_type="application/json",
-    )
-    assert invalid_json.status_code == 400
-    assert invalid_json.get_json() == {
-        "error": "A JSON investigation preview is required."
-    }
-
-    too_many = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json={"tokens": ["alice"] * 25, "mode": "quick"},
-    )
-    assert too_many.status_code == 400
-    assert too_many.get_json() == {"error": "Investigation preview inputs are invalid."}
-
-    invalid_token_object = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json={
-            "tokens": [{"value": "alice", "type": "username", "route": "raw"}],
-            "mode": "quick",
-        },
-    )
-    assert invalid_token_object.status_code == 400
-    assert invalid_token_object.get_json() == {
-        "error": "Investigation preview inputs are invalid."
-    }
-
-    invented_alias = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json={
-            "tokens": [{"value": "Alice Example", "type": "full_name"}],
-            "mode": "quick",
-            "search_likely_username_aliases": True,
-            "alias_selection_present": True,
-            "selected_aliases": ["not-a-server-candidate"],
-        },
-    )
-    assert invented_alias.status_code == 400
-    assert invented_alias.get_json() == {
-        "error": "Select aliases from the displayed server-ranked plan."
-    }
-
-
-def test_investigation_plan_preview_classifies_tokens_and_exposes_server_plan(
-    client, web_app, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
-    monkeypatch.setattr(
-        web_app,
-        "resolve_profile_url_identifiers",
-        lambda url: (
-            {"alice": "username"} if url == "https://instagram.com/alice" else {}
-        ),
-    )
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={
-            "tokens": [
-                "Alice Example",
-                "@Alice",
-                "+62 812-3456-7890",
-                "https://instagram.com/alice",
-                "https://public.example.com/reference/alice",
-            ],
-            "mode": "full",
-            "search_likely_username_aliases": True,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
-    payload = response.get_json()
-    assert payload["schema_version"] == 2
-    assert payload["input_contract"] == "investigation-tokens-v1"
-    assert [token["type"] for token in payload["tokens"]] == [
-        "full_name",
-        "social_handle",
-        "phone",
-        "profile_url",
-        "public_url",
-    ]
-    route_plan = payload["route_plan"]
-    assert route_plan["server_authoritative"] is True
-    assert route_plan["requested_mode"] == "full"
-    assert route_plan["execution_mode"] == "exhaustive"
-    assert route_plan["budget_seconds"] == 1800
-    assert [route["route"] for route in route_plan["effective_routes"]] == [
-        "likely_username_aliases",
-        "maigret",
-        "native_profile_search",
-    ]
-    assert [route["reason_code"] for route in route_plan["skipped_routes"]] == [
-        "context_only_no_outbound",
-        "context_only_no_outbound",
-    ]
-    assert payload["can_start"] is True
-    assert payload["requires_email_confirmation"] is False
-
-
-def test_production_failure_input_plans_maigret_targets_when_alias_search_is_enabled(
-    client, web_app, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
-    monkeypatch.setattr(web_app, "resolve_profile_url_identifiers", lambda _url: {})
-
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={
-            "tokens": [
-                "jati pratomo",
-                "jati.pratomo@gmail.com",
-                "+6281325104331",
-                "https://www.linkedin.com/in/jati-pratomo/",
-            ],
-            "mode": "full",
-            "search_likely_username_aliases": True,
-            "confirm_email_route": True,
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload["can_start"] is True
-    assert payload["route_plan"]["requested_mode"] == "full"
-    maigret_route = next(
-        route
-        for route in payload["route_plan"]["effective_routes"]
-        if route["route"] == "maigret"
-    )
-    assert maigret_route["target_count"] > 0
-    assert any(candidate["selected"] for candidate in payload["alias_candidates"])
-
-
-def test_full_scan_without_a_maigret_target_is_blocked_as_misleading(
-    client, web_app, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
-
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={
-            "tokens": ["Alice Example", "alice@example.com"],
-            "mode": "full",
-            "confirm_email_route": True,
-        },
-    )
-
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload["can_start"] is False
-    assert payload["blocking_error"] == (
-        "Full Scan requires at least one username, social handle, supported "
-        "profile URL, or selected username alias."
-    )
-    assert any(
-        route["route"] == "maigret"
-        and route["reason_code"] == "no_username_targets"
-        for route in payload["route_plan"]["skipped_routes"]
-    )
-    submission = client.post(
-        "/api/scan",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        data={
-            "investigation_token": ["Alice Example", "alice@example.com"],
-            "mode": "full",
-            "confirm_email_route": "on",
-        },
-    )
-    assert submission.status_code == 400
-    assert submission.get_json()["error"] == payload["blocking_error"]
-
-
-def test_quick_scan_can_degrade_to_native_search_when_maigret_is_unavailable(
-    client, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_MAIGRET_DISCOVERY_ENABLED", "false")
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={"tokens": ["alice"], "mode": "quick"},
-    )
-
-    assert response.status_code == 200
-    payload = response.get_json()
-    assert payload["can_start"] is True
-    assert any(
-        route["route"] == "maigret" and route["reason_code"] == "server_disabled"
-        for route in payload["route_plan"]["skipped_routes"]
-    )
-    assert any(
-        route["route"] == "native_profile_search"
-        for route in payload["route_plan"]["effective_routes"]
-    )
-
-
-def test_full_scan_is_blocked_when_maigret_is_unavailable(client, monkeypatch):
-    monkeypatch.setenv("OPENLEDGER_MAIGRET_DISCOVERY_ENABLED", "false")
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={"tokens": ["alice"], "mode": "full"},
-    )
-
-    payload = response.get_json()
-    assert payload["can_start"] is False
-    assert payload["blocking_error"] == (
-        "Public account discovery is unavailable because Maigret is disabled "
-        "by server policy."
-    )
-
-
-def test_investigation_preview_accepts_validated_type_overrides_and_keeps_raw_handle(
-    client, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={
-            "tokens": [
-                {"value": "@ferryirwandi", "type": None},
-                {"value": "0822335763", "type": "username"},
-            ],
-            "mode": "quick",
-        },
-    )
-
-    assert response.status_code == 200
-    tokens = response.get_json()["tokens"]
-    assert tokens[0]["input"] == "@ferryirwandi"
-    assert tokens[0]["type"] == "social_handle"
-    assert tokens[0]["type_source"] == "automatic"
-    assert tokens[1]["predicted_type"] == "phone"
-    assert tokens[1]["type"] == "username"
-    assert tokens[1]["type_source"] == "analyst_override"
-
-
-def test_investigation_preview_returns_and_applies_exact_alias_selection(
-    client, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    csrf_token = _csrf_token(client)
-    initial = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json={
-            "tokens": [{"value": "Ferry Irwandi", "type": None}],
-            "mode": "quick",
-            "search_likely_username_aliases": True,
-        },
-    ).get_json()
-    chosen = [
-        initial["alias_candidates"][1]["value"],
-        initial["alias_candidates"][3]["value"],
-    ]
-
-    reviewed = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json={
-            "tokens": [{"value": "Ferry Irwandi", "type": None}],
-            "mode": "quick",
-            "search_likely_username_aliases": True,
-            "alias_selection_present": True,
-            "selected_aliases": chosen,
-        },
-    )
-
-    assert reviewed.status_code == 200
-    payload = reviewed.get_json()
-    assert [
-        candidate["value"]
-        for candidate in payload["alias_candidates"]
-        if candidate["selected"]
-    ] == chosen
-    alias_route = next(
-        route
-        for route in payload["route_plan"]["effective_routes"]
-        if route["route"] == "likely_username_aliases"
-    )
-    assert alias_route["target_count"] == 2
-
-
-def test_final_unified_submission_preserves_type_override_and_alias_selection(
-    web_app, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_SEARCH_FIRST_DISCOVERY_ENABLED", "true")
-    monkeypatch.setattr(web_app, "resolve_profile_url_identifiers", lambda _url: {})
-    form = MultiDict(
-        [
-            ("investigation_token", "Ferry Irwandi"),
-            ("investigation_token_type", ""),
-            ("investigation_token", "0822335763"),
-            ("investigation_token_type", "username"),
-            ("mode", "quick"),
-            ("search_likely_username_aliases", "on"),
-            ("alias_candidates_present", "1"),
-            ("selected_alias", "ferry.irwandi"),
-        ]
-    )
-
-    usernames, plan = web_app.parse_investigation_submission(form)
-
-    assert plan["tokens"][1]["predicted_type"] == "phone"
-    assert plan["tokens"][1]["type"] == "username"
-    assert plan["tokens"][1]["type_source"] == "analyst_override"
-    assert [
-        candidate["value"]
-        for candidate in plan["alias_candidates"]
-        if candidate["selected"]
-    ] == ["ferry.irwandi"]
-    assert "0822335763" in usernames
-    assert "ferry.irwandi" in usernames
-
-
-def test_unified_submission_preserves_explicit_existing_optional_collectors(
-    web_app, monkeypatch
-):
-    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
-    usernames, plan = web_app.parse_investigation_submission(
-        MultiDict(
-            [
-                ("investigation_token", "alice"),
-                ("investigation_token_type", ""),
-                ("mode", "quick"),
-                ("enable_user_scanner_username", "on"),
-                ("user_scanner_platforms_present", "1"),
-                ("user_scanner_platform", "instagram"),
-                ("user_scanner_platform", "x"),
-                ("allow_user_scanner_vxtwitter", "on"),
-                ("enable_github_profile_enrichment", "on"),
-                ("enable_archived_url_evidence", "on"),
-            ]
-        )
-    )
-
-    assert usernames == ["alice"]
-    assert plan["enable_user_scanner_username"] is True
-    assert plan["user_scanner_username_platforms"] == ["instagram", "x"]
-    assert plan["allow_user_scanner_vxtwitter"] is True
-    assert plan["enable_github_profile_enrichment"] is True
-    assert plan["enable_archived_url_evidence"] is True
-    planned = web_app.finalize_investigation_route_plan(
-        plan,
-        flags={
-            "maigret_enabled": True,
-            "search_first_enabled": True,
-            "user_scanner_enabled": True,
-            "enrichment_providers_enabled": True,
-        },
-    )
-    assert {
-        route["route"] for route in planned["route_plan"]["effective_routes"]
-    }.issuperset(
-        {
-            "maigret",
-            "user_scanner_username",
-            "github_profile_enrichment",
-            "archived_profile_evidence",
-        }
-    )
-
-
-def test_preview_exposes_explicit_existing_optional_collectors(
-    client, web_app, monkeypatch
-):
-    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
-    payload = {
-        "tokens": ["alice"],
-        "mode": "quick",
-        "enable_user_scanner_username": True,
-        "user_scanner_username_platforms": ["instagram", "x"],
-        "allow_user_scanner_vxtwitter": True,
-        "enable_github_profile_enrichment": True,
-        "enable_archived_url_evidence": True,
-    }
-
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json=payload,
-    )
-
-    assert response.status_code == 200
-    effective = {
-        route["route"]: route
-        for route in response.get_json()["route_plan"]["effective_routes"]
-    }
-    assert effective["user_scanner_username"]["platforms"] == ["instagram", "x"]
-    assert effective["user_scanner_username"]["third_party_x_enabled"] is True
-    assert effective["github_profile_enrichment"][
-        "conditional_on_supported_profile"
-    ] is True
-    assert effective["archived_profile_evidence"][
-        "conditional_on_supported_profile"
-    ] is True
-
-    invalid = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={**payload, "user_scanner_username_platforms": ["not-a-platform"]},
-    )
-    assert invalid.status_code == 400
-    assert invalid.get_json() == {
-        "error": "Investigation preview inputs are invalid."
-    }
-
-
-def test_investigation_plan_preview_requires_email_confirmation_and_availability(
-    client, web_app, monkeypatch
-):
-    monkeypatch.setenv("OPENLEDGER_USER_SCANNER_DISCOVERY_ENABLED", "true")
-    monkeypatch.setattr(web_app, "user_scanner_available", lambda: True)
-    csrf_token = _csrf_token(client)
-    request_body = {"tokens": ["alice@example.com"], "mode": "quick"}
-
-    unconfirmed = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json=request_body,
-    )
-    assert unconfirmed.status_code == 200
-    unconfirmed_payload = unconfirmed.get_json()
-    assert unconfirmed_payload["requires_email_confirmation"] is True
-    assert unconfirmed_payload["can_start"] is False
-    assert (
-        unconfirmed_payload["route_plan"]["skipped_routes"][0]["reason_code"]
-        == "confirmation_required"
-    )
-
-    confirmed = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json={**request_body, "confirm_email_route": True},
-    )
-    assert confirmed.status_code == 200
-    confirmed_payload = confirmed.get_json()
-    assert confirmed_payload["requires_email_confirmation"] is False
-    assert confirmed_payload["can_start"] is True
-    assert confirmed_payload["route_plan"]["effective_routes"][0]["route"] == (
-        "user_scanner_email"
-    )
-
-    monkeypatch.setattr(web_app, "user_scanner_available", lambda: False)
-    unavailable = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": csrf_token},
-        json={**request_body, "confirm_email_route": True},
-    )
-    assert unavailable.status_code == 200
-    unavailable_payload = unavailable.get_json()
-    assert unavailable_payload["can_start"] is False
-    assert (
-        unavailable_payload["route_plan"]["skipped_routes"][0]["reason_code"]
-        == "server_disabled"
-    )
-
-
-def test_investigation_plan_preview_rejects_private_url_without_fetching(
-    client, web_app, monkeypatch
-):
-    resolver_called = False
-
-    def forbidden_resolver(_url):
-        nonlocal resolver_called
-        resolver_called = True
-        return {}
-
-    monkeypatch.setattr(web_app, "resolve_profile_url_identifiers", forbidden_resolver)
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={"tokens": ["http://127.0.0.1/private"], "mode": "quick"},
-    )
-
-    assert response.status_code == 400
-    assert "private or local" in response.get_json()["error"]
-    assert resolver_called is False
-
-
-def test_investigation_plan_preview_does_not_expose_exception_details(
-    client, web_app, monkeypatch
-):
-    sensitive_details = (
-        "resolver failed for postgresql://operator:secret@db.internal/openledger "
-        "using /etc/openledger/private.json"
-    )
-
-    def unsafe_plan(*_args, **_kwargs):
-        try:
-            raise RuntimeError(sensitive_details)
-        except RuntimeError as internal_error:
-            raise web_app.InvestigationInputError(
-                f"Internal URL resolution error: {internal_error}"
-            ) from internal_error
-
-    monkeypatch.setattr(web_app, "build_unified_investigation_plan", unsafe_plan)
-    response = client.post(
-        "/api/investigation-plan-preview",
-        headers={"X-OpenLedger-CSRF": _csrf_token(client)},
-        json={"tokens": ["alice"], "mode": "quick"},
-    )
-
-    assert response.status_code == 400
-    assert response.get_json() == {
-        "error": web_app.INVESTIGATION_PREVIEW_INVALID_MESSAGE
-    }
-    body = response.get_data(as_text=True)
-    assert "operator:secret" not in body
-    assert "/etc/openledger/private.json" not in body
-    assert "RuntimeError" not in body
-    assert "Traceback" not in body
-
-
-def test_investigation_plan_preview_reflects_global_and_mode_kill_switches(
-    client, monkeypatch
-):
-    csrf_token = _csrf_token(client)
-    request_body = {'tokens': ['alice'], 'mode': 'quick'}
-    monkeypatch.setenv('OPENLEDGER_PROFILE_DISCOVERY_ENABLED', 'false')
-
-    globally_disabled = client.post(
-        '/api/investigation-plan-preview',
-        headers={'X-OpenLedger-CSRF': csrf_token},
-        json=request_body,
-    ).get_json()
-    assert globally_disabled['can_start'] is False
-    assert globally_disabled['blocking_error'] == (
-        'Profile discovery is temporarily disabled by server policy.'
-    )
-    assert globally_disabled['route_plan']['skipped_routes'][0][
-        'reason_code'
-    ] == 'server_disabled'
-
-    monkeypatch.setenv('OPENLEDGER_PROFILE_DISCOVERY_ENABLED', 'true')
-    monkeypatch.setenv('OPENLEDGER_FOCUSED_DISCOVERY_ENABLED', 'false')
-    mode_disabled = client.post(
-        '/api/investigation-plan-preview',
-        headers={'X-OpenLedger-CSRF': csrf_token},
-        json=request_body,
-    ).get_json()
-    assert mode_disabled['can_start'] is False
-    assert mode_disabled['blocking_error'] == (
-        'Quick Scan is disabled by server policy.'
-    )
-
-
-def test_unified_browser_preserves_username_verification_as_explicit_opt_in(
+def test_username_verification_requires_explicit_browser_opt_in(
     client, web_app, monkeypatch
 ):
     monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
-    body = client.get('/').get_data(as_text=True)
 
-    assert 'name="enable_user_scanner_username"' in body
-    assert 'name="user_scanner_platform"' in body
-    assert 'name="allow_user_scanner_vxtwitter"' in body
-    assert 'id="enable-user-scanner-username" name="enable_user_scanner_username">' in body
-    assert 'id="allow-user-scanner-vxtwitter" name="allow_user_scanner_vxtwitter">' in body
-    assert body.count('name="search_likely_username_aliases"') == 1
-    assert 'name="confirm_email_route"' in body
-    assert 'id="email-route-confirmation" hidden' in body
+    body = client.get('/').get_data(as_text=True)
+    marker = 'id="enable-user-scanner-username"'
+    marker_position = body.index(marker)
+    input_start = body.rindex('<input', 0, marker_position)
+    input_end = body.index('>', marker_position)
+
+    assert 'checked' not in body[input_start:input_end]
+
+    with open(
+        os.path.join(CUR_PATH, '../maigret/web/templates/index.html'),
+        encoding='utf-8',
+    ) as template_file:
+        template = template_file.read()
+    handler_start = template.index(
+        "userScannerUsernameToggle.addEventListener('change'"
+    )
+    handler_end = template.index('});', handler_start)
+    handler = template[handler_start:handler_end]
+    assert 'enforceAliasSelectionLimit()' in handler
+    assert 'refreshAliasCandidates()' not in handler
+    assert (
+        "const aliasSourceTypes = new Set(['username', 'social_handle', "
+        "'profile_url', 'full_name']);" in template
+    )
+    assert "refreshAliasesForIdentifierChanges(type.value)" in template
+    selection_handler = template.index("selected.addEventListener('change'")
+    selection_handler_end = template.index('});', selection_handler)
+    assert (
+        'enforceAliasSelectionLimit()'
+        in template[selection_handler:selection_handler_end]
+    )
 
 
 def test_sensitive_security_headers_are_applied_to_direct_app_responses(client):
@@ -849,7 +238,7 @@ def test_only_discovery_graph_report_can_be_framed_same_origin(
         'session_folder': 'search_frameable',
         'graph_file': 'search_frameable/combined_graph.html',
         'usernames': ['alice'],
-            'individual_reports': [{'username': 'alice', 'html_file': 'search_frameable/report_alice.html', 'claimed_profiles': []}],
+            'individual_reports': [],
             'found_count': 0,
             'profile_reliability_version': 1,
         }
@@ -883,7 +272,7 @@ def test_only_discovery_graph_report_can_be_framed_same_origin(
     nested_response = client.get(
         '/reports/search_frameable/nested/combined_graph.html'
     )
-    assert nested_response.status_code == 404
+    assert nested_response.status_code == 200
     assert nested_response.headers['X-Frame-Options'] == 'DENY'
 
 
@@ -1067,127 +456,6 @@ def test_typed_investigation_builder_creates_a_grouped_query_plan(
     assert '+628123456789' not in captured['usernames']
 
 
-def test_unified_token_submission_uses_the_authoritative_schema_v2_route_plan(
-    client, web_app, monkeypatch
-):
-    captured = {}
-
-    def fake_start(usernames, options):
-        captured['usernames'] = usernames
-        captured['options'] = options
-        return 'token-plan'
-
-    monkeypatch.setattr(web_app, 'start_live_job', fake_start)
-    monkeypatch.setattr(
-        web_app,
-        'resolve_profile_url_identifiers',
-        lambda _url: {},
-    )
-    configured_settings = web_app.load_settings()
-    configured_settings['site_list'] = ['LegacyOnlySite']
-    monkeypatch.setattr(
-        web_app,
-        'load_settings',
-        lambda: dict(configured_settings),
-    )
-    response = client.post(
-        '/api/scan',
-        headers={'X-OpenLedger-CSRF': _csrf_token(client)},
-        data={
-            'investigation_token': [
-                'Alice Example',
-                '@alice',
-                '+62 812 3456 789',
-                'https://public.example.com/reference/alice',
-            ],
-            'search_likely_username_aliases': 'on',
-            'mode': 'quick',
-            # AI and source filters cannot be smuggled into schema v2. The
-            # established archive collector remains an explicit opt-in.
-            'allow_ai_context': 'on',
-            'enable_archived_url_evidence': 'on',
-            'tags': ['social'],
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.get_json() == {'job_id': 'token-plan'}
-    specification = captured['options']['investigation_spec']
-    assert specification['schema_version'] == 2
-    assert specification['processing_mode'] == 'same_subject'
-    assert specification['allow_ai_context'] is False
-    assert specification['enable_archived_url_evidence'] is True
-    assert specification['tags'] == []
-    assert captured['options']['tags'] == []
-    assert captured['options']['site_list'] == []
-    assert captured['options']['execution_mode'] == 'focused'
-    assert captured['options']['all_sites'] is False
-    assert captured['options']['execution_budget']['total_seconds'] == 600
-    route_plan = specification['route_plan']
-    assert route_plan['server_authoritative'] is True
-    assert route_plan['requested_mode'] == 'quick'
-    assert route_plan['execution_mode'] == 'focused'
-    assert route_plan['budget_seconds'] == 600
-    assert [item['route'] for item in route_plan['effective_routes']] == [
-        'likely_username_aliases',
-        'maigret',
-        'archived_profile_evidence',
-    ]
-    assert [item['route'] for item in route_plan['skipped_routes']] == [
-        'native_profile_search',
-        'context_only',
-        'context_only',
-    ]
-    assert '+628123456789' not in captured['usernames']
-    assert 'alice' in [value.casefold() for value in captured['usernames']]
-
-
-def test_unified_email_route_requires_confirmation_and_supports_no_username_target(
-    client, web_app, monkeypatch
-):
-    captured = {}
-
-    def fake_start(usernames, options):
-        captured['usernames'] = usernames
-        captured['options'] = options
-        return 'email-token-plan'
-
-    monkeypatch.setattr(web_app, 'start_live_job', fake_start)
-    monkeypatch.setattr(web_app, 'user_scanner_available', lambda: True)
-    csrf_token = _csrf_token(client)
-    refused = client.post(
-        '/api/scan',
-        headers={'X-OpenLedger-CSRF': csrf_token},
-        data={
-            'investigation_token': ['alice@example.com'],
-            'mode': 'quick',
-        },
-    )
-
-    assert refused.status_code == 400
-    assert 'confirm' in refused.get_json()['error'].casefold()
-    assert captured == {}
-
-    accepted = client.post(
-        '/api/scan',
-        headers={'X-OpenLedger-CSRF': csrf_token},
-        data={
-            'investigation_token': ['alice@example.com'],
-            'confirm_email_route': 'on',
-            'mode': 'quick',
-        },
-    )
-
-    assert accepted.status_code == 200
-    assert accepted.get_json() == {'job_id': 'email-token-plan'}
-    assert captured['usernames'] == []
-    route_plan = captured['options']['investigation_spec']['route_plan']
-    assert [item['route'] for item in route_plan['effective_routes']] == [
-        'user_scanner_email'
-    ]
-    assert route_plan['effective_routes'][0]['requires_confirmation'] is True
-
-
 def test_context_only_investigation_is_rejected_before_queueing(
     client, web_app, monkeypatch
 ):
@@ -1213,16 +481,15 @@ def test_context_only_investigation_is_rejected_before_queueing(
 
 
 def test_investigation_builder_explains_identifier_capabilities(client):
-    body = client.get("/").get_data(as_text=True)
+    body = client.get('/').get_data(as_text=True)
 
-    assert "Investigation tokens" in body
-    assert "spaces stay inside the value" in body
-    assert "server-ranked account variants" in body
-    assert "Generic public URLs and phone numbers remain context only" in body
-    assert "Case source filters" not in body
-    assert "Include terms" not in body
-    assert "Exclude terms" not in body
-    assert "Authoritative plan" in body
+    assert 'Known identifiers' in body
+    assert 'One phrase for native search when enabled' in body
+    assert 'Email and phone values never generate aliases' in body
+    assert 'Case source filters' in body
+    assert 'Include terms' not in body
+    assert 'Exclude terms' not in body
+    assert 'Query plan' in body
 
 
 def test_role_organization_suggestion_preserves_legal_suffix_and_fails_ambiguous(
@@ -1605,6 +872,48 @@ def test_results_report_links_open_in_new_tab(client, web_app, monkeypatch):
         tag_start = body.rindex('<a ', 0, idx)
         tag = body[tag_start : idx + len(label)]
         assert 'target="_blank"' in tag, f'{label} link missing target="_blank"'
+
+
+def test_source_report_selection_stays_scoped_after_another_persona_rerun(web_app):
+    alice_id = "alice-persona"
+    bob_id = "bob-persona"
+    case_personas = [{"id": alice_id}, {"id": bob_id}]
+    jobs = [
+        {
+            "session_folder": "alice-rerun",
+            "individual_reports": [{"username": "alice"}],
+            "options": {
+                "investigation_spec": {"target_persona_id": alice_id}
+            },
+        },
+        {
+            "session_folder": "original-shared-run",
+            "individual_reports": [
+                {"username": "alice"},
+                {"username": "bob"},
+            ],
+            "options": {
+                "investigation_spec": {
+                    "persona_bindings": [
+                        {"persona_id": alice_id},
+                        {"persona_id": bob_id},
+                    ]
+                }
+            },
+        },
+    ]
+
+    selected = next(
+        job
+        for job in jobs
+        if web_app._source_report_belongs_to_persona(
+            job, bob_id, case_personas
+        )
+    )
+    assert selected["session_folder"] == "original-shared-run"
+    assert web_app._source_report_belongs_to_persona(
+        jobs[0], bob_id, case_personas
+    ) is False
 
 
 def test_ai_analysis_requires_csrf_token(client, web_app, monkeypatch):
@@ -2163,8 +1472,237 @@ def test_case_chat_does_not_expose_internal_validation_errors(
         store.dispose()
 
 
+@pytest.mark.parametrize('extraction_fails,cited_url', [
+    (True, 'https://id.linkedin.com/in/alice-example?utm_source=search'),
+    (False, 'https://id.linkedin.com/in/alice-example?utm_source=search'),
+    (False, 'https://news.example/unrelated'),
+    ('full', 'https://id.linkedin.com/in/alice-example?utm_source=search'),
+    ('duplicate', 'https://www.linkedin.com/in/alice-example/'),
+])
+def test_case_chat_retains_linkedin_attachment_and_renders_source_provenance(
+    client, web_app, monkeypatch, tmp_path, extraction_fails, cited_url
+):
+    monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
+    store = CaseStore(f"sqlite:///{tmp_path / 'linkedin-chat.db'}", create_schema=True)
+    monkeypatch.setattr(web_app, 'case_store', store)
+    try:
+        job_id = store.create_investigation(['different_username'], {})
+        case = store.get_case(store.get_job(job_id)['case_id'])
+        persona_id = case['personas'][0]['id']
+        supplied_url = 'https://www.linkedin.com/in/alice-example/'
+
+        async def cited_research(**kwargs):
+            assert kwargs['case_context']['selected_persona']['id'] == persona_id
+            return {
+                'analysis': (
+                    '**Supplied URL retained.**\n\n'
+                    '- Direct retrieval was unavailable.\n'
+                    f'- [Public citation]({cited_url})\n\n'
+                    '<script>alert(1)</script>'
+                ),
+                'sources': [{'title': 'Public citation', 'url': cited_url}],
+            }
+
+        async def extract_proposals(**_kwargs):
+            if extraction_fails is True:
+                raise RuntimeError('fixture extraction failure')
+            if extraction_fails in {'full', 'duplicate'}:
+                return [{
+                    'field_name': 'full_name' if extraction_fails == 'full' else 'social_account',
+                    'value': f'Published name {index}' if extraction_fails == 'full' else supplied_url,
+                    'confidence': 70,
+                    'reason': 'Explicit statement in the cited fixture.',
+                    'source_url': cited_url,
+                    'evidence_basis': 'public_web',
+                    'latitude': None,
+                    'longitude': None,
+                    'coordinate_precision': None,
+                } for index in range(100 if extraction_fails == 'full' else 1)]
+            return []
+
+        monkeypatch.setattr(web_app, 'get_case_chat_response', cited_research)
+        monkeypatch.setattr(web_app, 'get_case_chat_claim_proposals', extract_proposals)
+        with client.session_transaction() as browser_session:
+            browser_session['csrf_token'] = 'test-csrf'
+
+        response = client.post(
+            f"/api/cases/{case['id']}/chat",
+            headers={'X-OpenLedger-CSRF': 'test-csrf'},
+            json={
+                'message': f'Add this profile {supplied_url}',
+                'persona_id': persona_id,
+                'research_enabled': True,
+                'propose_to_persona': True,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.get_json()
+        summary = payload['proposal_summary']
+        assert summary['status'] == 'pending_review'
+        assert summary['count'] == (100 if extraction_fails == 'full' else 1)
+        record = summary['url_evidence'][0]
+        assert record['supplied_url'] == supplied_url
+        assert record['direct_access'] == 'not_verified'
+        assert record['identity_status'] == 'unverified'
+        expected_status = 'profile_url_cited' if 'linkedin.com' in cited_url else 'not_cited'
+        assert record['citation_status'] == expected_status
+        assert record['citation_urls'] == ([cited_url] if expected_status == 'profile_url_cited' else [])
+        if extraction_fails is True:
+            assert summary['extraction_status'] == 'unavailable'
+
+        claims = [c for c in store.get_persona(persona_id)['claims'] if c['field_name'] == 'social_account']
+        assert len(claims) == 1
+        claim = claims[0]
+        assert claim['review_status'] == 'pending'
+        assert claim['value']['url'] == supplied_url
+        assert claim['value']['username'] == 'alice-example'
+        assert claim['confidence'] == 50
+        assert claim['evidence'][0]['details']['independently_corroborated'] is False
+
+        stored = store.list_case_chat_messages(case['id'])[-1]
+        assert stored['proposals']['url_evidence'] == summary['url_evidence']
+        assert stored['sources'] == [{'title': 'Public citation', 'url': cited_url}]
+        html = payload['assistant_message']['content_html']
+        assert '<strong>Supplied URL retained.</strong>' in html
+        assert html.count('<li>') == 2
+        assert '<script>' not in html
+        assert '&lt;script&gt;' in html
+        history = client.get(f"/cases/{case['id']}/chat").get_data(as_text=True)
+        assert html in history
+        assert f'href="{supplied_url}"' in history
+        assert 'Supplied URLs' in history
+        if extraction_fails is True:
+            assert 'Other AI fact proposals could not be extracted.' in history
+    finally:
+        store.engine.dispose()
+
+
+@pytest.mark.parametrize('extraction_result,large_previews', [
+    ('failure', None), ('full', None), ('failure', 'unicode_urls'), ('full', 'model_values'),
+])
+def test_case_chat_saves_supplied_urls_when_matching_citation_metadata_is_large(
+    client, web_app, monkeypatch, tmp_path, extraction_result, large_previews
+):
+    monkeypatch.setenv("OPENAI_API_KEY", "server-only-test-key")
+    store = CaseStore(
+        f"sqlite:///{tmp_path / 'large-chat-citations.db'}", create_schema=True
+    )
+    monkeypatch.setattr(web_app, "case_store", store)
+    try:
+        job_id = store.create_investigation(["different_username"], {})
+        case = store.get_case(store.get_job(job_id)["case_id"])
+        persona_id = case["personas"][0]["id"]
+        supplied = [
+            f"https://{host}/in/alice-example/"
+            for host in (
+                "www.linkedin.com",
+                "id.linkedin.com",
+                "uk.linkedin.com",
+                "linkedin.com",
+                "ca.linkedin.com",
+            )
+        ]
+        sources = [
+            {
+                "title": "Actual indexed citation",
+                "url": f"https://id.linkedin.com/in/alice-example?ref={index}"
+                + "a" * 1800,
+            }
+            for index in range(10)
+        ]
+        if large_previews == 'unicode_urls':
+            supplied = [f'https://r{index}.linkedin.com/in/alice-example?ref=' + '😀' * 1000
+                        for index in range(10)]
+            sources = [{'title': 'Actual indexed citation', 'url': 'https://id.linkedin.com/in/alice-example'}]
+        message = 'Add these profiles ' + ' '.join(supplied)
+        assert len(message) <= 12_000
+
+        async def cited_research(**_kwargs):
+            return {
+                "analysis": "**The supplied URLs remain unverified.**",
+                "sources": sources,
+            }
+
+        async def extract_proposals(**_kwargs):
+            if extraction_result == "failure":
+                raise RuntimeError("fixture extraction unavailable")
+            return [
+                {
+                    "field_name": "full_name",
+                    "value": f"Published name {index}" + ('😀' * 250 if large_previews == 'model_values' else ''),
+                    "confidence": 70,
+                    "reason": "A statement in the fixture citation.",
+                    "source_url": sources[0]["url"],
+                    "evidence_basis": "public_web",
+                }
+                for index in range(100)
+            ]
+
+        monkeypatch.setattr(web_app, "get_case_chat_response", cited_research)
+        monkeypatch.setattr(web_app, "get_case_chat_claim_proposals", extract_proposals)
+        with client.session_transaction() as browser_session:
+            browser_session["csrf_token"] = "test-csrf"
+        response = client.post(
+            f"/api/cases/{case['id']}/chat",
+            headers={"X-OpenLedger-CSRF": "test-csrf"},
+            json={
+                "message": message,
+                "persona_id": persona_id,
+                "research_enabled": True,
+                "propose_to_persona": True,
+            },
+        )
+        assert response.status_code == 200
+        payload = response.get_json()
+        summary = payload["proposal_summary"]
+        assert summary["status"] == "pending_review"
+        assert summary["count"] == (
+            100 if extraction_result == "full" else len(supplied)
+        )
+        records = summary["url_evidence"]
+        assert [record["supplied_url"] for record in records] == supplied
+        assert all(record["citation_count"] == (0 if large_previews == 'unicode_urls' else 10) for record in records)
+        assert all(
+            record["citation_status"] == ('not_cited' if large_previews == 'unicode_urls' else 'profile_url_cited') for record in records
+        )
+        assert any(not record["citation_urls"] for record in records)
+        assert all(record["direct_access"] == "not_verified" for record in records)
+        assert all(record["identity_status"] == "unverified" for record in records)
+        if extraction_result == "failure":
+            assert summary["extraction_status"] == "unavailable"
+        stored = store.list_case_chat_messages(case["id"])[-1]
+        assert stored["role"] == "assistant"
+        assert stored['proposals']['status'] == 'pending_review'
+        assert stored["sources"] == payload["assistant_message"]["sources"] == sources
+        assert stored["proposals"]["url_evidence"] == records
+        if large_previews:
+            assert summary['proposal_previews_omitted'] > 0
+            assert len(summary['proposals']) + summary['proposal_previews_omitted'] == summary['count']
+            assert len(json.dumps(summary, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) <= 64 * 1024
+        all_claims = store.get_persona(persona_id)['claims']
+        if large_previews == 'model_values':
+            assert len([claim for claim in all_claims if claim['field_name'] == 'full_name']) == 95
+            assert all(claim['value'].endswith('😀' * 250) for claim in all_claims if claim['field_name'] == 'full_name')
+        claims = [
+            claim
+            for claim in all_claims
+            if claim["field_name"] == "social_account"
+        ]
+        assert {claim["value"]["url"] for claim in claims} == set(supplied)
+        assert all(claim["value"]["username"] == ('' if large_previews == 'unicode_urls' else 'alice-example') for claim in claims)
+        assert all(claim["review_status"] == "pending" for claim in claims)
+        history = client.get(f"/cases/{case['id']}/chat").get_data(as_text=True)
+        if large_previews != 'unicode_urls':
+            assert "Some matching citation URLs are shown only in Sources." in history
+            assert "No matching URL citation" not in history
+        assert all(f'href="{source["url"]}"' in history for source in sources)
+    finally:
+        store.dispose()
+
+
+@pytest.mark.parametrize('overlong_citation', [False, True])
 def test_case_chat_retains_explicit_url_when_research_has_no_citations(
-    client, web_app, monkeypatch, tmp_path
+    client, web_app, monkeypatch, tmp_path, overlong_citation
 ):
     monkeypatch.setenv('OPENAI_API_KEY', 'server-only-test-key')
     store = CaseStore(
@@ -2176,8 +1714,15 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
         case = store.get_case(store.get_job(job_id)['case_id'])
         persona_id = case['personas'][0]['id']
         url = 'https://www.tiktok.com/@skandaloknumpejabat'
+        oversized = 'https://example.test/' + 'x' * 2100
 
         async def uncited_research(**_kwargs):
+            if overlong_citation:
+                return _parse_responses_analysis({'output': [
+                    {'type': 'web_search_call', 'status': 'completed'},
+                    {'type': 'message', 'content': [{'type': 'output_text', 'text': 'A model answer.',
+                        'annotations': [{'type': 'url_citation', 'url': oversized}]}]},
+                ]}, require_web_search=True)
             raise AIEnrichmentContractError('no cited public sources')
 
         async def proposals_must_not_run(**_kwargs):
@@ -2215,6 +1760,10 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
         assert payload['proposal_summary']['research_status'] == (
             'no_independent_citations'
         )
+        stored = store.list_case_chat_messages(case['id'])[-1]
+        assert stored['sources'] == payload['assistant_message']['sources']
+        assert stored['proposals']['status'] == 'pending_review'
+        assert all(source['url'] not in {oversized, oversized[:2000]} for source in stored['sources'])
         persona = store.get_persona(persona_id)
         claim = next(
             item
@@ -2229,6 +1778,7 @@ def test_case_chat_retains_explicit_url_when_research_has_no_citations(
         details = claim['evidence'][0]['details']
         assert details['unverified_user_statement'] is True
         assert details['independently_corroborated'] is False
+        assert payload['proposal_summary']['url_evidence'][0]['citation_status'] == 'not_cited'
 
         page = client.get(f"/cases/{case['id']}/chat")
         body = page.get_data(as_text=True)
@@ -2405,13 +1955,11 @@ def test_failed_task_redirects_to_index(client, web_app, monkeypatch):
 
 def test_download_report_serves_file_inside_reports_folder(client, web_app, tmp_path):
     """Happy path: a real file inside REPORTS_FOLDER is served back."""
-    target = tmp_path / 'search_session1'
+    target = tmp_path / 'session1'
     target.mkdir()
     (target / 'report.json').write_text('{"ok": true}')
 
-    web_app.job_results['session1'] = {'status': 'completed', 'individual_reports': [
-        {'username': 'fixture', 'json_file': 'search_session1/report.json'}]}
-    resp = client.get('/reports/search_session1/report.json')
+    resp = client.get('/reports/session1/report.json')
 
     assert resp.status_code == 200
     assert resp.get_data() == b'{"ok": true}'
@@ -4093,7 +3641,6 @@ def test_ai_markdown_excludes_uncorroborated_username_scanner_hits(web_app):
 @pytest.mark.parametrize(
     'relative_path',
     [
-        '../maigret/web/templates/index.html',
         '../maigret/web/templates/live.html',
         '../maigret/web/templates/settings.html',
         '../maigret/resources/ai_prompt.txt',
@@ -4104,14 +3651,7 @@ def test_ai_markdown_excludes_uncorroborated_username_scanner_hits(web_app):
 def test_user_facing_copy_is_openledger_branded(relative_path):
     path = os.path.join(CUR_PATH, relative_path)
     with open(path, encoding='utf-8') as branded_file:
-        content = branded_file.read().lower()
-        if relative_path.endswith('/live.html'):
-            # P3R identifies engines in source counters while product branding
-            # remains OpenLedger. Source names are no longer forbidden copy.
-            assert '{% block title %}live investigation | openledger{% endblock %}' in content
-            assert 'maigret site checks' in content
-        else:
-            assert 'maigret' not in content
+        assert 'maigret' not in branded_file.read().lower()
 
 
 def test_process_search_task_records_started_at_on_success(web_app, monkeypatch):

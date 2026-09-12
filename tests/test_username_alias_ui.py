@@ -1,127 +1,67 @@
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE_PATH = ROOT / "maigret" / "web" / "templates" / "index.html"
-SCRIPT_PATH = ROOT / "maigret" / "web" / "static" / "investigation-builder.js"
-STYLE_PATH = ROOT / "maigret" / "web" / "static" / "openledger.css"
+
+TEMPLATE_PATH = (
+    Path(__file__).resolve().parents[1] / "maigret" / "web" / "templates" / "index.html"
+)
 
 
-def test_unified_builder_replaces_typed_rows_and_preserves_optional_collectors():
+def test_alias_context_refresh_preserves_analyst_choices():
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
 
-    assert 'id="investigation-token-input"' in template
-    assert 'name="investigation_token"' in template
-    assert "data-preview-url=\"{{ url_for('api_investigation_plan_preview') }}\"" in (
-        template
+    context_handler = template.index(
+        "[aliasNicknameInput, aliasContextNumberInput].forEach"
     )
-    assert 'name="identifier_type"' not in template
-    assert 'name="identifier_value"' not in template
-    assert 'name="processing_mode"' not in template
-    assert 'name="tags"' not in template
-    assert 'name="excluded_tags"' not in template
-    assert 'name="allow_ai_context"' not in template
-    assert "Additional existing checks" in template
-    assert 'name="enable_user_scanner_username"' in template
-    assert 'name="enable_github_profile_enrichment"' in template
-    assert 'name="enable_archived_url_evidence"' in template
-    assert 'name="allow_user_scanner_vxtwitter"' in template
-
-
-def test_browser_commits_whole_nonempty_values_and_preserves_empty_tab_navigation():
-    script = SCRIPT_PATH.read_text(encoding="utf-8")
-
-    assert "if (event.key !== 'Enter' && event.key !== 'Tab') return;" in script
-    empty_branch = script.index("if (!draft) {")
-    prevent_commit = script.index("event.preventDefault();\n        commitDraft();")
+    context_handler_end = template.index("}));", context_handler)
     assert (
-        "if (event.key === 'Enter') event.preventDefault();"
-        in script[empty_branch:prevent_commit]
+        "refreshAliasCandidates({ preserveAnalystChoices: true })"
+        in template[context_handler:context_handler_end]
     )
-    assert "return;" in script[empty_branch:prevent_commit]
-    assert (
-        "split("
-        not in script[script.index("async function commitDraft()") : prevent_commit]
-    )
+    assert "row.dataset.analystChanged = 'true'" in template
+    assert "row.dataset.aliasEdited = 'true'" in template
+    assert "function mergeAnalystAliasChoices(" in template
+    assert "removed: !row.querySelector('.alias-value').value.trim()" in template
+    assert "const removedAliasChoices = new Map();" in template
+    assert "let plannedAliasKeysByComparison = new Map();" in template
+    assert "const choicesByGeneratedKey = new Map(removedAliasChoices);" in template
+    assert "matchedAliasKeys: Array.from(row._matchedAliasKeys || [])" in template
+    assert "const expandedChoices = analystChoices.map(candidate =>" in template
+    assert "const equalValueKeys = plannedAliasKeysByComparison.get(" in template
+    assert "choicesByGeneratedKey.set(key, candidate);" in template
+    assert "if (removedKeys.has(generatedKey)) return null;" in template
+    assert "matchedKeys.forEach(key => row._matchedAliasKeys.add(key));" in template
+    assert "removedAliasChoices.set(choice.generatedKey, choice);" in template
+    assert "if (!preserveAnalystChoices) removedAliasChoices.clear();" in template
+    assert "if (choice.removed) return null;" in template
 
 
-def test_token_editor_exposes_edit_remove_focus_cancel_and_error_behaviour():
+def test_profile_url_reranking_preserves_analyst_choices():
     template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    script = SCRIPT_PATH.read_text(encoding="utf-8")
-    styles = STYLE_PATH.read_text(encoding="utf-8")
 
-    assert 'aria-live="polite"' in template
-    assert 'role="alert" tabindex="-1"' in template
-    assert "function beginEdit(index)" in script
-    assert "function cancelEdit()" in script
-    assert "function removeToken(index)" in script
-    assert "input.focus();" in script
-    assert "input.select();" in script
-    assert "Use no more than ${maximumTokens} investigation values." in script
-    assert "setAttribute('aria-invalid'" in script
-    assert "function changeTokenType(index, selectedType)" in script
-    assert "token-chip-type-control" in script
-    assert "investigation_token_type" in script
-    assert ".token-chip-edit:focus-visible" in styles
-    assert ".token-chip-type-control:focus-visible" in styles
-    assert ".token-editor:focus-within" in styles
-    assert "@media (max-width: 991px)" in styles
-
-
-def test_browser_uses_only_the_authoritative_plan_preview_for_classification():
-    script = SCRIPT_PATH.read_text(encoding="utf-8")
-
-    assert "fetch(form.dataset.previewUrl" in script
-    assert "'X-OpenLedger-CSRF': csrfToken" in script
-    assert "tokens: tokens.map(token => ({" in script
-    assert "value: token.input" in script
-    assert "type: token.overrideType" in script
-    assert "payload.tokens || []" in script
-    assert "routePlan.effective_routes" in script
-    assert "routePlan.skipped_routes" in script
-    assert "classifyToken" not in script
-
-
-def test_plan_presents_conditional_unavailable_and_context_states_truthfully():
-    script = SCRIPT_PATH.read_text(encoding="utf-8")
-    styles = STYLE_PATH.read_text(encoding="utf-8")
-
-    assert "confirmation_required: {" in script
-    assert "state: 'conditional'" in script
-    assert "badge: 'Conditional'" in script
-    assert "context_only_no_outbound: {" in script
-    assert "state: 'context'" in script
-    assert "badge: 'Context only'" in script
-    assert "server_disabled: {" in script
-    assert "state: 'unavailable'" in script
-    assert "badge: 'Unavailable'" in script
-    assert "no_username_targets: {" in script
-    assert "badge: 'Needs username'" in script
-    assert "`${contextCount} context ${contextCount === 1 ? 'value' : 'values'}`" in script
-    assert "`${skippedRoutes.length} skipped`" not in script
-    assert ".investigation-route-item.is-conditional" in styles
-    assert ".investigation-route-item.is-context" in styles
-    assert ".investigation-route-item.is-unavailable" in styles
-    assert ".investigation-route-item.is-needs-input" in styles
-
-
-def test_builder_has_reviewable_alias_selection_and_quick_full_controls():
-    template = TEMPLATE_PATH.read_text(encoding="utf-8")
-    script = SCRIPT_PATH.read_text(encoding="utf-8")
-
-    assert template.count('name="search_likely_username_aliases"') == 1
-    assert "Search likely username aliases" in template
+    assert "const aliasResetTypes = new Set(['full_name']);" in template
+    assert "function refreshAliasesForIdentifierChanges(...types)" in template
+    helper_start = template.index("function refreshAliasesForIdentifierChanges(")
+    helper_end = template.index("function identifierValues(", helper_start)
+    helper = template[helper_start:helper_end]
+    assert "aliasResetTypes.has(type)" in helper
+    assert "aliasSourceTypes.has(type)" in helper
+    assert "refreshAliasCandidates({ preserveAnalystChoices: true })" in helper
+    value_handler = template.index(
+        "row.querySelector('.identifier-value').addEventListener('input'"
+    )
+    value_handler_end = template.index("});", value_handler)
     assert (
-        'id="search-likely-username-aliases" '
-        'name="search_likely_username_aliases" checked'
-    ) in template
-    assert 'id="username-alias-review"' in template
-    assert 'name="alias_candidates_present"' in template
-    assert "renderAliasCandidates" in script
-    assert "checkbox.name = 'selected_alias'" in script
-    assert "maximumSelectedAliases = 16" in script
-    assert 'name="alias_nicknames"' not in template
-    assert 'name="alias_context_numbers"' not in template
-    assert "Additional existing checks" in template
-    assert "syncUsernameScannerControls" in script
-    assert 'name="mode" id="mode-quick" value="quick"' in template
-    assert 'name="mode" id="mode-full" value="full"' in template
+        "refreshAliasesForIdentifierChanges(type.value)"
+        in template[value_handler:value_handler_end]
+    )
+
+
+def test_browser_uses_the_server_alias_planner():
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+
+    assert "fetch('/api/username-aliases'" in template
+    assert "'X-OpenLedger-CSRF': csrfToken" in template
+    assert "profile_urls: profileUrls" in template
+    assert "function cleanNameTokens(" not in template
+    assert ".toLocaleLowerCase(" not in template
+    assert "if (aliasRefreshPending)" in template

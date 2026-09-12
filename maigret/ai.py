@@ -10,7 +10,7 @@ import os
 import re
 import sys
 import threading
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import aiohttp
 
@@ -631,7 +631,12 @@ def _parse_responses_analysis(response_data, *, require_web_search=False):
                 ):
                     continue
                 url = annotation.get("url", "")
-                parsed = urlsplit(url) if isinstance(url, str) else None
+                if not isinstance(url, str) or len(url) > 2000 or url != url.strip():
+                    continue
+                try:
+                    parsed = urlsplit(url)
+                except ValueError:
+                    continue
                 if (
                     not parsed
                     or parsed.scheme not in {"http", "https"}
@@ -784,7 +789,20 @@ explicitly; treat rejected claims only as audit context. User statements are
 unverified until reviewed. Separate stored case evidence, cited public-web
 information, and analytical inference. Never present an inference as a stored
 fact. When web search is available, cite the sources returned by the tool and
-prefer official, institutional, and reputable public sources. Do not infer
+prefer official, institutional, and reputable public sources.
+Retain every analyst-supplied profile URL as unverified case context. A failed
+direct retrieval, login wall, or access error does not establish that a profile
+is absent or has no public evidence. When web search is enabled, research the
+exact supplied profile URL and profile path in the public search index. Consider
+regional LinkedIn URLs only when actually returned by search; do not invent a
+regional URL or bypass access controls. Distinguish direct page content, indexed
+excerpts, citations, and analyst-supplied context. Cite the exact retrieved URL
+for each supported statement, state which content was actually available, and
+do not describe an entire profile as blocked because one endpoint failed.
+A citation alone does not prove successful direct retrieval or that the profile
+belongs to the target Persona. Never equate a name or profile slug with another
+username without supporting identity evidence. Without web search, do not imply
+that any lookup or access check took place. Do not infer
 sensitive traits, private addresses, criminality, or interpersonal relationships
 from weak signals. Do not claim to have modified a Persona; a separate
 server-controlled review workflow handles proposed updates. Be concise, neutral,
@@ -862,6 +880,149 @@ uncertainty. Use the product name OpenLedger only."""
     )
 
 
+def _chat_history_url(value):
+    """Keep an exact bounded HTTP(S) URL; never turn truncation into a citation."""
+    if (
+        not isinstance(value, str)
+        or not value
+        or len(value) > 2000
+        or "\\" in value
+        or any(ord(char) < 32 for char in value)
+    ):
+        return ""
+    try:
+        parsed = urlsplit(value)
+        if (
+            parsed.scheme in {"http", "https"}
+            and parsed.hostname
+            and parsed.username is None
+            and parsed.password is None
+        ):
+            return value
+    except ValueError:
+        pass
+    return ""
+
+
+def _bounded_chat_history_entry(item, *, maximum_chars):
+    """Keep exact provenance before spending the remaining budget on chat text."""
+    if not isinstance(item, dict):
+        return None
+    role = str(item.get("role") or "").strip().casefold()
+    raw_content = str(item.get("content") or "")
+    if role not in {"user", "assistant"} or not raw_content:
+        return None
+    content = raw_content[:4000]
+    entry = {
+        "role": role,
+        "author": str(item.get("author") or "")[:200],
+        "content": content,
+        "content_truncated": len(content) < len(raw_content),
+    }
+    if role == "assistant":
+        sources_by_url = {}
+        for source in list(item.get("sources") or [])[:100]:
+            if not isinstance(source, dict):
+                continue
+            url = _chat_history_url(source.get("url"))
+            if url:
+                sources_by_url.setdefault(
+                    url, {"url": url, "title": str(source.get("title") or "")[:200]}
+                )
+        entry["sources"] = list(sources_by_url.values())[:5]
+        entry["source_count"] = len(sources_by_url)
+        summary = item.get("proposals") or {}
+        summary = summary if isinstance(summary, dict) else {}
+        entry["research_status"] = str(summary.get("research_status") or "")[:100]
+        evidence = []
+        for record in list(summary.get("url_evidence") or [])[:10]:
+            if not isinstance(record, dict):
+                continue
+            supplied_url = _chat_history_url(record.get("supplied_url"))
+            if not supplied_url:
+                continue
+            citations = list(
+                dict.fromkeys(
+                    url
+                    for raw in list(record.get("citation_urls") or [])[:100]
+                    for url in [_chat_history_url(raw)]
+                    if url
+                )
+            )
+            count = record.get("citation_count")
+            count = (
+                count
+                if isinstance(count, int) and 0 <= count <= 100
+                else len(citations)
+            )
+            status = record.get("citation_status")
+            evidence.append(
+                {
+                    "supplied_url": supplied_url,
+                    "citation_urls": citations[:5],
+                    "citation_count": max(count, len(citations)),
+                    "citation_status": (
+                        status
+                        if isinstance(status, str)
+                        and status
+                        in {
+                            "profile_url_cited",
+                            "exact_url_cited",
+                            "not_cited",
+                            "research_not_requested",
+                        }
+                        else "unknown"
+                    ),
+                    "direct_access": "not_verified",
+                    "identity_status": "unverified",
+                }
+            )
+        entry["url_evidence"] = evidence[:5]
+        entry["url_evidence_count"] = len(evidence)
+
+    def size():
+        return len(json.dumps(entry, ensure_ascii=False))
+
+    if role == "assistant":
+        # First remove excess copies while retaining one source and one copy per
+        # supplied URL. Counts/status continue to describe the stored catalogue.
+        for record in reversed(entry["url_evidence"]):
+            while size() > maximum_chars and len(record["citation_urls"]) > 1:
+                record["citation_urls"].pop()
+        while size() > maximum_chars and len(entry["sources"]) > 1:
+            entry["sources"].pop()
+        retained_source_urls = {source["url"] for source in entry["sources"]}
+        for record in reversed(entry["url_evidence"]):
+            if size() <= maximum_chars:
+                break
+            record["citation_urls"] = [
+                url
+                for url in record["citation_urls"]
+                if url not in retained_source_urls
+            ]
+
+    if size() > maximum_chars:
+        entry["content"] = ""
+        entry["content_truncated"] = True
+        if role == "assistant":
+            # A single record still preserves the exact supplied URL, available
+            # citation, count and uncertainty when the metadata itself is large.
+            while size() > maximum_chars and len(entry["url_evidence"]) > 1:
+                entry["url_evidence"].pop()
+        if size() > maximum_chars:
+            return None
+        low, high = 0, len(content)
+        while low < high:
+            midpoint = (low + high + 1) // 2
+            entry["content"] = content[:midpoint]
+            if size() <= maximum_chars:
+                low = midpoint
+            else:
+                high = midpoint - 1
+        entry["content"] = content[:low]
+    return entry
+
+
 async def _get_scoped_chat_response(
     api_key: str,
     *,
@@ -889,25 +1050,17 @@ async def _get_scoped_chat_response(
         "Content-Type": "application/json",
     }
     bounded_conversation = []
-    conversation_budget = 30_000
+    conversation_budget = 30_000 - 2  # JSON array brackets.
     for item in reversed(list(conversation or [])[-30:]):
-        if not isinstance(item, dict):
-            continue
-        role = str(item.get("role") or "").strip().casefold()
-        if role not in {"user", "assistant"}:
-            continue
-        content = str(item.get("content") or "")[: min(4_000, conversation_budget)]
-        if not content:
-            continue
-        bounded_conversation.insert(
-            0,
-            {
-                "role": role,
-                "author": str(item.get("author") or "")[:200],
-                "content": content,
-            },
+        separator_size = 2 if bounded_conversation else 0
+        entry = _bounded_chat_history_entry(
+            item, maximum_chars=min(10_000, conversation_budget - separator_size)
         )
-        conversation_budget -= len(content)
+        if entry is None:
+            continue
+        entry_size = len(json.dumps(entry, ensure_ascii=False))
+        bounded_conversation.insert(0, entry)
+        conversation_budget -= entry_size + separator_size
         if conversation_budget <= 0:
             break
     serialized_context = _serialize_bounded_chat_context(context)
@@ -1044,7 +1197,12 @@ user statement. Cap its confidence at 50, use null for source and coordinate
 fields, and omit ambiguity. A public_web proposal must be explicitly supported
 by the assistant answer and one exact URL from the citation catalogue; cap
 confidence at 85. Extrapolations, predictions, and hypotheses must never become
-Persona proposals. Email and phone values must be exact and explicitly supplied
+Persona proposals. A direct-access failure does not disqualify facts explicitly
+supported by cited public index excerpts or a cited regional profile page.
+Keep the actual citation URL and describe that limited evidence basis; never
+claim to have read fields that were not available. A matching name, profile path,
+or regional URL is not proof of identity or ownership. Email and phone values
+must be exact and explicitly supplied
 by the analyst or explicitly published by the cited source. Address proposals
 are allowed only with public_web evidence and must be explicitly published
 institutional or business contact addresses; never propose or infer a private
@@ -1399,9 +1557,20 @@ async def validate_openai_connection(
     allow_private_endpoint: bool = False,
 ) -> str:
     """Verify a server-side OpenAI key and model without generating content."""
+    if not isinstance(model, str) or not model or model in {".", ".."}:
+        raise ValueError("AI model must be a non-empty identifier, not a dot segment")
+    # The model is one identifier under /models/, never a path, query or fragment.
+    # quote leaves exact dot segments unchanged, so reject those explicitly above.
+    model_component = quote(model, safe="")
+    # Enforce the component contract at the request boundary independently of
+    # the encoder: only unreserved ASCII or complete percent escapes may pass.
+    if model_component in {".", ".."} or not re.fullmatch(
+        r"(?:[A-Za-z0-9._~-]|%[0-9A-Fa-f]{2})+", model_component
+    ):
+        raise ValueError("AI model URL component is invalid")
     url = _ai_api_url(
         api_base_url,
-        f"models/{model}",
+        f"models/{model_component}",
         allow_custom_endpoint=allow_custom_endpoint,
         allow_private_endpoint=allow_private_endpoint,
     )
@@ -1409,7 +1578,7 @@ async def validate_openai_connection(
     timeout = aiohttp.ClientTimeout(total=timeout_seconds)
 
     async with aiohttp.ClientSession(timeout=timeout) as session:
-        async with session.get(url, headers=headers) as resp:
+        async with session.get(url, headers=headers, allow_redirects=False) as resp:
             await _check_response(resp)
             try:
                 response_data = await resp.json()
