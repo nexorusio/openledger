@@ -169,10 +169,12 @@ def curate(journey):
     return result.get_json()
 
 
-def test_direct_operator_review_reject_research_resolve_approve_same_case(journey):
+def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     client = journey['client']
-    assert client.get(base(journey)).status_code == 200
-    assert b'Probability unavailable' in client.get(base(journey)).data
+    workspace = client.get(base(journey))
+    assert workspace.status_code == 200
+    assert b'Automated ranked curated findings' in workspace.data
+    assert b'Record decision' not in workspace.data
     assert client.get(base(journey) + '/final').status_code == 404
     version = curate(journey)
     assert client.get(base(journey) + '/versions/' + version['id']).status_code == 200

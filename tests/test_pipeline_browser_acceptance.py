@@ -68,8 +68,8 @@ def test_browser_four_inputs_review_research_qc_and_final(application_journey, t
             manual.locator('[name="reason"]').fill("The retained directory explicitly names this subject.")
             manual.locator('button[type="submit"]').click()
             page.goto(origin + base)
+            expect(page.get_by_role("heading", name="Automated ranked curated findings")).to_be_visible()
             decision = page.locator('form[action$="/decision"]').first
-            decision.locator('[name="reason"]').fill("Reviewed the retained record and its subject scope.")
             decision.locator('button[type="submit"]').click()
             version_form = page.locator('form[action$="/versions"]')
             version_form.locator('[name="scope"]').fill("Public name supported by the retained directory.")
