@@ -70,8 +70,8 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             page.goto(origin + base)
             expect(page.get_by_text("Review consolidated evidence by subject area.", exact=False)).to_be_visible()
             for tab_name in (
-                "Identity", "Contact & location", "Digital presence",
-                "Affiliations", "Assets & risk", "Review queue", "Engine status",
+                "Identity", "Contact and location", "Digital presence",
+                "Affiliations", "Assets and risk records", "Review queue", "Engine status",
             ):
                 expect(page.get_by_role("tab", name=tab_name, exact=False)).to_be_visible()
 

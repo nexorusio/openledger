@@ -2562,7 +2562,6 @@ class PipelineStore:
                     ],
                 }
                 for key, title in SHORTLIST_SECTIONS
-                if any(item["section"] == key for item in display_shortlist)
             ]
             result = dict(
                 pipeline_id=PIPELINE_ID,
