@@ -196,6 +196,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             ).locator("xpath=ancestor::td")
             decision_cell.get_by_role("button", name="Edit decision").click()
             decision = decision_cell.locator('form[action$="/decision"]:visible')
+            decision.locator("summary").click()
             decision.locator('[name="reason"]').fill("Approved after reviewing the cited source.")
             decision.get_by_role("button", name="Approve").click()
             expect(page.get_by_text("Approved", exact=True).first).to_be_visible()
