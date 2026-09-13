@@ -95,7 +95,11 @@ def journey(tmp_path):
     app.add_url_rule(
         "/personas/<persona_id>", "persona_workspace", lambda persona_id: persona_id
     )
-    app.add_url_rule("/live/<job_id>", "live_results", lambda job_id: job_id)
+    app.add_url_rule(
+        "/live/<job_id>",
+        "live_results",
+        lambda job_id: "synthetic live result",
+    )
     app.context_processor(
         lambda: {
             "csrf_token": session.get("csrf_token"),
