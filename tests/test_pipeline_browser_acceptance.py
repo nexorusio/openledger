@@ -186,11 +186,16 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             # Reject and then approve the same finding to prove both controls work
             # while retaining the complete decision trail used by report snapshots.
             decision = page.locator('form[action$="/decision"]:visible').first
+            decision_action = decision.get_attribute("action")
+            assert decision_action
             assert decision.locator('[name="reason"]').get_attribute("required") is None
             decision.get_by_role("button", name="Reject").click()
             expect(page.get_by_text("Rejected", exact=True).first).to_be_visible()
-            page.get_by_role("button", name="Edit decision").first.click()
-            decision = page.locator('form[action$="/decision"]:visible').first
+            decision_cell = page.locator(
+                f'form[action="{decision_action}"]'
+            ).locator("xpath=ancestor::td")
+            decision_cell.get_by_role("button", name="Edit decision").click()
+            decision = decision_cell.locator('form[action$="/decision"]:visible')
             decision.locator('[name="reason"]').fill("Approved after reviewing the cited source.")
             decision.get_by_role("button", name="Approve").click()
             expect(page.get_by_text("Approved", exact=True).first).to_be_visible()
