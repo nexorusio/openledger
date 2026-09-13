@@ -169,7 +169,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             page.goto(origin + base)
             expect(
                 page.get_by_role(
-                    "heading", name="Confirm digital presence and evidence"
+                    "heading", name="Review submitted evidence and discoveries"
                 )
             ).to_be_visible()
             for tab_name in ("Review queue", "Engine log"):
