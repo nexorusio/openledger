@@ -70,6 +70,12 @@ def test_live_job_is_queued_without_browser_owned_thread(
     job_id = response.location.rsplit("/", 1)[-1]
     stored = persistent_store.get_job(job_id)
     assert stored["status"] == "queued"
+    persona_id = stored["options"]["investigation_spec"]["persona_bindings"][0][
+        "persona_id"
+    ]
+    live_page = client.get(response.location).get_data(as_text=True)
+    assert f"/cases/{stored['case_id']}/pipeline/{persona_id}" in live_page
+    assert "doneRedirect && runtimeIsTerminal(runtimeState.status)" in live_page
 
     history = client.get("/history").get_data(as_text=True)
     assert "Queued" in history

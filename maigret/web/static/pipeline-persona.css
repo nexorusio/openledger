@@ -41,6 +41,19 @@
 .affiliation-branch-control input:not([type="checkbox"]) { width: 100%; }
 .approved-persona-header form { margin: 0; }
 
+.persona-section-status {
+    display: flex;
+    align-items: flex-start;
+    gap: .75rem;
+    margin: 0 0 1rem;
+    padding: .8rem 1rem;
+    border-left: 2px solid var(--ol-accent, #7c4dff);
+    background: rgba(124, 77, 255, .07);
+}
+
+.persona-section-status strong { flex: 0 0 auto; }
+.persona-section-status span { color: var(--ol-muted, #8d99a5); }
+
 @media (max-width: 700px) {
     .approved-persona-table { table-layout: auto; }
     .approved-persona-table th:nth-child(n) { width: auto; }

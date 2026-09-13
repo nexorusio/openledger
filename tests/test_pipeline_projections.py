@@ -134,7 +134,9 @@ def test_workspace_50k_evidence_pages_are_bounded_and_do_not_reassess(
         assert list(readers.map(read_independently, range(5))) == [(200, 50_001)] * 5
 
     last = client.get("/api" + base(journey) + "/observations?page=501").get_json()
-    assert len(last["observations"]) == 1
+    # The investigator-supplied username is retained as its own immutable
+    # candidate in addition to the 50,001 synthetic source observations.
+    assert len(last["observations"]) == 2
     assert not last["has_next"]
 
 

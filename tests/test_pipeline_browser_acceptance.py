@@ -169,7 +169,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             page.goto(origin + base)
             expect(
                 page.get_by_role(
-                    "heading", name="Confirm digital presence and evidence"
+                    "heading", name="Review submitted evidence and discoveries"
                 )
             ).to_be_visible()
             for tab_name in ("Review queue", "Engine log"):
@@ -206,6 +206,20 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             assert {row["id"] for row in originals} <= {
                 row["id"] for row in pipeline.list_observations(case_id, persona_id, limit=500)
             }
+
+            # Submitted inputs and every positive engine candidate now enter the
+            # same queue. Resolve the remaining rows before the wizard can open
+            # the approved Persona or export its immutable report snapshot.
+            for _ in range(workspace["review_pending_count"]):
+                pending = page.locator('form[action$="/decision"]:visible').first
+                expect(pending).to_be_visible()
+                pending.get_by_role("button", name="Reject").click()
+            workspace = pipeline.get_workspace(case_id, persona_id)
+            assert workspace["review_pending_count"] == 0
+
+            page.get_by_role("button", name="Proceed to Persona").click()
+            expect(page.get_by_text("Step 2 · Approved Persona", exact=True)).to_be_visible()
+            page.goto(origin + base)
 
             with page.expect_download() as download_info:
                 page.get_by_role("button", name="Export report").click()

@@ -477,7 +477,9 @@ async def _await_collector(call, *, timeout_seconds, cancelled):
 
 def refresh_consolidation(store, case_id, persona_id):
     from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+    from maigret.web.pipeline_store import PipelineStore
 
+    PipelineStore(store).reconcile_submitted_inputs(case_id, persona_id)
     return assess_consolidated_groups(store, case_id, persona_id)
 
 
@@ -770,10 +772,14 @@ async def _execute_requests(
                         session=job["job_id"],
                     )
                     outcome = "partial"
+                    diagnostic = getattr(exc, "safe_diagnostic", {})
                     returned = {
                         "retryable": False,
                         "completeness": "partial",
                         "display_status": "unavailable",
+                        "error_code": diagnostic.get(
+                            "code", "collector_process_unavailable"
+                        ),
                     }
                 except Exception as exc:
                     error = app_module.record_internal_error(

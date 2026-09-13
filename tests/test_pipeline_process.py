@@ -63,6 +63,28 @@ def test_bounded_process_preserves_output_and_input():
     assert code == 0 and output == b"test-input\n" and diagnostic == b"diagnostic\n"
 
 
+def test_child_exit_diagnostic_keeps_only_bounded_failure_classification():
+    detail = processes._safe_child_diagnostic(
+        b"provider payload must not survive\nCollector process failed: MemoryError\n",
+        137,
+    )
+    assert detail == {
+        "code": "collector_child_exception",
+        "returncode": 137,
+        "exception_type": "MemoryError",
+    }
+    assert "provider" not in json.dumps(detail)
+
+    malformed = processes._safe_child_diagnostic(
+        b"Collector process failed: ValueError injected detail", 1
+    )
+    assert malformed == {
+        "code": "collector_child_exit",
+        "returncode": 1,
+        "exception_type": None,
+    }
+
+
 def test_output_overflow_is_bounded_and_process_killed():
     started = time.monotonic()
     with pytest.raises(processes.CollectorProcessError, match="bounded output"):
