@@ -40,6 +40,41 @@ def assert_no_page_overflow(page, label):
     )
 
 
+def assert_logo_is_not_clipped(page, selector):
+    margins = page.locator(selector).evaluate(
+        """image => {
+            const canvas = document.createElement('canvas');
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight;
+            const context = canvas.getContext('2d');
+            context.drawImage(image, 0, 0);
+            const pixels = context.getImageData(
+                0, 0, canvas.width, canvas.height
+            ).data;
+            let maxX = -1;
+            let maxY = -1;
+            for (let offset = 3; offset < pixels.length; offset += 4) {
+                if (!pixels[offset]) continue;
+                const pixel = (offset - 3) / 4;
+                maxX = Math.max(maxX, pixel % canvas.width);
+                maxY = Math.max(maxY, Math.floor(pixel / canvas.width));
+            }
+            const imageBox = image.getBoundingClientRect();
+            const wrapperBox = image.parentElement.getBoundingClientRect();
+            return {
+                right: wrapperBox.right - (
+                    imageBox.left + (maxX + 1) * imageBox.width / canvas.width
+                ),
+                bottom: wrapperBox.bottom - (
+                    imageBox.top + (maxY + 1) * imageBox.height / canvas.height
+                ),
+            };
+        }"""
+    )
+    assert margins["right"] >= 1, margins
+    assert margins["bottom"] >= 1, margins
+
+
 def test_browser_four_inputs_assessment_reject_approve_and_report(application_journey, tmp_path):
     from playwright.sync_api import sync_playwright, expect
 
@@ -88,6 +123,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                 assert page.locator('.login-visual img').evaluate(
                     "image => image.complete && image.naturalWidth > 0"
                 )
+                assert_logo_is_not_clipped(page, ".login-wordmark-mark img")
                 assert_no_page_overflow(page, label)
                 if viewport["width"] != 768:
                     page.screenshot(
@@ -100,6 +136,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             page.locator('input[name="username"]').fill("pipeline-reviewer")
             page.locator('input[name="password"]').fill("Synthetic fixture password 2026!")
             page.locator('button[type="submit"]').click()
+            assert_logo_is_not_clipped(page, ".brand-mark-wrap img")
 
             # Live progress keeps fixed proportional columns while changing
             # activity text, exposes the full value on hover, remains sortable,
