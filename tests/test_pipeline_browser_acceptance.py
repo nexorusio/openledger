@@ -175,7 +175,12 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                     expect(page.locator("#appShell")).to_have_class(
                         re.compile(r"\bsidebar-open\b")
                     )
-                    page.locator("#sidebarBackdrop").click(position={"x": 2, "y": 2})
+                    backdrop = page.locator("#sidebarBackdrop")
+                    backdrop_box = backdrop.bounding_box()
+                    assert backdrop_box
+                    backdrop.click(
+                        position={"x": backdrop_box["width"] - 8, "y": 8}
+                    )
                     expect(page.locator("#appShell")).not_to_have_class(
                         re.compile(r"\bsidebar-open\b")
                     )
