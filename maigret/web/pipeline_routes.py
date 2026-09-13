@@ -171,6 +171,7 @@ def register_pipeline_routes(
     launch_research=None,
     prepare_workspace=None,
     submit_manual_evidence=None,
+    launch_approved_discovery=None,
 ):
     from maigret.web.pipeline_store import PipelineStore
 
@@ -194,6 +195,55 @@ def register_pipeline_routes(
 
     def actor():
         return session.get('username') or 'local-operator'
+
+    def approved_persona(case_id, persona_id):
+        from maigret.web.pipeline_store import (
+            SHORTLIST_SECTIONS,
+            _shortlist_section,
+        )
+
+        current = store()
+        items = []
+        for row in current.iter_included_groups(case_id, persona_id):
+            normalized = dict(row.get("normalized") or {})
+            value = normalized.get("value")
+            label = (
+                normalized.get("display_value")
+                or (value.get("url") if isinstance(value, dict) else value)
+                or normalized.get("canonical_url")
+                or normalized.get("url")
+                or normalized.get("handle")
+                or normalized.get("predicate")
+                or "Approved finding"
+            )
+            item_url = public_url(
+                normalized.get("canonical_url")
+                or normalized.get("url")
+                or (value.get("url") if isinstance(value, dict) else "")
+            )
+            items.append(
+                {
+                    "id": row["id"],
+                    "kind": row["kind"],
+                    "normalized": normalized,
+                    "label": str(label),
+                    "url": item_url,
+                    "section": _shortlist_section(row["kind"], normalized),
+                    "decision_actor": row.get("decision_actor"),
+                    "decision_reason": row.get("decision_reason"),
+                }
+            )
+        return {
+            "items": items,
+            "sections": [
+                {
+                    "key": key,
+                    "title": title,
+                    "items": [item for item in items if item["section"] == key],
+                }
+                for key, title in SHORTLIST_SECTIONS
+            ],
+        }
 
     def payload():
         if request.is_json:
@@ -334,6 +384,127 @@ def register_pipeline_routes(
             )
         )
 
+    @bp.route("/cases/<case_id>/pipeline/<persona_id>/proceed", methods=["POST"])
+    @access(mutate=True)
+    def proceed(case_id, persona_id):
+        scoped_persona(case_id, persona_id)
+        data = store().get_workspace(case_id, persona_id, limit=1)
+        if data["review_pending_count"]:
+            flash(
+                "Resolve every review-queue finding before proceeding to the Persona.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+                + "#operator-review",
+                code=303,
+            )
+        if not data["approved_count"]:
+            flash("Approve at least one finding before proceeding.", "warning")
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id),
+                code=303,
+            )
+        return redirect(
+            url_for("pipeline.persona", case_id=case_id, persona_id=persona_id),
+            code=303,
+        )
+
+    @bp.route("/cases/<case_id>/pipeline/<persona_id>/persona")
+    @access()
+    def persona(case_id, persona_id):
+        subject = scoped_persona(case_id, persona_id)
+        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if workspace_data["review_pending_count"]:
+            flash(
+                "Resolve every review-queue finding before opening the approved Persona.",
+                "warning",
+            )
+            return redirect(
+                url_for(
+                    "pipeline.workspace", case_id=case_id, persona_id=persona_id
+                )
+                + "#operator-review",
+                code=303,
+            )
+        projection = approved_persona(case_id, persona_id)
+        if not projection["items"]:
+            flash("Approve at least one finding before opening the Persona.", "warning")
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+            )
+        return render_template(
+            "pipeline_persona.html",
+            persona=subject,
+            approved=projection,
+            workspace=workspace_data,
+            discovery_available=launch_approved_discovery is not None,
+        )
+
+    @bp.route(
+        "/cases/<case_id>/pipeline/<persona_id>/discover-related",
+        methods=["POST"],
+    )
+    @access(mutate=True)
+    def discover_related(case_id, persona_id):
+        scoped_persona(case_id, persona_id)
+        if launch_approved_discovery is None:
+            abort(503, description="Related-evidence discovery is unavailable.")
+        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if workspace_data["review_pending_count"]:
+            abort(409, description="Resolve the review queue before launching discovery.")
+        projection = approved_persona(case_id, persona_id)
+        if not projection["items"]:
+            abort(409, description="Approve evidence before launching discovery.")
+        result = launch_approved_discovery(
+            case_id=case_id,
+            persona_id=persona_id,
+            approved_groups=projection["items"],
+            actor=actor(),
+        )
+        flash(
+            "Approved identifiers were queued for an AI-assisted cross-source check. New output will return to the review queue and is not auto-approved.",
+            "success",
+        )
+        return redirect(url_for("live_results", job_id=result["job_id"]), code=303)
+
+    @bp.route(
+        "/cases/<case_id>/pipeline/<persona_id>/groups/<group_id>/branch-affiliation",
+        methods=["POST"],
+    )
+    @access(mutate=True)
+    def branch_affiliation(case_id, persona_id, group_id):
+        scoped_persona(case_id, persona_id)
+        included = {
+            row["id"]: row
+            for row in store().iter_included_groups(case_id, persona_id)
+        }
+        row = included.get(group_id)
+        if row is None or row.get("kind") != "claim":
+            abort(409, description="Only an approved affiliation can open a branch.")
+        normalized = dict(row.get("normalized") or {})
+        predicate = str(normalized.get("predicate") or "").casefold()
+        if predicate not in {"company", "organization", "affiliation"}:
+            abort(409, description="Select an approved organization affiliation.")
+        organization = normalized.get("value")
+        if isinstance(organization, dict):
+            organization = organization.get("name") or organization.get("label")
+        current = get_case_store()
+        job_id = current.create_affiliation_investigation(
+            str(organization or ""),
+            source_claim_id=group_id,
+            source_claim_field="company",
+            target_basis="approved_affiliation_claim",
+            jurisdiction=request.form.get("jurisdiction", ""),
+            official_website=request.form.get("official_website", ""),
+            enable_domain_context=request.form.get("enable_domain_context") == "1",
+        )
+        flash(
+            "A separate affiliation investigation was opened. Its findings require their own review.",
+            "success",
+        )
+        return redirect(url_for("live_results", job_id=job_id), code=303)
+
     @bp.route('/cases/<case_id>/pipeline/<persona_id>/requests/<request_id>/resume', methods=['POST'])
     @access(mutate=True)
     def resume_request(case_id, persona_id, request_id):
@@ -466,6 +637,28 @@ def register_pipeline_routes(
             corrected_claim=corrected,
             evidence_dispositions=dispositions,
         )
+        if not (
+            request.is_json
+            or request.accept_mimetypes.best == 'application/json'
+        ):
+            flash(
+                'Operator decision recorded. Previous evidence and decisions are retained.',
+                'success',
+            )
+            return_page = max(
+                1, request.form.get('return_page', 1, type=int) or 1
+            )
+            return redirect(
+                url_for(
+                    'pipeline.workspace',
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    page=return_page,
+                )
+                + '#finding-'
+                + group_id,
+                code=303,
+            )
         return respond(
             case_id,
             persona_id,

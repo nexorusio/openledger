@@ -1,6 +1,8 @@
 import sys
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 from maigret.web import user_scanner_runner
 
 
@@ -194,5 +196,16 @@ def test_email_scan_runs_usable_modules_and_retains_load_diagnostics(
     assert captured["email"] == "alice@example.test"
     assert [module.NAME for module in captured["modules"]] == ["working"]
     assert results[0]["status"] == "Found"
+    assert captured["concurrency"] == 4
     assert results[1]["site_name"] == "Broken"
     assert results[1]["extra"]["scan_stage"] == "module_load"
+
+
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("1", 1), ("6", 6), ("99", 8), ("invalid", 4)],
+)
+def test_scanner_concurrency_is_bounded(monkeypatch, configured, expected):
+    monkeypatch.setenv("OPENLEDGER_USER_SCANNER_CONCURRENCY", configured)
+
+    assert user_scanner_runner._scanner_concurrency() == expected

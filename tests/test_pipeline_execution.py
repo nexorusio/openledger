@@ -79,6 +79,18 @@ def test_sync_pipeline_runner_is_safe_inside_an_existing_event_loop():
     assert asyncio.run(nested_call()) == "completed"
 
 
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [("1", 1), ("3", 3), ("99", 4), ("invalid", 2)],
+)
+def test_pipeline_concurrency_is_bounded(monkeypatch, configured, expected):
+    import maigret.web.pipeline_execution as execution
+
+    monkeypatch.setenv("OPENLEDGER_PIPELINE_CONCURRENCY", configured)
+
+    assert execution._pipeline_concurrency() == expected
+
+
 async def found(task, context):
     context.emit_observations(
         [
@@ -97,6 +109,32 @@ async def found(task, context):
         ]
     )
     return {"outcome": "found"}
+
+
+def test_collector_process_exit_is_partial_without_immediate_retry(
+    runtime, monkeypatch
+):
+    import maigret.web.pipeline_process as processes
+
+    store, pipeline, _ = runtime
+    sources(monkeypatch, {"maigret"})
+
+    async def unavailable(*_args, **_kwargs):
+        raise processes.CollectorProcessError("synthetic child exit")
+
+    monkeypatch.setattr(processes, "supervise_collector", unavailable)
+    job = enqueue(store, [{"type": "username", "value": "synthetic-person"}])
+
+    result = execute_pipeline_job(store, job)
+
+    request = pipeline.requests_for_job(job["job_id"])[0]
+    task = next(item for item in request["tasks"] if item["availability"] == "active")
+    assert result["status"] == "completed"
+    assert result["collection_status"] == "partial"
+    assert task["outcome"] == "partial"
+    assert task["attempt_count"] == 1
+    assert task["spec"]["_execution"]["retryable"] is False
+    assert "Collector process became unavailable" in task["attempts"][0]["error"]
 
 
 def test_real_query_and_attempts_reach_grouped_review_without_automatic_final(

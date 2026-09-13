@@ -100,6 +100,64 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             page.locator('input[name="username"]').fill("pipeline-reviewer")
             page.locator('input[name="password"]').fill("Synthetic fixture password 2026!")
             page.locator('button[type="submit"]').click()
+
+            # Live progress keeps fixed proportional columns while changing
+            # activity text, exposes the full value on hover, remains sortable,
+            # and belongs to New investigation rather than History.
+            page.goto(origin + f"/live/{job_id}")
+            expect(page.get_by_role("link", name="New investigation")).to_have_class(
+                re.compile(r"\bactive\b")
+            )
+            expect(page.get_by_role("link", name="History")).not_to_have_class(
+                re.compile(r"\bactive\b")
+            )
+            long_activity = (
+                "A deliberately long current activity message that must truncate "
+                "without resizing any column while remaining available on hover."
+            )
+            page.evaluate(
+                """activity => {
+                    updateCollector(
+                        {collector: 'zeta-engine', platform: 'threads'},
+                        'running', activity, 'Collecting'
+                    );
+                    updateCollector(
+                        {collector: 'alpha-engine', input_type: 'email'},
+                        'queued', 'Waiting for an execution slot', '—'
+                    );
+                }""",
+                long_activity,
+            )
+            progress_table = page.locator("#engine-progress-table")
+            activity_cell = progress_table.locator("tbody tr").first.locator("td").nth(2)
+            activity_text = activity_cell.locator(".table-cell-ellipsis")
+            expect(activity_text).to_have_attribute("title", long_activity)
+            assert activity_text.evaluate(
+                "element => getComputedStyle(element).textOverflow"
+            ) == "ellipsis"
+            assert activity_text.evaluate(
+                "element => getComputedStyle(element).whiteSpace"
+            ) == "nowrap"
+            widths_before = progress_table.locator("tbody tr").first.locator("td").evaluate_all(
+                "cells => cells.map(cell => cell.getBoundingClientRect().width)"
+            )
+            page.evaluate(
+                """() => updateCollector(
+                    {collector: 'zeta-engine', platform: 'threads'},
+                    'running', 'Short update', 'Collecting'
+                )"""
+            )
+            widths_after = progress_table.locator("tbody tr").first.locator("td").evaluate_all(
+                "cells => cells.map(cell => cell.getBoundingClientRect().width)"
+            )
+            assert all(
+                abs(before - after) <= 1
+                for before, after in zip(widths_before, widths_after)
+            )
+            page.get_by_role("button", name=re.compile(r"^Engine")).click()
+            engine_names = progress_table.locator("tbody tr td:first-child").all_text_contents()
+            assert engine_names == sorted(engine_names, key=str.casefold)
+
             page.goto(origin + base + "/observations")
             manual = page.locator('form[action$="/manual-evidence"]')
             manual.locator('[name="predicate"]').select_option("full_name")
@@ -109,21 +167,29 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             manual.locator('[name="reason"]').fill("The retained directory explicitly names this subject.")
             manual.locator('button[type="submit"]').click()
             page.goto(origin + base)
-            expect(page.get_by_text("Review consolidated evidence by subject area.", exact=False)).to_be_visible()
-            for tab_name in (
-                "Identity", "Contact and location", "Digital presence",
-                "Affiliations", "Assets and risk records", "Review queue", "Engine status",
-            ):
+            expect(page.get_by_text("First resolve the review queue.", exact=False)).to_be_visible()
+            for tab_name in ("Review queue", "Engine log"):
                 expect(page.get_by_role("tab", name=tab_name, exact=False)).to_be_visible()
+            expect(page.get_by_text("Step 1", exact=True)).to_be_visible()
+            expect(page.get_by_text("Step 2", exact=True)).to_be_visible()
+            review_table = page.locator("table.assessment-review-table")
+            expect(review_table).to_be_visible()
+            assert review_table.locator("thead th").all_text_contents() == [
+                "Finding ↕", "Category ↕", "Assessment ↕", "Evidence ↕",
+                "Decision ↕", "Actions",
+            ]
 
             # Reject and then approve the same finding to prove both controls work
             # while retaining the complete decision trail used by report snapshots.
             decision = page.locator('form[action$="/decision"]:visible').first
-            decision.locator('[name="reason"]').fill("Rejected pending closer source review.")
+            assert decision.locator('[name="reason"]').get_attribute("required") is None
             decision.get_by_role("button", name="Reject").click()
+            expect(page.get_by_text("Rejected", exact=True).first).to_be_visible()
+            page.get_by_role("button", name="Edit decision").first.click()
             decision = page.locator('form[action$="/decision"]:visible').first
             decision.locator('[name="reason"]').fill("Approved after reviewing the cited source.")
             decision.get_by_role("button", name="Approve").click()
+            expect(page.get_by_text("Approved", exact=True).first).to_be_visible()
 
             workspace = pipeline.get_workspace(case_id, persona_id)
             assert any(item.get("latest_decision") == "include" for item in workspace["shortlist"])

@@ -279,13 +279,10 @@ def _inputs(
                     "value": row.get("source_value"),
                 },
             )
-    for url, usernames in (plan.get("profile_url_usernames") or {}).items():
-        for username in usernames:
-            add(
-                "username",
-                str(username),
-                derived_from={"type": "profile_url", "value": url},
-            )
+    # ``profile_url_usernames`` is display/provenance metadata.  A handle parsed
+    # from a supplied URL is not permission to scan the same spelling across
+    # unrelated platforms; only explicit username inputs/search targets route
+    # to username collectors.
     for name, kind in _CONTEXT_INPUTS.items():
         for value in _values(context.get(name)):
             add(kind, value, derived_from={"context": name, "operator_selected": True})
@@ -459,10 +456,30 @@ def build_query_plan(
                     )
                 if not snapshot["enabled"]:
                     state, reason = "unavailable", snapshot["reason"]
-                if engine.option and not investigation_plan.get(engine.option):
+                if (
+                    engine.option
+                    and not investigation_plan.get(engine.option)
+                    and not (
+                        engine.engine_id == "unfurl_url_analysis"
+                        and item.get("type") == "profile_url"
+                        and item.get("value")
+                        not in investigation_plan.get("unresolved_profile_urls", [])
+                    )
+                ):
                     state, reason = (
                         "excluded",
                         "The operator has not selected this collection option.",
+                    )
+                elif (
+                    engine.engine_id == "unfurl_url_analysis"
+                    and item.get("type") == "profile_url"
+                    and item.get("value")
+                    not in investigation_plan.get("unresolved_profile_urls", [])
+                    and not investigation_plan.get(engine.option)
+                ):
+                    reason = (
+                        "Exact operator-supplied profile URL; local URL analysis "
+                        "preserves the target without making a network request."
                     )
                 if (
                     engine.engine_id == "user_scanner_username"

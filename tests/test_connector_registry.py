@@ -170,6 +170,43 @@ def test_new_connector_needs_only_package_manifest_and_fixtures(monkeypatch):
     assert seen[0]["retention_policy"] == [capability.retention, None]
 
 
+def test_exact_profile_url_collector_preserves_linkedin_slug(monkeypatch):
+    from maigret.web.connectors import builtin
+
+    captured = {}
+
+    async def analyze(target, *, timeout_seconds):
+        captured.update(target)
+        return {
+            "status": "candidate",
+            "source_url": target["profile_url"],
+            "subject_value": target["investigated_username"],
+        }
+
+    monkeypatch.setattr(
+        builtin,
+        "_adapters",
+        lambda: SimpleNamespace(run_unfurl_url_analysis=analyze),
+    )
+    context = Context()
+    asyncio.run(
+        builtin.collect_url(
+            {
+                "input_value": "https://linkedin.com/in/jati-pratomo",
+                "execution_key": "run_unfurl_url_analysis",
+                "timeout_seconds": 20,
+            },
+            context,
+        )
+    )
+
+    assert captured == {
+        "profile_url": "https://linkedin.com/in/jati-pratomo",
+        "investigated_username": "jati-pratomo",
+        "site_name": "linkedin.com",
+    }
+
+
 @pytest.mark.parametrize(
     "field,value",
     [

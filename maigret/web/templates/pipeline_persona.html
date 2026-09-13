@@ -1,0 +1,89 @@
+{% extends 'base.html' %}
+{% block title %}{{ persona.display_name }} · Persona | OpenLedger{% endblock %}
+{% block breadcrumb %}Persona profile{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='pipeline.css') }}"><link rel="stylesheet" href="{{ url_for('static', filename='pipeline-persona.css') }}">{% endblock %}
+{% block content %}
+<section class="persona-profile-header approved-persona-header">
+    <div class="persona-photo-frame">
+        <span class="persona-photo-placeholder"><i data-lucide="user-round"></i><small>Approved profile</small></span>
+    </div>
+    <div class="persona-profile-copy">
+        <p class="eyebrow">Step 2 · Approved Persona</p>
+        <h1>{{ persona.display_name }}</h1>
+        <p class="page-description">This profile contains only findings approved in the review step. New discoveries return to the queue and never change this view automatically.</p>
+        <div class="persona-status-strip" aria-label="Approved Persona status">
+            <span><strong>{{ approved['items'] | length }}</strong> approved</span>
+            <span><strong>{{ workspace.review_pending_count }}</strong> awaiting review</span>
+        </div>
+    </div>
+    <div class="heading-actions persona-heading-actions">
+        <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}#operator-review"><i data-lucide="pencil-line"></i> Edit approvals</a>
+        {% if discovery_available %}
+        <form method="post" action="{{ url_for('pipeline.discover_related', case_id=persona.case_id, persona_id=persona.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-primary" type="submit" data-busy-label="Queueing cross-check…"><i data-lucide="sparkles"></i> AI cross-check &amp; discover</button>
+        </form>
+        {% endif %}
+    </div>
+</section>
+
+<section class="persona-notice" aria-label="Discovery policy">
+    <i data-lucide="shield-check"></i>
+    <div><strong>Approved anchors only</strong><span>The cross-check reuses approved names, contacts, and exact profile URLs. It does not auto-select generated aliases, invent facts, or approve new evidence.</span></div>
+</section>
+
+<nav class="persona-tabs" role="tablist" aria-label="Approved Persona categories">
+    {% for section in approved.sections %}
+    <button type="button" role="tab" class="persona-tab {{ 'active' if loop.first }}" aria-selected="{{ 'true' if loop.first else 'false' }}" data-persona-tab="{{ section.key }}">{{ section.title }} <span>{{ section['items'] | length }}</span></button>
+    {% endfor %}
+</nav>
+
+<div class="persona-tab-workspace approved-persona-workspace">
+    {% for section in approved.sections %}
+    <section class="panel-card persona-group persona-tab-panel" id="approved-{{ section.key }}" data-persona-panel="{{ section.key }}" {% if not loop.first %}hidden{% endif %}>
+        <header class="panel-header">
+            <div><h2>{{ section.title }}</h2><p>Only explicitly approved findings appear here.</p></div>
+        </header>
+        <div class="panel-body">
+            {% if section['items'] %}
+            <div class="pipeline-table-wrap">
+                <table class="table pipeline-table approved-persona-table" data-sortable-table>
+                    <thead><tr><th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="0">Approved finding <span aria-hidden="true">↕</span></button></th><th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="1">Type <span aria-hidden="true">↕</span></button></th><th>Actions</th></tr></thead>
+                    <tbody>
+                    {% for item in section['items'] %}
+                    <tr>
+                        <td data-sort-value="{{ item.label }}">{% if item.url %}<a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.label }}</a>{% else %}{{ item.label }}{% endif %}{% if item.decision_reason %}<small title="{{ item.decision_reason }}">{{ item.decision_reason }}</small>{% endif %}</td>
+                        <td data-sort-value="{{ item.kind }} {{ item.normalized.predicate | default('') }}">{{ item.normalized.predicate | default(item.kind, true) | replace('_', ' ') | title }}</td>
+                        <td class="approved-persona-actions">
+                            <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}">View evidence</a>
+                            {% if section.key == 'affiliations' and item.kind == 'claim' and item.normalized.predicate in ('company', 'organization', 'affiliation') %}
+                            <details class="affiliation-branch-control"><summary class="btn btn-outline-secondary btn-sm">New investigation branch</summary><form method="post" action="{{ url_for('pipeline.branch_affiliation', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Jurisdiction <small>(optional)</small><input name="jurisdiction" maxlength="100"></label><label>Official website <small>(optional)</small><input name="official_website" type="url" maxlength="2000"></label><label><input type="checkbox" name="enable_domain_context" value="1"> Collect current DNS context</label><button class="btn btn-primary btn-sm" type="submit">Open branch</button></form></details>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% else %}
+            <div class="empty-state compact"><i data-lucide="inbox"></i><h3>No approved findings</h3><p>Nothing in this category was approved in Step 1.</p></div>
+            {% endif %}
+        </div>
+    </section>
+    {% endfor %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(() => {
+    const tabs = Array.from(document.querySelectorAll('[data-persona-tab]'));
+    const panels = Array.from(document.querySelectorAll('[data-persona-panel]'));
+    tabs.forEach((tab) => tab.addEventListener('click', () => {
+        tabs.forEach((candidate) => { const active = candidate === tab; candidate.classList.toggle('active', active); candidate.setAttribute('aria-selected', String(active)); });
+        panels.forEach((panel) => { panel.hidden = panel.dataset.personaPanel !== tab.dataset.personaTab; });
+    }));
+    document.querySelectorAll('form button[data-busy-label]').forEach((button) => button.form?.addEventListener('submit', () => { button.disabled = true; button.textContent = button.dataset.busyLabel; }));
+})();
+</script>
+{% endblock %}

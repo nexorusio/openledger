@@ -388,20 +388,9 @@
     }
 
     function applyScannerSelectionBudget(aliases) {
-        const scannerEnabled = userScannerUsernameToggle && userScannerUsernameToggle.checked;
-        if (!scannerEnabled) return aliases;
-        const scannerTargetKeys = new Set(exactTargetKeys);
-        let selectedAliasCount = 0;
-        return aliases.map(candidate => {
-                const key = candidate.key;
-                const selected = candidate.score >= 78 && !scannerTargetKeys.has(key)
-                    && scannerTargetKeys.size < 16 && selectedAliasCount < 16;
-                if (selected) {
-                    scannerTargetKeys.add(key);
-                    selectedAliasCount++;
-                }
-                return { ...candidate, selected };
-            });
+        // Ranking explains possible aliases; it never opts the analyst into
+        // scanning them. Existing analyst choices are merged back afterwards.
+        return aliases.map(candidate => ({ ...candidate, selected: false }));
     }
 
     function selectedAliases() {

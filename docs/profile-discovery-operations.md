@@ -172,6 +172,13 @@ again when claiming queued work. If policy changed while a job waited, the job
 fails before its first attempt and is not retried. Each accepted job stores the
 server policy snapshot used for its execution.
 
+Collector fan-out is independently bounded for small hosts. The supported
+Docker defaults run at most two collector processes at once
+(`OPENLEDGER_PIPELINE_CONCURRENCY=2`) and four User Scanner modules per process
+(`OPENLEDGER_USER_SCANNER_CONCURRENCY=4`). Values are clamped to 1–4 and 1–8,
+respectively. Increase them only after observing sustained CPU and memory
+headroom; reducing either value trades throughput for lower load.
+
 ## Change flags on the supported Docker deployment
 
 These commands run on the Ubuntu production server after connecting over SSH.

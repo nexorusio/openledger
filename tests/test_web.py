@@ -2806,6 +2806,19 @@ def test_live_start_redirects_to_dedicated_live_page(client, web_app, queued_sto
     assert 'id="reportsBtn"' in body
     assert 'Open reports' in body
     assert job_id in body
+    assert 'data-sortable-table' in body
+    assert body.count('data-sort-column=') == 4
+    assert 'engine-progress-column-activity' in body
+    from bs4 import BeautifulSoup
+
+    live_page = BeautifulSoup(body, 'html.parser')
+    navigation = {
+        link.get_text(" ", strip=True): link
+        for link in live_page.select(".sidebar-link")
+    }
+    assert "active" in navigation["New investigation"].get("class", [])
+    assert navigation["New investigation"].get("aria-current") == "page"
+    assert "active" not in navigation["History"].get("class", [])
     # No unconditional navigation on completion anymore.
     assert 'window.location.href = ev.redirect' not in body
 

@@ -1780,7 +1780,10 @@ class PipelineStore:
         corrected_claim=None,
         evidence_dispositions=None,
     ):
-        actor, reason = _actor(actor), _text(reason, "Decision reason")
+        actor = _actor(actor)
+        reason = str(reason or "").strip()
+        if len(reason) > 10000:
+            raise ValueError("Decision note must contain at most 10000 characters")
         if decision not in {"include", "exclude", "reject", "unresolved"}:
             raise ValueError(
                 "Operator decision must be include, exclude, reject or unresolved"
@@ -2418,6 +2421,21 @@ class PipelineStore:
             decisions = self._table("operator_decisions")
             memberships = self._table("group_observations")
             observations = self._table("observations")
+            requests = self._table("requests")
+            from maigret.web.pipeline_evidence import canonical_origin_url
+
+            exact_profile_urls = {
+                canonical
+                for request_inputs in connection.scalars(
+                    select(requests.c.inputs).where(
+                        requests.c.case_id == case_id,
+                        requests.c.persona_id == persona_id,
+                    )
+                )
+                for item in list(request_inputs or [])
+                if isinstance(item, dict) and item.get("type") == "profile_url"
+                if (canonical := canonical_origin_url(item.get("value")))
+            }
             latest_decision = (
                 select(
                     decisions.c.group_id,
@@ -2446,6 +2464,8 @@ class PipelineStore:
                     .exists()
                     .label("has_manual_cited_evidence"),
                     decisions.c.decision.label("latest_decision_value"),
+                    decisions.c.reason.label("latest_decision_reason"),
+                    decisions.c.actor.label("latest_decision_actor"),
                     decisions.c.created_at.label("latest_decision_at"),
                 )
                 .outerjoin(summaries, summaries.c.group_id == groups.c.id)
@@ -2478,6 +2498,29 @@ class PipelineStore:
                 source_supported = assessment.get("evidence_status") == "source_supported"
                 normalized = dict(row.get("summary_normalized") or row["normalized"])
                 observation_count = int(row.get("summary_observation_count") or 0)
+                normalized_value = normalized.get("value")
+                candidate_urls = {
+                    canonical
+                    for value in (
+                        normalized.get("canonical_url"),
+                        normalized.get("profile_url"),
+                        normalized.get("url"),
+                        (
+                            normalized_value.get("url")
+                            if isinstance(normalized_value, dict)
+                            else None
+                        ),
+                    )
+                    if (canonical := canonical_origin_url(value))
+                }
+                exact_profile_input = bool(candidate_urls & exact_profile_urls)
+                retained_found = any(
+                    str(item.get("status") or "").casefold() == "found"
+                    and dict(item.get("retention") or {}).get("final_eligible")
+                    is True
+                    for item in summary_observations
+                    if isinstance(item, dict)
+                )
                 ai_ranking = assessment.get("ai_ranking")
                 ai_ranking = ai_ranking if isinstance(ai_ranking, dict) else None
                 if ai_ranking:
@@ -2487,6 +2530,19 @@ class PipelineStore:
                 # stronger support.  Unsupported candidates stay visibly
                 # labelled as candidates; they are not silently promoted.
                 if conflicts or observation_count < 1:
+                    continue
+                # Search snippets and generated-handle candidates are leads, not
+                # confirmed digital-presence findings. Keep exact operator URLs,
+                # manual citations and retained detector results; omit the
+                # unsupported aliases that otherwise produce empty detail pages.
+                section_key = _shortlist_section(row["kind"], normalized)
+                if (
+                    section_key == "digital"
+                    and not exact_profile_input
+                    and not manual_cited
+                    and not source_supported
+                    and not retained_found
+                ):
                     continue
                 if ai_ranking:
                     priority = str(ai_ranking.get("priority") or "low").casefold()
@@ -2519,6 +2575,13 @@ class PipelineStore:
                         else "An operator-supplied claim cites retained source evidence and is ready for final review."
                     )
                     ranking_key = (1, support, observation_count, 0)
+                if exact_profile_input:
+                    recommendation = "operator_supplied_profile"
+                    ranking_explanation = (
+                        "Exact profile URL supplied in the investigation; no "
+                        "generated alias was substituted for this target."
+                    )
+                    ranking_key = (3, support, observation_count, 0)
                 shortlist.append(
                     {
                         "id": row["id"],
@@ -2527,11 +2590,16 @@ class PipelineStore:
                         "assessment": assessment,
                         "observation_count": observation_count,
                         "latest_decision": row.get("latest_decision_value"),
+                        "latest_decision_reason": row.get("latest_decision_reason"),
+                        "latest_decision_actor": row.get("latest_decision_actor"),
+                        "latest_decision_at": row.get("latest_decision_at"),
                         "recommendation": recommendation,
-                        "section": _shortlist_section(row["kind"], normalized),
+                        "section": section_key,
+                        "section_title": dict(SHORTLIST_SECTIONS)[section_key],
                         "ai_ranked": ai_ranking is not None,
                         "support_origin_families": support,
                         "evidence_status": assessment.get("evidence_status"),
+                        "exact_profile_input": exact_profile_input,
                         "ranking_explanation": ranking_explanation,
                         "ranking_key": ranking_key,
                     }
@@ -2544,15 +2612,23 @@ class PipelineStore:
             )
             for item in shortlist:
                 item.pop("ranking_key", None)
-            # Preserve a useful cross-input view: a prolific username crawl
-            # must not crowd every full-name, email, phone, affiliation, or
-            # public-record result off the first assessment screen.
-            display_shortlist = []
-            for key, _title in SHORTLIST_SECTIONS:
-                section_items = [
-                    item for item in shortlist if item["section"] == key
-                ]
-                display_shortlist.extend(section_items[:25])
+            # Interleave subject areas before paging so a prolific username
+            # crawl cannot crowd every name, contact, affiliation or record off
+            # the first review table. The unified queue still has stable,
+            # bounded pages instead of silently hiding the 26th item in a tab.
+            by_section = {
+                key: [item for item in shortlist if item["section"] == key]
+                for key, _title in SHORTLIST_SECTIONS
+            }
+            balanced_shortlist = []
+            depth = 0
+            while any(depth < len(items) for items in by_section.values()):
+                for key, _title in SHORTLIST_SECTIONS:
+                    items = by_section[key]
+                    if depth < len(items):
+                        balanced_shortlist.append(items[depth])
+                depth += 1
+            display_shortlist = balanced_shortlist[offset : offset + limit]
             shortlist_sections = [
                 {
                     "key": key,
@@ -2563,6 +2639,17 @@ class PipelineStore:
                 }
                 for key, title in SHORTLIST_SECTIONS
             ]
+            approved_count = sum(
+                item["latest_decision"] == "include" for item in shortlist
+            )
+            rejected_count = sum(
+                item["latest_decision"] in {"reject", "exclude"}
+                for item in shortlist
+            )
+            kept_count = sum(
+                item["latest_decision"] == "unresolved" for item in shortlist
+            )
+            review_pending_count = len(shortlist) - approved_count - rejected_count
             result = dict(
                 pipeline_id=PIPELINE_ID,
                 **state,
@@ -2580,6 +2667,10 @@ class PipelineStore:
                 shortlist=display_shortlist,
                 shortlist_count=len(shortlist),
                 shortlist_sections=shortlist_sections,
+                approved_count=approved_count,
+                rejected_count=rejected_count,
+                kept_count=kept_count,
+                review_pending_count=review_pending_count,
                 ai_ranked_group_count=ai_ranked_group_count,
                 limit=limit,
                 offset=offset,

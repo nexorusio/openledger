@@ -151,12 +151,21 @@ async def collect_github(task, context):
 
 
 async def collect_url(task, context):
+    from urllib.parse import urlsplit
+
+    from maigret.web.investigation_input import extract_profile_usernames
+
+    profile_url = task["input_value"]
+    usernames = extract_profile_usernames(profile_url)
+    hostname = (urlsplit(profile_url).hostname or "Public source").removeprefix(
+        "www."
+    )
     return _emit(
         await getattr(_adapters(), task["execution_key"])(
             {
-                "profile_url": task["input_value"],
-                "investigated_username": task.get("originating_username", ""),
-                "site_name": "Supplied public source",
+                "profile_url": profile_url,
+                "investigated_username": usernames[0] if usernames else "",
+                "site_name": hostname,
             },
             timeout_seconds=_timeout(task),
         ),
