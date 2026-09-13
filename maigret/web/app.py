@@ -7843,31 +7843,6 @@ def configure_persona_investigation(persona_id):
 
 @app.route("/relationships")
 def relationships_workspace():
-    selected_case_id = request.args.get("case_id", "").strip()
-    selected_persona_id = request.args.get("persona_id", "").strip()
-    flash(
-        "Relationship diagrams are not exposed in the operator interface. "
-        "Review cited findings in the case workspace instead.",
-        "info",
-    )
-    if selected_persona_id and case_store is not None:
-        selected_persona = case_store.get_persona(selected_persona_id)
-        if selected_persona:
-            return redirect(
-                url_for(
-                    "pipeline.workspace",
-                    case_id=selected_persona["case_id"],
-                    persona_id=selected_persona_id,
-                )
-            )
-    if selected_case_id and case_store is not None:
-        selected_case = case_store.get_case(selected_case_id)
-        if selected_case:
-            return redirect(url_for("case_workspace", case_id=selected_case_id))
-    return redirect(url_for("cases_workspace"))
-
-    # Retained below for schema/backward compatibility while historical graph
-    # projections are removed from the operator interface.
     if case_store is None:
         flash("The relationships workspace requires persistent storage.", "warning")
         return redirect(url_for("history"))
