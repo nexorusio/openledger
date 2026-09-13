@@ -7,6 +7,7 @@ CI requires this test and rejects missing Chromium/dependencies rather than skip
 
 import os
 from pathlib import Path
+import re
 import threading
 
 import pytest
@@ -21,6 +22,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def assert_no_page_overflow(page, label):
+    dimensions = page.evaluate(
+        """() => ({
+            viewport: document.documentElement.clientWidth,
+            document: document.documentElement.scrollWidth,
+            body: document.body.scrollWidth,
+        })"""
+    )
+    assert dimensions["document"] <= dimensions["viewport"] + 1, (
+        label,
+        dimensions,
+    )
+    assert dimensions["body"] <= dimensions["viewport"] + 1, (
+        label,
+        dimensions,
+    )
+
+
 def test_browser_four_inputs_assessment_reject_approve_and_report(application_journey, tmp_path):
     from playwright.sync_api import sync_playwright, expect
 
@@ -33,7 +52,8 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
     # HTTP collection entrypoint and real worker service; synthetic source only.
     queued = journey["client"].post("/api/scan", data=form(journey, identifiers))
     assert queued.status_code == 200, queued.get_data(as_text=True)
-    result = run_queued(journey, queued.get_json()["job_id"])
+    job_id = queued.get_json()["job_id"]
+    result = run_queued(journey, job_id)
     case_id = result["case_id"]
     subjects = store.get_case(case_id)["personas"]
     assert len(subjects) == 1
@@ -55,6 +75,27 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             page = context.new_page()
             failures = []
             page.on("pageerror", lambda error: failures.append(str(error)))
+            for viewport, label in (
+                ({"width": 1440, "height": 1000}, "desktop login"),
+                ({"width": 768, "height": 1024}, "tablet login"),
+                ({"width": 390, "height": 844}, "mobile login"),
+            ):
+                page.set_viewport_size(viewport)
+                page.goto(origin + "/login")
+                expect(page.locator('.login-visual img')).to_be_visible()
+                expect(page.get_by_role("link", name="OpenLedger")).to_be_visible()
+                expect(page.locator('form.login-form')).to_be_visible()
+                assert page.locator('.login-visual img').evaluate(
+                    "image => image.complete && image.naturalWidth > 0"
+                )
+                assert_no_page_overflow(page, label)
+                if viewport["width"] != 768:
+                    page.screenshot(
+                        path=str(evidence / f'{label.replace(" ", "-")}.png'),
+                        full_page=True,
+                    )
+
+            page.set_viewport_size({"width": 1440, "height": 1000})
             page.goto(origin + "/login")
             page.locator('input[name="username"]').fill("pipeline-reviewer")
             page.locator('input[name="password"]').fill("Synthetic fixture password 2026!")
@@ -101,6 +142,44 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             assert len(versions) == 1 and versions[0]["status"] == "submitted"
             assert pipeline.get_final_version(case_id, persona_id) is None
             assert len(store.get_case(case_id)["personas"]) == 1
+            responsive_paths = (
+                ("investigation", "/"),
+                ("cases", "/cases"),
+                ("combined case", "/cases/combine"),
+                ("case", f"/cases/{case_id}"),
+                ("persona", f"/personas/{persona_id}"),
+                ("live results", f"/live/{job_id}"),
+                ("assessment", base),
+                ("evidence", base + "/observations"),
+                ("history", "/history"),
+                ("settings", "/settings"),
+                ("security", "/security"),
+                (
+                    "relationships",
+                    f"/relationships?mode=persona&case_id={case_id}&persona_id={persona_id}&view=working",
+                ),
+            )
+            for viewport, viewport_name in (
+                ({"width": 1280, "height": 900}, "desktop"),
+                ({"width": 768, "height": 1024}, "tablet"),
+                ({"width": 390, "height": 844}, "mobile"),
+            ):
+                page.set_viewport_size(viewport)
+                for page_name, path in responsive_paths:
+                    page.goto(origin + path)
+                    expect(page.locator("main")).to_be_visible()
+                    assert_no_page_overflow(page, f"{viewport_name} {page_name}")
+                if viewport_name == "mobile":
+                    page.goto(origin + "/")
+                    page.locator("#sidebarToggle").click()
+                    expect(page.locator("#appShell")).to_have_class(
+                        re.compile(r"\bsidebar-open\b")
+                    )
+                    page.locator("#sidebarBackdrop").click(position={"x": 2, "y": 2})
+                    expect(page.locator("#appShell")).not_to_have_class(
+                        re.compile(r"\bsidebar-open\b")
+                    )
+            page.set_viewport_size({"width": 1440, "height": 1000})
             page.goto(origin + base)
             page.screenshot(path=str(evidence / "operator-assessment.png"), full_page=True)
             assert not failures, failures

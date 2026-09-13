@@ -636,8 +636,11 @@ def test_application_login_replaces_browser_authentication(client, web_app):
     body = login_page.get_data(as_text=True)
     assert 'Sign in to OpenLedger' in body
     assert 'href="/static/openledger-icon-white.png"' in body
+    assert 'src="/static/openledger-login-visual.jpg"' in body
     assert 'name="username"' in body
     assert 'name="password"' in body
+    assert 'Private intelligence workspace' not in body
+    assert 'Sign in securely' not in body
 
     response = client.post(
         '/login',

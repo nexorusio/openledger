@@ -304,8 +304,28 @@ a:hover {
 }
 
 .app-content {
+    min-width: 0;
     max-width: none;
     padding: 46px 48px 64px;
+}
+
+.app-shell,
+.app-workspace,
+.app-content > *,
+.panel-card,
+.panel-body,
+.page-heading > *,
+.heading-actions,
+.table-responsive,
+.pipeline-table-wrap,
+.relationship-workspace-grid {
+    min-width: 0;
+}
+
+img,
+video,
+canvas {
+    max-width: 100%;
 }
 
 /* Shared visual language */
@@ -362,33 +382,136 @@ a:hover {
     min-width: 0;
 }
 
-/* The sign-in screen uses the same quiet black/purple system as the app. */
-.login-brand-panel {
-    background: #090909;
-    border-right: 1px solid var(--ol-border);
+/* Sign-in: one restrained image, the OpenLedger mark and a glass form. */
+.login-body {
+    min-height: 100svh;
+    overflow: hidden;
+    background: #000;
 }
 
-.login-brand-panel::after {
-    border-radius: 0;
-    border-color: rgba(124, 77, 255, 0.24);
+.login-shell {
+    position: relative;
+    isolation: isolate;
+    min-height: 100svh;
+    display: grid;
+    grid-template-columns: minmax(360px, 0.72fr) minmax(0, 1.28fr);
+    overflow: hidden;
+    background: #000;
 }
 
-.login-brand-mark,
-.login-mobile-mark {
-    border-radius: 0;
-    background: transparent;
+.login-visual {
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    margin: 0;
+    overflow: hidden;
+    background: #000;
 }
 
-.login-brand-copy h1 {
-    font-weight: 500;
+.login-visual::after {
+    position: absolute;
+    inset: 0;
+    background:
+        linear-gradient(90deg, rgba(0, 0, 0, 0.94) 0%, rgba(0, 0, 0, 0.76) 29%, rgba(0, 0, 0, 0.12) 66%, rgba(0, 0, 0, 0.3) 100%),
+        linear-gradient(180deg, rgba(0, 0, 0, 0.22), transparent 38%, rgba(0, 0, 0, 0.5));
+    content: "";
 }
 
-.login-eyebrow {
-    color: var(--ol-accent-strong);
+.login-visual img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: cover;
+    object-position: 58% center;
+    filter: contrast(1.06) brightness(0.82);
 }
 
 .login-form-panel {
-    background: #000;
+    position: relative;
+    z-index: 1;
+    grid-column: 1;
+    min-width: 0;
+    min-height: 100svh;
+    display: grid;
+    place-items: center;
+    padding: clamp(28px, 5vw, 76px);
+    background: transparent;
+}
+
+.login-form-wrap {
+    width: min(100%, 410px);
+    padding: clamp(28px, 4vw, 46px);
+    border: 1px solid rgba(255, 255, 255, 0.16);
+    border-top-color: rgba(150, 117, 255, 0.72);
+    background: rgba(7, 7, 8, 0.62);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), 0 30px 80px rgba(0, 0, 0, 0.34);
+    -webkit-backdrop-filter: blur(24px) saturate(112%);
+    backdrop-filter: blur(24px) saturate(112%);
+}
+
+.login-wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 42px;
+    color: var(--ol-text);
+    text-decoration: none;
+}
+
+.login-wordmark:hover {
+    color: var(--ol-text);
+}
+
+.login-wordmark-mark {
+    width: 38px;
+    height: 38px;
+    display: grid;
+    place-items: center;
+    border: 1px solid #4a4947;
+}
+
+.login-wordmark-mark img {
+    width: 27px;
+    height: 27px;
+    display: block;
+    object-fit: contain;
+}
+
+.login-wordmark strong {
+    font-size: 0.9rem;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+.login-form-wrap h1 {
+    margin: 0 0 28px;
+    font-size: clamp(1.75rem, 3vw, 2.35rem);
+    font-weight: 500;
+    letter-spacing: -0.04em;
+}
+
+.login-form {
+    gap: 20px;
+}
+
+.login-form .form-label {
+    margin-bottom: 7px;
+    color: #aaa9a4;
+    font-size: 0.67rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+}
+
+.login-form .form-control {
+    min-width: 0;
+    border-color: rgba(255, 255, 255, 0.16);
+    background: rgba(0, 0, 0, 0.5);
+}
+
+.login-form .form-control:focus {
+    border-color: var(--ol-accent-strong);
+    box-shadow: 0 0 0 2px rgba(124, 77, 255, 0.16);
 }
 
 .login-submit {
@@ -923,6 +1046,24 @@ a:hover {
     .sidebar-operator {
         padding-bottom: 18px;
     }
+
+    .login-shell {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .login-form-panel {
+        grid-column: 1;
+        padding: 40px 28px;
+    }
+
+    .login-visual::after {
+        background: rgba(0, 0, 0, 0.58);
+    }
+
+    .login-visual img {
+        object-position: 61% center;
+        opacity: 0.72;
+    }
 }
 
 @media (min-width: 992px) {
@@ -993,6 +1134,72 @@ a:hover {
 
     .investigation-submit {
         margin: 0 20px 28px;
+    }
+
+    .login-form-panel {
+        padding: 24px 18px;
+    }
+
+    .login-form-wrap {
+        width: min(100%, 430px);
+        padding: 30px 24px;
+        background: rgba(7, 7, 8, 0.7);
+    }
+
+    .login-wordmark {
+        margin-bottom: 34px;
+    }
+
+    .breadcrumb-line {
+        min-width: 0;
+    }
+
+    .breadcrumb-line span {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+
+    .heading-actions > *,
+    .heading-actions form,
+    .heading-actions .btn,
+    .heading-actions form .btn {
+        max-width: 100%;
+    }
+}
+
+@media (max-width: 420px) {
+    .login-form-panel {
+        align-items: center;
+        padding: 16px 12px;
+    }
+
+    .login-form-wrap {
+        padding: 26px 19px;
+        -webkit-backdrop-filter: blur(18px) saturate(108%);
+        backdrop-filter: blur(18px) saturate(108%);
+    }
+
+    .login-wordmark {
+        margin-bottom: 30px;
+    }
+
+    .login-form-wrap h1 {
+        margin-bottom: 24px;
+        font-size: 1.7rem;
+    }
+
+    .assessment-decision-actions,
+    .heading-actions {
+        display: grid;
+        grid-template-columns: 1fr;
+    }
+
+    .assessment-decision-actions .btn,
+    .heading-actions .btn,
+    .heading-actions form,
+    .heading-actions form .btn {
+        width: 100%;
     }
 }
 
