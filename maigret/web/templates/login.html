@@ -9,50 +9,25 @@
     <link rel="icon" type="image/png" href="{{ url_for('static', filename='openledger-icon-white.png') }}">
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="{{ url_for('static', filename='openledger.css') }}" rel="stylesheet">
+    <link href="{{ url_for('static', filename='openledger-v2.css') }}" rel="stylesheet">
 </head>
 
 <body class="login-body">
     <main class="login-shell">
-        <section class="login-brand-panel" aria-label="OpenLedger introduction">
-            <div class="login-brand">
-                <span class="login-brand-mark">
-                    <img src="{{ url_for('static', filename='nexorus-mark.png') }}" alt="">
-                </span>
-                <div>
-                    <strong>OpenLedger</strong>
-                    <small>by Nexorus</small>
-                </div>
-            </div>
-            <div class="login-brand-copy">
-                <p class="login-eyebrow">Private intelligence workspace</p>
-                <h1>Trace public identity signals with evidence in view.</h1>
-                <p>
-                    Search authorized usernames, review supporting profiles, and create
-                    controlled AI-assisted assessments from one protected workspace.
-                </p>
-            </div>
-            <div class="login-trust-line">
-                <i data-lucide="shield-check"></i>
-                <span>Encrypted transport · protected runtime secrets · private reports</span>
-            </div>
-        </section>
+        <figure class="login-visual" aria-hidden="true">
+            <img src="{{ url_for('static', filename='openledger-login-visual.jpg') }}" alt="">
+        </figure>
 
-        <section class="login-form-panel">
-            <button type="button" class="icon-button login-theme-toggle" id="themeToggle"
-                    aria-label="Use dark theme" title="Toggle theme">
-                <i data-lucide="moon" class="theme-icon-dark"></i>
-                <i data-lucide="sun" class="theme-icon-light"></i>
-            </button>
-
+        <section class="login-form-panel" aria-labelledby="login-title">
             <div class="login-form-wrap">
-                <div class="login-heading">
-                    <span class="login-mobile-mark">
-                        <img src="{{ url_for('static', filename='nexorus-mark.png') }}" alt="">
+                <a class="login-wordmark" href="{{ url_for('index') }}" aria-label="OpenLedger">
+                    <span class="login-wordmark-mark" aria-hidden="true">
+                        <img src="{{ url_for('static', filename='openledger-icon-white.png') }}" alt="">
                     </span>
-                    <p class="eyebrow">Authorized access only</p>
-                    <h2>Sign in to OpenLedger</h2>
-                    <p>Use the operator credentials configured for this server.</p>
-                </div>
+                    <strong>OpenLedger</strong>
+                </a>
+
+                <h1 id="login-title">Sign in to OpenLedger</h1>
 
                 {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
@@ -95,14 +70,10 @@
                     </div>
 
                     <button type="submit" class="btn btn-primary login-submit" {% if not auth_configured %}disabled{% endif %}>
-                        Sign in securely
+                        Sign in
                         <i data-lucide="arrow-right"></i>
                     </button>
                 </form>
-
-                <p class="login-legal">
-                    Access is restricted to authorized operators. Activity may contain sensitive investigative material.
-                </p>
             </div>
         </section>
     </main>

@@ -509,13 +509,18 @@ async def rank_consolidated_findings(
         from maigret.ai import get_pipeline_group_rankings
 
         persona = store.get_persona(persona_id) or {}
-        rankings = await get_pipeline_group_rankings(
-            api_key,
-            subject_label=persona.get("display_name") or persona_id,
-            groups=candidates,
-            model=model,
-            timeout_seconds=120,
-            **app_module.ai_endpoint_options(),
+        # Ranking is advisory and must never make an otherwise completed
+        # investigation appear to run forever.
+        rankings = await asyncio.wait_for(
+            get_pipeline_group_rankings(
+                api_key,
+                subject_label=persona.get("display_name") or persona_id,
+                groups=candidates,
+                model=model,
+                timeout_seconds=40,
+                **app_module.ai_endpoint_options(),
+            ),
+            timeout=45,
         )
         expected_ids = {item["group_id"] for item in candidates}
         returned_ids = [str(item.get("group_id") or "") for item in rankings]
@@ -538,7 +543,7 @@ async def rank_consolidated_findings(
                 "type": "collector_completed",
                 "collector": "openai_ranking",
                 "task_id": task_id,
-                "outcome": "error",
+                "outcome": "inconclusive",
                 "observations": 0,
                 "evidence_observations": 0,
                 "diagnostic": diagnostic,
@@ -546,7 +551,7 @@ async def rank_consolidated_findings(
             }
         )
         return {
-            "status": "error",
+            "status": "unavailable",
             "ranked": 0,
             "shortlisted": 0,
             "reason": diagnostic,
@@ -726,7 +731,10 @@ async def _execute_requests(
                     outcome, error = "inconclusive", "request_budget_exhausted"
                     returned = {"retryable": False, "completeness": "partial"}
                 except ProviderCooldown as exc:
-                    outcome, error = "error", "provider_cooldown"
+                    # Provider throttle is a partial collection state, not a
+                    # collector fault. Preserve already committed evidence and
+                    # make the retry window explicit to the operator.
+                    outcome, error = "inconclusive", "provider_cooldown"
                     returned = {
                         "retryable": True,
                         "retry_after_seconds": exc.retry_after_seconds,

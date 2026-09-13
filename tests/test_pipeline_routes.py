@@ -85,6 +85,7 @@ def journey(tmp_path):
         "cases_workspace",
         "combine_cases_workspace",
         "relationships_workspace",
+        "configure_persona_investigation",
         "settings_update",
         "security_settings",
         "logout",
@@ -174,7 +175,8 @@ def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     client = journey['client']
     workspace = client.get(base(journey))
     assert workspace.status_code == 200
-    assert b'Evidence-ranked curated findings' in workspace.data
+    assert b'Review consolidated evidence by subject area' in workspace.data
+    assert b'> Reject<' in workspace.data
     assert b'Record decision' not in workspace.data
     assert client.get(base(journey) + '/final').status_code == 404
     version = curate(journey)
@@ -199,8 +201,9 @@ def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     )
     assert rejected.status_code == 200, rejected.get_data(as_text=True)
     requirement = rejected.get_json()['requirements'][0]
-    rendered = client.get(base(journey))
-    assert b'Does another public source' in rendered.data
+    # Requirements remain auditable and launchable, but are not part of the
+    # streamlined per-finding assessment workspace.
+    assert client.get(base(journey)).status_code == 200
     launched = post(journey, f'/requirements/{requirement["id"]}/launch', {})
     assert launched.status_code == 202
     assert journey['launches'][0]['case_id'] == journey['case_id']
@@ -265,6 +268,29 @@ def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     assert journey['observation_id'] in {
         node.get('observation_id') for node in graph['nodes']
     }
+
+
+def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):
+    decision = post(
+        journey,
+        '/groups/' + journey['group_id'] + '/decision',
+        {'decision': 'include', 'reason': 'Approved after reviewing the cited source.'},
+    )
+    assert decision.status_code == 201
+    response = journey['client'].post(
+        base(journey) + '/report',
+        data={'csrf_token': 'test-csrf'},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert '/export.pdf' in response.headers['Location']
+    version_id = response.headers['Location'].split('/versions/', 1)[1].split('/', 1)[0]
+    version = journey['pipeline'].get_version(
+        version_id,
+        case_id=journey['case_id'],
+        persona_id=journey['persona_id'],
+    )
+    assert version['status'] == 'submitted'
 
 
 def test_authentication_csrf_role_and_foreign_scope_block_mutations(journey):

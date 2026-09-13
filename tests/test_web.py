@@ -636,8 +636,11 @@ def test_application_login_replaces_browser_authentication(client, web_app):
     body = login_page.get_data(as_text=True)
     assert 'Sign in to OpenLedger' in body
     assert 'href="/static/openledger-icon-white.png"' in body
+    assert 'src="/static/openledger-login-visual.jpg"' in body
     assert 'name="username"' in body
     assert 'name="password"' in body
+    assert 'Private intelligence workspace' not in body
+    assert 'Sign in securely' not in body
 
     response = client.post(
         '/login',
@@ -3885,14 +3888,16 @@ def test_dashboard_sidebar_and_settings_route_are_available(client, web_app):
     assert 'id="appSidebar"' in body
     assert 'href="/settings"' in body
     assert 'New investigation' in body
-    assert '<span class="brand-mark-wrap" aria-hidden="true">O/</span>' in body
+    assert 'openledger-icon-white.png' in body
     assert 'Open-Gate · OSINT' in body
     assert 'Private workspace' not in body
     assert 'OpenLedger by Nexorus' not in body
     assert 'sidebar-status' not in body
     assert 'class="topbar-profile"' not in body
     assert 'aria-label="Sign out"' in body
-    assert '<span>Relationships</span>' not in body
+    assert '<span>Relationship evidence</span>' in body
+    assert 'Governed OSINT' not in body
+    assert 'id="sidebarToggle"' in body
 
     resp = client.get('/settings')
     assert resp.status_code == 200
@@ -3998,11 +4003,10 @@ def test_relationship_ui_is_read_only_and_preserves_exact_approved_evidence(
             f"/relationships?mode=shared&case_id={case['id']}"
             '&layout=hierarchical&focus=2&view=table&hide=persona:unknown'
         )
-        assert response.status_code == 302
-        assert response.location.endswith(f'/cases/{case["id"]}')
+        assert response.status_code == 200
         body = response.get_data(as_text=True)
-        assert 'relationship-workspace-grid' not in body
-        assert '/static/relationships.js' not in body
+        assert 'relationship-workspace-grid' in body
+        assert '/static/relationships.js' in body
 
         mutation_response = client.post(
             '/relationships', data={'action': 'create-edge'}

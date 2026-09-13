@@ -1,149 +1,131 @@
 {% extends 'base.html' %}
 {% import 'pipeline_macros.html' as pipeline_ui %}
-{% block title %}{{ persona.display_name }} · Working Persona | OpenLedger{% endblock %}
-{% block breadcrumb %}P2 working Persona{% endblock %}
+{% block title %}{{ persona.display_name }} · Assessment | OpenLedger{% endblock %}
+{% block breadcrumb %}Assessment{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='pipeline.css') }}">{% endblock %}
 {% block content %}
-<section class="page-heading">
+<section class="page-heading assessment-heading">
     <div>
-        <p class="eyebrow">Working Persona · AI-assisted curation</p>
+        <p class="eyebrow">Investigation assessment · working Persona</p>
         <h1>{{ persona.display_name }}</h1>
-        <p class="page-description">Review a short list of consolidated findings. Source collection and raw evidence remain available for inspection without requiring item-by-item QC.</p>
+        <p class="page-description">Review consolidated evidence by subject area. AI ranks and explains; an operator can approve, reject, or leave a finding in the review queue.</p>
     </div>
     <div class="heading-actions">
-        <a class="btn btn-outline-secondary" href="{{ url_for('case_workspace', case_id=persona.case_id) }}">Open case</a>
-        <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.observations', case_id=persona.case_id, persona_id=persona.id) }}">All evidence</a>
-        <a class="btn btn-outline-secondary" href="#collection-history">Collection log</a>
-        {% if workspace.final_version_id %}<a class="btn btn-primary" href="{{ url_for('pipeline.final_version', case_id=persona.case_id, persona_id=persona.id) }}">Open final Persona</a>{% endif %}
+        <a class="btn btn-outline-secondary" href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}"><i data-lucide="refresh-cw"></i> Run investigation</a>
+        <a class="btn btn-outline-secondary" href="{{ url_for('relationships_workspace', mode='persona', case_id=persona.case_id, persona_id=persona.id, view='working') }}"><i data-lucide="share-2"></i> Relationship evidence</a>
+        <a class="btn btn-primary" href="{{ url_for('persona_workspace', persona_id=persona.id) }}"><i data-lucide="contact-round"></i> Open Persona outline</a>
+        <form method="post" action="{{ url_for('pipeline.create_report_snapshot', case_id=persona.case_id, persona_id=persona.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-outline-secondary" type="submit"><i data-lucide="file-down"></i> Export report</button></form>
     </div>
 </section>
 
-{% if workspace.review_needed %}<div class="alert alert-warning">Working evidence changed after the approved version. The existing final Persona remains unchanged until a successor version passes QC.</div>{% endif %}
 {% if preparation_available and (workspace.projection.pending or workspace.projection.legacy_available) %}
-<div class="alert alert-info">
-    {% if workspace.projection.pending %}New evidence is saved and must be consolidated before it can enter the shortlist.{% else %}Historical evidence is available for a one-time import into this working Persona. Importing does not approve any fact.{% endif %}
+<section class="alert alert-info assessment-import-notice">
+    <div>
+        <strong>Evidence is ready to be prepared.</strong>
+        <span>{% if workspace.projection.pending %}New collection output has not yet been consolidated into this assessment.{% else %}Historical findings can be imported into this assessment without auto-approving any fact.{% endif %}</span>
+    </div>
     <form method="post" action="{{ url_for('pipeline.prepare', case_id=persona.case_id, persona_id=persona.id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-outline-secondary">Prepare working evidence</button>
+        <button type="submit" class="btn btn-outline-secondary">Prepare evidence</button>
     </form>
-</div>
+</section>
 {% endif %}
 
-<div class="pipeline-flow pipeline-flow-compact" aria-label="Persona workflow">
-    <span>1 · Collect all engines</span>
-    <span>2 · Consolidate and rank</span>
-    <span>3 · Operator approves shortlist</span>
-    <span>4 · QC publishes final Persona</span>
-</div>
+<section class="assessment-summary" aria-label="Assessment summary">
+    <div><span>{{ workspace.shortlist_count }}</span><small>reviewable findings</small></div>
+    <div><span>{{ workspace.group_count }}</span><small>consolidated groups</small></div>
+    <div><span>{{ workspace.tasks_count }}</span><small>engine tasks</small></div>
+    <div><span>{{ workspace.ai_ranked_group_count }}</span><small>AI-ranked findings</small></div>
+</section>
 
-<section class="panel-card pipeline-panel" id="ranked-findings">
-    <header class="panel-header">
-        <div>
-            <h2>{{ 'AI-ranked' if workspace.ai_ranked_group_count else 'Evidence-ranked' }} curated findings</h2>
-            <p>Candidate accounts, approved accounts, and profile facts from every engine are consolidated into one Persona view. The operator sees a bounded shortlist backed by retained observations.</p>
-        </div>
-        <span class="badge-soft">{{ workspace.shortlist_count }} shortlisted · {{ workspace.group_count }} total groups</span>
-    </header>
-    <div class="panel-body">
-        <div class="alert alert-info">
-            <strong>No raw-item QC is required.</strong>
-            {% if workspace.ai_ranked_group_count %}OpenAI ranked {{ workspace.ai_ranked_group_count }} eligible findings but did not approve any of them.{% else %}No model ranking is attached, so the fallback order uses retained source support and is labelled as evidence ranking.{% endif %}
-            Numerical probability appears only when a validated calibration artifact exists.
-        </div>
-        {% for section in workspace.shortlist_sections %}
-        <section class="pipeline-shortlist-section" id="shortlist-{{ section.key }}">
-            <header class="pipeline-section-heading">
-                <h3>{{ section.title }}</h3>
-                <span class="badge-soft">{{ section["items"] | length }}</span>
-            </header>
-            {% for group in section["items"] %}
-            <article class="pipeline-group pipeline-shortlist-item">
+<nav class="persona-tabs assessment-tabs" role="tablist" aria-label="Assessment categories">
+    {% for section in workspace.shortlist_sections %}
+    <button type="button" role="tab" class="persona-tab {{ 'active' if loop.first }}" aria-selected="{{ 'true' if loop.first else 'false' }}" data-assessment-tab="{{ section.key }}">{{ section.title }} <span>{{ section['items'] | length }}</span></button>
+    {% endfor %}
+    <button type="button" role="tab" class="persona-tab" aria-selected="false" data-assessment-tab="review">Review queue <span>{{ workspace.shortlist | rejectattr('latest_decision', 'equalto', 'include') | list | length }}</span></button>
+    <button type="button" role="tab" class="persona-tab" aria-selected="false" data-assessment-tab="engines">Engine status <span>{{ workspace.tasks_count }}</span></button>
+</nav>
+
+<div class="persona-tab-workspace assessment-workspace">
+    {% for section in workspace.shortlist_sections %}
+    <section class="panel-card persona-group assessment-tab-panel" data-assessment-panel="{{ section.key }}" {% if not loop.first %}hidden{% endif %}>
+        <header class="panel-header">
+            <div>
+                <h2>{{ section.title }}</h2>
+                <p>Findings are consolidated across every compatible engine. A source result is not identity proof until you make a decision.</p>
+            </div>
+        </header>
+        <div class="panel-body">
+            {% for group in section['items'] %}
+            <article class="pipeline-group assessment-finding" data-decision="{{ group.latest_decision | default('pending', true) }}">
                 <header>
                     <div>
-                        <span class="eyebrow">{{ group.recommendation | replace('_', ' ') | title }}</span>
-                        <h4>{{ group.normalized.display_value | default(group.normalized.value, true) | default(group.normalized.canonical_url, true) | default(group.normalized.url, true) | default(group.normalized.handle, true) | default(group.normalized.predicate, true) | default('Curated finding', true) }}</h4>
+                        <p class="eyebrow">{{ group.kind | title }} · {{ group.assessment.get('operating_scope', {}).get('input_type', 'source evidence') | replace('_', ' ') }}</p>
+                        <h3>{{ group.normalized.display_value | default(group.normalized.value, true) | default(group.normalized.canonical_url, true) | default(group.normalized.url, true) | default(group.normalized.handle, true) | default(group.normalized.predicate, true) | default('Finding', true) }}</h3>
                     </div>
-                    <span class="badge-soft">{{ group.latest_decision | default('Awaiting approval', true) | replace('_', ' ') | title }}</span>
+                    <span class="badge-soft {{ 'success' if group.latest_decision == 'include' else 'danger' if group.latest_decision == 'reject' else 'warning' if group.latest_decision in ('exclude', 'unresolved') else '' }}">{{ group.latest_decision | default('Needs review', true) | replace('_', ' ') | title }}</span>
                 </header>
                 {{ pipeline_ui.hypothesis(group.normalized, group.kind) }}
-                <p><strong>Why shortlisted:</strong> {{ group.ranking_explanation }}</p>
-                {% if group.evidence_status != 'source_supported' %}<p class="alert alert-warning"><strong>Candidate lead:</strong> the evidence does not yet meet the deterministic source-support threshold. Inspect its lineage before approving it.</p>{% endif %}
-                <p class="pipeline-muted">{{ group.support_origin_families }} independent retained source {{ 'family' if group.support_origin_families == 1 else 'families' }} · {{ group.observation_count }} cited observations</p>
-                {% if group.assessment.probability and group.assessment.probability.value is defined and group.assessment.probability.value is not none %}
-                <p><strong>{{ group.assessment.probability.event | replace('_', ' ') | title }}:</strong> {{ (group.assessment.probability.value * 100) | round(1) }}% calibrated probability</p>
-                {% endif %}
-                <p><a href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}">Inspect evidence and lineage</a></p>
-                {% if group.latest_decision == 'include' %}
-                <span class="badge-soft success">Approved for the next curated version</span>
-                {% else %}
-                <form method="post" action="{{ url_for('pipeline.group_decision', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                    <input type="hidden" name="decision" value="include">
-                    <input type="hidden" name="reason" value="Operator approved this shortlisted finding after checking its cited evidence.">
-                    <button class="btn btn-primary" type="submit">Approve finding</button>
-                </form>
-                {% endif %}
+                <div class="assessment-context">
+                    <p><strong>Assessment:</strong> {{ group.ranking_explanation }}</p>
+                    <p class="pipeline-muted">{{ group.support_origin_families }} independent retained source {{ 'family' if group.support_origin_families == 1 else 'families' }} · {{ group.observation_count }} observations</p>
+                </div>
+                {% if group.evidence_status != 'source_supported' %}<p class="assessment-caution">Candidate evidence: inspect its cited lineage before deciding.</p>{% endif %}
+                <div class="assessment-finding-footer">
+                    <a href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}">Inspect evidence and lineage</a>
+                    <form method="post" action="{{ url_for('pipeline.group_decision', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}" class="assessment-decision-form">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <label class="visually-hidden" for="reason-{{ group.id }}">Decision note</label>
+                        <input id="reason-{{ group.id }}" name="reason" maxlength="10000" required placeholder="Decision note (required)">
+                        <div class="assessment-decision-actions" role="group" aria-label="Decision for this finding">
+                            <button class="btn btn-primary" name="decision" value="include" type="submit"><i data-lucide="check"></i> Approve</button>
+                            <button class="btn btn-outline-secondary" name="decision" value="unresolved" type="submit"><i data-lucide="circle-help"></i> Keep in queue</button>
+                            <button class="btn btn-outline-danger" name="decision" value="reject" type="submit"><i data-lucide="x"></i> Reject</button>
+                        </div>
+                    </form>
+                </div>
             </article>
+            {% else %}
+            <div class="empty-state compact"><i data-lucide="inbox"></i><h3>No {{ section.title | lower }} findings yet</h3><p>Collection results will appear here when a compatible engine returns retained evidence.</p></div>
             {% endfor %}
-        </section>
-        {% else %}
-        <p>No source-backed finding is ready for approval. Collection history records unavailable and not-found sources without treating either as proof of absence.</p>
-        {% endfor %}
-    </div>
-</section>
+        </div>
+    </section>
+    {% endfor %}
 
-<section class="panel-card pipeline-panel" id="curation">
-    <header class="panel-header"><div><h2>Create the Persona version</h2><p>Freeze the approved shortlist and send that exact version to QC.</p></div></header>
-    <div class="panel-body">
-        <form method="post" class="pipeline-form" action="{{ url_for('pipeline.create_version', case_id=persona.case_id, persona_id=persona.id) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <label>Research scope and objectives<textarea name="scope" rows="3" required maxlength="10000" placeholder="What this profile establishes, including time period and identity scope"></textarea></label>
-            <label>Limitations and unknowns (one per line)<textarea name="limitations" rows="3" maxlength="20000"></textarea></label>
-            <label>Parent version<select name="parent_version_id"><option value="">First or independent version</option>{% for version in workspace.versions %}<option value="{{ version.id }}">Version {{ version.sequence }} · {{ version.status }}</option>{% endfor %}</select></label>
-            <button type="submit" class="btn btn-primary">Submit exact version to QC</button>
-        </form>
-    </div>
-</section>
+    <section class="panel-card persona-group assessment-tab-panel" data-assessment-panel="review" hidden>
+        <header class="panel-header"><div><h2>Review queue</h2><p>Items remain here until you approve or reject them. Rejected findings stay in audit history and are excluded from reports.</p></div></header>
+        <div class="panel-body">
+            {% for group in workspace.shortlist if group.latest_decision != 'include' %}
+            <article class="review-queue-item assessment-queue-item">
+                <div class="review-field-name">{{ group.section | replace('_', ' ') | title }}</div>
+                <div><strong>{{ group.normalized.display_value | default(group.normalized.value, true) | default(group.normalized.canonical_url, true) | default(group.normalized.url, true) | default(group.normalized.handle, true) | default(group.normalized.predicate, true) }}</strong><small>{{ group.assessment.get('operating_scope', {}).get('input_type', 'source evidence') | replace('_', ' ') }} · {{ group.observation_count }} observations</small></div>
+                <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}">Review</a>
+            </article>
+            {% else %}<div class="empty-state compact"><i data-lucide="badge-check"></i><h3>No unresolved findings</h3></div>{% endfor %}
+        </div>
+    </section>
 
-<section class="panel-card pipeline-panel" id="versions">
-    <header class="panel-header"><div><h2>Versions and QC</h2><p>Only a QC-approved version becomes the final Persona.</p></div></header>
-    <div class="panel-body"><div class="pipeline-table-wrap"><table class="table"><thead><tr><th>Version</th><th>Status</th><th>Manifest hash</th><th>Review</th></tr></thead><tbody>{% for version in workspace.versions %}<tr><td>{{ version.sequence }}</td><td>{{ 'Final Persona' if version.status == 'approved' else 'Draft · ' ~ version.status | replace('_', ' ') }}</td><td><code>{{ version.content_hash }}</code></td><td><a href="{{ url_for('pipeline.version_view', case_id=persona.case_id, persona_id=persona.id, version_id=version.id) }}">Open exact version{% if version.status == 'submitted' %} / perform QC{% endif %}</a></td></tr>{% else %}<tr><td colspan="4">No Persona version has been submitted to QC.</td></tr>{% endfor %}</tbody></table></div></div>
-</section>
-
-{% if workspace.requirements %}
-<section class="panel-card pipeline-panel" id="research">
-    <header class="panel-header"><div><h2>QC research requirements</h2><p>A failed QC check creates focused research in this same case without discarding prior evidence.</p></div></header>
-    <div class="panel-body">
-        {% for requirement in workspace.requirements %}
-        <article class="pipeline-group">
-            <header><h3>{{ requirement.spec.question }}</h3><span class="badge-soft">{{ requirement.status }}</span></header>
-            <p>{{ requirement.spec.reason }}</p>
-            <p><strong>Completion criteria:</strong> {{ requirement.spec.completion_criteria }}</p>
-            {% if requirement.status not in ['resolved', 'waived'] %}
-            <form method="post" action="{{ url_for('pipeline.launch_requirement', case_id=persona.case_id, persona_id=persona.id, requirement_id=requirement.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-primary" type="submit" {% if not research_available %}disabled{% endif %}>Run focused research</button></form>
-            <form method="post" class="pipeline-form" action="{{ url_for('pipeline.resolve_requirement', case_id=persona.case_id, persona_id=persona.id, requirement_id=requirement.id) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <label>Disposition<select name="disposition"><option value="resolved">Resolved against criteria</option><option value="contested">Contested or still open</option></select></label>
-                <label>Evidence observation IDs<input name="evidence_ids" placeholder="Comma-separated IDs from evidence lineage"></label>
-                <label>Reason<textarea name="reason" rows="2" required maxlength="10000"></textarea></label>
-                <button class="btn btn-outline-secondary" type="submit">Record disposition</button>
-            </form>
-            {% endif %}
-        </article>
-        {% endfor %}
-    </div>
-</section>
-{% endif %}
+    <section class="panel-card persona-group assessment-tab-panel" data-assessment-panel="engines" hidden>
+        <header class="panel-header"><div><h2>Engine status</h2><p>Every compatible route is shown with an explicit outcome. An error, timeout, block, or skipped route is not evidence that an account or fact is absent.</p></div></header>
+        <div class="panel-body"><div class="pipeline-table-wrap"><table class="table pipeline-table"><thead><tr><th>Engine</th><th>Input</th><th>Status</th><th>Outcome / reason</th></tr></thead><tbody>{% for task in workspace.tasks %}<tr class="{{ 'engine-problem' if task.outcome in ('error', 'timeout', 'blocked') else '' }}"><td>{{ task.engine_id | default(task.engine) }}{% if task.platform %} · {{ task.platform }}{% endif %}</td><td>{{ task.input_value | default(task.input, true) }}</td><td>{{ task.status | default(task.state) | replace('_', ' ') }}</td><td>{{ task.outcome | default('No outcome yet', true) | replace('_', ' ') }}{% if task.reason %}<br><small>{{ task.reason }}</small>{% endif %}</td></tr>{% else %}<tr><td colspan="4">No engine task is recorded yet.</td></tr>{% endfor %}</tbody></table></div><p class="pipeline-muted"><a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind='tasks') }}">Open complete engine and attempt history</a></p></div>
+    </section>
+</div>
 
 <details class="panel-card pipeline-panel pipeline-audit-panel" id="collection-history">
-    <summary class="panel-header"><div><h2>Collection and audit history</h2><p>{{ workspace.requests_count }} queries · {{ workspace.tasks_count }} engine tasks · {{ workspace.group_count }} consolidated groups. Open only when source-level inspection is needed.</p></div></summary>
-    <div class="panel-body">
-        <p><a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind='requests') }}">All query plans</a> · <a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind='tasks') }}">All engine tasks and attempts</a> · <a href="{{ url_for('pipeline.observations', case_id=persona.case_id, persona_id=persona.id) }}">All retained observations</a></p>
-        {% for query in workspace.requests %}
-        <details class="pipeline-details"><summary>Query {{ query.id }} · {{ query.status | default('planned') }} · {{ query.request_usage.consumed }} / {{ query.request_usage.max_requests }} requests used</summary>{% if query.status == 'interrupted' %}<form method="post" action="{{ url_for('pipeline.resume_request', case_id=persona.case_id, persona_id=persona.id, request_id=query.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-primary" type="submit">Resume interrupted collection</button></form>{% endif %}<pre>{{ query | tojson(indent=2) }}</pre></details>
-        {% else %}<p>No pipeline query is recorded.</p>{% endfor %}
-        <div class="pipeline-table-wrap"><table class="table pipeline-table"><thead><tr><th>Engine</th><th>Input</th><th>Status</th><th>Outcome</th></tr></thead><tbody>{% for task in workspace.tasks %}<tr><td>{{ task.engine_id | default(task.engine) }}{% if task.platform %} · {{ task.platform }}{% endif %}</td><td>{{ task.input_value | default(task.input, true) }}</td><td>{{ task.status | default(task.state) }}</td><td>{{ task.outcome | default('No outcome yet', true) }}{% if task.reason %}<br>{{ task.reason }}{% endif %}<details><summary>Attempt history</summary><pre>{{ task | tojson(indent=2) }}</pre></details></td></tr>{% else %}<tr><td colspan="4">No engine task has been recorded.</td></tr>{% endfor %}</tbody></table></div>
-        <nav class="pipeline-pager" aria-label="Collection and version history pages">{% if history_page > 1 %}<a href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page, history_page=history_page-1) }}#collection-history">Previous history</a>{% endif %}<span>History page {{ history_page }}</span>{% if history_page * 25 < [workspace.requests_count, workspace.tasks_count, workspace.versions_count, workspace.requirements_count] | max %}<a href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page, history_page=history_page+1) }}#collection-history">Next history</a>{% endif %}</nav>
-    </div>
+    <summary class="panel-header"><div><h2>Collection and audit history</h2><p>{{ workspace.requests_count }} queries · {{ workspace.tasks_count }} engine tasks · {{ workspace.group_count }} consolidated groups.</p></div></summary>
+    <div class="panel-body"><p><a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind='requests') }}">Query plans</a> · <a href="{{ url_for('pipeline.observations', case_id=persona.case_id, persona_id=persona.id) }}">Retained evidence</a> · <a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind='tasks') }}">Engine attempts</a></p></div>
 </details>
+{% endblock %}
+{% block scripts %}
+<script>
+(() => {
+    const tabs = Array.from(document.querySelectorAll('[data-assessment-tab]'));
+    const panels = Array.from(document.querySelectorAll('[data-assessment-panel]'));
+    const activate = (key) => {
+        tabs.forEach((tab) => { const selected = tab.dataset.assessmentTab === key; tab.classList.toggle('active', selected); tab.setAttribute('aria-selected', String(selected)); });
+        panels.forEach((panel) => { panel.hidden = panel.dataset.assessmentPanel !== key; });
+    };
+    tabs.forEach((tab) => tab.addEventListener('click', () => activate(tab.dataset.assessmentTab)));
+})();
+</script>
 {% endblock %}

@@ -1,4 +1,4 @@
-"""PDF projection of a frozen P2 Persona version, with full evidence register."""
+"""PDF projection of an immutable, analyst-reviewed investigation snapshot."""
 
 from __future__ import annotations
 
@@ -49,33 +49,33 @@ def generate_pipeline_pdf(projection):
 
     def page(canvas, doc):
         canvas.saveState()
-        canvas.setFillColor(colors.HexColor('#172533'))
+        canvas.setFillColor(colors.HexColor('#09090b'))
         canvas.setFont(bold, 10)
-        canvas.drawString(18 * mm, A4[1] - 14 * mm, 'O/  OPENLEDGER')
+        canvas.drawString(18 * mm, A4[1] - 14 * mm, 'OPENLEDGER')
         canvas.setFont(regular, 8)
         canvas.drawRightString(
             A4[0] - 18 * mm,
             A4[1] - 14 * mm,
             f'{projection["label"]} · v{projection["sequence"]}',
         )
-        canvas.setFillColor(colors.HexColor('#526578'))
+        canvas.setFillColor(colors.HexColor('#6d28d9'))
         canvas.setFont(regular, 6)
         canvas.drawString(18 * mm, 12 * mm, 'Version ' + str(projection['version_id']))
         canvas.drawRightString(A4[0] - 18 * mm, 12 * mm, str(doc.page))
         canvas.restoreState()
 
-    text(f'{projection["label"]} · Version {projection["sequence"]}', 'field')
+    text(f'Investigation report · Snapshot {projection["sequence"]}', 'field')
     if projection['status'] == 'withdrawn':
         text(
             'WITHDRAWN — This version remains an audit record and is no longer designated as the final Persona.'
         )
     elif projection['status'] == 'superseded':
         text(
-            'SUPERSEDED — A newer QC-approved Persona version is current. This historical evidence manifest is retained.'
+            'SUPERSEDED — A newer investigation snapshot is current. This historical evidence manifest is retained.'
         )
     elif projection['status'] != 'approved':
         text(
-            'DRAFT — This version has no current QC-approved final designation. Export does not approve a Persona.'
+            'REVIEWED SNAPSHOT — This report includes only findings that an operator explicitly approved. The full decision trail is retained.'
         )
     text('Version: ' + projection['version_id'], 'small')
     text('Manifest SHA-256: ' + projection['content_hash'], 'small')
@@ -95,18 +95,32 @@ def generate_pipeline_pdf(projection):
     evidence_uses = {}
     for item in projection['items']:
         normalized = item.get('normalized', {})
-        title = (
+        predicate = (
             normalized.get('predicate') or normalized.get('field_name') or item['kind']
         )
-        text(str(title).replace('_', ' ').title(), 'field')
+        value = (
+            normalized.get('display_value')
+            or normalized.get('value')
+            or normalized.get('canonical_url')
+            or normalized.get('url')
+            or normalized.get('handle')
+            or 'Retained finding'
+        )
+        text(str(predicate).replace('_', ' ').title(), 'field')
+        text(str(value), 'body')
         text('Group: ' + item['group_id'], 'small')
-        payload(normalized)
-        text('Operator decision', 'small_bold')
-        payload(item['decision'])
+        qualifiers = normalized.get('qualifiers')
+        if qualifiers:
+            text('Context: ' + json.dumps(qualifiers, ensure_ascii=False), 'small')
+        decision = item.get('decision') or {}
+        decision_reason = str(decision.get('reason') or '').strip()
+        if decision_reason:
+            text('Analyst decision: ' + decision_reason, 'small')
         assessment = item.get('assessment')
         if assessment:
-            text('Frozen evidence assessment', 'small_bold')
-            payload(assessment)
+            explanation = str(assessment.get('explanation') or assessment.get('reason') or '').strip()
+            if explanation:
+                text('Evidence assessment: ' + explanation, 'small')
         else:
             text(
                 'Numerical probability unavailable: no validated assessment is included in this version.',
@@ -164,7 +178,7 @@ def generate_pipeline_pdf(projection):
         )
         text('Use of this observation in each curated group', 'small_bold')
         payload(evidence_uses[observation_id])
-    text('QC audit', 'field')
+    text('Decision audit', 'field')
     payload(projection['qc'])
     document.build(story, onFirstPage=page, onLaterPages=page)
     return output.getvalue()

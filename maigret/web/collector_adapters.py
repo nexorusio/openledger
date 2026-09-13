@@ -5223,29 +5223,43 @@ async def run_icij_offshore_match(
             "(+https://github.com/nexorusio/openledger)"
         ),
     }
-    async with session_factory(timeout=timeout, headers=headers) as session:
-        async with session.post(
-            ICIJ_RECONCILE_URL,
-            json={"query": confirmed_name, "type": "Officer", "limit": MAX_ICIJ_MATCHES},
-            allow_redirects=False,
-        ) as response:
-            if response.status in {403, 429}:
-                status, payload = "rate_limited", None
-            elif response.status == 200:
-                status = "ok"
-                payload = await _read_bounded_public_json(
-                    response,
-                    source_name="ICIJ Offshore Leaks",
-                    maximum_bytes=ICIJ_MAX_RESPONSE_BYTES,
-                )
-            else:
-                raise RuntimeError(
-                    "ICIJ Offshore Leaks reconciliation returned "
-                    f"HTTP {int(response.status)}"
-                )
-    matches = normalize_icij_offshore_matches(confirmed_name, payload) if payload else []
+    payload, reason = None, ""
+    try:
+        async with session_factory(timeout=timeout, headers=headers) as session:
+            async with session.post(
+                ICIJ_RECONCILE_URL,
+                json={"query": confirmed_name, "type": "Officer", "limit": MAX_ICIJ_MATCHES},
+                allow_redirects=False,
+            ) as response:
+                if response.status in {403, 429}:
+                    status = "rate_limited"
+                elif response.status == 200:
+                    status = "ok"
+                    payload = await _read_bounded_public_json(
+                        response,
+                        source_name="ICIJ Offshore Leaks",
+                        maximum_bytes=ICIJ_MAX_RESPONSE_BYTES,
+                    )
+                else:
+                    status = "unavailable"
+                    reason = (
+                        "ICIJ Offshore Leaks is temporarily unavailable "
+                        f"(HTTP {int(response.status)})."
+                    )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        status = "unavailable"
+        reason = f"ICIJ Offshore Leaks is temporarily unavailable ({type(exc).__name__})."
+    try:
+        matches = normalize_icij_offshore_matches(confirmed_name, payload) if payload else []
+    except ValueError:
+        # An upstream schema change is an unavailable source for this run, not
+        # a failed investigation or a negative search result.
+        matches, status = [], "unavailable"
+        reason = "ICIJ Offshore Leaks returned an unsupported public response."
     observation_status = "potential_match" if matches else (
-        "rate_limited" if status == "rate_limited" else "no_match"
+        "rate_limited" if status == "rate_limited" else (
+            "unavailable" if status == "unavailable" else "no_match"
+        )
     )
     return {
         "source_engine": ICIJ_OFFSHORE_ENGINE,
@@ -5256,7 +5270,7 @@ async def run_icij_offshore_match(
         "source_record_id": (
             f"icij-offshore-search:{claim_fingerprint('full_name', confirmed_name)}"
         ),
-        "reason": (
+        "reason": reason or (
             "Exact-name candidates require independent identity confirmation. "
             "Database inclusion does not imply illegal or improper conduct."
         ),
@@ -6502,6 +6516,8 @@ def _user_scanner_username_outcome(status: str, reason: str) -> str:
         return "not_found"
     if native_status == "skipped":
         return "blocked"
+    if native_status in {"inconclusive", "unavailable", "partial"}:
+        return "unknown"
     if native_status != "error":
         return "unknown"
     if any(
@@ -6764,7 +6780,7 @@ async def run_user_scanner_usernames(
                 return complete_batch(
                     [
                         {
-                            "status": "Error",
+                            "status": "Inconclusive",
                             "reason": reason,
                             "username": username,
                             "site_name": "User Scanner",

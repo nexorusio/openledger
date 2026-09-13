@@ -176,10 +176,17 @@ def test_opted_in_openai_ranking_runs_after_collection_and_groups_persona_sectio
     assert ranking["model"] == "test-model"
     assert captured["api_key"] == "test-key"
     assert workspace["ai_ranked_group_count"] == len(captured["groups"])
-    assert {section["key"] for section in workspace["shortlist_sections"]} >= {
+    assert [section["key"] for section in workspace["shortlist_sections"]] == [
+        "identity",
+        "contact",
         "digital",
         "affiliations",
-    }
+        "records",
+    ]
+    assert next(
+        section for section in workspace["shortlist_sections"]
+        if section["key"] == "contact"
+    )["items"] == []
     assert all(item["ai_ranked"] for item in workspace["shortlist"])
     assert pipeline.get_final_version(job["case_id"], request["persona_id"]) is None
 
