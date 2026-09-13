@@ -13,6 +13,7 @@ import copy
 import hashlib
 import inspect
 import json
+import os
 import threading
 import time
 import uuid
@@ -36,6 +37,15 @@ def _app():
     import importlib
 
     return importlib.import_module("maigret.web.app")
+
+
+def _pipeline_concurrency() -> int:
+    """Bound simultaneous collector processes for predictable host load."""
+    try:
+        configured = int(os.getenv("OPENLEDGER_PIPELINE_CONCURRENCY", "2"))
+    except ValueError:
+        configured = 2
+    return max(1, min(4, configured))
 
 
 def _run_coroutine_sync(factory):
@@ -584,7 +594,7 @@ async def _execute_requests(
 ):
     from maigret.web.pipeline_contract import validate_task
     from maigret.web.pipeline_runtime import ProviderCooldown, RequestBudgetExceeded
-    from maigret.web.pipeline_process import supervise_collector
+    from maigret.web.pipeline_process import CollectorProcessError, supervise_collector
     from maigret.web.pipeline_store import (
         PipelineStore,
         collection_status as collection_status_for_request,
@@ -607,7 +617,7 @@ async def _execute_requests(
             for task in request.get("tasks", [])
         ]
     )
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(_pipeline_concurrency())
     outcomes, collector_contexts = [], []
     for task in queue:
         if task.get("route_state") == "active":
@@ -747,6 +757,24 @@ async def _execute_requests(
                     )
                 except (asyncio.TimeoutError, TimeoutError):
                     outcome, error = "timeout", "The task reached its deadline"
+                except CollectorProcessError as exc:
+                    # A fenced child ending unexpectedly is an unavailable
+                    # source, not a fatal investigation error. Avoid an
+                    # immediate resource-heavy retry, retain any observations
+                    # already committed by the child, and give operators a
+                    # stable server-log reference.
+                    error = app_module.record_internal_error(
+                        "Collector process became unavailable; retained evidence is safe",
+                        exc,
+                        collector=task["engine_id"],
+                        session=job["job_id"],
+                    )
+                    outcome = "partial"
+                    returned = {
+                        "retryable": False,
+                        "completeness": "partial",
+                        "display_status": "unavailable",
+                    }
                 except Exception as exc:
                     error = app_module.record_internal_error(
                         "Pipeline collector failed",

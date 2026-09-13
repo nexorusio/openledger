@@ -76,13 +76,18 @@ def test_live_progress_and_pipeline_workspace_keep_collection_separate_from_appr
         assert required in live
     for forbidden in ('id="graph"', "addCandidate(ev)", "vis.Network"):
         assert forbidden not in live
-    assert "shortlist_sections" in pipeline
-    assert "section['items']" in pipeline
-    assert "section.items" not in pipeline
+    assert "assessment-review-table" in pipeline
     assert "Review queue" in pipeline
+    assert "Engine log" in pipeline
+    assert "Proceed to approved Persona" in pipeline
+    assert "Decision note (optional)" in pipeline
+    assert "Decision note (required)" not in pipeline
+    assert "shortlist_sections" not in pipeline
     assert "Digital presence" not in live
-    assert "> Approve<" in pipeline
-    assert "> Reject<" in pipeline
+    assert ">Approve<" in pipeline
+    assert ">Reject<" in pipeline
+    assert ">Keep in queue<" in pipeline
+    assert "Edit decision" in pipeline
     assert "Record decision" not in pipeline
 
 

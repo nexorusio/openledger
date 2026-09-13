@@ -1,5 +1,4 @@
 {% extends 'base.html' %}
-{% import 'pipeline_macros.html' as pipeline_ui %}
 {% block title %}{{ persona.display_name }} · Assessment | OpenLedger{% endblock %}
 {% block breadcrumb %}Assessment{% endblock %}
 {% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='pipeline.css') }}">{% endblock %}
@@ -8,108 +7,156 @@
     <div>
         <p class="eyebrow">Investigation assessment · working Persona</p>
         <h1>{{ persona.display_name }}</h1>
-        <p class="page-description">Review consolidated evidence by subject area. AI ranks and explains; an operator can approve, reject, or leave a finding in the review queue.</p>
+        <p class="page-description">Step 1 confirms digital presence and every related finding in one review queue. When all rows are resolved, Proceed opens an approved-only Persona. Engine outcomes remain a read-only log.</p>
     </div>
     <div class="heading-actions">
         <a class="btn btn-outline-secondary" href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}"><i data-lucide="refresh-cw"></i> Run investigation</a>
         <a class="btn btn-outline-secondary" href="{{ url_for('relationships_workspace', mode='persona', case_id=persona.case_id, persona_id=persona.id, view='working') }}"><i data-lucide="share-2"></i> Relationship evidence</a>
-        <a class="btn btn-primary" href="{{ url_for('persona_workspace', persona_id=persona.id) }}"><i data-lucide="contact-round"></i> Open Persona outline</a>
-        <form method="post" action="{{ url_for('pipeline.create_report_snapshot', case_id=persona.case_id, persona_id=persona.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-outline-secondary" type="submit"><i data-lucide="file-down"></i> Export report</button></form>
     </div>
 </section>
 
 {% if preparation_available and (workspace.projection.pending or workspace.projection.legacy_available) %}
-<section class="alert alert-info assessment-import-notice">
+<section class="alert alert-info assessment-import-notice" aria-live="polite">
     <div>
-        <strong>Evidence is ready to be prepared.</strong>
-        <span>{% if workspace.projection.pending %}New collection output has not yet been consolidated into this assessment.{% else %}Historical findings can be imported into this assessment without auto-approving any fact.{% endif %}</span>
+        {% if workspace.projection.pending %}
+        <strong>New collection output is ready.</strong>
+        <span>Refresh the table to consolidate the latest retained evidence. This does not approve any finding.</span>
+        {% else %}
+        <strong>Historical evidence is available.</strong>
+        <span>Import it into this review queue without auto-approving any fact.</span>
+        {% endif %}
     </div>
-    <form method="post" action="{{ url_for('pipeline.prepare', case_id=persona.case_id, persona_id=persona.id) }}">
+    <form method="post" class="evidence-preparation-form" action="{{ url_for('pipeline.prepare', case_id=persona.case_id, persona_id=persona.id) }}">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-        <button type="submit" class="btn btn-outline-secondary">Prepare evidence</button>
+        <button type="submit" class="btn btn-outline-secondary" data-busy-label="{{ 'Refreshing…' if workspace.projection.pending else 'Importing…' }}">{{ 'Refresh findings' if workspace.projection.pending else 'Import historical evidence' }}</button>
     </form>
 </section>
 {% endif %}
 
-<section class="assessment-summary" aria-label="Assessment summary">
-    <div><span>{{ workspace.shortlist_count }}</span><small>reviewable findings</small></div>
-    <div><span>{{ workspace.group_count }}</span><small>consolidated groups</small></div>
-    <div><span>{{ workspace.tasks_count }}</span><small>engine tasks</small></div>
-    <div><span>{{ workspace.ai_ranked_group_count }}</span><small>AI-ranked findings</small></div>
+<section class="assessment-summary" aria-label="Review summary">
+    <div><span>{{ workspace.review_pending_count }}</span><small>remaining in queue</small></div>
+    <div><span>{{ workspace.approved_count }}</span><small>approved</small></div>
+    <div><span>{{ workspace.rejected_count }}</span><small>rejected</small></div>
+    <div><span>{{ workspace.tasks_count }}</span><small>engine log entries</small></div>
 </section>
 
-<nav class="persona-tabs assessment-tabs" role="tablist" aria-label="Assessment categories">
-    {% for section in workspace.shortlist_sections %}
-    <button type="button" role="tab" class="persona-tab {{ 'active' if loop.first }}" aria-selected="{{ 'true' if loop.first else 'false' }}" data-assessment-tab="{{ section.key }}">{{ section.title }} <span>{{ section['items'] | length }}</span></button>
-    {% endfor %}
-    <button type="button" role="tab" class="persona-tab" aria-selected="false" data-assessment-tab="review">Review queue <span>{{ workspace.shortlist | rejectattr('latest_decision', 'equalto', 'include') | list | length }}</span></button>
-    <button type="button" role="tab" class="persona-tab" aria-selected="false" data-assessment-tab="engines">Engine status <span>{{ workspace.tasks_count }}</span></button>
+<nav class="persona-tabs assessment-tabs" role="tablist" aria-label="Assessment views">
+    <button type="button" role="tab" class="persona-tab active" aria-selected="true" data-assessment-tab="review">Review queue <span>{{ workspace.shortlist_count }}</span></button>
+    <button type="button" role="tab" class="persona-tab" aria-selected="false" data-assessment-tab="engines">Engine log <span>{{ workspace.tasks_count }}</span></button>
 </nav>
 
-<div class="persona-tab-workspace assessment-workspace">
-    {% for section in workspace.shortlist_sections %}
-    <section class="panel-card persona-group assessment-tab-panel" data-assessment-panel="{{ section.key }}" {% if not loop.first %}hidden{% endif %}>
-        <header class="panel-header">
+<div class="persona-tab-workspace assessment-workspace" id="operator-review">
+    <section class="panel-card persona-group assessment-tab-panel" data-assessment-panel="review">
+        <header class="panel-header assessment-step-header">
             <div>
-                <h2>{{ section.title }}</h2>
-                <p>Findings are consolidated across every compatible engine. A source result is not identity proof until you make a decision.</p>
+                <p class="eyebrow">Step 1</p>
+                <h2>Confirm digital presence and evidence</h2>
+                <p>Exact supplied profile URLs are prioritized. Approve verified findings or reject incorrect ones. “Keep in queue” records uncertainty and intentionally blocks Proceed.</p>
             </div>
+            <span class="review-progress">{{ workspace.shortlist_count - workspace.review_pending_count }} of {{ workspace.shortlist_count }} resolved</span>
         </header>
-        <div class="panel-body">
-            {% for group in section['items'] %}
-            <article class="pipeline-group assessment-finding" data-decision="{{ group.latest_decision | default('pending', true) }}">
-                <header>
-                    <div>
-                        <p class="eyebrow">{{ group.kind | title }} · {{ group.assessment.get('operating_scope', {}).get('input_type', 'source evidence') | replace('_', ' ') }}</p>
-                        <h3>{{ group.normalized.display_value | default(group.normalized.value, true) | default(group.normalized.canonical_url, true) | default(group.normalized.url, true) | default(group.normalized.handle, true) | default(group.normalized.predicate, true) | default('Finding', true) }}</h3>
-                    </div>
-                    <span class="badge-soft {{ 'success' if group.latest_decision == 'include' else 'danger' if group.latest_decision == 'reject' else 'warning' if group.latest_decision in ('exclude', 'unresolved') else '' }}">{{ group.latest_decision | default('Needs review', true) | replace('_', ' ') | title }}</span>
-                </header>
-                {{ pipeline_ui.hypothesis(group.normalized, group.kind) }}
-                <div class="assessment-context">
-                    <p><strong>Assessment:</strong> {{ group.ranking_explanation }}</p>
-                    <p class="pipeline-muted">{{ group.support_origin_families }} independent retained source {{ 'family' if group.support_origin_families == 1 else 'families' }} · {{ group.observation_count }} observations</p>
-                </div>
-                {% if group.evidence_status != 'source_supported' %}<p class="assessment-caution">Candidate evidence: inspect its cited lineage before deciding.</p>{% endif %}
-                <div class="assessment-finding-footer">
-                    <a href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}">Inspect evidence and lineage</a>
-                    <form method="post" action="{{ url_for('pipeline.group_decision', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}" class="assessment-decision-form">
-                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                        <label class="visually-hidden" for="reason-{{ group.id }}">Decision note</label>
-                        <input id="reason-{{ group.id }}" name="reason" maxlength="10000" required placeholder="Decision note (required)">
-                        <div class="assessment-decision-actions" role="group" aria-label="Decision for this finding">
-                            <button class="btn btn-primary" name="decision" value="include" type="submit"><i data-lucide="check"></i> Approve</button>
-                            <button class="btn btn-outline-secondary" name="decision" value="unresolved" type="submit"><i data-lucide="circle-help"></i> Keep in queue</button>
-                            <button class="btn btn-outline-danger" name="decision" value="reject" type="submit"><i data-lucide="x"></i> Reject</button>
-                        </div>
-                    </form>
-                </div>
-            </article>
-            {% else %}
-            <div class="empty-state compact"><i data-lucide="inbox"></i><h3>No {{ section.title | lower }} findings yet</h3><p>Collection results will appear here when a compatible engine returns retained evidence.</p></div>
-            {% endfor %}
-        </div>
-    </section>
-    {% endfor %}
-
-    <section class="panel-card persona-group assessment-tab-panel" data-assessment-panel="review" hidden>
-        <header class="panel-header"><div><h2>Review queue</h2><p>Items remain here until you approve or reject them. Rejected findings stay in audit history and are excluded from reports.</p></div></header>
-        <div class="panel-body">
-            {% for group in workspace.shortlist if group.latest_decision != 'include' %}
-            <article class="review-queue-item assessment-queue-item">
-                <div class="review-field-name">{{ group.section | replace('_', ' ') | title }}</div>
-                <div><strong>{{ group.normalized.display_value | default(group.normalized.value, true) | default(group.normalized.canonical_url, true) | default(group.normalized.url, true) | default(group.normalized.handle, true) | default(group.normalized.predicate, true) }}</strong><small>{{ group.assessment.get('operating_scope', {}).get('input_type', 'source evidence') | replace('_', ' ') }} · {{ group.observation_count }} observations</small></div>
-                <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}">Review</a>
-            </article>
-            {% else %}<div class="empty-state compact"><i data-lucide="badge-check"></i><h3>No unresolved findings</h3></div>{% endfor %}
+        <div class="panel-body assessment-review-body">
+            <div class="pipeline-table-wrap assessment-table-wrap">
+                <table class="table pipeline-table assessment-review-table" data-sortable-table>
+                    <colgroup>
+                        <col class="assessment-column-finding">
+                        <col class="assessment-column-category">
+                        <col class="assessment-column-assessment">
+                        <col class="assessment-column-evidence">
+                        <col class="assessment-column-decision">
+                        <col class="assessment-column-actions">
+                    </colgroup>
+                    <thead><tr>
+                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="0">Finding <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="1">Category <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="2">Assessment <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="3">Evidence <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="4">Decision <span aria-hidden="true">↕</span></button></th>
+                        <th>Actions</th>
+                    </tr></thead>
+                    <tbody>
+                    {% for group in workspace.shortlist %}
+                        {% set finding_label = group.normalized.display_value | default(group.normalized.value, true) | default(group.normalized.canonical_url, true) | default(group.normalized.url, true) | default(group.normalized.handle, true) | default(group.normalized.predicate, true) | default('Finding', true) %}
+                        {% set decision_label = 'Approved' if group.latest_decision == 'include' else 'Rejected' if group.latest_decision in ('reject', 'exclude') else 'Kept in queue' if group.latest_decision == 'unresolved' else 'Needs review' %}
+                        <tr id="finding-{{ group.id }}" data-decision="{{ group.latest_decision | default('pending', true) }}">
+                            <td data-sort-value="{{ finding_label }}">
+                                <a class="assessment-finding-link" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}" title="{{ finding_label }}">{{ finding_label }}</a>
+                                <small>{{ group.kind | title }} · {{ group.assessment.get('operating_scope', {}).get('input_type', 'source evidence') | replace('_', ' ') }}</small>
+                            </td>
+                            <td data-sort-value="{{ group.section_title }}">{{ group.section_title }}</td>
+                            <td data-sort-value="{{ group.ranking_explanation }}"><span class="table-cell-ellipsis" title="{{ group.ranking_explanation }}">{{ group.ranking_explanation }}</span>{% if group.evidence_status != 'source_supported' %}<small class="assessment-candidate-label">Candidate—inspect lineage</small>{% endif %}</td>
+                            <td data-sort-value="{{ group.support_origin_families }} {{ group.observation_count }}"><a href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}">{{ group.support_origin_families }} source {{ 'family' if group.support_origin_families == 1 else 'families' }}</a><small>{{ group.observation_count }} observations</small></td>
+                            <td data-sort-value="{{ decision_label }}">
+                                <span class="badge-soft {{ 'success' if group.latest_decision == 'include' else 'danger' if group.latest_decision in ('reject', 'exclude') else 'warning' if group.latest_decision == 'unresolved' else '' }}">{{ decision_label }}</span>
+                            </td>
+                            <td class="assessment-actions-cell">
+                                {% if group.latest_decision %}
+                                <div class="assessment-recorded-decision">
+                                    {% if group.latest_decision_reason %}<span class="decision-note-preview table-cell-ellipsis" title="{{ group.latest_decision_reason }}">{{ group.latest_decision_reason }}</span>{% endif %}
+                                    <button class="btn btn-outline-secondary btn-sm" type="button" data-edit-decision>Edit decision</button>
+                                </div>
+                                {% endif %}
+                                <form method="post" action="{{ url_for('pipeline.group_decision', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}" class="assessment-table-decision-form" {% if group.latest_decision %}hidden{% endif %}>
+                                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                                    <input type="hidden" name="return_page" value="{{ page }}">
+                                    <details class="assessment-note-control">
+                                        <summary>Decision note (optional)</summary>
+                                        <label class="visually-hidden" for="reason-{{ group.id }}">Decision note (optional)</label>
+                                        <input id="reason-{{ group.id }}" name="reason" maxlength="10000" value="{{ group.latest_decision_reason | default('', true) }}" placeholder="Add context for the audit trail">
+                                    </details>
+                                    <div class="review-action-buttons" role="group" aria-label="Decision for {{ finding_label }}">
+                                        <button class="btn btn-primary btn-sm {{ 'is-selected' if group.latest_decision == 'include' }}" aria-pressed="{{ 'true' if group.latest_decision == 'include' else 'false' }}" name="decision" value="include" type="submit">Approve</button>
+                                        <button class="btn btn-outline-danger btn-sm {{ 'is-selected' if group.latest_decision in ('reject', 'exclude') }}" aria-pressed="{{ 'true' if group.latest_decision in ('reject', 'exclude') else 'false' }}" name="decision" value="reject" type="submit">Reject</button>
+                                        <button class="btn btn-outline-secondary btn-sm {{ 'is-selected' if group.latest_decision == 'unresolved' }}" aria-pressed="{{ 'true' if group.latest_decision == 'unresolved' else 'false' }}" name="decision" value="unresolved" type="submit">Keep in queue</button>
+                                    </div>
+                                </form>
+                            </td>
+                        </tr>
+                    {% else %}
+                        <tr><td colspan="6"><div class="empty-state compact"><i data-lucide="inbox"></i><h3>No reviewable findings yet</h3><p>Run an investigation or refresh newly collected evidence.</p></div></td></tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            {% if workspace.shortlist_count > page_size %}
+            <nav class="pipeline-pager" aria-label="Finding pages">
+                {% if page > 1 %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page-1) }}#operator-review">Previous</a>{% else %}<span></span>{% endif %}
+                <span>Page {{ page }} · showing {{ ((page - 1) * page_size) + 1 }}–{{ [page * page_size, workspace.shortlist_count] | min }} of {{ workspace.shortlist_count }}</span>
+                {% if page * page_size < workspace.shortlist_count %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page+1) }}#operator-review">Next</a>{% else %}<span></span>{% endif %}
+            </nav>
+            {% endif %}
         </div>
     </section>
 
     <section class="panel-card persona-group assessment-tab-panel" data-assessment-panel="engines" hidden>
-        <header class="panel-header"><div><h2>Engine status</h2><p>Every compatible route is shown with an explicit outcome. An error, timeout, block, or skipped route is not evidence that an account or fact is absent.</p></div></header>
-        <div class="panel-body"><div class="pipeline-table-wrap"><table class="table pipeline-table"><thead><tr><th>Engine</th><th>Input</th><th>Status</th><th>Outcome / reason</th></tr></thead><tbody>{% for task in workspace.tasks %}<tr class="{{ 'engine-problem' if task.outcome in ('error', 'timeout', 'blocked') else '' }}"><td>{{ task.engine_id | default(task.engine) }}{% if task.platform %} · {{ task.platform }}{% endif %}</td><td>{{ task.input_value | default(task.input, true) }}</td><td>{{ task.status | default(task.state) | replace('_', ' ') }}</td><td>{{ task.outcome | default('No outcome yet', true) | replace('_', ' ') }}{% if task.reason %}<br><small>{{ task.reason }}</small>{% endif %}</td></tr>{% else %}<tr><td colspan="4">No engine task is recorded yet.</td></tr>{% endfor %}</tbody></table></div><p class="pipeline-muted"><a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind='tasks') }}">Open complete engine and attempt history</a></p></div>
+        <header class="panel-header"><div><p class="eyebrow">Read-only log</p><h2>Engine status</h2><p>Every compatible route is shown with an explicit outcome. An error, timeout, block, or skipped route is not evidence that an account or fact is absent.</p></div></header>
+        <div class="panel-body"><div class="pipeline-table-wrap"><table class="table pipeline-table" data-sortable-table><thead><tr><th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="0">Engine <span aria-hidden="true">↕</span></button></th><th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="1">Input <span aria-hidden="true">↕</span></button></th><th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="2">Status <span aria-hidden="true">↕</span></button></th><th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="3">Outcome / reason <span aria-hidden="true">↕</span></button></th></tr></thead><tbody>{% for task in workspace.tasks %}<tr class="{{ 'engine-problem' if task.outcome in ('error', 'timeout', 'blocked') else '' }}"><td>{{ task.engine_id | default(task.engine) }}{% if task.platform %} · {{ task.platform }}{% endif %}</td><td>{{ task.input_value | default(task.input, true) }}</td><td>{{ task.status | default(task.state) | replace('_', ' ') }}</td><td><span class="table-cell-ellipsis" title="{{ task.reason | default(task.outcome, true) }}">{{ task.outcome | default('No outcome yet', true) | replace('_', ' ') }}{% if task.reason %} · {{ task.reason }}{% endif %}</span></td></tr>{% else %}<tr><td colspan="4">No engine task is recorded yet.</td></tr>{% endfor %}</tbody></table></div><p class="pipeline-muted"><a href="{{ url_for('pipeline.history', case_id=persona.case_id, persona_id=persona.id, kind='tasks') }}">Open complete engine and attempt history</a></p></div>
     </section>
 </div>
+
+<section class="panel-card assessment-next-step {{ 'is-locked' if workspace.review_pending_count or not workspace.approved_count }}" id="approved-evidence">
+    <div class="panel-body">
+        <div>
+            <p class="eyebrow">Step 2</p>
+            <h2>Proceed to approved Persona</h2>
+            {% if workspace.review_pending_count %}
+            <p>Resolve {{ workspace.review_pending_count }} remaining {{ 'finding' if workspace.review_pending_count == 1 else 'findings' }} to continue. Items kept in queue intentionally remain here.</p>
+            {% elif not workspace.approved_count %}
+            <p>The queue is resolved, but no evidence is approved. Approve at least one finding before creating the Persona or report.</p>
+            {% else %}
+            <p>Review is complete. Proceed to a Persona containing only the {{ workspace.approved_count }} approved {{ 'finding' if workspace.approved_count == 1 else 'findings' }}.</p>
+            {% endif %}
+        </div>
+        {% if not workspace.review_pending_count and workspace.approved_count %}
+        <div class="heading-actions">
+            <form method="post" action="{{ url_for('pipeline.proceed', case_id=persona.case_id, persona_id=persona.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-primary" type="submit"><i data-lucide="arrow-right"></i> Proceed to Persona</button></form>
+            <form method="post" action="{{ url_for('pipeline.create_report_snapshot', case_id=persona.case_id, persona_id=persona.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-outline-secondary" type="submit"><i data-lucide="file-down"></i> Export report</button></form>
+        </div>
+        {% else %}
+        <span class="badge-soft warning">Locked until review is complete</span>
+        {% endif %}
+    </div>
+</section>
 
 <details class="panel-card pipeline-panel pipeline-audit-panel" id="collection-history">
     <summary class="panel-header"><div><h2>Collection and audit history</h2><p>{{ workspace.requests_count }} queries · {{ workspace.tasks_count }} engine tasks · {{ workspace.group_count }} consolidated groups.</p></div></summary>
@@ -126,6 +173,25 @@
         panels.forEach((panel) => { panel.hidden = panel.dataset.assessmentPanel !== key; });
     };
     tabs.forEach((tab) => tab.addEventListener('click', () => activate(tab.dataset.assessmentTab)));
+    document.querySelectorAll('[data-edit-decision]').forEach((button) => {
+        button.addEventListener('click', () => {
+            const cell = button.closest('.assessment-actions-cell');
+            const form = cell?.querySelector('.assessment-table-decision-form');
+            const recorded = cell?.querySelector('.assessment-recorded-decision');
+            if (!form) return;
+            form.hidden = false;
+            if (recorded) recorded.hidden = true;
+            form.querySelector('button[name="decision"]')?.focus();
+        });
+    });
+    document.querySelectorAll('.evidence-preparation-form').forEach((form) => {
+        form.addEventListener('submit', () => {
+            const button = form.querySelector('button[type="submit"]');
+            if (!button) return;
+            button.disabled = true;
+            button.textContent = button.dataset.busyLabel || 'Working…';
+        });
+    });
 })();
 </script>
 {% endblock %}

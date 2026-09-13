@@ -8142,6 +8142,21 @@ class CaseStore:
         """
         authorization = metadata.tables["pipeline_case_purge_authorizations"]
         connection.execute(insert(authorization).values(case_id=case_id))
+
+        # Runtime request allowances are scoped through pipeline_requests rather
+        # than carrying their own case_id. Delete them before the case-scoped
+        # request rows so PostgreSQL's RESTRICT foreign key can continue to
+        # protect every ordinary request deletion.
+        requests = metadata.tables["pipeline_requests"]
+        request_budgets = metadata.tables.get("pipeline_request_budgets")
+        if request_budgets is not None:
+            connection.execute(
+                delete(request_budgets).where(
+                    request_budgets.c.request_id.in_(
+                        select(requests.c.id).where(requests.c.case_id == case_id)
+                    )
+                )
+            )
         for table in reversed(metadata.sorted_tables):
             if (
                 not table.name.startswith("pipeline_")

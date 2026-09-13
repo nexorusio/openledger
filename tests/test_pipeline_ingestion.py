@@ -12,6 +12,26 @@ from maigret.web.pipeline_ingestion import (
 from maigret.web.pipeline_store import PipelineStore
 
 
+def test_legacy_import_stops_if_its_cursor_does_not_advance(monkeypatch):
+    from maigret.web import pipeline_ingestion
+
+    class StalledPipeline:
+        def backfill_legacy(self, *args, **kwargs):
+            return {"next_after_claim_id": "stalled-cursor"}
+
+    monkeypatch.setattr(
+        pipeline_ingestion,
+        "_scope",
+        lambda *args: {"jobs": [], "personas": [{"id": "persona"}]},
+    )
+    monkeypatch.setattr(
+        pipeline_ingestion, "_pipeline", lambda *args: StalledPipeline()
+    )
+
+    with pytest.raises(ValueError, match="progress did not advance"):
+        bootstrap_legacy_workspace(object(), "case", "persona")
+
+
 @pytest.fixture
 def legacy_result():
     return {

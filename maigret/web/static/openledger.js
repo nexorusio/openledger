@@ -75,6 +75,53 @@
         if (event.key === 'Escape') closeMobileSidebar();
     });
 
+    function initializeSortableTable(table) {
+        const buttons = Array.from(table.querySelectorAll('[data-sort-column]'));
+        if (!buttons.length || !table.tBodies.length) return;
+        let activeColumn = null;
+        let direction = 'ascending';
+
+        function valueFor(row, column) {
+            const cell = row.cells[column];
+            return String(cell?.dataset.sortValue || cell?.textContent || '').trim();
+        }
+
+        function applySort() {
+            if (activeColumn === null) return;
+            const body = table.tBodies[0];
+            const rows = Array.from(body.rows).filter(row => row.cells.length > activeColumn);
+            rows.sort(function (left, right) {
+                const comparison = valueFor(left, activeColumn).localeCompare(
+                    valueFor(right, activeColumn),
+                    undefined,
+                    { numeric: true, sensitivity: 'base' }
+                );
+                return direction === 'ascending' ? comparison : -comparison;
+            });
+            rows.forEach(row => body.appendChild(row));
+        }
+
+        buttons.forEach(function (button) {
+            button.addEventListener('click', function () {
+                const column = Number(button.dataset.sortColumn);
+                direction = activeColumn === column && direction === 'ascending'
+                    ? 'descending'
+                    : 'ascending';
+                activeColumn = column;
+                buttons.forEach(function (candidate) {
+                    const selected = Number(candidate.dataset.sortColumn) === activeColumn;
+                    candidate.closest('th')?.setAttribute(
+                        'aria-sort', selected ? direction : 'none'
+                    );
+                });
+                applySort();
+            });
+        });
+        table.addEventListener('openledger:table-updated', applySort);
+    }
+
+    document.querySelectorAll('[data-sortable-table]').forEach(initializeSortableTable);
+
     const caseDeleteForms = document.querySelectorAll('.case-delete-form');
     const caseDeleteElement = document.getElementById('caseDeleteModal');
     const caseDeleteExpected = document.getElementById('caseDeleteExpected');

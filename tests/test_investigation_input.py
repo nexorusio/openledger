@@ -23,15 +23,14 @@ def test_full_name_stays_intact_and_generates_bounded_account_candidates():
     )
 
     assert plan["identifiers"] == [{"type": "full_name", "value": "Jati Pratomo"}]
-    assert search_usernames(plan)[:4] == [
+    assert search_usernames(plan) == []
+    assert [candidate["value"] for candidate in plan["alias_candidates"][:4]] == [
         "jatipratomo",
         "jati.pratomo",
         "jati_pratomo",
         "jati-pratomo",
     ]
-    assert "jati" not in search_usernames(plan)
-    assert "pratomo" not in search_usernames(plan)
-    assert len(search_usernames(plan)) <= 16
+    assert not any(candidate["selected"] for candidate in plan["alias_candidates"])
 
 
 def test_identifiers_are_typed_and_sensitive_context_is_not_scanned():
@@ -91,8 +90,11 @@ def test_profile_url_extracts_handle_without_fetching():
         profile_url_resolver=lambda url: {},
     )
 
-    assert search_usernames(plan) == ["jatipratomo"]
+    assert search_usernames(plan) == []
     assert plan["identifiers"][0]["value"] == ("https://www.instagram.com/jatipratomo/")
+    assert plan["profile_url_usernames"] == {
+        "https://www.instagram.com/jatipratomo/": ["jatipratomo"]
+    }
 
 
 def test_username_handle_and_profile_url_are_one_canonical_account_target():
@@ -282,7 +284,7 @@ def test_ranked_aliases_are_explainable_transliterated_and_context_bounded():
         "value": "josemarianunez",
         "score": 100,
         "reason": "Full name in natural order",
-        "selected": True,
+        "selected": False,
     }
     assert any(alias["value"] == "pepenunez" for alias in aliases)
     assert any(alias["value"] == "josenunez84" for alias in aliases)
@@ -313,7 +315,10 @@ def test_ranked_aliases_preserve_non_latin_name_tokens(full_name, expected_alias
         }
     )
 
-    assert expected_alias in search_usernames(plan)
+    assert expected_alias in {
+        candidate["value"] for candidate in plan["alias_candidates"]
+    }
+    assert search_usernames(plan) == []
 
 
 def test_analyst_can_edit_and_deselect_ranked_aliases():
@@ -507,5 +512,26 @@ def test_username_verification_cap_counts_the_deduplicated_target_union():
         }
     )
 
-    assert len(search_usernames(generated)) == 16
+    assert search_usernames(generated) == ["johnmichaeldoe"]
     assert search_usernames(generated).count("johnmichaeldoe") == 1
+
+
+def test_exact_linkedin_profile_is_not_replaced_or_broadcast_as_an_alias():
+    url = "https://linkedin.com/in/jati-pratomo"
+    plan = build_investigation_plan(
+        {
+            "identifier_type": ["full_name", "profile_url"],
+            "identifier_value": ["Jati Pratomo", url],
+            "generate_name_variants": "on",
+        }
+    )
+
+    assert plan["profile_url_usernames"] == {url: ["jati-pratomo"]}
+    assert search_usernames(plan) == []
+    assert "jati-pratomo" not in {
+        candidate["value"] for candidate in plan["alias_candidates"]
+    }
+    assert any(
+        candidate["value"] == "jati.pratomo" and not candidate["selected"]
+        for candidate in plan["alias_candidates"]
+    )

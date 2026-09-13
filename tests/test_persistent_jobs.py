@@ -7,6 +7,7 @@ from threading import Timer
 
 import pytest
 from sqlalchemy import delete
+from sqlalchemy.exc import SQLAlchemyError
 
 from maigret.web.case_store import CaseStore, investigation_jobs
 from maigret.web.persona_intelligence import extract_case_chat_persona_claims
@@ -628,6 +629,37 @@ def test_case_delete_requires_csrf(client, persistent_store):
     assert persistent_store.get_job(job_id) is not None
 
 
+def test_case_delete_database_refusal_returns_to_case_without_plain_500(
+    client, persistent_store, web_app, monkeypatch
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    persistent_store.finish(
+        job_id, {"status": "cancelled", "usernames": job["usernames"]}
+    )
+    monkeypatch.setattr(
+        web_app,
+        "delete_persisted_case",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SQLAlchemyError("synthetic database refusal")
+        ),
+    )
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "delete-case-csrf"
+
+    response = client.post(
+        f'/cases/{job["case_id"]}/delete',
+        data={"csrf_token": "delete-case-csrf", "confirmation_name": "alice"},
+        follow_redirects=True,
+    )
+
+    body = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Nothing was deleted" in body
+    assert "Internal Server Error" not in body
+    assert persistent_store.get_case(job["case_id"]) is not None
+
+
 def test_case_delete_rejects_symlinked_report_directory(
     web_app, persistent_store, tmp_path
 ):
@@ -738,13 +770,13 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
 
     persona_page = client.get(f"/personas/{persona_id}?view=working").get_data(as_text=True)
     assert "Alice Example" in persona_page
-    assert "90% confidence" in persona_page
+    assert "90 legacy evidence score" in persona_page
     assert f'/personas/{persona_id}/export.pdf' in persona_page
     assert "Export investigation report" in persona_page
     assert "No evidence extracted." in persona_page
     assert "AI proposes; the analyst decides" in persona_page
     assert "Review queue" in persona_page
-    assert "Relationships" in persona_page
+    assert "Relationship evidence" in persona_page
 
 
 def test_case_scope_displays_one_username_with_attached_profile_sources(
@@ -1932,10 +1964,10 @@ def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
     )
     persistent_store.review_claim(email["id"], "rejected", "analyst", "Collision")
 
-    page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    page = client.get(f"/personas/{persona_id}?view=working").get_data(as_text=True)
     assert page.count("collision@example.test") == 1
     assert 'data-review-item="rejected"' in page
-    assert "excluded from the default profile, map, and relationship graph" in page
+    assert "excluded from the default Persona and its approved outputs" in page
 
 
 def test_approved_location_and_photo_render_in_persona_workspace(
@@ -1979,7 +2011,7 @@ def test_approved_location_and_photo_render_in_persona_workspace(
     )
     persistent_store.review_claim(photo["id"], "approved", "analyst")
 
-    page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    page = client.get(f"/personas/{persona_id}?view=working").get_data(as_text=True)
     assert 'id="personaLocationMap"' in page
     assert "-6.1754" in page
     assert "106.8272" in page

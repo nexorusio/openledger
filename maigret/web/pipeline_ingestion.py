@@ -270,7 +270,14 @@ def bootstrap_legacy_workspace(store, case_id, persona_id):
         "auto_finalized": False,
     }
     after = None
+    seen_cursors = set()
+    batch_count = 0
     while True:
+        batch_count += 1
+        if batch_count > 1000:
+            raise ValueError(
+                "Historical evidence import stopped at its safety limit; no evidence was auto-approved."
+            )
         batch = pipeline.backfill_legacy(
             case_id,
             persona_id,
@@ -286,9 +293,15 @@ def bootstrap_legacy_workspace(store, case_id, persona_id):
             batch.get("request_ids")
             or ([batch["request_id"]] if batch.get("request_id") else [])
         )
-        after = batch.get("next_after_claim_id")
-        if not after:
+        next_after = batch.get("next_after_claim_id")
+        if not next_after:
             break
+        if next_after == after or next_after in seen_cursors:
+            raise ValueError(
+                "Historical evidence import stopped because progress did not advance; no evidence was auto-approved."
+            )
+        seen_cursors.add(next_after)
+        after = next_after
     for job in case["jobs"]:
         if job["status"] not in _TERMINAL_JOBS:
             continue

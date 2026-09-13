@@ -5,10 +5,20 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
 _USERNAME_PLATFORMS = ("facebook", "instagram", "threads", "tiktok", "x")
+
+
+def _scanner_concurrency() -> int:
+    """Keep module fan-out within the capacity of a small Docker host."""
+    try:
+        configured = int(os.getenv("OPENLEDGER_USER_SCANNER_CONCURRENCY", "4"))
+    except ValueError:
+        configured = 4
+    return max(1, min(8, configured))
 
 
 def _diagnostic_result(
@@ -105,7 +115,7 @@ def _scan_email(request: dict) -> list[dict]:
     from user_scanner.core.email_orchestrator import run_email_module_batch, set_concurrency
     from user_scanner.core.helpers import ScanConfig, set_global_timeout
 
-    set_concurrency(12)
+    set_concurrency(_scanner_concurrency())
     set_global_timeout(15.0)
     config = ScanConfig(
         allow_loud=False,
@@ -166,7 +176,7 @@ def _scan_usernames(request: dict) -> list[dict]:
     from user_scanner.core.helpers import ScanConfig, set_global_timeout
     from user_scanner.core.orchestrator import run_user_module, set_concurrency
 
-    set_concurrency(12)
+    set_concurrency(_scanner_concurrency())
     set_global_timeout(15.0)
     config = ScanConfig(
         allow_loud=False,

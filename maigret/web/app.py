@@ -13,6 +13,7 @@ from flask import (
 )
 from werkzeug.exceptions import NotFound
 from werkzeug.middleware.proxy_fix import ProxyFix
+from sqlalchemy.exc import SQLAlchemyError
 import base64
 import io
 import logging
@@ -6083,6 +6084,7 @@ def api_username_aliases():
         )
         exact_usernames = bounded_values('exact_usernames', count=24, length=128)
         profile_urls = bounded_values('profile_urls', count=24, length=2000)
+        profile_target_keys = []
         for profile_url in profile_urls:
             normalized_url = normalize_profile_url(profile_url)
             resolved_usernames = extract_profile_usernames(
@@ -6093,6 +6095,8 @@ def api_username_aliases():
                     confirmed_usernames.append(username)
                 if username not in exact_usernames:
                     exact_usernames.append(username)
+                if username.casefold() not in profile_target_keys:
+                    profile_target_keys.append(username.casefold())
     except ValueError:
         return {'error': 'Alias planning inputs are invalid.'}, 400
 
@@ -6117,6 +6121,7 @@ def api_username_aliases():
         'aliases': [
             {**candidate, 'key': str(candidate['value']).casefold()}
             for candidate in aliases
+            if str(candidate['value']).casefold() not in profile_target_keys
         ],
         'exact_target_keys': exact_target_keys,
         'exact_targets': exact_targets,
@@ -7047,6 +7052,16 @@ def delete_case_workspace(case_id):
     except (KeyError, OSError, ValueError) as error:
         record_internal_error("Failed to delete case", error, case_id=case_id)
         flash(str(error), "warning")
+        return redirect(url_for("case_workspace", case_id=case_id))
+    except SQLAlchemyError as error:
+        diagnostic = record_internal_error(
+            "Case deletion could not be completed", error, case_id=case_id
+        )
+        flash(
+            f"{diagnostic} Nothing was deleted; review the server log before "
+            "trying again.",
+            "danger",
+        )
         return redirect(url_for("case_workspace", case_id=case_id))
 
     if deleted:
@@ -8878,6 +8893,19 @@ def download_report(filename):
 
 def _prepare_pipeline_workspace(case_id, persona_id):
     from maigret.web.pipeline_ingestion import bootstrap_legacy_workspace
+    from maigret.web.pipeline_execution import refresh_consolidation
+    from maigret.web.pipeline_store import PipelineStore
+
+    pipeline = PipelineStore(case_store)
+    workspace = pipeline.get_workspace(case_id, persona_id, limit=1)
+    if workspace["projection"]["pending"]:
+        groups = refresh_consolidation(case_store, case_id, persona_id)
+        return {
+            "case_id": case_id,
+            "persona_id": persona_id,
+            "group_count": len(groups),
+            "mode": "refresh",
+        }
     return bootstrap_legacy_workspace(case_store, case_id, persona_id)
 
 
@@ -8891,6 +8919,70 @@ def _submit_pipeline_evidence(**kwargs):
     return submit_manual_evidence(case_store, **kwargs)
 
 
+def _launch_approved_pipeline_discovery(
+    *, case_id, persona_id, approved_groups, actor
+):
+    """Cross-check only analyst-approved identifiers in the existing Persona."""
+    from werkzeug.datastructures import MultiDict
+
+    identifiers = []
+    seen = set()
+
+    def add(kind, value):
+        value = str(value or "").strip()
+        key = (kind, value.casefold())
+        if value and key not in seen and len(identifiers) < 24:
+            seen.add(key)
+            identifiers.append((kind, value))
+
+    for item in approved_groups:
+        normalized = dict(item.get("normalized") or {})
+        value = normalized.get("value")
+        if item.get("kind") == "account":
+            add(
+                "profile_url",
+                normalized.get("canonical_url")
+                or normalized.get("url")
+                or (value.get("url") if isinstance(value, dict) else ""),
+            )
+            continue
+        predicate = str(normalized.get("predicate") or "").casefold()
+        if predicate in {"full_name", "email", "phone"} and not isinstance(
+            value, (dict, list)
+        ):
+            add(predicate, value)
+        elif predicate == "social_account" and isinstance(value, dict):
+            add("profile_url", value.get("url"))
+    if not identifiers:
+        raise ValueError(
+            "No approved name, contact, or exact profile URL is available to cross-check."
+        )
+    form = MultiDict(
+        [
+            *[("identifier_type", kind) for kind, _value in identifiers],
+            *[("identifier_value", value) for _kind, value in identifiers],
+            ("processing_mode", "same_subject"),
+            ("allow_ai_context", "on"),
+            ("mode", "focused"),
+        ]
+    )
+    _usernames, plan = parse_investigation_submission(form)
+    plan.update(
+        processing_mode="same_subject",
+        subject_label=(case_store.get_persona(persona_id) or {}).get(
+            "display_name", "Persona"
+        ),
+        target_persona_id=persona_id,
+        discovery_basis="approved_pipeline_findings",
+    )
+    options = sanitize_persistent_options(parse_search_options(form, plan))
+    options["requested_by"] = actor
+    job_id = case_store.repeat_persona_investigation(
+        persona_id, search_usernames(plan), options
+    )
+    return {"job_id": job_id, "case_id": case_id, "persona_id": persona_id}
+
+
 from maigret.web.pipeline_routes import register_pipeline_routes
 
 register_pipeline_routes(
@@ -8898,6 +8990,7 @@ register_pipeline_routes(
     is_valid_csrf=is_valid_csrf, launch_research=_launch_pipeline_research,
     prepare_workspace=_prepare_pipeline_workspace,
     submit_manual_evidence=_submit_pipeline_evidence,
+    launch_approved_discovery=_launch_approved_pipeline_discovery,
 )
 
 from maigret.web.pipeline_connector_routes import register_connector_ingestion_routes

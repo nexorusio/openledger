@@ -226,7 +226,7 @@ def generate_username_variants(full_name: str) -> List[str]:
     return [
         candidate["value"]
         for candidate in rank_username_aliases([full_name])
-        if candidate.get("selected")
+        if int(candidate.get("score") or 0) >= 78
     ][:MAX_VARIANTS]
 
 
@@ -397,7 +397,10 @@ def build_investigation_plan(
             if not profile_usernames[normalized]:
                 unresolved_profile_urls.append(normalized)
             for username in profile_usernames[normalized]:
-                add_target(username, identifier_type, normalized)
+                # A handle parsed from an exact profile URL remains provenance
+                # for that URL.  It must not silently become a cross-platform
+                # username scan target (for example, LinkedIn jati-pratomo must
+                # not fan out into speculative jati.pratomo profiles).
                 confirmed_usernames.append(username)
         elif identifier_type == "full_name":
             normalized = _normalize_text(raw_value)
@@ -468,6 +471,16 @@ def build_investigation_plan(
         if generate_variants
         else []
     )
+    exact_profile_username_keys = {
+        str(username).casefold()
+        for usernames in profile_usernames.values()
+        for username in usernames
+    }
+    generated_aliases = [
+        candidate
+        for candidate in generated_aliases
+        if str(candidate["value"]).casefold() not in exact_profile_username_keys
+    ]
     generated_by_value = {
         str(candidate["value"]).casefold(): candidate for candidate in generated_aliases
     }
@@ -549,22 +562,6 @@ def build_investigation_plan(
                     f"{MAX_USER_SCANNER_USERNAME_TARGETS} total account targets. "
                     "Deselect aliases or disable the additional verification."
                 )
-        else:
-            selected_alias_count = 0
-            for candidate in alias_candidates:
-                candidate_key = str(candidate["value"]).casefold()
-                candidate["selected"] = bool(
-                    int(candidate["score"]) >= 78
-                    and candidate_key not in scanner_target_keys
-                    and len(scanner_target_keys) < MAX_USER_SCANNER_USERNAME_TARGETS
-                    and selected_alias_count < MAX_SELECTED_ALIASES
-                )
-                if candidate["selected"]:
-                    scanner_target_keys.add(candidate_key)
-                    selected_alias_count += 1
-            selected_aliases = [
-                candidate for candidate in alias_candidates if candidate.get("selected")
-            ]
     for candidate in selected_aliases:
         source_names = alias_source_names.get(str(candidate["value"]).casefold())
         if not source_names:
@@ -610,8 +607,18 @@ def build_investigation_plan(
         ),
         "",
     )
+    first_profile_username = next(
+        (
+            username
+            for usernames in profile_usernames.values()
+            for username in usernames
+        ),
+        "",
+    )
     subject_label = full_name or (
-        search_targets[0]["value"] if search_targets else identifiers[0]["value"]
+        search_targets[0]["value"]
+        if search_targets
+        else first_profile_username or identifiers[0]["value"]
     )
     if processing_mode == "same_subject":
         subject_groups = [
@@ -658,12 +665,13 @@ def build_investigation_plan(
                 )
                 continue
 
-            targets = (
-                profile_usernames[value]
+            targets = [] if identifier_type == "profile_url" else [value]
+            grouping_targets = (
+                profile_usernames.get(value, [])
                 if identifier_type == "profile_url"
-                else [value]
+                else targets
             )
-            target_keys = {target.casefold() for target in targets}
+            target_keys = {target.casefold() for target in grouping_targets}
             matching_groups = [
                 group
                 for group in subject_groups
@@ -675,7 +683,11 @@ def build_investigation_plan(
             if not matching_groups:
                 subject_groups.append(
                     {
-                        "label": targets[0] if targets else value,
+                        "label": (
+                            (profile_usernames.get(value) or [value])[0]
+                            if identifier_type == "profile_url"
+                            else targets[0]
+                        ),
                         "usernames": list(targets),
                         "identifiers": [identifier],
                         "account_group": True,
@@ -805,7 +817,6 @@ def public_identifier_scope(plan: Any) -> Dict[str, List[Dict[str, Any]]]:
                     continue
                 if normalized.casefold() not in {item.casefold() for item in linked}:
                     linked.append(normalized)
-                    add("username", normalized)
             if not linked:
                 raw_linked = [
                     target.get("value")
@@ -823,7 +834,6 @@ def public_identifier_scope(plan: Any) -> Dict[str, List[Dict[str, Any]]]:
                         item.casefold() for item in linked
                     }:
                         linked.append(normalized)
-                        add("username", normalized)
             profile_urls.append({"url": url, "usernames": linked})
         elif identifier_type in {"full_name", "email", "phone"}:
             add(identifier_type, value)

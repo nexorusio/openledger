@@ -26,7 +26,14 @@
     </div>
     {% else %}
     <div class="table-responsive">
-        <table class="table align-middle">
+        <table class="table align-middle case-list-table">
+            <colgroup>
+                <col class="case-list-column-case">
+                <col class="case-list-column-personas">
+                <col class="case-list-column-investigation">
+                <col class="case-list-column-updated">
+                <col class="case-list-column-actions">
+            </colgroup>
             <thead>
                 <tr>
                     <th>Case</th>
@@ -59,7 +66,8 @@
                         {% else %}—{% endif %}
                     </td>
                     <td>{{ case.updated_at or '—' }}</td>
-                    <td class="text-end">
+                    <td>
+                        <div class="case-row-actions">
                         <a href="{{ url_for('case_workspace', case_id=case.id) }}" class="btn btn-sm btn-outline-secondary">Open case</a>
                         <form method="POST"
                               action="{{ url_for('delete_case_workspace', case_id=case.id) }}"
@@ -72,6 +80,7 @@
                                 Delete
                             </button>
                         </form>
+                        </div>
                     </td>
                 </tr>
                 {% endfor %}

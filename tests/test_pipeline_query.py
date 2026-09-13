@@ -164,7 +164,34 @@ def test_same_handle_and_url_preserve_all_three_raw_inputs_without_triplicate_ta
         "Test_Person",
         "@Test_Person",
     }
-    assert any(row["value"] == url for row in username["derived_from"])
+    assert not any(row["value"] == url for row in username["derived_from"])
+    profile = next(item for item in query["inputs"] if item["type"] == "profile_url")
+    assert profile["value"] == url
+
+
+def test_exact_profile_url_does_not_fan_out_to_cross_platform_username_tasks():
+    url = "https://linkedin.com/in/jati-pratomo"
+    raw = plan_for(
+        ["full_name", "profile_url"],
+        ["Jati Pratomo", url],
+        generate_name_variants="on",
+    )
+    query = query_for(raw)
+
+    assert not [item for item in query["inputs"] if item["type"] == "username"]
+    assert not [
+        task
+        for task in query["tasks"]
+        if task["input_type"] == "username" and task["route_state"] == "active"
+    ]
+    unfurl = next(
+        task
+        for task in query["tasks"]
+        if task["engine_id"] == "unfurl_url_analysis"
+        and task["input_value"] == url
+    )
+    assert unfurl["route_state"] == "active"
+    assert "without making a network request" in unfurl["reason"]
 
 
 @pytest.mark.parametrize(

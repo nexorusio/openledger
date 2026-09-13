@@ -16,6 +16,7 @@
 
 <body>
     {% set current_endpoint = request.endpoint or '' %}
+    {% set new_investigation_active = current_endpoint in ('index', 'live_start', 'live_results') %}
     <div class="app-shell" id="appShell">
         <aside class="app-sidebar" id="appSidebar" aria-label="Primary navigation">
             <div class="sidebar-brand">
@@ -36,8 +37,8 @@
             <nav class="sidebar-nav">
                 <p class="nav-section-label">Workspace</p>
                 <a href="{{ url_for('index') }}"
-                   class="sidebar-link {{ 'active' if request.endpoint == 'index' }}"
-                   {{ 'aria-current=page' if request.endpoint == 'index' }}>
+                   class="sidebar-link {{ 'active' if new_investigation_active }}"
+                   {{ 'aria-current=page' if new_investigation_active }}>
                     <i data-lucide="scan-search"></i>
                     <span>New investigation</span>
                 </a>
@@ -60,8 +61,8 @@
                     <span>Relationship evidence</span>
                 </a>
                 <a href="{{ url_for('history') }}"
-                   class="sidebar-link {{ 'active' if request.endpoint in ('history', 'live_results', 'results') }}"
-                   {{ 'aria-current=page' if request.endpoint in ('history', 'live_results', 'results') }}>
+                   class="sidebar-link {{ 'active' if current_endpoint in ('history', 'results') }}"
+                   {{ 'aria-current=page' if current_endpoint in ('history', 'results') }}>
                     <i data-lucide="clock-3"></i>
                     <span>History</span>
                 </a>

@@ -63,13 +63,28 @@
         <span><strong>Operational notice</strong><span id="runtime-notice-list" class="d-block"></span></span>
     </div>
     {% if job_kind not in ('case_fusion', 'identity_enrichment', 'affiliation') %}
-    <section class="pipeline-table-wrap mb-3" aria-labelledby="engine-progress-title">
+    <section class="engine-progress-panel mb-3" aria-labelledby="engine-progress-title">
         <h3 id="engine-progress-title">Live engine progress</h3>
         <p class="form-text">Each enabled engine remains visible while it runs. A completed or unavailable engine does not pause the rest of discovery.</p>
-        <table class="table pipeline-table" id="engine-progress-table">
-            <thead><tr><th>Engine</th><th>Status</th><th>Current activity</th><th>Result</th></tr></thead>
-            <tbody id="engine-progress-body"><tr id="engine-progress-empty"><td colspan="4">Waiting for the worker to start collection…</td></tr></tbody>
-        </table>
+        <div class="pipeline-table-wrap">
+            <table class="table pipeline-table engine-progress-table" id="engine-progress-table" data-sortable-table>
+                <colgroup>
+                    <col class="engine-progress-column-engine">
+                    <col class="engine-progress-column-status">
+                    <col class="engine-progress-column-activity">
+                    <col class="engine-progress-column-result">
+                </colgroup>
+                <thead>
+                    <tr>
+                        <th scope="col" aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="0">Engine<span class="table-sort-indicator" aria-hidden="true"></span></button></th>
+                        <th scope="col" aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="1">Status<span class="table-sort-indicator" aria-hidden="true"></span></button></th>
+                        <th scope="col" aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="2">Current activity<span class="table-sort-indicator" aria-hidden="true"></span></button></th>
+                        <th scope="col" aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="3">Result<span class="table-sort-indicator" aria-hidden="true"></span></button></th>
+                    </tr>
+                </thead>
+                <tbody id="engine-progress-body"><tr id="engine-progress-empty"><td colspan="4">Waiting for the worker to start collection…</td></tr></tbody>
+            </table>
+        </div>
     </section>
     {% endif %}
     {% if job_kind == 'case_fusion' %}
@@ -247,6 +262,15 @@
         if (key === catalogueEngineId) return 'OpenLedger site catalogue';
         return String(key || 'unknown engine').replaceAll('-', ' ').replaceAll('_', ' ');
     }
+    function setCollectorCell(cell, value, ellipsis = false) {
+        const text = String(value || '—');
+        const content = document.createElement('span');
+        content.className = ellipsis ? 'table-cell-ellipsis' : 'table-cell-content';
+        content.textContent = text;
+        if (ellipsis && text !== '—') content.title = text;
+        cell.dataset.sortValue = text;
+        cell.replaceChildren(content);
+    }
     function updateCollector(ev, status, activity, result) {
         const collector = String(ev.collector || ev.site || 'discovery');
         const qualifier = String(ev.platform || ev.input_type || '');
@@ -265,10 +289,13 @@
             document.getElementById('engine-progress-body').appendChild(row);
         }
         const cells = row.children;
-        cells[0].textContent = row.dataset.label;
-        cells[1].textContent = status;
-        cells[2].textContent = activity || '—';
-        cells[3].textContent = result || '—';
+        setCollectorCell(cells[0], row.dataset.label);
+        setCollectorCell(cells[1], status);
+        setCollectorCell(cells[2], activity, true);
+        setCollectorCell(cells[3], result);
+        document.getElementById('engine-progress-table')?.dispatchEvent(
+            new CustomEvent('openledger:table-updated')
+        );
     }
 
     function finish(statusText, redirect, coverageComplete = true) {
@@ -283,7 +310,7 @@
         if (redirect) {
             const btn = document.getElementById('reportsBtn');
             btn.href = redirect;
-            btn.style.display = 'inline-block';
+            btn.style.display = 'inline-flex';
         }
     }
 
@@ -365,7 +392,7 @@
             statusEl.textContent = 'Snapshot ready. Opening the combined case while AI synthesis continues in the background…';
             document.getElementById('live-progress').style.width = '100%';
             document.getElementById('stopBtn').disabled = true;
-            if (ev.redirect) window.location.replace(ev.redirect);
+            if (doneRedirect) window.location.replace(doneRedirect);
         } else if (ev.type === 'found') {
             foundCount++;
             document.getElementById('stat-found').textContent = foundCount;
@@ -536,7 +563,7 @@
             }
             const coverageComplete = ev.status === 'completed'
                 && !['budget_exhausted', 'cancelled', 'interrupted'].includes(ev.reason);
-            finish(text, ev.redirect, coverageComplete);
+            finish(text, doneRedirect, coverageComplete);
         }
     }
 

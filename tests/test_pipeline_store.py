@@ -497,7 +497,116 @@ def test_no_routes_research_needed_and_request_replay_atomic(pair):
             plan,
             actor="operator",
             job_id=scope[2],
-        )
+            )
+
+
+def test_optional_decision_note_and_review_progress_are_persisted(pair):
+    request, _, group, _ = curated(pair)
+    pipeline = pair[1]
+
+    kept = pipeline.decide(
+        request["case_id"],
+        request["persona_id"],
+        group["id"],
+        "unresolved",
+        actor="operator",
+        reason="",
+    )
+    assert kept["reason"] == ""
+    workspace = pipeline.get_workspace(request["case_id"], request["persona_id"])
+    assert workspace["approved_count"] == 0
+    assert workspace["rejected_count"] == 0
+    assert workspace["kept_count"] == 1
+    assert workspace["review_pending_count"] == 1
+    assert workspace["shortlist"][0]["latest_decision_reason"] == ""
+
+    pipeline.decide(
+        request["case_id"],
+        request["persona_id"],
+        group["id"],
+        "reject",
+        actor="operator",
+        reason=None,
+    )
+    workspace = pipeline.get_workspace(request["case_id"], request["persona_id"])
+    assert workspace["rejected_count"] == 1
+    assert workspace["kept_count"] == 0
+    assert workspace["review_pending_count"] == 0
+
+
+def test_review_prioritizes_exact_profile_url_and_omits_unsupported_alias(pair):
+    scope = subject(pair)
+    pipeline = pair[1]
+    exact_url = "https://linkedin.com/in/jati-pratomo"
+    alias_url = "https://linkedin.com/in/jati.pratomo"
+    request = pipeline.create_request(
+        scope[0],
+        scope[1],
+        [{"type": "profile_url", "value": exact_url}],
+        {
+            "pipeline_id": PIPELINE_ID,
+            "tasks": [
+                {
+                    "task_id": "profile-candidates",
+                    "engine_id": "fixture",
+                    "route_state": "active",
+                    "retry_ceiling": 0,
+                }
+            ],
+        },
+        actor="operator",
+        job_id=scope[2],
+    )
+    attempt = pipeline.start_attempt(request["tasks"][0]["id"], "worker:test")
+    observations = pipeline.record_observations(
+        attempt["id"],
+        [
+            {
+                "id": "exact-profile-input",
+                "status": "candidate",
+                "source_url": exact_url,
+                "retention": {"mode": "retained", "final_eligible": True},
+            },
+            {
+                "id": "generated-alias-candidate",
+                "status": "candidate",
+                "source_url": alias_url,
+                "retention": {"mode": "retained", "final_eligible": True},
+            },
+        ],
+        outcome="candidate",
+        worker_id="worker:test",
+    )["observations"]
+    pipeline.upsert_groups(
+        scope[0],
+        scope[1],
+        {
+            "accounts": [
+                {
+                    "id": "exact-account",
+                    "platform": "linkedin.com",
+                    "canonical_url": exact_url,
+                    "observation_ids": [observations[0]["id"]],
+                },
+                {
+                    "id": "alias-account",
+                    "platform": "linkedin.com",
+                    "canonical_url": alias_url,
+                    "observation_ids": [observations[1]["id"]],
+                },
+            ]
+        },
+        projection_revision=pipeline.projection_revision(scope[0], scope[1]),
+    )
+
+    workspace = pipeline.get_workspace(scope[0], scope[1])
+    assert [item["normalized"]["canonical_url"] for item in workspace["shortlist"]] == [
+        exact_url
+    ]
+    assert workspace["shortlist"][0]["exact_profile_input"] is True
+    assert "no generated alias was substituted" in workspace["shortlist"][0][
+        "ranking_explanation"
+    ]
 
 
 def test_withdraw_preserves_final_version_and_audit(pair):
