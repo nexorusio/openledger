@@ -10,7 +10,7 @@ REQUIRED_CASES = (
     "test_operator_and_machine_connectors_are_not_query_worker_fallbacks",
     "test_saved_versions_cannot_silently_use_a_different_parser",
     "test_registered_wrapper_keeps_positive_result_and_surfaces_retry_warning",
-    "test_browser_four_inputs_review_research_qc_and_final",
+    "test_browser_four_inputs_assessment_reject_approve_and_report",
     "test_page_commit_advances_cursor_and_atomic_evidence",
     "test_crash_retry_resumes_checkpoint_and_deduplicates_page",
     "test_page_and_cursor_roll_back_together_on_late_record_conflict",
