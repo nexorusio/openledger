@@ -2482,18 +2482,23 @@ class PipelineStore:
                 ai_ranking = ai_ranking if isinstance(ai_ranking, dict) else None
                 if ai_ranking:
                     ai_ranked_group_count += 1
-                if conflicts or not (
-                    source_supported
-                    or manual_cited
-                    or (ai_ranking and ai_ranking.get("shortlisted") is True)
-                ):
+                # The assessment view must not erase name, email, phone, or
+                # public-search findings merely because an account result has
+                # stronger support.  Unsupported candidates stay visibly
+                # labelled as candidates; they are not silently promoted.
+                if conflicts or observation_count < 1:
                     continue
                 if ai_ranking:
-                    if ai_ranking.get("shortlisted") is not True:
-                        continue
                     priority = str(ai_ranking.get("priority") or "low").casefold()
-                    recommendation = "ai_" + priority + "_priority"
-                    ranking_explanation = str(ai_ranking.get("reason") or "").strip()
+                    recommendation = (
+                        "ai_" + priority + "_priority"
+                        if ai_ranking.get("shortlisted") is True
+                        else "ai_review_queue"
+                    )
+                    ranking_explanation = str(ai_ranking.get("reason") or "").strip() or (
+                        "AI left this finding outside its priority shortlist; "
+                        "the cited evidence remains available for operator review."
+                    )
                     ranking_key = (
                         2,
                         {"high": 3, "medium": 2, "low": 1}.get(priority, 0),
@@ -2539,7 +2544,15 @@ class PipelineStore:
             )
             for item in shortlist:
                 item.pop("ranking_key", None)
-            display_shortlist = shortlist[:50]
+            # Preserve a useful cross-input view: a prolific username crawl
+            # must not crowd every full-name, email, phone, affiliation, or
+            # public-record result off the first assessment screen.
+            display_shortlist = []
+            for key, _title in SHORTLIST_SECTIONS:
+                section_items = [
+                    item for item in shortlist if item["section"] == key
+                ]
+                display_shortlist.extend(section_items[:25])
             shortlist_sections = [
                 {
                     "key": key,

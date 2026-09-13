@@ -20,7 +20,9 @@
         <aside class="app-sidebar" id="appSidebar" aria-label="Primary navigation">
             <div class="sidebar-brand">
                 <a href="{{ url_for('index') }}" class="brand-link" aria-label="OpenLedger home">
-                    <span class="brand-mark-wrap" aria-hidden="true">O/</span>
+                    <span class="brand-mark-wrap" aria-hidden="true">
+                        <img src="{{ url_for('static', filename='openledger-icon-white.png') }}" alt="">
+                    </span>
                     <span class="brand-copy">
                         <strong>OpenLedger</strong>
                         <small>Open-Gate · OSINT</small>
@@ -50,6 +52,12 @@
                    {{ 'aria-current=page' if request.endpoint in ('combine_cases_workspace', 'combined_case_workspace') }}>
                     <i data-lucide="layers-3"></i>
                     <span>Combined case</span>
+                </a>
+                <a href="{{ url_for('relationships_workspace') }}"
+                   class="sidebar-link {{ 'active' if request.endpoint == 'relationships_workspace' }}"
+                   {{ 'aria-current=page' if request.endpoint == 'relationships_workspace' }}>
+                    <i data-lucide="share-2"></i>
+                    <span>Relationship evidence</span>
                 </a>
                 <a href="{{ url_for('history') }}"
                    class="sidebar-link {{ 'active' if request.endpoint in ('history', 'live_results', 'results') }}"
@@ -103,7 +111,6 @@
                     </nav>
                 </div>
                 <div class="topbar-actions">
-                    <span class="governed-status"><i></i>Governed OSINT</span>
                     <time class="workspace-clock" id="workspaceClock" aria-label="Current local time"></time>
                 </div>
             </header>

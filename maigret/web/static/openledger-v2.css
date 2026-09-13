@@ -109,6 +109,13 @@ a:hover {
     letter-spacing: -0.06em;
 }
 
+.brand-mark-wrap img {
+    width: 24px;
+    height: 24px;
+    display: block;
+    object-fit: contain;
+}
+
 .brand-copy strong {
     font-size: 0.88rem;
     font-weight: 600;
@@ -261,7 +268,9 @@ a:hover {
 }
 
 .app-topbar .icon-button {
-    display: none;
+    display: inline-grid;
+    flex: 0 0 auto;
+    color: #bcbab4;
 }
 
 .breadcrumb-line {
@@ -283,7 +292,6 @@ a:hover {
     color: #4a4947;
 }
 
-.governed-status,
 .workspace-clock {
     color: #74736f;
     font-size: 0.62rem;
@@ -291,20 +299,8 @@ a:hover {
     text-transform: uppercase;
 }
 
-.governed-status {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-}
-
-.governed-status i {
-    width: 5px;
-    height: 5px;
-    background: var(--ol-accent);
-}
-
 .workspace-clock {
-    margin-left: 12px;
+    margin-left: 0;
 }
 
 .app-content {
@@ -345,6 +341,58 @@ a:hover {
     display: flex;
     flex-wrap: wrap;
     gap: 10px;
+}
+
+.page-heading,
+.persona-profile-header {
+    align-items: flex-start;
+}
+
+.page-heading > :first-child,
+.persona-profile-copy {
+    max-width: min(760px, 100%);
+}
+
+.heading-actions {
+    max-width: min(100%, 560px);
+}
+
+.heading-actions .btn,
+.heading-actions form {
+    min-width: 0;
+}
+
+/* The sign-in screen uses the same quiet black/purple system as the app. */
+.login-brand-panel {
+    background: #090909;
+    border-right: 1px solid var(--ol-border);
+}
+
+.login-brand-panel::after {
+    border-radius: 0;
+    border-color: rgba(124, 77, 255, 0.24);
+}
+
+.login-brand-mark,
+.login-mobile-mark {
+    border-radius: 0;
+    background: transparent;
+}
+
+.login-brand-copy h1 {
+    font-weight: 500;
+}
+
+.login-eyebrow {
+    color: var(--ol-accent-strong);
+}
+
+.login-form-panel {
+    background: #000;
+}
+
+.login-submit {
+    border-radius: 0;
 }
 
 .panel-card,
@@ -583,10 +631,52 @@ a:hover {
     font-weight: 500;
 }
 
-.identifier-list {
+.identifier-columns {
+    display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 18px 16px;
+    gap: 16px;
     margin-top: 20px;
+}
+
+.identifier-column {
+    min-width: 0;
+    padding: 14px;
+    border: 1px solid var(--ol-border);
+    background: #080809;
+}
+
+.identifier-column-heading {
+    display: flex;
+    justify-content: space-between;
+    gap: 12px;
+    align-items: flex-start;
+    padding-bottom: 12px;
+    border-bottom: 1px solid var(--ol-border);
+}
+
+.identifier-column-heading h4 {
+    margin: 0;
+    color: #f2f1ef;
+    font-size: .84rem;
+    font-weight: 600;
+}
+
+.identifier-column-heading small {
+    display: block;
+    margin-top: 3px;
+    color: #85847f;
+    font-size: .68rem;
+}
+
+.identifier-column-heading .btn {
+    flex: 0 0 auto;
+    white-space: nowrap;
+}
+
+.identifier-column-rows {
+    display: grid;
+    gap: 8px;
+    padding-top: 12px;
 }
 
 .identifier-row {
@@ -595,16 +685,6 @@ a:hover {
     grid-template-columns: minmax(0, 1fr) 34px;
     align-items: center;
     gap: 7px 8px;
-}
-
-.identifier-field-label {
-    grid-column: 1 / -1;
-    margin: 0;
-    color: #85847f;
-    font-size: 0.64rem;
-    font-weight: 500;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
 }
 
 .identifier-row .identifier-value {
@@ -618,34 +698,6 @@ a:hover {
     height: 48px;
     border-color: #2c2c2f;
     background: #080809;
-}
-
-.identifier-row .identifier-behavior {
-    grid-column: 1 / -1;
-    min-height: 2.8em;
-    color: #6f6e6a;
-    font-size: 0.64rem;
-}
-
-.identifier-row-additional {
-    grid-column: 1 / -1;
-    grid-template-columns: minmax(150px, 0.35fr) minmax(220px, 1fr) 34px;
-}
-
-.identifier-row-additional .identifier-type {
-    grid-column: 1;
-}
-
-.identifier-row-additional .identifier-value {
-    grid-column: 2;
-}
-
-.identifier-row-additional .identifier-remove {
-    grid-column: 3;
-}
-
-.identifier-row-additional .identifier-behavior {
-    grid-column: 1 / -1;
 }
 
 .alias-context-fields .row,
@@ -873,6 +925,12 @@ a:hover {
     }
 }
 
+@media (min-width: 992px) {
+    .sidebar-close {
+        display: none;
+    }
+}
+
 @media (max-width: 760px) {
     .app-content {
         padding: 28px 18px 48px;
@@ -884,6 +942,19 @@ a:hover {
 
     .page-heading h1 {
         font-size: 2.25rem;
+    }
+
+    .heading-actions,
+    .persona-heading-actions {
+        justify-content: flex-start;
+        max-width: none;
+        width: 100%;
+    }
+
+    .heading-actions .btn,
+    .heading-actions form,
+    .heading-actions form .btn {
+        flex: 1 1 170px;
     }
 
     .investigation-page-heading .heading-actions {
@@ -900,26 +971,12 @@ a:hover {
         padding-left: 20px;
     }
 
-    .identifier-list,
+    .identifier-columns,
     .mode-selector,
     .research-context-grid {
         grid-template-columns: 1fr;
     }
 
-    .identifier-row-additional {
-        grid-column: 1;
-        grid-template-columns: minmax(0, 1fr) 34px;
-    }
-
-    .identifier-row-additional .identifier-type,
-    .identifier-row-additional .identifier-value {
-        grid-column: 1;
-    }
-
-    .identifier-row-additional .identifier-remove {
-        grid-column: 2;
-        grid-row: 2;
-    }
 
     .alias-candidate-row {
         grid-template-columns: 22px 28px minmax(0, 1fr);

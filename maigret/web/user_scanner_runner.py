@@ -15,7 +15,9 @@ def _diagnostic_result(
     *, target: str, site_name: str, category: str, reason: str, stage: str
 ) -> dict:
     return {
-        "status": "Error",
+        # A module or optional cross-scan being unavailable is not evidence that
+        # the account is absent, and it must not abort results from other modules.
+        "status": "Inconclusive",
         "reason": reason,
         "username": target,
         "site_name": site_name,
@@ -113,8 +115,20 @@ def _scan_email(request: dict) -> list[dict]:
         timeout=15.0,
     )
     modules, diagnostics = _load_modules_tolerantly(target=email, is_email=True)
-    with contextlib.redirect_stdout(sys.stderr):
-        results = run_email_module_batch(modules, email, config) if modules else []
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            results = run_email_module_batch(modules, email, config) if modules else []
+    except Exception as exc:
+        results = []
+        diagnostics.append(
+            _diagnostic_result(
+                target=email,
+                site_name="User Scanner email modules",
+                category="Email",
+                reason=f"Email checks unavailable ({type(exc).__name__})",
+                stage="email_scan",
+            )
+        )
     return [result.to_dict() for result in results] + diagnostics
 
 
@@ -170,7 +184,19 @@ def _scan_usernames(request: dict) -> list[dict]:
     serialized: list[dict] = list(load_diagnostics)
     with contextlib.redirect_stdout(sys.stderr):
         for username in usernames:
-            direct = run_user_module(modules, username, config) if modules else []
+            try:
+                direct = run_user_module(modules, username, config) if modules else []
+            except Exception as exc:
+                direct = []
+                serialized.append(
+                    _diagnostic_result(
+                        target=username,
+                        site_name="User Scanner direct scan",
+                        category="Social",
+                        reason=f"Direct scan unavailable ({type(exc).__name__})",
+                        stage="direct_scan",
+                    )
+                )
             for result in direct:
                 result.update(
                     extra={

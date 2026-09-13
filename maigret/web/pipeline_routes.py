@@ -1,8 +1,4 @@
-"""Operator curation and explicit QC for the complete P2 pipeline.
-
-Every presentation endpoint projects the stored version manifest. Neither a legacy
-approved claim nor an export request may designate a Persona as final.
-"""
+"""Operator curation and immutable report snapshots for the complete pipeline."""
 
 from __future__ import annotations
 
@@ -57,7 +53,7 @@ def version_projection(version):
         'approved': 'Final Persona',
         'withdrawn': 'Withdrawn Persona',
         'superseded': 'Superseded final Persona',
-    }.get(status, 'Draft Persona')
+    }.get(status, 'Reviewed Investigation Snapshot')
     return {
         'pipeline_id': manifest.get('pipeline_id', PIPELINE_ID),
         'case_id': manifest['case_id'],
@@ -621,6 +617,38 @@ def register_pipeline_routes(
             'Immutable curated version submitted for QC. It remains a draft until explicit approval.',
             result,
             201,
+        )
+
+    @bp.route('/cases/<case_id>/pipeline/<persona_id>/report', methods=['POST'])
+    @access(mutate=True)
+    def create_report_snapshot(case_id, persona_id):
+        """Freeze operator-approved findings and export them without a second QC UI.
+
+        The immutable manifest and per-finding decision trail remain intact; this
+        restores the single analyst-review flow used by the Persona outline.
+        """
+        scoped_persona(case_id, persona_id)
+        try:
+            version = store().create_version(
+                case_id,
+                persona_id,
+                actor=actor(),
+                scope={
+                    'report_type': 'investigation_snapshot',
+                    'decision_model': 'per_finding_operator_review',
+                },
+                limitations=['Only findings explicitly approved by an analyst are included.'],
+            )
+        except ValueError as error:
+            flash(str(error), 'warning')
+            return redirect(url_for('pipeline.workspace', case_id=case_id, persona_id=persona_id))
+        return redirect(
+            url_for(
+                'pipeline.export_pdf',
+                case_id=case_id,
+                persona_id=persona_id,
+                version_id=version['id'],
+            )
         )
 
     def scoped_version(case_id, persona_id, version_id):

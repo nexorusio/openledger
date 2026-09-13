@@ -443,7 +443,7 @@ async def test_username_runner_preserves_completed_targets_when_one_times_out(
     ]
     assert [item["status"] for item in observations] == [
         "found",
-        "error",
+        "unknown",
         "found",
     ]
     assert observations[1]["reason"] == (
@@ -3692,3 +3692,17 @@ async def test_confirmed_name_runtime_uses_only_fixed_credential_free_endpoints(
     assert icij_calls[1][1]["allow_redirects"] is False
     assert icij_calls[1][1]["json"]["type"] == "Officer"
     assert "Authorization" not in icij_calls[0][1]["headers"]
+
+
+@pytest.mark.asyncio
+async def test_icij_transient_http_failure_is_an_unavailable_source_not_a_collector_error():
+    calls = []
+    offshore = await run_icij_offshore_match(
+        "Alice Example",
+        session_factory=lambda **options: _FakeSequenceSession(
+            [_FakeResponse(status=503, body=b"")], calls, **options
+        ),
+    )
+    assert offshore["status"] == "unavailable"
+    assert offshore["matches"] == []
+    assert "HTTP 503" in offshore["reason"]
