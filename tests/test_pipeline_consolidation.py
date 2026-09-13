@@ -60,6 +60,45 @@ def test_three_engines_one_account_and_claim_all_lineages():
         assert group["independent_origin_count"] == 1
 
 
+def test_negative_check_retains_account_target_lineage_without_claims():
+    document = observation(status="not_found")
+    # The explicit account descriptor is retained only as the check target so
+    # audit graphs can attach the no-match outcome. Workspace projection still
+    # requires a positive observation before exposing any review candidate.
+    assert document["account"]["canonical_url"] == (
+        "https://www.instagram.com/alice/"
+    )
+    assert document["claims"] == []
+    consolidated = consolidate_observations([document])
+    assert len(consolidated["accounts"]) == 1
+    assert consolidated["claims"] == []
+    assert consolidated["ungrouped_observation_ids"] == []
+
+
+def test_positive_retained_url_without_extractor_becomes_reviewable_lead():
+    document = normalize_observation(
+        {
+            "source_engine": "public_exact_match",
+            "source_record_id": "public-lead",
+            "status": "candidate",
+            "source_url": "https://example.test/public/jati",
+        },
+        **SCOPE,
+    )
+    assert document["account"] is None
+    assert document["claims"] == [
+        {
+            "predicate": "linked_profile_lead",
+            "value": "https://example.test/public/jati",
+            "qualifiers": {
+                "ownership": "not_established",
+                "source_engine": "public_exact_match",
+            },
+        }
+    ]
+    assert len(consolidate_observations([document])["claims"]) == 1
+
+
 def test_mirrors_snippets_models_do_not_manufacture_independent_support():
     docs = [observation("original")]
     for number in range(100):

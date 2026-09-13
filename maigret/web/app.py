@@ -505,11 +505,16 @@ def record_internal_error(public_message: str, error: Exception, **context) -> s
     """Log one sanitized diagnostic and return a non-sensitive client message."""
     del context  # Never place request-derived identifiers in application logs.
     reference = secrets.token_hex(6)
+    diagnostic = getattr(error, 'safe_diagnostic', None)
+    diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
     logging.error(
-        '%s [error_ref=%s error_type=%s]',
+        '%s [error_ref=%s error_type=%s diagnostic_code=%s returncode=%s child_exception=%s]',
         safe_log_value(public_message, limit=200),
         reference,
         safe_log_value(type(error).__name__, limit=100),
+        safe_log_value(diagnostic.get('code'), limit=100) or 'none',
+        safe_log_value(diagnostic.get('returncode'), limit=20) or 'none',
+        safe_log_value(diagnostic.get('exception_type'), limit=100) or 'none',
     )
     return f'{public_message}. Reference: {reference}.'
 
@@ -8378,8 +8383,43 @@ def live_results(job_id):
             'kind': 'live',
             'options': live_jobs[job_id].get('options') or {},
         }
-    done_redirect = None
     result = view_job
+    specification = dict(
+        ((result or {}).get("options") or {}).get("investigation_spec") or {}
+    )
+    pipeline_persona_id = str(
+        (result or {}).get("persona_id")
+        or specification.get("target_persona_id")
+        or specification.get("pipeline_subject_id")
+        or ""
+    ).strip()
+    raw_persona_bindings = specification.get("persona_bindings")
+    persona_bindings = (
+        raw_persona_bindings if isinstance(raw_persona_bindings, list) else []
+    )
+    if (
+        not pipeline_persona_id
+        and len(persona_bindings) == 1
+        and isinstance(persona_bindings[0], dict)
+    ):
+        pipeline_persona_id = str(
+            (persona_bindings[0] or {}).get("persona_id") or ""
+        ).strip()
+    pipeline_case_id = str((result or {}).get("case_id") or "").strip()
+    is_pipeline_job = specification.get("pipeline_id") == "p2-e2e-v1" or bool(
+        (result or {}).get("review_url")
+    )
+    done_redirect = None
+    if is_pipeline_job and pipeline_case_id:
+        done_redirect = (
+            url_for(
+                "pipeline.workspace",
+                case_id=pipeline_case_id,
+                persona_id=pipeline_persona_id,
+            )
+            if pipeline_persona_id
+            else url_for("pipeline.case_entry", case_id=pipeline_case_id)
+        )
     if result and result.get("status") == "completed":
         if result.get("kind") in {"affiliation", "case_fusion"}:
             done_redirect = url_for("case_workspace", case_id=result["case_id"])
@@ -8387,11 +8427,11 @@ def live_results(job_id):
             done_redirect = url_for(
                 "persona_workspace", persona_id=result["persona_id"]
             )
-        elif result.get("review_url"):
+        elif done_redirect:
             # P2 jobs land in the evidence/review workspace. The retained
             # report artifact remains available for audit, but is not the
             # completion destination for a current investigation.
-            done_redirect = result["review_url"]
+            pass
         elif result.get("case_id"):
             done_redirect = url_for("pipeline.case_entry", case_id=result["case_id"])
         else:
@@ -8898,15 +8938,39 @@ def _prepare_pipeline_workspace(case_id, persona_id):
 
     pipeline = PipelineStore(case_store)
     workspace = pipeline.get_workspace(case_id, persona_id, limit=1)
-    if workspace["projection"]["pending"]:
+    report = None
+    if workspace["unreconciled_input_count"] or workspace["projection"]["pending"]:
+        reconciled = pipeline.reconcile_submitted_inputs(case_id, persona_id)
         groups = refresh_consolidation(case_store, case_id, persona_id)
-        return {
+        report = {
             "case_id": case_id,
             "persona_id": persona_id,
             "group_count": len(groups),
+            "captured_inputs": reconciled["captured_inputs"],
             "mode": "refresh",
         }
-    return bootstrap_legacy_workspace(case_store, case_id, persona_id)
+        # One explicit preparation action reconciles both the current pipeline
+        # and any eligible historical evidence.  Operators should never need
+        # to discover that the same button must be pressed twice.
+        workspace = pipeline.get_workspace(case_id, persona_id, limit=1)
+    if workspace["projection"]["legacy_available"]:
+        legacy = bootstrap_legacy_workspace(case_store, case_id, persona_id)
+        if report:
+            report.update(
+                legacy_observation_count=legacy["observation_count"],
+                legacy_claim_count=legacy["claim_count"],
+                group_count=legacy["group_count"],
+                mode="reconcile_all",
+            )
+            return report
+        return legacy
+    return report or {
+        "case_id": case_id,
+        "persona_id": persona_id,
+        "group_count": workspace["group_count"],
+        "captured_inputs": 0,
+        "mode": "already_current",
+    }
 
 
 def _launch_pipeline_research(**kwargs):

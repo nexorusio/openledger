@@ -203,9 +203,32 @@ def register_pipeline_routes(
         )
 
         current = store()
+        included_rows = list(current.iter_included_groups(case_id, persona_id))
+        included_account_keys = {
+            str(value)
+            for row in included_rows
+            if row.get("kind") == "account"
+            for value in (
+                (row.get("normalized") or {}).get("key"),
+                (row.get("normalized") or {}).get("canonical_key"),
+            )
+            if value
+        }
         items = []
-        for row in current.iter_included_groups(case_id, persona_id):
+        for row in included_rows:
             normalized = dict(row.get("normalized") or {})
+            predicate = str(
+                normalized.get("predicate")
+                or normalized.get("field_name")
+                or ""
+            ).casefold()
+            if (
+                row.get("kind") == "claim"
+                and predicate == "social_account"
+                and str(normalized.get("account_key") or "")
+                in included_account_keys
+            ):
+                continue
             value = normalized.get("value")
             label = (
                 normalized.get("display_value")
@@ -389,6 +412,19 @@ def register_pipeline_routes(
     def proceed(case_id, persona_id):
         scoped_persona(case_id, persona_id)
         data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            data["unreconciled_input_count"]
+            or data["projection"]["pending"]
+            or data["projection"]["legacy_available"]
+        ):
+            flash(
+                "Reconcile submitted and retained evidence before proceeding.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id),
+                code=303,
+            )
         if data["review_pending_count"]:
             flash(
                 "Resolve every review-queue finding before proceeding to the Persona.",
@@ -415,6 +451,19 @@ def register_pipeline_routes(
     def persona(case_id, persona_id):
         subject = scoped_persona(case_id, persona_id)
         workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            flash(
+                "Reconcile submitted and retained evidence before opening the Persona.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id),
+                code=303,
+            )
         if workspace_data["review_pending_count"]:
             flash(
                 "Resolve every review-queue finding before opening the approved Persona.",
@@ -451,6 +500,18 @@ def register_pipeline_routes(
         if launch_approved_discovery is None:
             abort(503, description="Related-evidence discovery is unavailable.")
         workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            abort(
+                409,
+                description=(
+                    "Reconcile submitted and retained evidence before launching "
+                    "related discovery."
+                ),
+            )
         if workspace_data["review_pending_count"]:
             abort(409, description="Resolve the review queue before launching discovery.")
         projection = approved_persona(case_id, persona_id)
@@ -475,9 +536,24 @@ def register_pipeline_routes(
     @access(mutate=True)
     def branch_affiliation(case_id, persona_id, group_id):
         scoped_persona(case_id, persona_id)
+        current = store()
+        workspace_data = current.get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+            or workspace_data["review_pending_count"]
+        ):
+            abort(
+                409,
+                description=(
+                    "Complete evidence reconciliation and review before opening "
+                    "an affiliation branch."
+                ),
+            )
         included = {
             row["id"]: row
-            for row in store().iter_included_groups(case_id, persona_id)
+            for row in current.iter_included_groups(case_id, persona_id)
         }
         row = included.get(group_id)
         if row is None or row.get("kind") != "claim":
@@ -818,6 +894,28 @@ def register_pipeline_routes(
         restores the single analyst-review flow used by the Persona outline.
         """
         scoped_persona(case_id, persona_id)
+        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            flash(
+                "Reconcile submitted and retained evidence before exporting a report.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+            )
+        if workspace_data["review_pending_count"]:
+            flash(
+                "Resolve every review-queue finding before exporting a report.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+                + "#operator-review"
+            )
         try:
             version = store().create_version(
                 case_id,

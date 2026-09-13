@@ -43,8 +43,13 @@
     <section class="panel-card persona-group persona-tab-panel" id="approved-{{ section.key }}" data-persona-panel="{{ section.key }}" {% if not loop.first %}hidden{% endif %}>
         <header class="panel-header">
             <div><h2>{{ section.title }}</h2><p>Only explicitly approved findings appear here.</p></div>
+            {% set section_state = workspace.section_states.get(section.key, {}) %}
+            <span class="badge-soft {{ 'success' if section['items'] else 'warning' }}">{{ 'Approved evidence' if section['items'] else section_state.get('label', 'Not assessed') }}</span>
         </header>
         <div class="panel-body">
+            {% if section.key == 'records' %}
+            <div class="persona-section-status"><strong>Risk assessment</strong><span>{{ 'Evidence present; no numerical risk score is calculated without an approved, versioned scoring model.' if section['items'] else 'Not assessed. A zero would be misleading when source coverage or approved evidence is incomplete.' }}</span></div>
+            {% endif %}
             {% if section['items'] %}
             <div class="pipeline-table-wrap">
                 <table class="table pipeline-table approved-persona-table" data-sortable-table>
@@ -66,7 +71,8 @@
                 </table>
             </div>
             {% else %}
-            <div class="empty-state compact"><i data-lucide="inbox"></i><h3>No approved findings</h3><p>Nothing in this category was approved in Step 1.</p></div>
+            {% set section_state = workspace.section_states.get(section.key, {}) %}
+            <div class="empty-state compact"><i data-lucide="inbox"></i><h3>{{ section_state.get('label', 'No approved evidence') }}</h3><p>{{ section_state.get('explanation', 'Nothing in this category was approved in Step 1.') }}</p></div>
             {% endif %}
         </div>
     </section>

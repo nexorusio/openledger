@@ -9,7 +9,7 @@
         <p class="page-description">{{ 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Every compatible source engine runs independently. Results are consolidated and ranked before the operator sees a concise review list.' }}</p>
     </div>
     <div class="heading-actions">
-        <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open combined case' if job_kind == 'case_fusion' else 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Open reports' }}</a>
+        <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open combined case' if job_kind == 'case_fusion' else 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Review findings' }}</a>
         <button type="button" id="stopBtn" class="btn btn-outline-danger" {{ 'disabled' if runtime_state.status in ('completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted') }}>Stop investigation</button>
     </div>
 </section>
@@ -117,16 +117,16 @@
     const completedRegistryCandidateCount = {{ completed_registry_candidate_count|tojson }};
     const completedOffshoreAlertCount = {{ completed_offshore_alert_count|tojson }};
 
-    let foundCount = doneRedirect ? completedFoundCount : 0;
-    let candidateCount = doneRedirect ? completedCandidateCount : 0;
-    let suppressedCount = doneRedirect ? completedSuppressedCount : 0;
-    let registrationCount = doneRedirect ? completedRegistrationCount : 0;
-    let usernameVerificationCount = doneRedirect ? completedUsernameVerificationCount : 0;
-    let githubEnrichmentCount = doneRedirect ? completedGithubEnrichmentCount : 0;
-    let archivedProfileCount = doneRedirect ? completedArchivedProfileCount : 0;
-    let affiliatedPersonCount = doneRedirect ? completedAffiliatedPersonCount : 0;
-    let registryCandidateCount = doneRedirect ? completedRegistryCandidateCount : 0;
-    let offshoreAlertCount = doneRedirect ? completedOffshoreAlertCount : 0;
+    let foundCount = runtimeIsTerminal(initialRuntimeState.status) ? completedFoundCount : 0;
+    let candidateCount = runtimeIsTerminal(initialRuntimeState.status) ? completedCandidateCount : 0;
+    let suppressedCount = runtimeIsTerminal(initialRuntimeState.status) ? completedSuppressedCount : 0;
+    let registrationCount = runtimeIsTerminal(initialRuntimeState.status) ? completedRegistrationCount : 0;
+    let usernameVerificationCount = runtimeIsTerminal(initialRuntimeState.status) ? completedUsernameVerificationCount : 0;
+    let githubEnrichmentCount = runtimeIsTerminal(initialRuntimeState.status) ? completedGithubEnrichmentCount : 0;
+    let archivedProfileCount = runtimeIsTerminal(initialRuntimeState.status) ? completedArchivedProfileCount : 0;
+    let affiliatedPersonCount = runtimeIsTerminal(initialRuntimeState.status) ? completedAffiliatedPersonCount : 0;
+    let registryCandidateCount = runtimeIsTerminal(initialRuntimeState.status) ? completedRegistryCandidateCount : 0;
+    let offshoreAlertCount = runtimeIsTerminal(initialRuntimeState.status) ? completedOffshoreAlertCount : 0;
     let runtimeState = {...initialRuntimeState};
     let runtimePollTimer = null;
     let runtimeClockTimer = null;
@@ -250,6 +250,11 @@
             applyRuntimeState(payload);
             if (runtimeIsTerminal(runtimeState.status)) {
                 window.clearInterval(runtimePollTimer);
+                finish(
+                    completionText(),
+                    doneRedirect,
+                    !['budget_exhausted', 'cancelled', 'interrupted'].includes(runtimeState.collection_status)
+                );
             }
         } catch (_error) {
             // EventSource remains authoritative; a transient poll failure is not a job failure.
@@ -576,7 +581,7 @@
         pollRuntimeState();
     }
 
-    if (doneRedirect) {
+    if (doneRedirect && runtimeIsTerminal(runtimeState.status)) {
         if (isCaseFusion) {
             window.location.replace(doneRedirect);
         } else {

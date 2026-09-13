@@ -29,7 +29,7 @@ def journey(tmp_path):
         "tasks": [{"engine": "fixture", "availability": "active", "input": inputs[0]}],
     }
     query = pipeline.create_request(
-        case_id, persona_id, inputs, plan, actor="analyst", job_id=job_id
+        case_id, persona_id, inputs, plan, actor="system:route-fixture", job_id=job_id
     )
     attempt = pipeline.start_attempt(query["tasks"][0]["id"], "fixture-worker")
     observations = pipeline.record_observations(
@@ -72,6 +72,20 @@ def journey(tmp_path):
         },
         projection_revision=pipeline.projection_revision(case_id, persona_id),
     )
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    pipeline.reconcile_submitted_inputs(case_id, persona_id)
+    assess_consolidated_groups(case_store, case_id, persona_id)
+    for item in pipeline.get_workspace(case_id, persona_id)["shortlist"]:
+        if item["investigator_supplied"]:
+            pipeline.decide(
+                case_id,
+                persona_id,
+                item["id"],
+                "reject",
+                actor="fixture-reviewer",
+                reason="Resolved setup anchor for route-fixture isolation",
+            )
     group_id = groups[0]["id"]
     app = Flask(
         __name__,
@@ -191,7 +205,7 @@ def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     client = journey['client']
     workspace = client.get(base(journey))
     assert workspace.status_code == 200
-    assert b'Step 1 confirms digital presence' in workspace.data
+    assert b'Review submitted evidence and discoveries' in workspace.data
     assert b'Decision note (optional)' in workspace.data
     assert b'>Reject<' in workspace.data
     assert b'Record decision' not in workspace.data
@@ -306,6 +320,13 @@ def test_review_proceed_persona_and_approved_discovery_are_an_explicit_wizard(
         data={"csrf_token": "test-csrf"},
     )
     assert blocked_discovery.status_code == 409
+    blocked_report = client.post(
+        base(journey) + "/report",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_report.status_code == 302
+    assert blocked_report.location.endswith(base(journey) + "#operator-review")
 
     decision = post(
         journey,
@@ -391,6 +412,8 @@ def test_approved_discovery_reuses_exact_url_without_generated_aliases(monkeypat
 
 
 def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
     groups = journey["pipeline"].upsert_groups(
         journey["case_id"],
         journey["persona_id"],
@@ -411,6 +434,9 @@ def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
             journey["case_id"], journey["persona_id"]
         ),
     )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
     affiliation_id = groups[0]["id"]
     decision = post(
         journey,
@@ -418,6 +444,12 @@ def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
         {"decision": "include"},
     )
     assert decision.status_code == 201
+    resolved_existing = post(
+        journey,
+        f"/groups/{journey['group_id']}/decision",
+        {"decision": "reject"},
+    )
+    assert resolved_existing.status_code == 201
 
     branch = journey["client"].post(
         base(journey) + f"/groups/{affiliation_id}/branch-affiliation",
@@ -802,7 +834,8 @@ def test_split_preserves_observations_and_requires_new_operator_review(journey):
         pipeline.get_group(case_id, persona_id, successor_group)["latest_decision"]
         is None
     )
-    assert len(pipeline.list_observations(case_id, persona_id)) == 2
+    # Two source observations plus the retained original investigation input.
+    assert len(pipeline.list_observations(case_id, persona_id)) == 3
     assert (
         pipeline.get_group(case_id, persona_id, journey["group_id"])[
             "observation_count"

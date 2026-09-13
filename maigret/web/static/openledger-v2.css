@@ -98,22 +98,22 @@ a:hover {
 }
 
 .brand-mark-wrap {
-    width: 42px;
-    height: 42px;
-    flex-basis: 42px;
+    width: 58px;
+    height: 58px;
+    flex-basis: 58px;
     display: block;
-    overflow: hidden;
+    overflow: visible;
     border: 0;
     background: transparent;
 }
 
 .brand-mark-wrap img {
-    width: 69px;
-    height: 69px;
-    max-width: none;
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
     display: block;
     object-fit: contain;
-    object-position: left top;
+    object-position: center;
 }
 
 .brand-copy strong {
@@ -368,6 +368,23 @@ canvas {
     align-items: flex-start;
 }
 
+/* Keep the current page and its primary actions in view while long evidence,
+   history and result tables scroll beneath the application chrome. */
+.app-content > .page-heading,
+.app-content > .persona-profile-header {
+    position: sticky;
+    top: var(--ol-topbar-height);
+    z-index: 1010;
+    padding-top: 18px;
+    padding-bottom: 18px;
+    border-bottom: 1px solid var(--ol-border);
+    background: var(--ol-canvas, #000);
+}
+
+.app-content > .persona-profile-header {
+    background: var(--ol-surface);
+}
+
 .page-heading > :first-child,
 .persona-profile-copy {
     max-width: min(760px, 100%);
@@ -463,20 +480,20 @@ canvas {
 }
 
 .login-wordmark-mark {
-    width: 44px;
-    height: 44px;
+    width: 68px;
+    height: 68px;
     display: block;
-    overflow: hidden;
+    overflow: visible;
     border: 0;
 }
 
 .login-wordmark-mark img {
-    width: 72px;
-    height: 72px;
-    max-width: none;
+    width: 100%;
+    height: 100%;
+    max-width: 100%;
     display: block;
     object-fit: contain;
-    object-position: left top;
+    object-position: center;
 }
 
 .login-wordmark strong {
@@ -1369,7 +1386,7 @@ th[aria-sort="descending"] .table-sort-indicator::before {
 
 @media (min-width: 992px) {
     .sidebar-collapsed .sidebar-brand {
-        padding-inline: 15px;
+        padding-inline: 6px;
     }
 
     .sidebar-close {

@@ -609,6 +609,191 @@ def test_review_prioritizes_exact_profile_url_and_omits_unsupported_alias(pair):
     ]
 
 
+def test_submitted_inputs_are_idempotently_reconciled_across_persona_sections(pair):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    scope = subject(pair)
+    pipeline = pair[1]
+    request = pipeline.create_request(
+        scope[0],
+        scope[1],
+        [
+            {"type": "full_name", "value": "Jati Pratomo"},
+            {"type": "email", "value": "jati@example.test"},
+            {"type": "phone", "value": "+628123456789"},
+            {"type": "username", "value": "jati-pratomo"},
+            {
+                "type": "profile_url",
+                "value": "https://linkedin.com/in/jati-pratomo",
+            },
+            {
+                "type": "username",
+                "value": "jati.pratomo",
+                "derived_from": [
+                    {"type": "ranked_alias", "value": "Jati Pratomo"}
+                ],
+            },
+        ],
+        {"pipeline_id": PIPELINE_ID, "tasks": []},
+        actor="analyst",
+        job_id=scope[2],
+    )
+    before = pipeline.get_workspace(scope[0], scope[1])
+    # The case's original username plus the five values in this follow-up
+    # request must all survive as reviewable investigation inputs.
+    assert before["input_count"] == before["unreconciled_input_count"] == 6
+
+    reconciled = pipeline.reconcile_submitted_inputs(scope[0], scope[1])
+    assert reconciled["captured_inputs"] == 6
+    assert pipeline.get_request(request["id"])["status"] == "research_needed"
+    assess_consolidated_groups(pair[0], scope[0], scope[1])
+
+    workspace = pipeline.get_workspace(scope[0], scope[1])
+    assert workspace["unreconciled_input_count"] == 0
+    # The system capture task is hidden; the case's original engine plan remains.
+    assert workspace["tasks_count"] == before["tasks_count"]
+    assert workspace["shortlist_count"] == 6
+    assert all(item["investigator_supplied"] for item in workspace["shortlist"])
+    assert {
+        section["key"]: len(section["items"])
+        for section in workspace["shortlist_sections"]
+    } == {
+        "identity": 1,
+        "contact": 2,
+        "digital": 3,
+        "affiliations": 0,
+        "records": 0,
+    }
+    assert pipeline.reconcile_submitted_inputs(scope[0], scope[1])[
+        "captured_inputs"
+    ] == 0
+
+
+def test_negative_account_target_is_audit_only_not_a_review_finding(pair):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+    from maigret.web.pipeline_consolidation import consolidate_observations
+    from maigret.web.pipeline_evidence import normalize_observation
+
+    request = query(pair)
+    pipeline = pair[1]
+    attempt = pipeline.start_attempt(request["tasks"][0]["id"], "worker:test")
+    document = normalize_observation(
+        {
+            "status": "not_found",
+            "source_url": "https://social.example/jati",
+            "account": {
+                "platform": "social.example",
+                "url": "https://social.example/jati",
+            },
+        },
+        case_id=request["case_id"],
+        subject_id=request["persona_id"],
+        request_id=request["id"],
+        task_id=request["tasks"][0]["id"],
+        attempt_id=attempt["id"],
+        observed_at=attempt["created_at"],
+        engine="fixture",
+    )
+    saved = pipeline.record_observations(
+        attempt["id"], [document], outcome="not_found", worker_id="worker:test"
+    )["observations"]
+    pipeline.upsert_groups(
+        request["case_id"],
+        request["persona_id"],
+        consolidate_observations(saved),
+        projection_revision=pipeline.projection_revision(
+            request["case_id"], request["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(pair[0], request["case_id"], request["persona_id"])
+
+    workspace = pipeline.get_workspace(request["case_id"], request["persona_id"])
+    assert workspace["group_count"] == 1
+    assert workspace["shortlist_count"] == 0
+    assert workspace["observation_outcome_counts"]["not_found"] == 1
+
+
+def test_positive_engine_output_reaches_every_persona_section(pair):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+    from maigret.web.pipeline_consolidation import consolidate_observations
+    from maigret.web.pipeline_evidence import normalize_observation
+
+    request = query(pair)
+    pipeline = pair[1]
+    attempt = pipeline.start_attempt(request["tasks"][0]["id"], "worker:test")
+    document = normalize_observation(
+        {
+            "status": "found",
+            "source_url": "https://source.example/jati",
+            "account": {
+                "platform": "source.example",
+                "url": "https://source.example/jati",
+            },
+            "claims": [
+                {"predicate": "full_name", "value": "Jati Pratomo"},
+                {"predicate": "email", "value": "jati@example.test"},
+                {"predicate": "current_location", "value": "Jakarta"},
+                {"predicate": "organization", "value": "Example Ltd"},
+                {"predicate": "sanctions_record", "value": "Candidate record"},
+            ],
+        },
+        case_id=request["case_id"],
+        subject_id=request["persona_id"],
+        request_id=request["id"],
+        task_id=request["tasks"][0]["id"],
+        attempt_id=attempt["id"],
+        observed_at=attempt["created_at"],
+        engine="fixture",
+    )
+    saved = pipeline.record_observations(
+        attempt["id"], [document], outcome="found", worker_id="worker:test"
+    )["observations"]
+    pipeline.upsert_groups(
+        request["case_id"],
+        request["persona_id"],
+        consolidate_observations(saved),
+        projection_revision=pipeline.projection_revision(
+            request["case_id"], request["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(pair[0], request["case_id"], request["persona_id"])
+
+    workspace = pipeline.get_workspace(request["case_id"], request["persona_id"])
+    assert workspace["shortlist_count"] == 6
+    assert {
+        section["key"]: len(section["items"])
+        for section in workspace["shortlist_sections"]
+    } == {
+        "identity": 1,
+        "contact": 2,
+        "digital": 1,
+        "affiliations": 1,
+        "records": 1,
+    }
+
+
+def test_engine_coverage_maps_to_every_section_it_can_populate():
+    from maigret.web.pipeline_store import SHORTLIST_SECTIONS, _task_sections
+
+    assert _task_sections({"engine": "github_public_profile"}) == {
+        "identity",
+        "contact",
+        "digital",
+        "affiliations",
+    }
+    assert _task_sections({"engine": "icij_offshore_leaks"}) == {
+        "affiliations",
+        "records",
+    }
+    assert _task_sections({"engine": "user_scanner_email"}) == {
+        "contact",
+        "digital",
+    }
+    assert _task_sections({"engine": "ai_cited_research"}) == {
+        key for key, _title in SHORTLIST_SECTIONS
+    }
+
+
 def test_withdraw_preserves_final_version_and_audit(pair):
     request, _, _, version = curated(pair)
     pipeline = pair[1]

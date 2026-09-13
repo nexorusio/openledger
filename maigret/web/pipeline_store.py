@@ -68,12 +68,107 @@ SHORTLIST_PREDICATE_SECTIONS = {
     "linked_profile_lead": "digital",
     "account_registration": "digital",
     "website": "digital",
+    "username": "digital",
     "occupation": "affiliations",
     "company": "affiliations",
     "organization": "affiliations",
     "affiliation": "affiliations",
     "company_ownership": "affiliations",
 }
+
+INPUT_EVIDENCE_ENGINE = "investigation_input"
+INPUT_EVIDENCE_TASK_KEY = "system:submitted-inputs"
+INPUT_CLAIM_PREDICATES = {
+    "full_name": "full_name",
+    "email": "email",
+    "phone": "phone",
+    "username": "username",
+    "social_handle": "username",
+    "organization": "organization",
+}
+
+INPUT_SECTIONS = {
+    "full_name": "identity",
+    "email": "contact",
+    "phone": "contact",
+    "username": "digital",
+    "social_handle": "digital",
+    "profile_url": "digital",
+    "public_url": "digital",
+    "organization": "affiliations",
+    "official_website": "digital",
+}
+
+
+def _task_review_state(task):
+    """Reduce technical lifecycle terms to one operator-facing coverage state."""
+    outcome = str(task.get("outcome") or "").casefold()
+    if outcome == "found":
+        return "found"
+    if outcome == "candidate":
+        return "candidate"
+    if outcome == "not_found":
+        return "no_match"
+    if outcome == "not_executed":
+        return "not_searched"
+    if outcome or task.get("status") == "completed":
+        return "could_not_check"
+    return "pending"
+
+
+def _task_sections(task):
+    """Map a collection task to the Persona sections whose coverage it affects."""
+    engine = str(task.get("engine") or task.get("engine_id") or "").casefold()
+    input_document = task.get("input") if isinstance(task.get("input"), dict) else {}
+    input_type = str(
+        task.get("input_type") or input_document.get("type") or ""
+    ).casefold()
+    if engine == INPUT_EVIDENCE_ENGINE:
+        return set()
+    sections = set()
+    if any(value in engine for value in ("ai_cited", "case_fusion")):
+        sections.update(key for key, _title in SHORTLIST_SECTIONS)
+    if any(value in engine for value in ("icij", "offshore", "risk")):
+        sections.update({"affiliations", "records"})
+    if "github" in engine:
+        # A GitHub profile can explicitly publish a name, email, location,
+        # organization, website, and account identity.
+        sections.update({"identity", "contact", "digital", "affiliations"})
+    if "wikipedia" in engine:
+        sections.update({"identity", "affiliations"})
+    if any(
+        value in engine
+        for value in (
+            "wikidata",
+            "registry",
+            "official_website",
+            "business_context",
+            "dns_context",
+        )
+    ):
+        sections.add("affiliations")
+    if "official_website" in engine:
+        sections.add("contact")
+    if any(
+        value in engine
+        for value in (
+            "maigret",
+            "profile_search",
+            "user_scanner_username",
+            "unfurl",
+            "wayback",
+        )
+    ):
+        sections.add("digital")
+    if "user_scanner_email" in engine:
+        sections.update({"contact", "digital"})
+    if input_type in {"email", "phone"}:
+        sections.add("contact")
+    if input_type in {"username", "profile_url", "public_url"}:
+        sections.add("digital")
+    if input_type == "full_name":
+        sections.add("identity")
+    return sections
 
 
 def _shortlist_section(kind, normalized):
@@ -85,6 +180,41 @@ def _shortlist_section(kind, normalized):
         or ""
     ).casefold()
     return SHORTLIST_PREDICATE_SECTIONS.get(predicate, "records")
+
+
+def _reviewable_request_inputs(request):
+    """Return human investigation anchors, excluding internal checkpoints."""
+    actor = str(request.get("actor") or "").casefold()
+    plan = request.get("plan") if isinstance(request.get("plan"), dict) else {}
+    if actor.startswith(("system:", "worker:", "connector:")) or plan.get(
+        "import_source"
+    ):
+        return []
+    inputs = []
+    for item in list(request.get("inputs") or []):
+        if not isinstance(item, dict) or not str(item.get("value") or "").strip():
+            continue
+        input_type = str(item.get("type") or item.get("kind") or "").casefold()
+        if input_type not in INPUT_SECTIONS:
+            continue
+        derivations = [
+            row
+            for row in list(item.get("derived_from") or [])
+            if isinstance(row, dict)
+        ]
+        # A ranked spelling variant is an operator-selected search route, not
+        # an asserted subject fact. Its positive source results remain
+        # reviewable, but the alias itself must not be materialized as if the
+        # investigator typed it as evidence.
+        if derivations and all(
+            row.get("type") == "ranked_alias" or row.get("context")
+            for row in derivations
+        ):
+            continue
+        normalized = dict(item)
+        normalized["type"] = input_type
+        inputs.append(normalized)
+    return inputs
 
 
 def task_can_retry(task):
@@ -566,6 +696,207 @@ class PipelineStore:
 
     def create_request_with_connection(self, connection, *args, **kwargs):
         return self.create_request(*args, connection=connection, **kwargs)
+
+    def reconcile_submitted_inputs(self, case_id, persona_id):
+        """Materialize submitted identifiers as reviewable, unverified evidence.
+
+        Investigation inputs previously existed only inside request JSON. This
+        idempotent bridge gives every supplied value an immutable ledger record
+        and a normal account/claim group without treating it as independently
+        corroborated or automatically approving it.
+        """
+        from maigret.web.pipeline_evidence import normalize_observation
+
+        requests = self._table("requests")
+        tasks = self._table("tasks")
+        attempts = self._table("attempts")
+        captured_inputs = 0
+        captured_requests = 0
+        with self.engine.begin() as connection:
+            self._scope(connection, case_id, persona_id, lock=True)
+            request_rows = list(
+                connection.execute(
+                    select(requests)
+                    .where(
+                        requests.c.case_id == case_id,
+                        requests.c.persona_id == persona_id,
+                    )
+                    .order_by(requests.c.created_at, requests.c.id)
+                ).mappings()
+            )
+            for request in request_rows:
+                inputs = _reviewable_request_inputs(request)
+                if not inputs:
+                    continue
+                capture_request_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "openledger:submitted-inputs:" + request["id"],
+                    )
+                )
+                existing = (
+                    connection.execute(
+                        select(requests.c.id).where(requests.c.id == capture_request_id)
+                    )
+                    .mappings()
+                    .first()
+                )
+                if existing:
+                    continue
+                now = _now()
+                observed_at = request["created_at"]
+                if isinstance(observed_at, datetime) and observed_at.tzinfo is None:
+                    # SQLite drops timezone metadata even though the value was
+                    # written as UTC.  Restore the schema's declared timezone
+                    # at this trusted database boundary.
+                    observed_at = observed_at.replace(tzinfo=timezone.utc)
+                capture_plan = {
+                    "pipeline_id": PIPELINE_ID,
+                    "request_id": capture_request_id,
+                    "source_request_id": request["id"],
+                    "system_input_capture": True,
+                }
+                connection.execute(
+                    insert(requests).values(
+                        id=capture_request_id,
+                        case_id=case_id,
+                        persona_id=persona_id,
+                        pipeline_id=PIPELINE_ID,
+                        job_id=None,
+                        parent_request_id=None,
+                        actor="system:input-reconciliation",
+                        inputs=[
+                            {"type": "source_request", "value": request["id"]}
+                        ],
+                        plan=capture_plan,
+                        plan_hash=_digest(capture_plan),
+                        idempotency_key="input-reconciliation:" + request["id"],
+                        status="planned",
+                        depth=0,
+                        created_at=now,
+                    )
+                )
+                task = dict(
+                    id=_id(),
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    request_id=capture_request_id,
+                    task_key=INPUT_EVIDENCE_TASK_KEY,
+                    engine=INPUT_EVIDENCE_ENGINE,
+                    platform=None,
+                    input={"type": "submitted_inputs", "count": len(inputs)},
+                    spec={
+                        "task_id": INPUT_EVIDENCE_TASK_KEY,
+                        "engine_id": INPUT_EVIDENCE_ENGINE,
+                        "route_state": "active",
+                        "retry_ceiling": 0,
+                        "retention": {
+                            "mode": "retained",
+                            "final_eligible": True,
+                        },
+                        "system_input_capture": True,
+                        "source_request_id": request["id"],
+                    },
+                    availability="active",
+                    reason="Submitted values retained for analyst confirmation",
+                    status="running",
+                    outcome=None,
+                    attempt_count=1,
+                    retry_limit=0,
+                    active_attempt_id=None,
+                    updated_at=now,
+                    created_at=now,
+                )
+                attempt = dict(
+                    id=_id(),
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    task_id=task["id"],
+                    number=1,
+                    worker_id="system:input-reconciliation",
+                    status="running",
+                    outcome=None,
+                    error=None,
+                    finished_at=None,
+                    created_at=now,
+                )
+                task["active_attempt_id"] = attempt["id"]
+                connection.execute(insert(tasks).values(**task))
+                connection.execute(insert(attempts).values(**attempt))
+                observations = []
+                for item in inputs:
+                    input_type = str(item.get("type") or "").casefold()
+                    value = str(item.get("value") or "").strip()
+                    input_id = str(
+                        item.get("input_id")
+                        or "input:" + _digest([request["id"], input_type, value])
+                    )
+                    raw = {
+                        "source_engine": INPUT_EVIDENCE_ENGINE,
+                        "native_record_id": input_id,
+                        "status": "candidate",
+                        "observed_at": observed_at,
+                        "locator": input_id,
+                        "input_type": input_type,
+                        "input_value": value,
+                        "provenance_type": "investigator_supplied",
+                        "input_provenance": list(item.get("provenance") or []),
+                        # Query-planner derivation records can be structured
+                        # objects. Keep them as input audit metadata; the
+                        # observation-level derived_from field is reserved for
+                        # immutable observation IDs.
+                        "input_derivation": list(item.get("derived_from") or []),
+                        "evidence_signals": {"investigator_supplied": True},
+                        "retention": {
+                            "mode": "retained",
+                            "final_eligible": True,
+                        },
+                    }
+                    if input_type in {"profile_url", "public_url"}:
+                        raw.update(profile_url=value, source_url=value, claims=[])
+                    else:
+                        predicate = INPUT_CLAIM_PREDICATES.get(input_type)
+                        raw["claims"] = (
+                            [{"predicate": predicate, "value": value}]
+                            if predicate
+                            else []
+                        )
+                    observations.append(
+                        normalize_observation(
+                            raw,
+                            case_id=case_id,
+                            subject_id=persona_id,
+                            request_id=capture_request_id,
+                            task_id=task["id"],
+                            attempt_id=attempt["id"],
+                            engine=INPUT_EVIDENCE_ENGINE,
+                            observed_at=observed_at,
+                            engine_version="investigation-input-v1",
+                            parser_version="pipeline-evidence-2",
+                            retention_policy={
+                                "mode": "retained",
+                                "final_eligible": True,
+                            },
+                        )
+                    )
+                records = self._append_observations(
+                    connection, attempt, task, observations
+                )
+                self._finish_attempt(
+                    connection,
+                    attempt,
+                    task,
+                    "candidate",
+                    "Submitted evidence captured; independent corroboration remains pending",
+                )
+                captured_inputs += len(records)
+                captured_requests += 1
+        return {
+            "case_id": case_id,
+            "persona_id": persona_id,
+            "captured_inputs": captured_inputs,
+            "captured_requests": captured_requests,
+        }
 
     def get_task(self, task_id):
         with self.engine.connect() as connection:
@@ -2276,7 +2607,13 @@ class PipelineStore:
     def list_history(
         self, case_id, persona_id, kind, *, limit=25, offset=0, parent_id=None
     ):
-        """Independent bounded pages preserve access to every lifecycle record."""
+        """Return bounded operator and collection history pages.
+
+        The submitted-input reconciliation checkpoint is evidence-ledger
+        bookkeeping rather than an engine run.  Keep it out of query/engine
+        history so counts and pagination describe only work the operator
+        requested or a collector performed.
+        """
         names = {
             "requests": "requests",
             "tasks": "tasks",
@@ -2292,6 +2629,19 @@ class PipelineStore:
         limit, offset = min(max(int(limit), 1), 100), max(int(offset), 0)
         table = self._table(names[kind])
         criteria = [table.c.case_id == case_id, table.c.persona_id == persona_id]
+        if kind == "requests":
+            criteria.append(table.c.actor != "system:input-reconciliation")
+        elif kind == "tasks":
+            criteria.append(table.c.engine != INPUT_EVIDENCE_ENGINE)
+        elif kind == "attempts":
+            task_table = self._table("tasks")
+            criteria.append(
+                ~table.c.task_id.in_(
+                    select(task_table.c.id).where(
+                        task_table.c.engine == INPUT_EVIDENCE_ENGINE
+                    )
+                )
+            )
         if parent_id and kind == "requests":
             links = self._table("requirement_requests")
             criteria.append(table.c.id.in_(select(links.c.request_id).where(
@@ -2422,7 +2772,118 @@ class PipelineStore:
             memberships = self._table("group_observations")
             observations = self._table("observations")
             requests = self._table("requests")
+            task_table = self._table("tasks")
             from maigret.web.pipeline_evidence import canonical_origin_url
+
+            request_rows = list(
+                connection.execute(
+                    select(
+                        requests.c.id,
+                        requests.c.inputs,
+                        requests.c.actor,
+                        requests.c.plan,
+                    )
+                    .where(
+                        requests.c.case_id == case_id,
+                        requests.c.persona_id == persona_id,
+                    )
+                    .order_by(requests.c.created_at, requests.c.id)
+                ).mappings()
+            )
+            captured_request_ids = set(
+                str(spec.get("source_request_id"))
+                for spec in connection.scalars(
+                    select(task_table.c.spec).where(
+                        task_table.c.case_id == case_id,
+                        task_table.c.persona_id == persona_id,
+                        task_table.c.task_key == INPUT_EVIDENCE_TASK_KEY,
+                    )
+                )
+                if isinstance(spec, dict) and spec.get("source_request_id")
+            )
+            input_inventory_by_key = {}
+            unreconciled_input_keys = set()
+            unreconciled_sections = set()
+            request_input_keys = {}
+            for request_row in request_rows:
+                captured = request_row["id"] in captured_request_ids
+                # Every persisted plan input may establish query provenance
+                # for an engine result. Only direct investigator anchors below
+                # become standalone input evidence.
+                request_input_keys[request_row["id"]] = {
+                    (
+                        str(item.get("type") or item.get("kind") or "").casefold(),
+                        str(item.get("value") or "").casefold(),
+                    )
+                    for item in list(request_row.get("inputs") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("type") or item.get("kind") or "").strip()
+                    and str(item.get("value") or "").strip()
+                }
+                for item in _reviewable_request_inputs(request_row):
+                    input_type = str(item.get("type") or "unknown")
+                    value = str(item.get("value") or "")
+                    key = (input_type.casefold(), value.casefold())
+                    entry = input_inventory_by_key.setdefault(
+                        key,
+                        {
+                            "type": input_type,
+                            "value": value,
+                            "captured": True,
+                            "request_ids": [],
+                        },
+                    )
+                    entry["captured"] = entry["captured"] and captured
+                    entry["request_ids"].append(request_row["id"])
+                    if not captured:
+                        unreconciled_input_keys.add(key)
+                        section = INPUT_SECTIONS.get(input_type.casefold())
+                        if section:
+                            unreconciled_sections.add(section)
+            input_inventory = list(input_inventory_by_key.values())
+            unreconciled_input_count = len(unreconciled_input_keys)
+
+            # A candidate produced for a task is query-provenanced only when
+            # that task points at an identifier explicitly retained in the
+            # request.  This keeps selected username aliases visible without
+            # allowing a connector-generated spelling variant to appear as if
+            # the investigator supplied it.
+            explicit_task_ids = set()
+            for task_row in connection.execute(
+                select(task_table.c.id, task_table.c.request_id, task_table.c.input)
+                .where(
+                    task_table.c.case_id == case_id,
+                    task_table.c.persona_id == persona_id,
+                    task_table.c.engine != INPUT_EVIDENCE_ENGINE,
+                )
+            ).mappings():
+                task_input = (
+                    dict(task_row["input"])
+                    if isinstance(task_row["input"], dict)
+                    else {}
+                )
+                task_key = (
+                    str(task_input.get("type") or "").casefold(),
+                    str(task_input.get("value") or "").casefold(),
+                )
+                if task_key in request_input_keys.get(task_row["request_id"], set()):
+                    explicit_task_ids.add(task_row["id"])
+            query_provenance_group_ids = set()
+            if explicit_task_ids:
+                query_provenance_group_ids.update(
+                    connection.scalars(
+                        select(memberships.c.group_id)
+                        .join(
+                            observations,
+                            observations.c.id == memberships.c.observation_id,
+                        )
+                        .where(
+                            observations.c.task_id.in_(explicit_task_ids),
+                            observations.c.retained.is_(True),
+                            observations.c.outcome.in_(["found", "candidate"]),
+                        )
+                    )
+                )
 
             exact_profile_urls = {
                 canonical
@@ -2463,6 +2924,42 @@ class PipelineStore:
                     )
                     .exists()
                     .label("has_manual_cited_evidence"),
+                    select(memberships.c.group_id)
+                    .join(
+                        observations,
+                        observations.c.id == memberships.c.observation_id,
+                    )
+                    .where(
+                        memberships.c.group_id == groups.c.id,
+                        observations.c.retained.is_(True),
+                        observations.c.outcome.in_(["found", "candidate"]),
+                    )
+                    .exists()
+                    .label("has_positive_evidence"),
+                    select(memberships.c.group_id)
+                    .join(
+                        observations,
+                        observations.c.id == memberships.c.observation_id,
+                    )
+                    .where(
+                        memberships.c.group_id == groups.c.id,
+                        observations.c.retained.is_(True),
+                        observations.c.outcome == "found",
+                    )
+                    .exists()
+                    .label("has_found_evidence"),
+                    select(memberships.c.group_id)
+                    .join(
+                        observations,
+                        observations.c.id == memberships.c.observation_id,
+                    )
+                    .where(
+                        memberships.c.group_id == groups.c.id,
+                        observations.c.retained.is_(True),
+                        observations.c.engine == INPUT_EVIDENCE_ENGINE,
+                    )
+                    .exists()
+                    .label("has_investigator_input"),
                     decisions.c.decision.label("latest_decision_value"),
                     decisions.c.reason.label("latest_decision_reason"),
                     decisions.c.actor.label("latest_decision_actor"),
@@ -2479,6 +2976,27 @@ class PipelineStore:
                 )
                 .where(*criteria)
             ).mappings()
+            shortlist_rows = list(shortlist_rows)
+            account_keys = set()
+            for source_row in shortlist_rows:
+                if (
+                    source_row["kind"] != "account"
+                    or not source_row.get("has_positive_evidence")
+                ):
+                    continue
+                account_normalized = dict(
+                    source_row.get("summary_normalized")
+                    or source_row["normalized"]
+                    or {}
+                )
+                account_keys.update(
+                    str(value)
+                    for value in (
+                        account_normalized.get("key"),
+                        account_normalized.get("canonical_key"),
+                    )
+                    if value
+                )
             shortlist = []
             ai_ranked_group_count = 0
             for row in shortlist_rows:
@@ -2488,16 +3006,23 @@ class PipelineStore:
                 conflicts = int(assessment.get("contradiction_count") or 0) + int(
                     assessment.get("group_conflict_count") or 0
                 )
-                summary_observations = list(row.get("summary_observations") or [])
-                manual_cited = bool(row.get("has_manual_cited_evidence")) or any(
-                    item.get("source_engine") == "manual_evidence"
-                    and dict(item.get("retention") or {}).get("final_eligible") is True
-                    for item in summary_observations
-                    if isinstance(item, dict)
-                )
                 source_supported = assessment.get("evidence_status") == "source_supported"
                 normalized = dict(row.get("summary_normalized") or row["normalized"])
                 observation_count = int(row.get("summary_observation_count") or 0)
+                predicate = str(
+                    normalized.get("predicate")
+                    or normalized.get("field_name")
+                    or ""
+                ).casefold()
+                if (
+                    row["kind"] == "claim"
+                    and predicate == "social_account"
+                    and str(normalized.get("account_key") or "") in account_keys
+                ):
+                    # One canonical account is one user-facing finding. The
+                    # derived social_account claim remains in the immutable
+                    # evidence graph but does not create a duplicate decision.
+                    continue
                 normalized_value = normalized.get("value")
                 candidate_urls = {
                     canonical
@@ -2514,13 +3039,6 @@ class PipelineStore:
                     if (canonical := canonical_origin_url(value))
                 }
                 exact_profile_input = bool(candidate_urls & exact_profile_urls)
-                retained_found = any(
-                    str(item.get("status") or "").casefold() == "found"
-                    and dict(item.get("retention") or {}).get("final_eligible")
-                    is True
-                    for item in summary_observations
-                    if isinstance(item, dict)
-                )
                 ai_ranking = assessment.get("ai_ranking")
                 ai_ranking = ai_ranking if isinstance(ai_ranking, dict) else None
                 if ai_ranking:
@@ -2529,19 +3047,17 @@ class PipelineStore:
                 # public-search findings merely because an account result has
                 # stronger support.  Unsupported candidates stay visibly
                 # labelled as candidates; they are not silently promoted.
-                if conflicts or observation_count < 1:
+                if observation_count < 1 or not row.get("has_positive_evidence"):
                     continue
-                # Search snippets and generated-handle candidates are leads, not
-                # confirmed digital-presence findings. Keep exact operator URLs,
-                # manual citations and retained detector results; omit the
-                # unsupported aliases that otherwise produce empty detail pages.
                 section_key = _shortlist_section(row["kind"], normalized)
-                if (
-                    section_key == "digital"
-                    and not exact_profile_input
-                    and not manual_cited
-                    and not source_supported
-                    and not retained_found
+                has_query_provenance = row["id"] in query_provenance_group_ids
+                if section_key == "digital" and not (
+                    exact_profile_input
+                    or row.get("has_manual_cited_evidence")
+                    or source_supported
+                    or has_query_provenance
+                    or row.get("has_investigator_input")
+                    or row.get("has_found_evidence")
                 ):
                     continue
                 if ai_ranking:
@@ -2572,9 +3088,22 @@ class PipelineStore:
                         f"{'family supports' if support == 1 else 'families support'} "
                         "this finding; no unresolved contradiction is present."
                         if source_supported
-                        else "An operator-supplied claim cites retained source evidence and is ready for final review."
+                        else (
+                            "An operator-supplied claim cites retained source evidence and is ready for final review."
+                            if row.get("has_manual_cited_evidence")
+                            else "A positive engine observation produced this candidate. Inspect its source lineage before deciding."
+                            if row.get("has_found_evidence")
+                            else "A source returned a possible candidate. Inspect its source lineage before deciding."
+                        )
                     )
                     ranking_key = (1, support, observation_count, 0)
+                if conflicts:
+                    recommendation = "conflicting_evidence"
+                    ranking_explanation = (
+                        "Positive evidence conflicts with another retained observation. "
+                        "Inspect the lineage before deciding."
+                    )
+                    ranking_key = (5, support, observation_count, conflicts)
                 if exact_profile_input:
                     recommendation = "operator_supplied_profile"
                     ranking_explanation = (
@@ -2582,6 +3111,13 @@ class PipelineStore:
                         "generated alias was substituted for this target."
                     )
                     ranking_key = (3, support, observation_count, 0)
+                if row.get("has_investigator_input"):
+                    recommendation = "investigator_supplied"
+                    ranking_explanation = (
+                        "Submitted by the investigator as a search anchor. "
+                        "Confirm it for the Persona or keep it as search-only input."
+                    )
+                    ranking_key = (4, support, observation_count, 0)
                 shortlist.append(
                     {
                         "id": row["id"],
@@ -2600,6 +3136,9 @@ class PipelineStore:
                         "support_origin_families": support,
                         "evidence_status": assessment.get("evidence_status"),
                         "exact_profile_input": exact_profile_input,
+                        "investigator_supplied": bool(
+                            row.get("has_investigator_input")
+                        ),
                         "ranking_explanation": ranking_explanation,
                         "ranking_key": ranking_key,
                     }
@@ -2650,6 +3189,95 @@ class PipelineStore:
                 item["latest_decision"] == "unresolved" for item in shortlist
             )
             review_pending_count = len(shortlist) - approved_count - rejected_count
+            engine_tasks = [
+                dict(row)
+                for row in connection.execute(
+                    select(task_table).where(
+                        task_table.c.case_id == case_id,
+                        task_table.c.persona_id == persona_id,
+                        task_table.c.engine != INPUT_EVIDENCE_ENGINE,
+                    )
+                ).mappings()
+            ]
+            coverage_counts = {
+                key: 0
+                for key in (
+                    "found",
+                    "candidate",
+                    "no_match",
+                    "could_not_check",
+                    "not_searched",
+                    "pending",
+                )
+            }
+            for task in engine_tasks:
+                coverage_counts[_task_review_state(task)] += 1
+            outcome_counts = {
+                str(outcome): int(count)
+                for outcome, count in connection.execute(
+                    select(observations.c.outcome, func.count())
+                    .where(
+                        observations.c.case_id == case_id,
+                        observations.c.persona_id == persona_id,
+                        observations.c.engine != INPUT_EVIDENCE_ENGINE,
+                    )
+                    .group_by(observations.c.outcome)
+                )
+            }
+            section_states = {}
+            for section_key, section_title in SHORTLIST_SECTIONS:
+                section_items = [
+                    item for item in shortlist if item["section"] == section_key
+                ]
+                section_tasks = [
+                    task for task in engine_tasks if section_key in _task_sections(task)
+                ]
+                task_states = {_task_review_state(task) for task in section_tasks}
+                if any(
+                    item["latest_decision"] not in {"include", "exclude", "reject"}
+                    for item in section_items
+                ):
+                    key = "awaiting_review"
+                elif any(
+                    item["latest_decision"] == "include" for item in section_items
+                ):
+                    key = "approved_evidence"
+                elif section_items:
+                    key = "no_approved_evidence"
+                elif section_key in unreconciled_sections:
+                    key = "reconciliation_required"
+                elif not section_tasks or task_states <= {"not_searched"}:
+                    key = "not_searched"
+                elif "could_not_check" in task_states or "pending" in task_states:
+                    key = "could_not_check"
+                elif task_states <= {"no_match", "not_searched"}:
+                    key = "no_match"
+                else:
+                    key = "no_approved_evidence"
+                labels = {
+                    "approved_evidence": "Approved evidence",
+                    "awaiting_review": "Awaiting review",
+                    "no_approved_evidence": "No approved evidence",
+                    "reconciliation_required": "Evidence reconciliation required",
+                    "not_searched": "Not searched",
+                    "could_not_check": "Could not check",
+                    "no_match": "No match returned",
+                }
+                explanations = {
+                    "approved_evidence": "Approved evidence is available in this section.",
+                    "awaiting_review": "At least one candidate in this section still needs a decision.",
+                    "no_approved_evidence": "No candidate in this section is currently approved.",
+                    "reconciliation_required": "Submitted or retained evidence must be reconciled before this section is complete.",
+                    "not_searched": "No eligible source ran for this section.",
+                    "could_not_check": "At least one required source failed, timed out, was blocked, or did not complete reliably.",
+                    "no_match": "Eligible checks completed without a candidate. This is not proof of absence.",
+                }
+                section_states[section_key] = {
+                    "key": key,
+                    "title": section_title,
+                    "label": labels[key],
+                    "explanation": explanations[key],
+                }
             result = dict(
                 pipeline_id=PIPELINE_ID,
                 **state,
@@ -2664,6 +3292,14 @@ class PipelineStore:
                 group_count=connection.scalar(
                     select(func.count()).select_from(groups).where(*criteria)
                 ),
+                reviewable_group_count=len(shortlist),
+                input_inventory=input_inventory,
+                input_count=len(input_inventory),
+                unreconciled_input_count=unreconciled_input_count,
+                engine_task_count=len(engine_tasks),
+                coverage_counts=coverage_counts,
+                observation_outcome_counts=outcome_counts,
+                section_states=section_states,
                 shortlist=display_shortlist,
                 shortlist_count=len(shortlist),
                 shortlist_sections=shortlist_sections,
@@ -2683,6 +3319,46 @@ class PipelineStore:
             )
             result[kind] = page["items"]
             result[kind + "_count"] = page["count"]
+        result["tasks"] = [
+            task
+            for task in result["tasks"]
+            if task.get("engine") != INPUT_EVIDENCE_ENGINE
+        ]
+        coverage_labels = {
+            "found": "Found",
+            "candidate": "Candidate",
+            "no_match": "No match",
+            "could_not_check": "Could not check",
+            "not_searched": "Not searched",
+            "pending": "Pending",
+        }
+        for task in result["tasks"]:
+            task["review_state"] = _task_review_state(task)
+            task["review_state_label"] = coverage_labels[task["review_state"]]
+            task_input = task["input"] if isinstance(task.get("input"), dict) else {}
+            task["input_type"] = str(task_input.get("type") or "")
+            task["input_value"] = str(
+                task_input.get("value") or task_input.get("input_id") or "—"
+            )
+            latest_attempt = max(
+                task.get("attempts") or [],
+                key=lambda attempt: int(attempt.get("number") or 0),
+                default={},
+            )
+            explanations = {
+                "found": "The source returned at least one positive retained observation.",
+                "candidate": "The source returned a possible match that requires analyst confirmation.",
+                "no_match": "The source completed without a candidate. This is not proof of absence.",
+                "could_not_check": "The source failed, timed out, was blocked, or returned incomplete output; no negative conclusion was drawn.",
+                "not_searched": str(task.get("reason") or "This route was not eligible for the submitted input."),
+                "pending": "This source has not reached a terminal state.",
+            }
+            task["review_explanation"] = str(
+                latest_attempt.get("error")
+                or task.get("reason")
+                or explanations[task["review_state"]]
+            )
+        result["tasks_count"] = result["engine_task_count"]
         result.update(case_id=case_id, persona_id=persona_id)
         return _json(result)
 

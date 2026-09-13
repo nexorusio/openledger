@@ -454,11 +454,22 @@ def normalize_status(value: Any, *, error: Any = None) -> tuple[str, str]:
 def _account(
     raw: Mapping[str, Any], engine: str, status: str
 ) -> Optional[Dict[str, Any]]:
+    # A failed, blocked, inconclusive or negative check is coverage metadata,
+    # not evidence that an account exists.  An explicit account descriptor is
+    # still normalized as an internal query target so the immutable evidence
+    # graph can retain provenance and collection-outcome edges.  Workspace
+    # projection separately requires positive evidence before a group can
+    # become a reviewable finding.
+    positive = status in {"found", "candidate"}
     account = (
         dict(raw.get("account") or {})
         if isinstance(raw.get("account"), Mapping)
         else {}
     )
+    if not positive and not account:
+        # Never manufacture an account from a requested URL or echoed handle
+        # when a source did not return a positive result.
+        return None
     if not account:
         # Existing Persona/AI/manual claims retain the account descriptor in
         # value rather than an outer account object. Recover that same account
@@ -498,6 +509,17 @@ def _account(
         "platform",
         raw.get("platform") or raw.get("site_name") or raw.get("source_name"),
     )
+    if not account.get("platform"):
+        profile_host = urlsplit(
+            str(
+                raw.get("profile_url")
+                or raw.get("url")
+                or raw.get("source_url")
+                or ""
+            )
+        ).hostname
+        if profile_host:
+            account["platform"] = profile_host.casefold().removeprefix("www.")
     account.setdefault(
         "profile_url",
         account.get("canonical_url")
@@ -531,8 +553,18 @@ def _account(
 def _claim_rows(
     raw: Mapping[str, Any], account: Optional[Dict[str, Any]], status: str
 ) -> list:
+    # Provider payloads can echo requested identifiers even when the source
+    # returned no match or could not be checked.  Those values remain in the
+    # observation payload for audit, but only positive outcomes may propose a
+    # claim for analyst review.
+    if status not in {"found", "candidate"}:
+        return []
     if isinstance(raw.get("claims"), list):
-        return [dict(item) for item in raw["claims"] if isinstance(item, Mapping)]
+        explicit_claims = [
+            dict(item) for item in raw["claims"] if isinstance(item, Mapping)
+        ]
+        if explicit_claims or account:
+            return explicit_claims
     if raw.get("predicate") or raw.get("field_name"):
         return [
             {
@@ -554,8 +586,6 @@ def _claim_rows(
                 if key in raw
             }
         ]
-    if status not in {"found", "candidate"}:
-        return []
     result = []
     if account:
         result.append(
@@ -589,6 +619,27 @@ def _claim_rows(
         for name, value in fields.items():
             if name in _FIELD_ALIASES and value not in (None, "", [], {}):
                 result.append({"predicate": _FIELD_ALIASES[name], "value": value})
+    # A positive retained result with a public URL is itself a reviewable lead,
+    # even when the connector has no richer field extractor.  This prevents a
+    # credible engine discovery from disappearing into the technical log.  It
+    # remains a candidate and gains no identity binding or automatic approval.
+    if not result and not account:
+        source_url = canonical_origin_url(
+            raw.get("source_url") or raw.get("url") or raw.get("profile_url")
+        )
+        if source_url:
+            result.append(
+                {
+                    "predicate": "linked_profile_lead",
+                    "value": source_url,
+                    "qualifiers": {
+                        "ownership": "not_established",
+                        "source_engine": str(
+                            raw.get("source_engine") or raw.get("engine") or "unknown"
+                        ),
+                    },
+                }
+            )
     return result
 
 

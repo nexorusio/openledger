@@ -91,6 +91,24 @@ def test_live_progress_and_pipeline_workspace_keep_collection_separate_from_appr
     assert "Record decision" not in pipeline
 
 
+def test_assessment_explains_reconciliation_and_plain_language_engine_results():
+    pipeline = (
+        ROOT / "maigret" / "web" / "templates" / "pipeline_workspace.html"
+    ).read_text(encoding="utf-8")
+
+    for required in (
+        "Evidence reconciliation is required",
+        "Reconcile evidence",
+        "submitted values retained",
+        "sources could not check",
+        "What these results mean",
+        "No match:",
+        "Could not check:",
+        "internal hypothesis groups are retained for audit and are not a discovery count",
+    ):
+        assert required in pipeline
+
+
 def test_active_case_has_a_safe_stop_then_archive_path():
     case_template = (ROOT / "maigret" / "web" / "templates" / "case.html").read_text(
         encoding="utf-8"
