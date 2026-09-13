@@ -57,7 +57,7 @@
                         <td class="approved-persona-actions">
                             <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}">View evidence</a>
                             {% if section.key == 'affiliations' and item.kind == 'claim' and item.normalized.predicate in ('company', 'organization', 'affiliation') %}
-                            <details class="affiliation-branch-control"><summary class="btn btn-outline-secondary btn-sm">New investigation branch</summary><form method="post" action="{{ url_for('pipeline.branch_affiliation', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><label>Jurisdiction <small>(optional)</small><input name="jurisdiction" maxlength="100"></label><label>Official website <small>(optional)</small><input name="official_website" type="url" maxlength="2000"></label><label><input type="checkbox" name="enable_domain_context" value="1"> Collect current DNS context</label><button class="btn btn-primary btn-sm" type="submit">Open branch</button></form></details>
+                            <form class="affiliation-branch-control" method="post" action="{{ url_for('pipeline.branch_affiliation', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-outline-secondary btn-sm" type="submit">New investigation branch</button></form>
                             {% endif %}
                         </td>
                     </tr>

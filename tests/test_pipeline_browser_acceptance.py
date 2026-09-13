@@ -167,7 +167,11 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             manual.locator('[name="reason"]').fill("The retained directory explicitly names this subject.")
             manual.locator('button[type="submit"]').click()
             page.goto(origin + base)
-            expect(page.get_by_text("First resolve the review queue.", exact=False)).to_be_visible()
+            expect(
+                page.get_by_role(
+                    "heading", name="Confirm digital presence and evidence"
+                )
+            ).to_be_visible()
             for tab_name in ("Review queue", "Engine log"):
                 expect(page.get_by_role("tab", name=tab_name, exact=False)).to_be_visible()
             expect(page.get_by_text("Step 1", exact=True)).to_be_visible()

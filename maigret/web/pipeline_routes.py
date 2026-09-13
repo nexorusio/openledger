@@ -495,9 +495,6 @@ def register_pipeline_routes(
             source_claim_id=group_id,
             source_claim_field="company",
             target_basis="approved_affiliation_claim",
-            jurisdiction=request.form.get("jurisdiction", ""),
-            official_website=request.form.get("official_website", ""),
-            enable_domain_context=request.form.get("enable_domain_context") == "1",
         )
         flash(
             "A separate affiliation investigation was opened. Its findings require their own review.",

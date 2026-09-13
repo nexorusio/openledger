@@ -417,7 +417,7 @@ def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
 
     branch = journey["client"].post(
         base(journey) + f"/groups/{affiliation_id}/branch-affiliation",
-        data={"csrf_token": "test-csrf", "jurisdiction": "ID"},
+        data={"csrf_token": "test-csrf"},
         follow_redirects=False,
     )
 
@@ -429,6 +429,8 @@ def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
     assert specification["affiliation_name"] == "Nexorus"
     assert specification["source_claim_id"] == affiliation_id
     assert specification["target_basis"] == "approved_affiliation_claim"
+    assert specification["official_website"] is None
+    assert specification["enable_domain_context"] is False
 
 
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):
