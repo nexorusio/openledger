@@ -1327,6 +1327,55 @@ def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store)
         assert connection.scalar(select(func.count()).select_from(claim_reviews)) == 1
 
 
+def test_identifier_free_repeat_requires_server_approved_research(store):
+    job_id = store.create_investigation(["synthetic.person"], {})
+    source_job = store.claim_next("worker:approved-research-source")
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "usernames": source_job["usernames"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    case = store.get_case(source_job["case_id"])
+    persona_id = case["personas"][0]["id"]
+    specification = {
+        "schema_version": 2,
+        "processing_mode": "same_subject",
+        "subject_label": "Synthetic Person",
+        "identifiers": [],
+        "search_targets": [],
+        "allow_ai_context": True,
+        "discovery_basis": "approved_pipeline_findings",
+        "approved_research_question": (
+            "Cross-check approved affiliation: Synthetic Research Institute."
+        ),
+        "approved_research_questions": [
+            "Cross-check approved affiliation: Synthetic Research Institute."
+        ],
+    }
+    options = {"investigation_spec": specification}
+
+    with pytest.raises(ValueError, match="No investigation identifiers"):
+        store.repeat_persona_investigation(persona_id, [], options)
+
+    refresh_id = store.repeat_persona_investigation(
+        persona_id,
+        [],
+        options,
+        allow_identifier_free_approved_research=True,
+    )
+    queued = store.get_job(refresh_id)
+    assert queued["usernames"] == []
+    retained = queued["options"]["investigation_spec"]
+    assert retained["identifiers"] == []
+    assert retained["approved_research_questions"] == specification[
+        "approved_research_questions"
+    ]
+
+
 def test_configured_refresh_routes_variants_to_selected_persona_in_multi_person_case(
     store,
 ):

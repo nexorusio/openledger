@@ -410,8 +410,20 @@ def test_approved_discovery_reuses_exact_url_without_generated_aliases(monkeypat
         def get_persona(self, persona_id):
             return {"id": persona_id, "display_name": "Jati Pratomo"}
 
-        def repeat_persona_investigation(self, persona_id, usernames, options):
-            self.queued = (persona_id, usernames, options)
+        def repeat_persona_investigation(
+            self,
+            persona_id,
+            usernames,
+            options,
+            *,
+            allow_identifier_free_approved_research=False,
+        ):
+            self.queued = (
+                persona_id,
+                usernames,
+                options,
+                allow_identifier_free_approved_research,
+            )
             return "cross-check-job"
 
     store = Store()
@@ -441,9 +453,10 @@ def test_approved_discovery_reuses_exact_url_without_generated_aliases(monkeypat
     )
 
     assert result["job_id"] == "cross-check-job"
-    _persona_id, usernames, options = store.queued
+    _persona_id, usernames, options, allow_identifier_free = store.queued
     specification = options["investigation_spec"]
     assert usernames == []
+    assert allow_identifier_free is False
     assert specification["generate_name_variants"] is False
     assert specification["profile_url_usernames"] == {
         "https://linkedin.com/in/jati-pratomo": ["jati-pratomo"]
@@ -455,6 +468,87 @@ def test_approved_discovery_reuses_exact_url_without_generated_aliases(monkeypat
     assert "Jati Pratomo" in research
     assert "https://linkedin.com/in/jati-pratomo" in research
     assert "employment, education, memberships" in research
+
+
+def test_approved_discovery_uses_cited_research_for_affiliation_without_identifier(
+    monkeypatch,
+):
+    import maigret.web.app as web_app
+
+    class Store:
+        queued = None
+
+        def get_persona(self, persona_id):
+            return {"id": persona_id, "display_name": "Affiliation-only Persona"}
+
+        def repeat_persona_investigation(
+            self,
+            persona_id,
+            usernames,
+            options,
+            *,
+            allow_identifier_free_approved_research=False,
+        ):
+            self.queued = (
+                persona_id,
+                usernames,
+                options,
+                allow_identifier_free_approved_research,
+            )
+            return "affiliation-cross-check-job"
+
+    store = Store()
+    monkeypatch.setattr(web_app, "case_store", store)
+    monkeypatch.setattr(
+        web_app,
+        "parse_investigation_submission",
+        lambda _form: (_ for _ in ()).throw(
+            AssertionError(
+                "identifier-free approved research must not use the public parser"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        web_app,
+        "parse_search_options",
+        lambda _form, plan: {"investigation_spec": plan},
+    )
+
+    result = web_app._launch_approved_pipeline_discovery(
+        case_id="case-id",
+        persona_id="persona-id",
+        actor="analyst",
+        approved_groups=[
+            {
+                "kind": "claim",
+                "normalized": {
+                    "predicate": "company",
+                    "value": "Nexorus",
+                    "binding_status": "resolved",
+                },
+            },
+            {
+                "kind": "claim",
+                "normalized": {
+                    "predicate": "organization_location",
+                    "value": "Jakarta, Indonesia",
+                    "binding_status": "resolved",
+                },
+            },
+        ],
+    )
+
+    assert result["job_id"] == "affiliation-cross-check-job"
+    _persona_id, usernames, options, allow_identifier_free = store.queued
+    specification = options["investigation_spec"]
+    assert usernames == []
+    assert specification["identifiers"] == []
+    assert specification["search_targets"] == []
+    assert specification["discovery_basis"] == "approved_pipeline_findings"
+    assert allow_identifier_free is True
+    research = "\n".join(specification["approved_research_questions"])
+    assert "company: Nexorus" in research
+    assert "organization_location: Jakarta, Indonesia" in research
 
 
 def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
@@ -582,6 +676,22 @@ def test_persona_renders_approved_photo_and_persisted_location_map(journey):
     assert b'"truncated_count": 0' in relationships.data
     assert b"approved-photo" not in relationships.data
     assert journey["observation_id"].encode() in relationships.data
+
+
+def test_persona_map_popup_uses_text_nodes_for_untrusted_precision():
+    template = (
+        Path(__file__).parents[1]
+        / "maigret"
+        / "web"
+        / "templates"
+        / "pipeline_persona.html"
+    ).read_text()
+
+    assert "label.textContent = String(point.label ?? '')" in template
+    assert "document.createTextNode(" in template
+    assert "String(point.precision ?? '')" in template
+    assert "bindPopup(popup)" in template
+    assert "· ${point.precision}" not in template
 
 
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):

@@ -746,6 +746,48 @@ def build_investigation_plan(
     }
 
 
+def build_approved_research_plan(subject_label: Any) -> Dict[str, Any]:
+    """Build the server-owned plan for cited research without direct identifiers.
+
+    This path is deliberately separate from ``build_investigation_plan``: public
+    investigation submissions still require at least one validated identifier.
+    The caller must attach bounded, server-generated approved research questions
+    before the plan can be queued.
+    """
+    label = _normalize_text(subject_label)
+    if not label:
+        raise InvestigationInputError(
+            "Approved-evidence research requires an existing Persona label."
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "processing_mode": "same_subject",
+        "generate_name_variants": False,
+        "allow_ai_context": True,
+        "enable_user_scanner_email": False,
+        "enable_user_scanner_username": False,
+        "user_scanner_username_platforms": [],
+        "allow_user_scanner_vxtwitter": False,
+        "enable_github_profile_enrichment": False,
+        "enable_archived_url_evidence": False,
+        "subject_label": label,
+        "subject_groups": [{"label": label, "usernames": [], "identifiers": []}],
+        "identifiers": [],
+        "input_provenance": [],
+        "unresolved_profile_urls": [],
+        "phone_context": {},
+        "alias_nicknames": [],
+        "alias_context_numbers": [],
+        "alias_candidates": [],
+        "tags": [],
+        "excluded_tags": [],
+        "include_terms": [],
+        "exclude_terms": [],
+        "search_targets": [],
+        "profile_url_usernames": {},
+    }
+
+
 def search_usernames(plan: Dict[str, Any]) -> List[str]:
     return [
         str(target["value"])

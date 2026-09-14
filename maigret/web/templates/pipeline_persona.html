@@ -127,7 +127,15 @@
         points.forEach((point) => {
             const coordinates = [point.latitude, point.longitude];
             bounds.push(coordinates);
-            window.L.marker(coordinates).addTo(map).bindPopup(`<strong>${String(point.label).replace(/[&<>"']/g, (character) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[character]))}</strong><br>${point.predicate === 'organization_location' ? 'Organization location' : 'Person location'} · ${point.precision}`);
+            const popup = document.createElement('span');
+            const label = document.createElement('strong');
+            label.textContent = String(point.label ?? '');
+            popup.appendChild(label);
+            popup.appendChild(document.createElement('br'));
+            popup.appendChild(document.createTextNode(
+                `${point.predicate === 'organization_location' ? 'Organization location' : 'Person location'} · ${String(point.precision ?? '')}`
+            ));
+            window.L.marker(coordinates).addTo(map).bindPopup(popup);
         });
         map.fitBounds(bounds, {padding: [28, 28], maxZoom: 12});
     }

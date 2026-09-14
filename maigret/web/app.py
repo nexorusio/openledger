@@ -130,6 +130,7 @@ from maigret.web.profile_search_runtime import GovernedProfileSearchClient
 from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web.investigation_input import (
     InvestigationInputError,
+    build_approved_research_plan,
     build_investigation_plan,
     extract_profile_usernames,
     normalize_profile_url,
@@ -9101,7 +9102,10 @@ def _launch_approved_pipeline_discovery(
             ("mode", "focused"),
         ]
     )
-    _usernames, plan = parse_investigation_submission(form)
+    if identifiers:
+        _usernames, plan = parse_investigation_submission(form)
+    else:
+        plan = build_approved_research_plan(subject_label)
     plan.update(
         processing_mode="same_subject",
         subject_label=subject_label,
@@ -9113,7 +9117,10 @@ def _launch_approved_pipeline_discovery(
     options = sanitize_persistent_options(parse_search_options(form, plan))
     options["requested_by"] = actor
     job_id = case_store.repeat_persona_investigation(
-        persona_id, search_usernames(plan), options
+        persona_id,
+        search_usernames(plan),
+        options,
+        allow_identifier_free_approved_research=not identifiers,
     )
     return {"job_id": job_id, "case_id": case_id, "persona_id": persona_id}
 
