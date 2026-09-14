@@ -2449,6 +2449,8 @@ class CaseStore:
         persona_id: str,
         usernames: Optional[Iterable[str]] = None,
         options: Optional[Dict[str, Any]] = None,
+        *,
+        allow_identifier_free_approved_research: bool = False,
     ) -> str:
         """Queue a fresh collection for one existing persona in the same case."""
         now = utcnow()
@@ -2535,7 +2537,11 @@ class CaseStore:
                 dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
             )
             if not queued_usernames and not specification.get("identifiers"):
-                raise ValueError("No investigation identifiers are available")
+                from maigret.web.pipeline_enqueue import approved_research_questions
+
+                questions = approved_research_questions(specification)
+                if not allow_identifier_free_approved_research or not questions:
+                    raise ValueError("No investigation identifiers are available")
             specification["pipeline_id"] = "p2-e2e-v1"
             if not explicit_plan and not grouped:
                 target_keys = {value.casefold() for value in queued_usernames}

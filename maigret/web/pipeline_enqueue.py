@@ -3,7 +3,8 @@
 from copy import deepcopy
 
 
-def _approved_research_questions(spec):
+def approved_research_questions(spec):
+    """Validate the server-owned marker and questions for approved discovery."""
     if spec.get("discovery_basis") != "approved_pipeline_findings" or not spec.get(
         "allow_ai_context"
     ):
@@ -69,7 +70,7 @@ def enqueue_primary_requests(store, connection, *, job_id, case_id, options, bin
             persona_bindings=[binding],
         )
         context = {"collection_options": options}
-        approved_questions = _approved_research_questions(spec)
+        approved_questions = approved_research_questions(spec)
         if approved_questions:
             context.update(
                 research_questions=approved_questions,
