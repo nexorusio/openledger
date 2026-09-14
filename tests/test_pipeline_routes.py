@@ -611,8 +611,15 @@ def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
     assert specification["enable_google_places_search"] is True
 
 
-def test_persona_renders_approved_photo_and_persisted_location_map(journey):
+def test_persona_renders_approved_photo_and_persisted_location_map(
+    journey, monkeypatch
+):
     from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    monkeypatch.setenv(
+        "OPENLEDGER_MAP_TILE_URL",
+        "https://tiles.example.test/{z}/{x}/{y}.png",
+    )
 
     groups = journey["pipeline"].upsert_groups(
         journey["case_id"],
@@ -665,6 +672,7 @@ def test_persona_renders_approved_photo_and_persisted_location_map(journey):
     assert b"Approved locations" in response.data
     assert b"106.8272" in response.data
     assert b"Organization location" in response.data
+    assert b'https://tiles.example.test/{z}/{x}/{y}.png' in response.data
     assert b"Export Persona PDF" in response.data
     assert b"Case AI assistant" in response.data
     assert b"Relationship evidence" in response.data
@@ -692,6 +700,19 @@ def test_persona_map_popup_uses_text_nodes_for_untrusted_precision():
     assert "String(point.precision ?? '')" in template
     assert "bindPopup(popup)" in template
     assert "· ${point.precision}" not in template
+
+
+def test_persona_map_uses_the_configured_tile_service():
+    template = (
+        Path(__file__).parents[1]
+        / "maigret"
+        / "web"
+        / "templates"
+        / "pipeline_persona.html"
+    ).read_text()
+
+    assert "window.L.tileLayer({{ map_tile_url | tojson }}" in template
+    assert "window.L.tileLayer('https://tile.openstreetmap.org" not in template
 
 
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):

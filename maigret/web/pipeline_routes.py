@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import math
+import os
 from functools import wraps
 from typing import Any
 from urllib.parse import urlsplit
@@ -657,6 +658,10 @@ def register_pipeline_routes(
             ),
             google_places_available=bool(
                 google_places_enabled and google_places_enabled()
+            ),
+            map_tile_url=os.getenv(
+                "OPENLEDGER_MAP_TILE_URL",
+                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
             ),
         )
 

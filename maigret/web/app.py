@@ -2411,7 +2411,13 @@ def protect_sensitive_responses(response):
     response.headers.setdefault(
         'X-Frame-Options', 'SAMEORIGIN' if embedded_graph else 'DENY'
     )
-    response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    # Only map pages need to identify this site's origin to their configured
+    # tile host. They never expose a case path or query string. Every other
+    # page keeps the stricter default because it may link to public sources.
+    if request.endpoint in {'pipeline.persona', 'persona_workspace'}:
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    else:
+        response.headers.setdefault('Referrer-Policy', 'no-referrer')
     response.headers.setdefault(
         'Permissions-Policy',
         'camera=(), microphone=(), geolocation=(), usb=()',
