@@ -122,7 +122,7 @@
     const points = {{ approved.map_points | tojson }};
     if (mapElement && points.length && window.L) {
         const map = window.L.map(mapElement, {scrollWheelZoom: false});
-        window.L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'}).addTo(map);
+        window.L.tileLayer({{ map_tile_url | tojson }}, {maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'}).addTo(map);
         const bounds = [];
         points.forEach((point) => {
             const coordinates = [point.latitude, point.longitude];
