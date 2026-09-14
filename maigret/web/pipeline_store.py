@@ -63,6 +63,7 @@ SHORTLIST_PREDICATE_SECTIONS = {
     "phone": "contact",
     "address": "contact",
     "current_location": "contact",
+    "organization_location": "affiliations",
     "social_account": "digital",
     "platform_identifier": "digital",
     "linked_profile_lead": "digital",
@@ -1993,7 +1994,9 @@ class PipelineStore:
             ]
         return result
 
-    def iter_included_groups(self, case_id, persona_id, *, batch_size=500):
+    def iter_included_groups(
+        self, case_id, persona_id, *, batch_size=500, include_observations=False
+    ):
         """Yield latest explicitly included hypotheses as research targeting context."""
         groups, decisions = self._table("groups"), self._table("operator_decisions")
         latest = (
@@ -2032,7 +2035,9 @@ class PipelineStore:
                 .mappings()
             ):
                 result = dict(row)
-                current = self._group(connection, result, limit=0)
+                current = self._group(
+                    connection, result, limit=None if include_observations else 0
+                )
                 if (
                     current.get('decision_stale')
                     or current['normalized'].get('binding_status') == 'unresolved'
@@ -2041,6 +2046,10 @@ class PipelineStore:
                 ):
                     continue
                 result['normalized'] = current['normalized']
+                if include_observations:
+                    result['observations'] = current['observations']
+                    result['observation_count'] = current['observation_count']
+                    result['assessment'] = current.get('assessment')
                 corrected = result["decision_details"].get("corrected_claim")
                 if corrected:
                     result["normalized"] = dict(

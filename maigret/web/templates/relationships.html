@@ -7,8 +7,8 @@
 {% block content %}
 <section class="page-heading relationship-page-heading">
     <div>
-        <p class="eyebrow">Working evidence · {{ 'Cross-case correlations' if mode == 'shared' else 'Draft Persona' }}</p>
-        <h1>{{ 'Working cross-case correlations' if mode == 'shared' else 'Working evidence graph' }}</h1>
+        <p class="eyebrow">{{ 'Approved Persona' if approved_only else 'Working evidence' }} · {{ 'Cross-case correlations' if mode == 'shared' else ('Approved evidence' if approved_only else 'Draft Persona') }}</p>
+        <h1>{{ 'Working cross-case correlations' if mode == 'shared' else ('Approved Persona evidence graph' if approved_only else 'Working evidence graph') }}</h1>
         <p class="page-description">This view makes evidence paths inspectable. It never infers a relationship from a visual proximity or an AI summary.</p>
     </div>
 </section>
@@ -25,7 +25,10 @@
 <section class="relationship-policy" aria-label="Evidence policy">
     <i data-lucide="{{ 'file-search-2' if mode == 'persona' else 'shield-check' }}"></i>
     <div>
-        {% if mode == 'persona' %}
+        {% if approved_only %}
+        <strong>Complete approved evidence paths</strong>
+        <span>Every approved P2 finding and every retained supporting observation is shown without a claim or source limit. Review decisions remain available in the Persona workspace.</span>
+        {% elif mode == 'persona' %}
         <strong>Review status remains visible</strong>
         <span>Approved, pending, and uncertain records can be traced to their sources. Rejected records are excluded from the graph but retained in the audit trail.</span>
         {% elif combined_scope %}

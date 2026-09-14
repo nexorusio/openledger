@@ -303,6 +303,30 @@ def approved_context(
         "selected_wikipedia_page_id": specification.get("selected_wikipedia_page_id"),
         "wikidata_entity_id": specification.get("wikidata_entity_id"),
     }
+    if (
+        specification.get("discovery_basis") == "approved_pipeline_findings"
+        and specification.get("allow_ai_context") is True
+    ):
+        raw_questions = specification.get("approved_research_questions")
+        if raw_questions is None:
+            raw_questions = [specification.get("approved_research_question")]
+        if not isinstance(raw_questions, list) or not 1 <= len(raw_questions) <= 100:
+            raise ValueError(
+                "Approved discovery requires 1 to 100 research questions."
+            )
+        questions = []
+        for question in raw_questions:
+            if (
+                not isinstance(question, str)
+                or not question.strip()
+                or len(question) > 10000
+            ):
+                raise ValueError(
+                    "Each approved research question must contain 1 to 10000 characters."
+                )
+            questions.append(question.strip())
+        context["research_questions"] = questions
+        context["approved_research_questions"] = questions
     legacy = [
         item
         for item in persona.get("claims", [])

@@ -219,10 +219,10 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
 
             page.get_by_role("button", name="Proceed to Persona").click()
             expect(page.get_by_text("Step 2 · Approved Persona", exact=True)).to_be_visible()
-            page.goto(origin + base)
+            expect(page).to_have_url(origin + base + "/persona")
 
             with page.expect_download() as download_info:
-                page.get_by_role("button", name="Export report").click()
+                page.get_by_role("button", name="Export Persona PDF").click()
             download = download_info.value
             report_path = download.path()
             assert report_path and Path(report_path).read_bytes().startswith(b"%PDF")

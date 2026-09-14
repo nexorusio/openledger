@@ -701,6 +701,19 @@ a {
     margin-bottom: 26px;
 }
 
+/* Keep the current page identity and its primary actions visible while the
+   operator works through long evidence tables. */
+.page-heading,
+.persona-profile-header {
+    position: sticky;
+    top: var(--ol-topbar-height);
+    z-index: 900;
+    padding-top: 12px;
+    padding-bottom: 12px;
+    background: color-mix(in srgb, var(--ol-canvas) 96%, transparent);
+    backdrop-filter: blur(12px);
+}
+
 .page-heading > :first-child,
 .panel-header > :first-child {
     min-width: 0;

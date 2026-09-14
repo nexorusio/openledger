@@ -521,8 +521,16 @@ def build_investigation_report_view(
     photograph_claim = next(iter(claims.get("photograph") or []), None)
     summary_claim = next(iter(claims.get("summary") or []), None)
     locations = [
-        _report_item(claim, label="Current location")
-        for claim in claims.get("current_location") or []
+        _report_item(
+            claim,
+            label=(
+                "Current location"
+                if field == "current_location"
+                else "Organization location"
+            ),
+        )
+        for field in ("current_location", "organization_location")
+        for claim in claims.get(field) or []
     ]
     address_items = [
         _report_item(claim, label="Approved public address")

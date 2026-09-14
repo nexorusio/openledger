@@ -147,7 +147,7 @@
             <p class="eyebrow">Step 2</p>
             <h2>Proceed to approved Persona</h2>
             {% if reconciliation_pending %}
-            <p>Reconcile all submitted values and retained engine evidence above before reviewing the final queue.</p>
+            <p>New or submitted evidence still needs to enter the review queue. Reconcile it now; if that creates more rows, review them before proceeding.</p>
             {% elif workspace.review_pending_count %}
             <p>Resolve {{ workspace.review_pending_count }} remaining {{ 'finding' if workspace.review_pending_count == 1 else 'findings' }} to continue. Items kept in queue intentionally remain here.</p>
             {% elif not workspace.approved_count %}
@@ -156,13 +156,19 @@
             <p>Review is complete. Proceed to a Persona containing only the {{ workspace.approved_count }} approved {{ 'finding' if workspace.approved_count == 1 else 'findings' }}.</p>
             {% endif %}
         </div>
-        {% if not reconciliation_pending and not workspace.review_pending_count and workspace.approved_count %}
+        {% if reconciliation_pending and preparation_available %}
+        <div class="heading-actions">
+            <form method="post" class="evidence-preparation-form" action="{{ url_for('pipeline.prepare', case_id=persona.case_id, persona_id=persona.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="btn btn-primary" type="submit" data-busy-label="Reconciling evidence…"><i data-lucide="refresh-cw"></i> Reconcile evidence and continue</button>
+            </form>
+        </div>
+        {% elif not reconciliation_pending and not workspace.review_pending_count and workspace.approved_count %}
         <div class="heading-actions">
             <form method="post" action="{{ url_for('pipeline.proceed', case_id=persona.case_id, persona_id=persona.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-primary" type="submit"><i data-lucide="arrow-right"></i> Proceed to Persona</button></form>
-            <form method="post" action="{{ url_for('pipeline.create_report_snapshot', case_id=persona.case_id, persona_id=persona.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-outline-secondary" type="submit"><i data-lucide="file-down"></i> Export report</button></form>
         </div>
         {% else %}
-        <span class="badge-soft warning">{{ 'Reconciliation required' if reconciliation_pending else 'Locked until review is complete' }}</span>
+        <span class="badge-soft warning">{{ 'Reconciliation unavailable' if reconciliation_pending else 'Locked until review is complete' }}</span>
         {% endif %}
     </div>
 </section>

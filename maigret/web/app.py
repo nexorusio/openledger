@@ -7722,7 +7722,9 @@ def persona_workspace(persona_id):
             ),
         }
         for claim in persona['claims']
-        if claim['field_name'] in ('address', 'current_location')
+        if claim['field_name'] in (
+            'address', 'current_location', 'organization_location'
+        )
         and claim['review_status'] == 'approved'
         and claim['latitude'] is not None
         and claim['longitude'] is not None
@@ -7912,11 +7914,17 @@ def relationships_workspace():
                         requests.c.persona_id == selected_persona_id,
                     ).limit(1)
                 ).first() is not None
+            if has_pipeline:
+                return redirect(
+                    url_for(
+                        'pipeline.relationships',
+                        case_id=selected['case_id'],
+                        persona_id=selected_persona_id,
+                    )
+                )
             if final:
                 return redirect(url_for('pipeline.graph', case_id=selected['case_id'],
                                         persona_id=selected_persona_id, version_id=final['id']))
-            if has_pipeline:
-                return redirect(url_for('pipeline.workspace', case_id=selected['case_id'], persona_id=selected_persona_id))
         graph = case_store.build_persona_graph(selected_persona_id)
     elif mode == "persona":
         graph = {
@@ -8248,6 +8256,7 @@ def review_persona_claim(claim_id):
         if reviewed_claim and reviewed_claim.get('field_name') in {
             'address',
             'current_location',
+            'organization_location',
         }:
             try:
                 center = geocode_place_center(
@@ -8986,11 +8995,25 @@ def _submit_pipeline_evidence(**kwargs):
 def _launch_approved_pipeline_discovery(
     *, case_id, persona_id, approved_groups, actor
 ):
-    """Cross-check only analyst-approved identifiers in the existing Persona."""
+    """Cross-check the complete analyst-approved Persona evidence set."""
     from werkzeug.datastructures import MultiDict
 
     identifiers = []
     seen = set()
+    research_anchors = []
+    seen_research_anchors = set()
+
+    def add_research_anchor(kind, value):
+        if isinstance(value, (dict, list)):
+            rendered = json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+        else:
+            rendered = str(value or "").strip()
+        key = (str(kind), rendered.casefold())
+        if rendered and key not in seen_research_anchors:
+            seen_research_anchors.add(key)
+            research_anchors.append(f"{kind}: {rendered}")
 
     def add(kind, value):
         value = str(value or "").strip()
@@ -8998,16 +9021,26 @@ def _launch_approved_pipeline_discovery(
         if value and key not in seen and len(identifiers) < 24:
             seen.add(key)
             identifiers.append((kind, value))
+        add_research_anchor(kind, value)
 
     for item in approved_groups:
         normalized = dict(item.get("normalized") or {})
         value = normalized.get("value")
         if item.get("kind") == "account":
-            add(
-                "profile_url",
+            profile_url = (
                 normalized.get("canonical_url")
                 or normalized.get("url")
-                or (value.get("url") if isinstance(value, dict) else ""),
+                or (value.get("url") if isinstance(value, dict) else "")
+            )
+            add("profile_url", profile_url)
+            add_research_anchor(
+                "approved account",
+                {
+                    "platform": normalized.get("platform"),
+                    "url": profile_url,
+                    "username": normalized.get("username")
+                    or normalized.get("handle"),
+                },
             )
             continue
         predicate = str(normalized.get("predicate") or "").casefold()
@@ -9017,9 +9050,47 @@ def _launch_approved_pipeline_discovery(
             add(predicate, value)
         elif predicate == "social_account" and isinstance(value, dict):
             add("profile_url", value.get("url"))
-    if not identifiers:
+            add_research_anchor("approved social account", value)
+        else:
+            add_research_anchor(predicate or item.get("kind") or "finding", value)
+    if not research_anchors:
         raise ValueError(
-            "No approved name, contact, or exact profile URL is available to cross-check."
+            "No approved evidence is available to cross-check."
+        )
+    # Keep direct collectors within their 24-input safety boundary. The cited
+    # research path receives every approved anchor in bounded batches so facts
+    # such as employers, locations and stable platform IDs are not discarded.
+    subject_label = (case_store.get_persona(persona_id) or {}).get(
+        "display_name", "Persona"
+    )
+    instruction = (
+        f"Cross-check the approved public evidence for {subject_label}. Find "
+        "cited, structured candidates for identity and biography; exact public "
+        "email or phone; a public profile photograph; the person's explicitly "
+        "stated location; employment, education, memberships and other "
+        "affiliations; occupation or role; each organization's public office or "
+        "campus location and official website; and additional exact public "
+        "profiles. Distinguish a person's location from an organization's "
+        "location. Do not infer sensitive traits, ownership, criminality, "
+        "finances, assets or risk. Every proposed fact must cite a public source "
+        "and must return for analyst review; do not approve anything."
+    )
+    questions = []
+    batch = []
+    batch_size = len(instruction)
+    for anchor in research_anchors:
+        addition = len(anchor) + 3
+        if batch and batch_size + addition > 9000:
+            questions.append(instruction + "\n\nApproved anchors:\n- " + "\n- ".join(batch))
+            batch, batch_size = [], len(instruction)
+        batch.append(anchor[:2000])
+        batch_size += addition
+    if batch:
+        questions.append(instruction + "\n\nApproved anchors:\n- " + "\n- ".join(batch))
+    if len(questions) > 100:
+        raise ValueError(
+            "The approved evidence set exceeds the 100-question cited-research "
+            "limit. Export the Persona or open a narrower follow-up investigation."
         )
     form = MultiDict(
         [
@@ -9033,11 +9104,11 @@ def _launch_approved_pipeline_discovery(
     _usernames, plan = parse_investigation_submission(form)
     plan.update(
         processing_mode="same_subject",
-        subject_label=(case_store.get_persona(persona_id) or {}).get(
-            "display_name", "Persona"
-        ),
+        subject_label=subject_label,
         target_persona_id=persona_id,
         discovery_basis="approved_pipeline_findings",
+        approved_research_question=questions[0],
+        approved_research_questions=questions,
     )
     options = sanitize_persistent_options(parse_search_options(form, plan))
     options["requested_by"] = actor
@@ -9055,6 +9126,13 @@ register_pipeline_routes(
     prepare_workspace=_prepare_pipeline_workspace,
     submit_manual_evidence=_submit_pipeline_evidence,
     launch_approved_discovery=_launch_approved_pipeline_discovery,
+    geocode_approved_location=lambda place: geocode_place_center(
+        place,
+        endpoint=app.config['GEOCODER_URL'],
+        timeout_seconds=app.config['GEOCODER_TIMEOUT_SECONDS'],
+    ),
+    affiliation_public_web_enabled=affiliation_public_web_research_enabled,
+    google_places_enabled=google_places_search_enabled,
 )
 
 from maigret.web.pipeline_connector_routes import register_connector_ingestion_routes

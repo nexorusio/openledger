@@ -405,6 +405,7 @@ async def dispatch_collector(task, context: CollectorContext):
 
 async def _cited_research_adapter(task, context):
     from maigret.ai import get_case_chat_response, get_case_chat_claim_proposals
+    from maigret.web.persona_intelligence import extract_ai_persona_claims
 
     app_module = _app()
     settings = app_module.load_settings()
@@ -419,18 +420,19 @@ async def _cited_research_adapter(task, context):
         conversation=[],
         user_message=task["input_value"],
         model=model,
-        timeout_seconds=min(120, task["timeout_seconds"]),
+        timeout_seconds=min(105, task["timeout_seconds"]),
         web_search_enabled=True,
         **app_module.ai_endpoint_options(),
     )
     sources = response.get("sources") or []
-    rows = [
+    citation_rows = [
         {
             "source_engine": "openai_web_research",
             "source_record_id": "citation:" + str(index),
             "source_url": item.get("url"),
             "source_name": item.get("title"),
             "status": "candidate",
+            "observation_only": True,
             "payload": {
                 "source": item,
                 "analysis": response.get("analysis"),
@@ -441,9 +443,81 @@ async def _cited_research_adapter(task, context):
         }
         for index, item in enumerate(sources)
     ]
+    persona = context.store.get_persona(context.request["persona_id"]) or {}
+    target_persona = str(
+        persona.get("display_name") or context.request["persona_id"]
+    )
+    raw_proposals = await get_case_chat_claim_proposals(
+        api_key=api_key,
+        target_persona=target_persona,
+        user_message=task["input_value"],
+        assistant_answer=response.get("analysis") or "",
+        sources=sources,
+        model=model,
+        timeout_seconds=60,
+        **app_module.ai_endpoint_options(),
+    )
+    candidates = extract_ai_persona_claims(
+        [
+            {**proposal, "username": target_persona}
+            for proposal in list(raw_proposals or [])
+            if isinstance(proposal, Mapping)
+            and proposal.get("evidence_basis") in {None, "public_web"}
+        ],
+        sources=sources,
+        usernames=[target_persona],
+        model=model,
+    )
+    claim_rows = []
+    for index, candidate in enumerate(candidates):
+        evidence = (candidate.get("evidence") or [{}])[0]
+        details = dict(evidence.get("details") or {})
+        qualifiers = {
+            "confidence": candidate.get("confidence"),
+            "evidence_basis": "cited_public_web",
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+            "reason": details.get("proposal_reason"),
+            "source_title": evidence.get("source_name"),
+        }
+        if details.get("coordinate_role") == "approximate_map_center":
+            qualifiers.update(
+                latitude=candidate.get("latitude"),
+                longitude=candidate.get("longitude"),
+                coordinate_precision=details.get("coordinate_precision"),
+                coordinate_role="approximate_map_center",
+                coordinate_source="cited_ai_proposal",
+            )
+        claim_rows.append(
+            {
+                "source_engine": "openai_web_research",
+                "source_record_id": "proposal:"
+                + str(candidate.get("fingerprint") or index),
+                "source_url": evidence.get("source_url"),
+                "source_name": evidence.get("source_name"),
+                "status": "candidate",
+                "claims": [
+                    {
+                        "predicate": candidate["field_name"],
+                        "value": candidate["value"],
+                        "qualifiers": qualifiers,
+                    }
+                ],
+                "payload": {
+                    "candidate": candidate,
+                    "analysis": response.get("analysis"),
+                    "model": model,
+                },
+            }
+        )
+    rows = [*citation_rows, *claim_rows]
     context.emit_observations(rows)
     context.raw_collector_observations.extend(rows)
-    return {"outcome": "candidate" if rows else "inconclusive"}
+    return {
+        "outcome": "candidate" if claim_rows or citation_rows else "inconclusive",
+        "citation_count": len(citation_rows),
+        "proposal_count": len(claim_rows),
+    }
 
 
 async def _await_collector(call, *, timeout_seconds, cancelled):
