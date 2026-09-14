@@ -1427,11 +1427,21 @@
       "guardrails": {
         "human_review_required": true,
         "automatic_approval_allowed": false,
-        "timeout_seconds": 60,
+        "timeout_seconds": 180,
         "maximum_response_bytes": 1000000
       },
       "claim_candidates": [
-        "generic_reviewed_claims"
+        "summary",
+        "full_name",
+        "email",
+        "phone",
+        "current_location",
+        "organization_location",
+        "occupation",
+        "company",
+        "social_account",
+        "website",
+        "photograph"
       ],
       "observation_only_fields": [
         "outcome",
@@ -1457,9 +1467,9 @@
             "approved_research_question"
           ],
           "option": "allow_ai_context",
-          "timeout_seconds": 60,
+          "timeout_seconds": 180,
           "retry_ceiling": 1,
-          "request_budget": 1,
+          "request_budget": 2,
           "retention": "bounded_source_evidence",
           "trigger": "query"
         },

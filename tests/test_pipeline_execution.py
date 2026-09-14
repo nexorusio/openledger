@@ -79,6 +79,104 @@ def test_sync_pipeline_runner_is_safe_inside_an_existing_event_loop():
     assert asyncio.run(nested_call()) == "completed"
 
 
+def test_cited_research_emits_structured_pending_claims_with_coordinates(
+    monkeypatch,
+):
+    import maigret.ai as ai
+    import maigret.web.pipeline_execution as execution
+
+    app = importlib.import_module("maigret.web.app")
+    monkeypatch.setattr(app, "get_openai_api_key", lambda: "test-key")
+    monkeypatch.setattr(app, "load_settings", lambda: {"openai_model": "test-model"})
+    monkeypatch.setattr(app, "ai_endpoint_options", lambda: {})
+    source = {
+        "title": "Official biography",
+        "url": "https://example.test/jati",
+    }
+
+    async def response(*_args, **_kwargs):
+        return {"analysis": "Cited analysis", "sources": [source]}
+
+    async def proposals(*_args, **_kwargs):
+        return [
+            {
+                "field_name": "company",
+                "value": "Nexorus",
+                "confidence": 80,
+                "evidence_basis": "public_web",
+                "source_url": source["url"],
+                "source_title": source["title"],
+                "reason": "The biography explicitly names the employer.",
+            },
+            {
+                "field_name": "organization_location",
+                "value": "Jakarta, Indonesia",
+                "confidence": 75,
+                "evidence_basis": "public_web",
+                "source_url": source["url"],
+                "source_title": source["title"],
+                "reason": "The biography identifies the public office.",
+                "latitude": -6.1754,
+                "longitude": 106.8272,
+                "coordinate_precision": "city",
+            },
+        ]
+
+    monkeypatch.setattr(ai, "get_case_chat_response", response)
+    monkeypatch.setattr(ai, "get_case_chat_claim_proposals", proposals)
+    emitted = []
+
+    class Store:
+        def get_case_chat_context(self, _case_id):
+            return {}
+
+        def get_persona(self, _persona_id):
+            return {"display_name": "Jati Pratomo"}
+
+    context = SimpleNamespace(
+        store=Store(),
+        job={"case_id": "case-id"},
+        request={"persona_id": "persona-id"},
+        emit_observations=lambda rows: emitted.extend(rows),
+        raw_collector_observations=[],
+    )
+    result = asyncio.run(
+        execution._cited_research_adapter(
+            {"input_value": "research approved anchors", "timeout_seconds": 180},
+            context,
+        )
+    )
+
+    claims = [
+        row["claims"][0]
+        for row in emitted
+        if isinstance(row.get("claims"), list) and row["claims"]
+    ]
+    assert result == {"outcome": "candidate", "citation_count": 1, "proposal_count": 2}
+    assert {claim["predicate"] for claim in claims} == {
+        "company",
+        "organization_location",
+    }
+    location = next(
+        claim for claim in claims if claim["predicate"] == "organization_location"
+    )
+    assert location["qualifiers"]["latitude"] == -6.1754
+    assert location["qualifiers"]["automatic_approval_allowed"] is False
+    assert emitted[0]["observation_only"] is True
+    from maigret.web.pipeline_evidence import normalize_observation
+
+    citation = normalize_observation(
+        emitted[0],
+        case_id="case-id",
+        subject_id="persona-id",
+        request_id="request-id",
+        task_id="task-id",
+        attempt_id="attempt-id",
+        observed_at="2026-09-14T00:00:00Z",
+    )
+    assert citation["claims"] == []
+
+
 @pytest.mark.parametrize(
     ("configured", "expected"),
     [("1", 1), ("3", 3), ("99", 4), ("invalid", 2)],

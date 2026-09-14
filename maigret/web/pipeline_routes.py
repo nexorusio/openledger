@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 from functools import wraps
 from typing import Any
 from urllib.parse import urlsplit
@@ -54,6 +55,7 @@ def version_projection(version):
         'withdrawn': 'Withdrawn Persona',
         'superseded': 'Superseded final Persona',
     }.get(status, 'Reviewed Investigation Snapshot')
+    scope = manifest.get('scope', '')
     return {
         'pipeline_id': manifest.get('pipeline_id', PIPELINE_ID),
         'case_id': manifest['case_id'],
@@ -66,7 +68,13 @@ def version_projection(version):
         'label': label,
         'publication_status': publication,
         'review_needed': version.get('review_needed', False),
-        'scope': manifest.get('scope', ''),
+        'scope': scope,
+        'subject_name': (
+            scope.get('subject_name') if isinstance(scope, dict) else ''
+        ) or manifest['persona_id'],
+        'case_title': (
+            scope.get('case_title') if isinstance(scope, dict) else ''
+        ) or manifest['case_id'],
         'limitations': manifest.get('limitations', []),
         'items': items,
         'exclusions': manifest.get('exclusions', []),
@@ -172,6 +180,9 @@ def register_pipeline_routes(
     prepare_workspace=None,
     submit_manual_evidence=None,
     launch_approved_discovery=None,
+    geocode_approved_location=None,
+    affiliation_public_web_enabled=None,
+    google_places_enabled=None,
 ):
     from maigret.web.pipeline_store import PipelineStore
 
@@ -256,8 +267,54 @@ def register_pipeline_routes(
                     "decision_reason": row.get("decision_reason"),
                 }
             )
+        photographs = [
+            item["url"]
+            for item in items
+            if str(item["normalized"].get("predicate") or "").casefold()
+            == "photograph"
+            and item["url"]
+        ]
+        map_points = []
+        for item in items:
+            normalized = item["normalized"]
+            predicate = str(normalized.get("predicate") or "").casefold()
+            if predicate not in {
+                "address",
+                "current_location",
+                "organization_location",
+            }:
+                continue
+            qualifiers = (
+                normalized.get("qualifiers")
+                if isinstance(normalized.get("qualifiers"), dict)
+                else {}
+            )
+            try:
+                latitude = float(qualifiers.get("latitude"))
+                longitude = float(qualifiers.get("longitude"))
+            except (TypeError, ValueError):
+                continue
+            if (
+                math.isfinite(latitude)
+                and math.isfinite(longitude)
+                and -90 <= latitude <= 90
+                and -180 <= longitude <= 180
+            ):
+                map_points.append(
+                    {
+                        "id": item["id"],
+                        "label": item["label"],
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "predicate": predicate,
+                        "precision": qualifiers.get("coordinate_precision")
+                        or "place",
+                    }
+                )
         return {
             "items": items,
+            "photograph": photographs[0] if photographs else "",
+            "map_points": map_points,
             "sections": [
                 {
                     "key": key,
@@ -266,6 +323,112 @@ def register_pipeline_routes(
                 }
                 for key, title in SHORTLIST_SECTIONS
             ],
+        }
+
+    def approved_relationship_graph(case_id, persona_id, subject):
+        """Project every approved P2 group and supporting observation."""
+        current = store()
+        rows = list(
+            current.iter_included_groups(
+                case_id, persona_id, include_observations=True
+            )
+        )
+        subject_node = 'persona:' + persona_id
+        nodes = [
+            {
+                'id': subject_node,
+                'kind': 'persona',
+                'label': subject.get('display_name') or persona_id,
+                'persona_id': persona_id,
+                'case_id': case_id,
+                'case_title': subject.get('case_title') or '',
+            }
+        ]
+        edges = []
+        field_counts = {}
+        evidence_seen = set()
+        for row in rows:
+            normalized = dict(row.get('normalized') or {})
+            predicate = str(
+                normalized.get('predicate')
+                or normalized.get('field_name')
+                or row.get('kind')
+                or 'finding'
+            ).casefold()
+            value = normalized.get('value')
+            label = (
+                normalized.get('display_value')
+                or (value.get('url') if isinstance(value, dict) else value)
+                or normalized.get('canonical_url')
+                or normalized.get('url')
+                or normalized.get('handle')
+                or predicate
+            )
+            group_node = 'claim:' + row['id']
+            field_counts[predicate] = field_counts.get(predicate, 0) + 1
+            probability = (
+                ((row.get('assessment') or {}).get('probability') or {}).get('value')
+            )
+            confidence = (
+                round(float(probability) * 100)
+                if isinstance(probability, (int, float))
+                else None
+            )
+            nodes.append(
+                {
+                    'id': group_node,
+                    'kind': 'claim',
+                    'label': str(label),
+                    'claim_id': row['id'],
+                    'field_name': predicate,
+                    'confidence': confidence,
+                    'review_status': 'approved',
+                }
+            )
+            edges.append(
+                {
+                    'id': 'persona-group:' + row['id'],
+                    'from': subject_node,
+                    'to': group_node,
+                    'label': predicate.replace('_', ' '),
+                    'field_name': predicate,
+                }
+            )
+            for observation in row.get('observations') or []:
+                evidence_id = str(observation['id'])
+                source_node = 'source:' + evidence_id
+                if evidence_id not in evidence_seen:
+                    nodes.append(
+                        {
+                            'id': source_node,
+                            'kind': 'source',
+                            'label': observation.get('engine') or evidence_id,
+                            'url': public_url(observation.get('source_url')),
+                            'evidence_type': observation.get('status') or 'observation',
+                        }
+                    )
+                    evidence_seen.add(evidence_id)
+                edges.append(
+                    {
+                        'id': 'group-source:' + row['id'] + ':' + evidence_id,
+                        'from': group_node,
+                        'to': source_node,
+                        'label': 'supported by',
+                        'field_name': predicate,
+                    }
+                )
+        return {
+            'mode': 'persona',
+            'nodes': nodes,
+            'edges': edges,
+            'stats': {
+                'persona_count': 1,
+                'claim_count': len(rows),
+                'source_count': len(evidence_seen),
+                'pending_count': 0,
+                'field_counts': field_counts,
+                'truncated_count': 0,
+            },
         }
 
     def payload():
@@ -488,6 +651,44 @@ def register_pipeline_routes(
             approved=projection,
             workspace=workspace_data,
             discovery_available=launch_approved_discovery is not None,
+            affiliation_public_web_available=bool(
+                affiliation_public_web_enabled
+                and affiliation_public_web_enabled()
+            ),
+            google_places_available=bool(
+                google_places_enabled and google_places_enabled()
+            ),
+        )
+
+    @bp.route("/cases/<case_id>/pipeline/<persona_id>/persona/relationships")
+    @access()
+    def relationships(case_id, persona_id):
+        subject = scoped_persona(case_id, persona_id)
+        case_store = get_case_store()
+        cases = case_store.list_cases()
+        available_personas = [
+            {
+                'id': item['id'],
+                'display_name': item['display_name'],
+                'case_id': case['id'],
+                'case_title': case['title'],
+            }
+            for case in cases
+            for item in case.get('personas', [])
+        ]
+        from maigret.web.persona_intelligence import field_display_label
+
+        return render_template(
+            'relationships.html',
+            graph=approved_relationship_graph(case_id, persona_id, subject),
+            cases=cases,
+            mode='persona',
+            selected_case_id=case_id,
+            available_personas=available_personas,
+            selected_persona_id=persona_id,
+            field_display_label=field_display_label,
+            combined_scope=False,
+            approved_only=True,
         )
 
     @bp.route(
@@ -566,12 +767,25 @@ def register_pipeline_routes(
         if isinstance(organization, dict):
             organization = organization.get("name") or organization.get("label")
         current = get_case_store()
-        job_id = current.create_affiliation_investigation(
-            str(organization or ""),
-            source_claim_id=group_id,
-            source_claim_field="company",
-            target_basis="approved_affiliation_claim",
-        )
+        try:
+            job_id = current.create_affiliation_investigation(
+                str(organization or ""),
+                source_claim_id=group_id,
+                source_claim_field="company",
+                target_basis="approved_affiliation_claim",
+                enable_public_web_research=bool(
+                    affiliation_public_web_enabled
+                    and affiliation_public_web_enabled()
+                ),
+                enable_google_places_search=bool(
+                    google_places_enabled and google_places_enabled()
+                ),
+            )
+        except ValueError as error:
+            flash(str(error), "warning")
+            return redirect(
+                url_for("pipeline.persona", case_id=case_id, persona_id=persona_id)
+            )
         flash(
             "A separate affiliation investigation was opened. Its findings require their own review.",
             "success",
@@ -687,6 +901,51 @@ def register_pipeline_routes(
             if group['kind'] != 'claim':
                 abort(400, description='Claim corrections require a claim group.')
             corrected = {**group['normalized'], **changes}
+        geocoding_warning = None
+        if data.get('decision') == 'include' and geocode_approved_location:
+            group = store().get_group(case_id, persona_id, group_id, limit=1)
+            candidate = dict(corrected or group.get('normalized') or {})
+            predicate = str(
+                candidate.get('predicate') or candidate.get('field_name') or ''
+            ).casefold()
+            qualifiers = (
+                dict(candidate.get('qualifiers'))
+                if isinstance(candidate.get('qualifiers'), dict)
+                else {}
+            )
+            has_coordinates = all(
+                qualifiers.get(key) is not None
+                for key in ('latitude', 'longitude')
+            )
+            if predicate in {
+                'address',
+                'current_location',
+                'organization_location',
+            } and not has_coordinates:
+                place_value = candidate.get('value')
+                if not isinstance(place_value, (dict, list)):
+                    try:
+                        center = geocode_approved_location(str(place_value or ''))
+                    except Exception:
+                        center = None
+                        geocoding_warning = (
+                            'The location was approved, but its map point could not '
+                            'be generated. The evidence remains approved.'
+                        )
+                    if center:
+                        qualifiers.update(
+                            latitude=center['latitude'],
+                            longitude=center['longitude'],
+                            coordinate_precision=center.get('precision') or 'place',
+                            coordinate_role='approximate_map_center',
+                            coordinate_source='approved_place_geocoder',
+                        )
+                        corrected = dict(candidate, qualifiers=qualifiers)
+                    elif geocoding_warning is None:
+                        geocoding_warning = (
+                            'The location was approved, but no approximate map '
+                            'point was found. The evidence remains approved.'
+                        )
         dispositions = (
             structured(data, 'evidence_dispositions', [])
             if 'evidence_dispositions' in data
@@ -718,6 +977,8 @@ def register_pipeline_routes(
                 'Operator decision recorded. Previous evidence and decisions are retained.',
                 'success',
             )
+            if geocoding_warning:
+                flash(geocoding_warning, 'warning')
             return_page = max(
                 1, request.form.get('return_page', 1, type=int) or 1
             )
@@ -893,8 +1154,10 @@ def register_pipeline_routes(
         The immutable manifest and per-finding decision trail remain intact; this
         restores the single analyst-review flow used by the Persona outline.
         """
-        scoped_persona(case_id, persona_id)
-        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        subject = scoped_persona(case_id, persona_id)
+        current = store()
+        case = current.get_case_shell(case_id) or {}
+        workspace_data = current.get_workspace(case_id, persona_id, limit=1)
         if (
             workspace_data["unreconciled_input_count"]
             or workspace_data["projection"]["pending"]
@@ -917,15 +1180,21 @@ def register_pipeline_routes(
                 + "#operator-review"
             )
         try:
-            version = store().create_version(
+            version = current.create_version(
                 case_id,
                 persona_id,
                 actor=actor(),
                 scope={
-                    'report_type': 'investigation_snapshot',
+                    'report_type': 'approved_persona',
                     'decision_model': 'per_finding_operator_review',
+                    'subject_name': subject.get('display_name') or persona_id,
+                    'case_title': case.get('title') or case_id,
                 },
-                limitations=['Only findings explicitly approved by an analyst are included.'],
+                limitations=[
+                    'Only findings explicitly approved by an analyst are included.',
+                    'An absent category means no evidence was approved; it is not proof that no such information exists.',
+                    'Assets, misconduct and risk are never inferred from a social profile, affiliation or AI summary.',
+                ],
             )
         except ValueError as error:
             flash(str(error), 'warning')

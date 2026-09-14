@@ -31,7 +31,7 @@ def generate_pipeline_pdf(projection):
         rightMargin=18 * mm,
         topMargin=25 * mm,
         bottomMargin=20 * mm,
-        title=f'{projection["label"]} v{projection["sequence"]}',
+        title=f'{projection["subject_name"]} · {projection["label"]}',
         author='OpenLedger',
         subject=f'Frozen Persona version {projection["version_id"]}',
     )
@@ -64,7 +64,9 @@ def generate_pipeline_pdf(projection):
         canvas.drawRightString(A4[0] - 18 * mm, 12 * mm, str(doc.page))
         canvas.restoreState()
 
-    text(f'Investigation report · Snapshot {projection["sequence"]}', 'field')
+    text(projection['subject_name'], 'title')
+    text(f'Approved Persona · Snapshot {projection["sequence"]}', 'field')
+    text('Case: ' + projection['case_title'], 'small')
     if projection['status'] == 'withdrawn':
         text(
             'WITHDRAWN — This version remains an audit record and is no longer designated as the final Persona.'
@@ -79,8 +81,8 @@ def generate_pipeline_pdf(projection):
         )
     text('Version: ' + projection['version_id'], 'small')
     text('Manifest SHA-256: ' + projection['content_hash'], 'small')
-    text('Case: ' + projection['case_id'], 'small')
-    text('Subject: ' + projection['persona_id'], 'small')
+    text('Case ID: ' + projection['case_id'], 'small')
+    text('Persona ID: ' + projection['persona_id'], 'small')
     text('Scope', 'field')
     payload(projection['scope'])
     text('Limitations and unknowns', 'field')
@@ -88,68 +90,91 @@ def generate_pipeline_pdf(projection):
         text(limitation)
     if not projection['limitations']:
         text('No additional limitations were recorded in this version.')
-    text('Curated facts and account bindings', 'field')
     from maigret.web.pipeline_evidence import observation_evidence_role
+    from maigret.web.pipeline_store import SHORTLIST_SECTIONS, _shortlist_section
 
     evidence = {}
     evidence_uses = {}
-    for item in projection['items']:
-        normalized = item.get('normalized', {})
-        predicate = (
-            normalized.get('predicate') or normalized.get('field_name') or item['kind']
-        )
-        value = (
-            normalized.get('display_value')
-            or normalized.get('value')
-            or normalized.get('canonical_url')
-            or normalized.get('url')
-            or normalized.get('handle')
-            or 'Retained finding'
-        )
-        text(str(predicate).replace('_', ' ').title(), 'field')
-        text(str(value), 'body')
-        text('Group: ' + item['group_id'], 'small')
-        qualifiers = normalized.get('qualifiers')
-        if qualifiers:
-            text('Context: ' + json.dumps(qualifiers, ensure_ascii=False), 'small')
-        decision = item.get('decision') or {}
-        decision_reason = str(decision.get('reason') or '').strip()
-        if decision_reason:
-            text('Analyst decision: ' + decision_reason, 'small')
-        assessment = item.get('assessment')
-        if assessment:
-            explanation = str(assessment.get('explanation') or assessment.get('reason') or '').strip()
-            if explanation:
-                text('Evidence assessment: ' + explanation, 'small')
-        else:
+    for section_key, section_title in SHORTLIST_SECTIONS:
+        text(section_title, 'title')
+        section_items = [
+            item
+            for item in projection['items']
+            if _shortlist_section(item['kind'], item.get('normalized', {}))
+            == section_key
+        ]
+        if section_key == 'records':
             text(
-                'Numerical probability unavailable: no validated assessment is included in this version.',
+                'Risk is not numerically scored without an approved versioned model. Social profiles, employers and AI summaries do not establish assets, misconduct or risk.',
                 'small',
             )
-        ids = []
-        for observation in item.get('evidence', []):
-            ids.append(str(observation['id']))
-            evidence[str(observation['id'])] = observation
-            use = {
-                'group_id': item['group_id'],
-                'role': observation_evidence_role(observation, normalized),
-                'operator_disposition': observation.get('operator_disposition'),
-                'source_state': observation.get('source_state'),
-            }
-            evidence_uses.setdefault(str(observation['id']), []).append(use)
-            text(
-                'Observation '
-                + str(observation['id'])
-                + ' — '
-                + use['role'].replace('_', ' '),
-                'small',
+        if not section_items:
+            text('No approved findings in this category. This is not proof of absence.')
+            continue
+        for item in section_items:
+            normalized = item.get('normalized', {})
+            predicate = (
+                normalized.get('predicate')
+                or normalized.get('field_name')
+                or item['kind']
             )
-            if use['operator_disposition']:
+            value = (
+                normalized.get('display_value')
+                or normalized.get('value')
+                or normalized.get('canonical_url')
+                or normalized.get('url')
+                or normalized.get('handle')
+                or 'Retained finding'
+            )
+            text(str(predicate).replace('_', ' ').title(), 'field')
+            text(str(value), 'body')
+            text('Group: ' + item['group_id'], 'small')
+            qualifiers = normalized.get('qualifiers')
+            if qualifiers:
+                text('Context: ' + json.dumps(qualifiers, ensure_ascii=False), 'small')
+            decision = item.get('decision') or {}
+            decision_reason = str(decision.get('reason') or '').strip()
+            if decision_reason:
+                text('Analyst decision: ' + decision_reason, 'small')
+            assessment = item.get('assessment')
+            if assessment:
+                explanation = str(
+                    assessment.get('explanation')
+                    or assessment.get('reason')
+                    or ''
+                ).strip()
+                if explanation:
+                    text('Evidence assessment: ' + explanation, 'small')
+            else:
                 text(
-                    'Evidence disposition: ' + use['operator_disposition']['reason'],
+                    'Numerical probability unavailable: no validated assessment is included in this version.',
                     'small',
                 )
-        text('Observation IDs: ' + ', '.join(ids), 'small')
+            ids = []
+            for observation in item.get('evidence', []):
+                ids.append(str(observation['id']))
+                evidence[str(observation['id'])] = observation
+                use = {
+                    'group_id': item['group_id'],
+                    'role': observation_evidence_role(observation, normalized),
+                    'operator_disposition': observation.get('operator_disposition'),
+                    'source_state': observation.get('source_state'),
+                }
+                evidence_uses.setdefault(str(observation['id']), []).append(use)
+                text(
+                    'Observation '
+                    + str(observation['id'])
+                    + ' — '
+                    + use['role'].replace('_', ' '),
+                    'small',
+                )
+                if use['operator_disposition']:
+                    text(
+                        'Evidence disposition: '
+                        + use['operator_disposition']['reason'],
+                        'small',
+                    )
+            text('Observation IDs: ' + ', '.join(ids), 'small')
     if not projection['items']:
         text('No facts were included in this version.')
     text('Frozen exclusions', 'field')

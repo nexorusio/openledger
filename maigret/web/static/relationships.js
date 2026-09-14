@@ -207,7 +207,7 @@
         } else if (node.kind === 'claim') {
             addLine('Field', readable(node.field_name));
             addLine('Review status', readable(node.review_status));
-            addLine('Evidence confidence', `${node.confidence}%`);
+            if (Number.isFinite(node.confidence)) addLine('Evidence confidence', `${node.confidence}%`);
             const sources = sourcesForClaim(id);
             const list = addList(`Supporting sources (${sources.length})`);
             (sources.length ? sources : [{name: 'No source record attached'}]).forEach((source) => appendSource(list, source));
@@ -234,7 +234,7 @@
             const list = addList(`Evidence paths (${connections.length})`);
             connections.forEach((edge) => {
                 const persona = nodeLookup.get(edge.from === id ? edge.to : edge.from);
-                appendSource(list, {name: `${persona.label} · ${persona.case_title}`, type: `${edge.confidence}% confidence`});
+                appendSource(list, {name: `${persona.label} · ${persona.case_title}`, type: Number.isFinite(edge.confidence) ? `${edge.confidence}% confidence` : 'approved evidence'});
                 (edge.sources || []).forEach((source) => appendSource(list, source));
             });
         }
@@ -250,7 +250,7 @@
         addLine('Field', readable(edge.field_name));
         if (edge.proposal_id) {
             addLine('Review status', readable(edge.review_status));
-            addLine('AI confidence', `${edge.confidence}%`);
+            if (Number.isFinite(edge.confidence)) addLine('AI confidence', `${edge.confidence}%`);
             addLine('Evidence rule', edge.relationship_rule);
             const list = addList(`Evidence anchors (${(edge.sources || []).length})`);
             ((edge.sources || []).length ? edge.sources : [{name: 'No public URL attached'}]).forEach((source) => appendSource(list, source));
@@ -258,7 +258,7 @@
         }
         if (graph.mode === 'shared') {
             addLine('Evidence rule', edge.relationship_rule || 'Exact normalized value · approved claim');
-            addLine('Evidence confidence', `${edge.confidence}%`);
+            if (Number.isFinite(edge.confidence)) addLine('Evidence confidence', `${edge.confidence}%`);
             const list = addList(`Attached sources (${(edge.sources || []).length})`);
             ((edge.sources || []).length ? edge.sources : [{name: 'No source URL attached'}]).forEach((source) => appendSource(list, source));
             if (from?.kind === 'persona') addPersonaLink(from);
@@ -267,7 +267,7 @@
             const source = from?.kind === 'source' ? from : to?.kind === 'source' ? to : null;
             if (claim) {
                 addLine('Review status', readable(claim.review_status));
-                addLine('Evidence confidence', `${claim.confidence}%`);
+                if (Number.isFinite(claim.confidence)) addLine('Evidence confidence', `${claim.confidence}%`);
             }
             const evidence = source ? [{name: source.label, url: source.url, type: source.evidence_type}] : claim ? sourcesForClaim(claim.id) : [];
             const list = addList(`Supporting sources (${evidence.length})`);
@@ -288,7 +288,7 @@
     };
     const nodeContext = (node) => {
         if (node.kind === 'persona') return node.case_title || 'Persona record';
-        if (node.kind === 'claim') return `${readable(node.field_name)} · ${readable(node.review_status)} · ${node.confidence}% confidence`;
+        if (node.kind === 'claim') return `${readable(node.field_name)} · ${readable(node.review_status)}${Number.isFinite(node.confidence) ? ` · ${node.confidence}% confidence` : ''}`;
         if (node.kind === 'source') return readable(node.evidence_type || 'Evidence source');
         if (node.kind === 'organization') return `${node.case_title || 'Source case'} · analyst-confirmed organization`;
         return `${readable(node.field_name)} · ${node.persona_count} connected Personas`;
@@ -314,7 +314,7 @@
         originalNodes.filter((node) => visibleNodeIds.has(node.id)).forEach((node) => addTableRow(node.label, readable(node.kind), nodeContext(node), {inspectNode: node.id}, focusedNodeIds && !focusedNodeIds.has(node.id)));
         originalEdges.filter((edge) => visibleEdgeIds.has(edge.id)).forEach((edge) => {
             const from = nodeLookup.get(edge.from); const to = nodeLookup.get(edge.to);
-            const context = graph.mode === 'shared' ? `${readable(edge.field_name)} · exact approved match · ${edge.confidence}% confidence` : readable(edge.label);
+            const context = graph.mode === 'shared' ? `${readable(edge.field_name)} · exact approved match${Number.isFinite(edge.confidence) ? ` · ${edge.confidence}% confidence` : ''}` : readable(edge.label);
             addTableRow(`${from?.label} → ${to?.label}`, 'Evidence path', context, {inspectEdge: edge.id}, focusedNodeIds && (!focusedNodeIds.has(edge.from) || !focusedNodeIds.has(edge.to)));
         });
     };

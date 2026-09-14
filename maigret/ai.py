@@ -24,6 +24,7 @@ AI_EVIDENCE_FIELDS = (
     "phone",
     "address",
     "current_location",
+    "organization_location",
     "occupation",
     "company",
     "social_account",
@@ -1238,11 +1239,15 @@ organization. When a cited source explicitly states a role or occupation at a
 named organization, return two separate proposals: occupation for the role and
 company for the exact organization name. Do not leave the organization only
 embedded inside the occupation value, and do not infer one from a role title.
+Use organization_location only for an explicitly published office, campus, or
+other public organization location. Name the exact related organization in the
+reason and never represent its location as the person's current location.
+Propose a photograph only when its exact public image URL appears in the
+citation catalogue and the cited source associates it with the target.
 Never propose finances, vehicles, criminal records, sensitive
-traits, or relationships. For a cited
-coarse current location only, an approximate city or region map center may be
-included. These records always require human review. Return an empty list when
-nothing qualifies."""
+traits, or relationships. For a cited coarse current location or organization
+location only, an approximate city or region map center may be included. These
+records always require human review. Return an empty list when nothing qualifies."""
     structured_input = json.dumps(
         {
             "target_persona": str(target_persona)[:500],
@@ -1532,10 +1537,14 @@ addresses. Use the company field for any explicit affiliation, including an empl
 institution, association, or organization. When a cited source explicitly states a role or
 occupation at a named organization, return separate occupation and company proposals; do not leave
 the organization only embedded in the occupation value, and do not infer one from a role title.
+Use organization_location only for an explicitly published office, campus, or other public
+organization location. Name the exact related organization in the reason and never represent its
+location as the person's current location. Propose a photograph only when its exact public image URL
+appears in the citation catalogue and the cited source associates it with the target.
 Never propose finances, vehicles, criminal records,
 sensitive traits, or interpersonal relationships. A summary must be a concise public-biographical description, not a
 speculative biography. Confidence measures source support, never identity certainty alone. Keep it
-at or below 85. For a coarse current_location only, latitude and longitude may contain an
+at or below 85. For a coarse current_location or organization_location, latitude and longitude may contain an
 approximate city or region map center when that place is explicitly supported; set
 coordinate_precision accordingly. They must never represent a person's precise position. Use null
 for all coordinate fields otherwise. These are analyst-review proposals and must never be described

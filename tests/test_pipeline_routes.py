@@ -146,7 +146,15 @@ def journey(tmp_path):
         lambda: session.get("role", ""),
         lambda token: token == session.get("csrf_token") == "test-csrf",
         launch_research=launch_research,
+        prepare_workspace=lambda **_kwargs: {"status": "prepared"},
         launch_approved_discovery=launch_approved_discovery,
+        geocode_approved_location=lambda _place: {
+            "latitude": -6.1754,
+            "longitude": 106.8272,
+            "precision": "city",
+        },
+        affiliation_public_web_enabled=lambda: True,
+        google_places_enabled=lambda: True,
     )
     client = app.test_client()
     with client.session_transaction() as current:
@@ -361,6 +369,38 @@ def test_review_proceed_persona_and_approved_discovery_are_an_explicit_wizard(
     )
 
 
+def test_step_two_exposes_reconciliation_action_at_the_decision_point(
+    journey, monkeypatch
+):
+    original = PipelineStore.get_workspace
+
+    def pending(self, *args, **kwargs):
+        workspace = original(self, *args, **kwargs)
+        workspace["projection"]["pending"] = True
+        return workspace
+
+    monkeypatch.setattr(PipelineStore, "get_workspace", pending)
+
+    response = journey["client"].get(base(journey))
+
+    assert response.status_code == 200
+    assert b"Reconcile evidence and continue" in response.data
+    assert response.data.count(b'action="' + base(journey).encode() + b'/prepare"') == 2
+
+
+def test_page_and_persona_titles_share_the_global_sticky_rule():
+    css = (
+        Path(__file__).parents[1]
+        / "maigret"
+        / "web"
+        / "static"
+        / "openledger.css"
+    ).read_text()
+    rule = css.split(".page-heading,\n.persona-profile-header", 1)[1].split("}", 1)[0]
+    assert "position: sticky" in rule
+    assert "top: var(--ol-topbar-height)" in rule
+
+
 def test_approved_discovery_reuses_exact_url_without_generated_aliases(monkeypatch):
     import maigret.web.app as web_app
 
@@ -409,6 +449,12 @@ def test_approved_discovery_reuses_exact_url_without_generated_aliases(monkeypat
         "https://linkedin.com/in/jati-pratomo": ["jati-pratomo"]
     }
     assert specification["search_targets"] == []
+    assert specification["discovery_basis"] == "approved_pipeline_findings"
+    assert specification["approved_research_questions"]
+    research = "\n".join(specification["approved_research_questions"])
+    assert "Jati Pratomo" in research
+    assert "https://linkedin.com/in/jati-pratomo" in research
+    assert "employment, education, memberships" in research
 
 
 def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
@@ -467,6 +513,75 @@ def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
     assert specification["target_basis"] == "approved_affiliation_claim"
     assert specification["official_website"] is None
     assert specification["enable_domain_context"] is False
+    assert specification["enable_public_web_research"] is True
+    assert specification["enable_google_places_search"] is True
+
+
+def test_persona_renders_approved_photo_and_persisted_location_map(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "approved-photo",
+                    "normalized": {
+                        "predicate": "photograph",
+                        "value": "https://cdn.example.test/jati.jpg",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                },
+                {
+                    "canonical_key": "approved-organization-location",
+                    "normalized": {
+                        "predicate": "organization_location",
+                        "value": "Jakarta, Indonesia",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                },
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    for group in groups:
+        assert post(
+            journey,
+            f"/groups/{group['id']}/decision",
+            {"decision": "include"},
+        ).status_code == 201
+    assert post(
+        journey,
+        f"/groups/{journey['group_id']}/decision",
+        {"decision": "reject"},
+    ).status_code == 201
+
+    response = journey["client"].get(base(journey) + "/persona")
+
+    assert response.status_code == 200
+    assert b"https://cdn.example.test/jati.jpg" in response.data
+    assert b"Approved locations" in response.data
+    assert b"106.8272" in response.data
+    assert b"Organization location" in response.data
+    assert b"Export Persona PDF" in response.data
+    assert b"Case AI assistant" in response.data
+    assert b"Relationship evidence" in response.data
+
+    relationships = journey["client"].get(
+        base(journey) + "/persona/relationships"
+    )
+    assert relationships.status_code == 200
+    assert b'"truncated_count": 0' in relationships.data
+    assert b"approved-photo" not in relationships.data
+    assert journey["observation_id"].encode() in relationships.data
 
 
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):
@@ -483,6 +598,11 @@ def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):
     )
     assert response.status_code == 302
     assert '/export.pdf' in response.headers['Location']
+    download = journey['client'].get(response.headers['Location'])
+    assert download.status_code == 200
+    assert download.mimetype == 'application/pdf'
+    assert download.data.startswith(b'%PDF-')
+    assert 'attachment' in download.headers['Content-Disposition']
     version_id = response.headers['Location'].split('/versions/', 1)[1].split('/', 1)[0]
     version = journey['pipeline'].get_version(
         version_id,
@@ -490,6 +610,11 @@ def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):
         persona_id=journey['persona_id'],
     )
     assert version['status'] == 'submitted'
+    assert version['manifest']['scope']['subject_name'] == (
+        journey['pipeline'].get_subject(
+            journey['case_id'], journey['persona_id']
+        )['display_name']
+    )
 
 
 def test_authentication_csrf_role_and_foreign_scope_block_mutations(journey):

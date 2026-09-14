@@ -3,6 +3,26 @@
 from copy import deepcopy
 
 
+def _approved_research_questions(spec):
+    if spec.get("discovery_basis") != "approved_pipeline_findings" or not spec.get(
+        "allow_ai_context"
+    ):
+        return []
+    raw = spec.get("approved_research_questions")
+    if raw is None:
+        raw = [spec.get("approved_research_question")]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 100:
+        raise ValueError("Approved discovery requires 1 to 100 research questions")
+    questions = []
+    for value in raw:
+        if not isinstance(value, str) or not value.strip() or len(value) > 10000:
+            raise ValueError(
+                "Each approved research question must contain 1 to 10000 characters"
+            )
+        questions.append(value.strip())
+    return questions
+
+
 def enqueue_primary_requests(store, connection, *, job_id, case_id, options, bindings):
     from maigret.web.pipeline_query import build_query_plan, runtime_source_status
     from maigret.web.pipeline_store import PipelineStore
@@ -49,6 +69,12 @@ def enqueue_primary_requests(store, connection, *, job_id, case_id, options, bin
             persona_bindings=[binding],
         )
         context = {"collection_options": options}
+        approved_questions = _approved_research_questions(spec)
+        if approved_questions:
+            context.update(
+                research_questions=approved_questions,
+                approved_research_questions=approved_questions,
+            )
         plan = build_query_plan(
             spec,
             case_id=case_id,

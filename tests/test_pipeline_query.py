@@ -91,6 +91,28 @@ def test_multiple_email_tasks_share_case_and_subject_but_keep_per_address_input_
     assert {task["case_id"] for task in tasks} == {"case-a"}
 
 
+def test_approved_persona_research_questions_route_as_active_cited_ai_tasks():
+    raw = plan_for(["full_name"], ["Jati Pratomo"], allow_ai_context="on")
+    questions = [
+        "Cross-check approved anchor batch one with cited public sources.",
+        "Cross-check approved anchor batch two with cited public sources.",
+    ]
+    plan = query_for(
+        raw,
+        context={
+            "research_questions": questions,
+            "approved_research_questions": questions,
+        },
+    )
+    ai_tasks = [
+        task
+        for task in plan["tasks"]
+        if task["engine_id"] == "ai_cited_research"
+    ]
+    assert [task["input_value"] for task in ai_tasks] == questions
+    assert all(task["route_state"] == "active" for task in ai_tasks)
+
+
 def test_every_existing_adapter_and_catalog_source_has_a_route_contract():
     root = Path(__file__).resolve().parents[1]
     module = ast.parse((root / "maigret/web/collector_adapters.py").read_text())

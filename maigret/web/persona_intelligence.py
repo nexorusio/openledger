@@ -69,6 +69,7 @@ FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
         "fields": (
             ("occupation", "Role or occupation"),
             ("company", "Organization, institution or company"),
+            ("organization_location", "Organization location"),
             ("company_ownership", "Ownership or leadership"),
         ),
     },
@@ -244,6 +245,7 @@ AI_PROPOSAL_FIELDS = {
     "phone",
     "address",
     "current_location",
+    "organization_location",
     "occupation",
     "company",
     "social_account",
@@ -258,6 +260,7 @@ AI_FIELD_LIMITS = {
     "phone": 80,
     "address": 1000,
     "current_location": 300,
+    "organization_location": 1000,
     "occupation": 500,
     "company": 500,
     "social_account": 2000,
@@ -1163,8 +1166,16 @@ def extract_ai_persona_claims(
             if not value or value not in source_catalog:
                 reject("invalid_public_url")
                 continue
-        elif field_name in {"email", "phone", "address"}:
-            value = _validated_contact_value(field_name, value)
+        elif field_name in {
+            "email",
+            "phone",
+            "address",
+            "organization_location",
+        }:
+            validation_field = (
+                "address" if field_name == "organization_location" else field_name
+            )
+            value = _validated_contact_value(validation_field, value)
             if not value:
                 reject("invalid_contact_value")
                 continue
@@ -1193,7 +1204,7 @@ def extract_ai_persona_claims(
         )
         if coordinates_supplied:
             if (
-                field_name != "current_location"
+                field_name not in {"current_location", "organization_location"}
                 or latitude is None
                 or longitude is None
                 or coordinate_precision not in {"city", "region"}

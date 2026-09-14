@@ -7,10 +7,12 @@ Callers commit these documents in the same transaction as task progress.
 
 from __future__ import annotations
 
+import ast
 import hashlib
 import ipaddress
 import json
 import math
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Iterable, Iterator, Mapping, Optional
@@ -88,13 +90,97 @@ _DERIVED_ENGINES = frozenset(
     }
 )
 _FIELD_ALIASES = {
+    "about": "summary",
+    "bio": "summary",
+    "biography": "summary",
     "fullname": "full_name",
+    "full_name": "full_name",
+    "display_name": "full_name",
+    "displayname": "full_name",
     "name": "full_name",
+    "email": "email",
+    "emails": "email",
+    "e-mail": "email",
+    "mail": "email",
+    "mobile": "phone",
+    "phone": "phone",
+    "phone_number": "phone",
+    "telephone": "phone",
+    "address": "address",
+    "street_address": "address",
+    "city": "current_location",
+    "country": "current_location",
     "location": "current_location",
+    "current_location": "current_location",
+    "avatar": "photograph",
+    "avatar_url": "photograph",
+    "image": "photograph",
+    "image_url": "photograph",
+    "photo": "photograph",
+    "photo_url": "photograph",
+    "picture": "photograph",
     "description": "summary",
     "company": "affiliation",
-    "bio": "summary",
+    "employer": "affiliation",
+    "affiliation": "affiliation",
+    "affiliations": "affiliation",
+    "association": "affiliation",
+    "college": "affiliation",
+    "educational_institution": "affiliation",
+    "institution": "affiliation",
+    "membership_organization": "affiliation",
+    "organization": "affiliation",
+    "organisation": "affiliation",
+    "school": "affiliation",
+    "university": "affiliation",
+    "campus_location": "organization_location",
+    "company_location": "organization_location",
+    "office_location": "organization_location",
+    "organization_location": "organization_location",
+    "job": "occupation",
+    "job_title": "occupation",
+    "occupation": "occupation",
+    "profession": "occupation",
+    "title": "occupation",
+    "homepage": "website",
+    "url": "website",
+    "website": "website",
 }
+_LINK_EVIDENCE_FIELDS = frozenset({"links", "social_links"})
+_STABLE_IDENTIFIER_FIELDS = frozenset(
+    {
+        "uid",
+        "id",
+        "facebook_id",
+        "facebook_uid",
+        "flickr_id",
+        "gaia_id",
+        "github_id",
+        "googleplus_uid",
+        "instagram_id",
+        "instagram_pk",
+        "mail_id",
+        "mail_uid",
+        "patreon_id",
+        "pinterest_id",
+        "reddit_id",
+        "roblox_user_id",
+        "sec_uid",
+        "steam_id",
+        "tiktok_id",
+        "twitter_uid",
+        "vk_id",
+        "yandex_public_id",
+        "yandex_uid",
+        "yandex_znatoki_id",
+        "youtube_channel_id",
+    }
+)
+_EMAIL_VALUE_PATTERN = re.compile(
+    r"^[A-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Z0-9-]+(?:\.[A-Z0-9-]+)+$",
+    re.IGNORECASE,
+)
+_PHONE_VALUE_PATTERN = re.compile(r"^[0-9+().\-\s]+$")
 
 
 class ObservationContractError(ValueError):
@@ -550,6 +636,67 @@ def _account(
     return canonical_account(account, observed_at=raw.get("observed_at"))
 
 
+def _literal_profile_values(value: Any) -> Iterator[str]:
+    """Yield bounded literal extractor values without evaluating string payloads."""
+    if isinstance(value, bool):
+        return
+    if isinstance(value, (str, int, float)):
+        candidate = " ".join(str(value).split())[:4000]
+        if candidate:
+            yield candidate
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value[:20]:
+            yield from _literal_profile_values(item)
+
+
+def _literal_link_values(value: Any, depth: int = 0) -> Iterator[str]:
+    if depth > 2:
+        return
+    decoded = value
+    if isinstance(value, str):
+        candidate = value.strip()
+        if candidate.startswith(("[", "{")) and len(candidate) <= 10000:
+            try:
+                decoded = json.loads(candidate)
+            except (TypeError, ValueError):
+                try:
+                    decoded = ast.literal_eval(candidate)
+                except (SyntaxError, ValueError):
+                    decoded = value
+    if isinstance(decoded, Mapping):
+        for item in list(decoded.values())[:20]:
+            yield from _literal_link_values(item, depth + 1)
+        return
+    if isinstance(decoded, (list, tuple)):
+        for item in decoded[:20]:
+            yield from _literal_link_values(item, depth + 1)
+        return
+    yield from _literal_profile_values(decoded)
+
+
+def _validated_profile_claim_value(predicate: str, value: str) -> Optional[str]:
+    if predicate in {"website", "photograph", "linked_profile_lead"}:
+        return canonical_source_url(value)
+    if predicate == "email":
+        value = value.casefold()
+        return (
+            value
+            if len(value) <= 254 and _EMAIL_VALUE_PATTERN.fullmatch(value)
+            else None
+        )
+    if predicate == "phone":
+        digits = re.sub(r"\D", "", value)
+        return (
+            value
+            if _PHONE_VALUE_PATTERN.fullmatch(value) and 7 <= len(digits) <= 15
+            else None
+        )
+    if predicate in {"address", "organization_location"} and len(value) < 5:
+        return None
+    return value
+
+
 def _claim_rows(
     raw: Mapping[str, Any], account: Optional[Dict[str, Any]], status: str
 ) -> list:
@@ -558,6 +705,8 @@ def _claim_rows(
     # observation payload for audit, but only positive outcomes may propose a
     # claim for analyst review.
     if status not in {"found", "candidate"}:
+        return []
+    if raw.get("observation_only") is True:
         return []
     if isinstance(raw.get("claims"), list):
         explicit_claims = [
@@ -612,13 +761,49 @@ def _claim_rows(
                 "qualifiers": {"ownership": "not_established"},
             }
         )
-    # Extract only literal reported values; richer provider extractors can supply
-    # their existing candidate dictionaries in raw.claims without losing fields.
+    # Extract only bounded, literal profile fields. Provider-specific adapters can
+    # supply richer candidate dictionaries in raw.claims without losing fields.
     fields = raw.get("evidence")
     if isinstance(fields, Mapping):
-        for name, value in fields.items():
-            if name in _FIELD_ALIASES and value not in (None, "", [], {}):
-                result.append({"predicate": _FIELD_ALIASES[name], "value": value})
+        for raw_name, raw_value in fields.items():
+            name = str(raw_name).strip().lower().replace(" ", "_")
+            if name in _FIELD_ALIASES:
+                predicate = _FIELD_ALIASES[name]
+                for value in _literal_profile_values(raw_value):
+                    value = _validated_profile_claim_value(predicate, value)
+                    if value:
+                        result.append({"predicate": predicate, "value": value})
+                continue
+            if name in _LINK_EVIDENCE_FIELDS:
+                for value in _literal_link_values(raw_value):
+                    value = _validated_profile_claim_value(
+                        "linked_profile_lead", value
+                    )
+                    if value:
+                        result.append(
+                            {
+                                "predicate": "linked_profile_lead",
+                                "value": value,
+                                "qualifiers": {"ownership": "not_established"},
+                            }
+                        )
+                continue
+            if name in _STABLE_IDENTIFIER_FIELDS and account:
+                for value in _literal_profile_values(raw_value):
+                    result.append(
+                        {
+                            "predicate": "platform_identifier",
+                            "value": {
+                                "platform": account["platform"],
+                                "identifier_type": name,
+                                "identifier": value[:500],
+                            },
+                            "qualifiers": {
+                                "ownership": "not_established",
+                                "continuity_only": True,
+                            },
+                        }
+                    )
     # A positive retained result with a public URL is itself a reviewable lead,
     # even when the connector has no richer field extractor.  This prevents a
     # credible engine discovery from disappearing into the technical log.  It
