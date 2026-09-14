@@ -46,6 +46,14 @@ against the same development commit, tree, image and schema before promotion.
 | P1-01 | “Cross-check all approved evidence” must work when the Persona has approved affiliation/location evidence but no username, URL, email, phone or full-name identifier. PR #66 built cited questions and then sent an empty identifier form through the public parser, which rejected it. | `maigret/web/app.py::_launch_approved_pipeline_discovery`; `maigret/web/investigation_input.py::build_approved_research_plan`; the explicit internal gate in `maigret/web/case_store.py::CaseStore.repeat_persona_investigation`; question validation in `maigret/web/pipeline_enqueue.py::approved_research_questions` | `tests/test_pipeline_routes.py::test_approved_discovery_uses_cited_research_for_affiliation_without_identifier`; `tests/test_case_store.py::test_identifier_free_repeat_requires_server_approved_research`; existing `tests/test_pipeline_query.py::test_approved_persona_research_questions_route_as_active_cited_ai_tasks` | `Repair` |
 | P1-02 | Persona map popups must not insert attacker-controlled `precision` or `label` strings as HTML. PR #66 escaped the label but interpolated precision into popup HTML. | `maigret/web/templates/pipeline_persona.html` creates DOM nodes and assigns untrusted values through `textContent`/`createTextNode` before `bindPopup` | `tests/test_pipeline_routes.py::test_persona_map_popup_uses_text_nodes_for_untrusted_precision`; complementary HTML escaping coverage in `tests/test_report.py` and `tests/test_chat_presentation.py` | `Repair` |
 
+Repair review also identified and fixed a P2 limit mismatch: the approved
+workflow and validator permit 100 questions of up to 10,000 characters, while
+the generic query-context path accepted only 24 and truncated each to 2,000.
+`maigret/web/pipeline_query.py` now applies the approved-research bounds to both
+planning and prerequisite matching. The regression
+`tests/test_pipeline_query.py::test_approved_research_preserves_25_full_length_batches`
+proves that more than 24 complete batches reach active cited-research tasks.
+
 The identifier-free path is intentionally not a general bypass. Public intake
 still requires validated identifiers. An empty-identifier rerun is accepted only
 when the internal caller sets the explicit gate and the specification contains
