@@ -133,11 +133,17 @@ def test_cited_research_emits_structured_pending_claims_with_coordinates(
         def get_persona(self, _persona_id):
             return {"display_name": "Jati Pratomo"}
 
+    emitted_engines = []
+
+    def emit_observations(rows, *, engine=None):
+        emitted.extend(rows)
+        emitted_engines.append(engine)
+
     context = SimpleNamespace(
         store=Store(),
         job={"case_id": "case-id"},
         request={"persona_id": "persona-id"},
-        emit_observations=lambda rows: emitted.extend(rows),
+        emit_observations=emit_observations,
         raw_collector_observations=[],
     )
     result = asyncio.run(
@@ -163,6 +169,7 @@ def test_cited_research_emits_structured_pending_claims_with_coordinates(
     assert location["qualifiers"]["latitude"] == -6.1754
     assert location["qualifiers"]["automatic_approval_allowed"] is False
     assert emitted[0]["observation_only"] is True
+    assert emitted_engines == ["openai_web_research"]
     from maigret.web.pipeline_evidence import normalize_observation
 
     citation = normalize_observation(
@@ -175,6 +182,56 @@ def test_cited_research_emits_structured_pending_claims_with_coordinates(
         observed_at="2026-09-14T00:00:00Z",
     )
     assert citation["claims"] == []
+    claim = normalize_observation(
+        emitted[1],
+        case_id="case-id",
+        subject_id="persona-id",
+        request_id="request-id",
+        task_id="task-id",
+        attempt_id="attempt-id",
+        observed_at="2026-09-14T00:00:00Z",
+    )
+    assert citation["origin_family_id"]
+    assert claim["origin_family_id"] == citation["origin_family_id"]
+
+
+def test_approved_source_citations_accept_localized_linkedin_only():
+    from maigret.web.pipeline_execution import _same_approved_profile_source
+
+    approved = "https://www.linkedin.com/in/jati-pratomo/"
+    assert _same_approved_profile_source(
+        "https://id.linkedin.com/in/jati-pratomo", approved
+    )
+    assert not _same_approved_profile_source(
+        "https://id.linkedin.com/in/another-person", approved
+    )
+    assert not _same_approved_profile_source(
+        "https://example.test/jati-pratomo", approved
+    )
+
+
+def test_approved_source_enrichment_skips_unrelated_case_wide_reranking():
+    import maigret.web.pipeline_execution as execution
+
+    result = asyncio.run(
+        execution.rank_consolidated_findings(
+            None,
+            None,
+            None,
+            {},
+            "persona-id",
+            {
+                "collection_options": {
+                    "investigation_spec": {
+                        "discovery_basis": "approved_source_fetch"
+                    }
+                }
+            },
+        )
+    )
+
+    assert result["status"] == "not_requested"
+    assert result["ranked"] == 0
 
 
 @pytest.mark.parametrize(

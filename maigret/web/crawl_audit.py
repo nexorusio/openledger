@@ -143,11 +143,15 @@ def _engine_summaries(events: Iterable[Dict[str, Any]], requests) -> list[Dict[s
                 "evidence_observations": 0,
                 "warning_count": 0,
                 "diagnostic": task.get("reason"),
+                "stages": [],
             }
     for stored_event in events:
         event = stored_event.get("event") or {}
         event_type = str(event.get("type") or "")
-        if not event_type.startswith("collector_"):
+        if (
+            not event_type.startswith("collector_")
+            and event_type != "approved_source_stage"
+        ):
             continue
         task_id = str(event.get("task_id") or "")
         key = task_keys.get(task_id) or _collector_key(event)
@@ -167,10 +171,25 @@ def _engine_summaries(events: Iterable[Dict[str, Any]], requests) -> list[Dict[s
                 "evidence_observations": 0,
                 "warning_count": 0,
                 "diagnostic": None,
+                "stages": [],
             },
         )
         row["last_event_at"] = stored_event.get("created_at")
-        if event_type == "collector_started":
+        if event_type == "approved_source_stage":
+            row.setdefault("stages", []).append(
+                {
+                    "stage": event.get("stage"),
+                    "status": event.get("status"),
+                    "message": event.get("message"),
+                    "source_url": event.get("source_url"),
+                    "http_status": event.get("http_status"),
+                    "claim_count": event.get("claim_count"),
+                    "citation_count": event.get("citation_count"),
+                    "proposal_count": event.get("proposal_count"),
+                    "created_at": stored_event.get("created_at"),
+                }
+            )
+        elif event_type == "collector_started":
             row["status"] = "running"
             row["attempt_count"] = max(1, int(row.get("attempt_count") or 0))
         elif event_type == "collector_error":

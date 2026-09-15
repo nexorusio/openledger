@@ -61,6 +61,27 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
     base = f"/cases/{case_id}/pipeline/{persona_id}"
     originals = pipeline.list_observations(case_id, persona_id, limit=500)
     source = next(row for row in originals if row.get("source_url") and row["outcome"] == "found")
+    approved_urls = [
+        "https://www.linkedin.com/in/synthetic-person/",
+        "https://www.threads.com/@synthetic.person",
+    ]
+    approved_live_job_id = store.create_investigation(
+        ["synthetic.person"],
+        {
+            "investigation_spec": {
+                "pipeline_id": "p2-e2e-v1",
+                "processing_mode": "same_subject",
+                "subject_label": "Synthetic Person",
+                "identifiers": [
+                    {"type": "username", "value": "synthetic.person"}
+                ],
+                "discovery_basis": "approved_source_fetch",
+                "approved_source_urls": approved_urls,
+                "enable_approved_source_fetch": True,
+            }
+        },
+        kind="refresh",
+    )
     server = make_server("127.0.0.1", 0, journey["web"].app, threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -100,6 +121,50 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             page.locator('input[name="username"]').fill("pipeline-reviewer")
             page.locator('input[name="password"]').fill("Synthetic fixture password 2026!")
             page.locator('button[type="submit"]').click()
+
+            # Approved-source progress has its own runtime view. It must not
+            # touch absent profile-discovery stats, and two URLs using the same
+            # collector must remain two independently auditable rows.
+            page.goto(origin + f"/live/{approved_live_job_id}")
+            expect(page.get_by_role("heading", name="Approved source fetch")).to_be_visible()
+            page.evaluate(
+                """urls => {
+                    urls.forEach((sourceUrl, index) => onScanEvent({data: JSON.stringify({
+                        type: 'collector_planned',
+                        collector: 'approved_public_source_fetch',
+                        task_id: 'approved-task-' + index,
+                        input_type: 'public_url',
+                        input_value: sourceUrl,
+                        source_url: sourceUrl,
+                    })}));
+                    onScanEvent({data: JSON.stringify({
+                        type: 'approved_source_stage',
+                        collector: 'approved_public_source_fetch',
+                        task_id: 'approved-task-0',
+                        input_type: 'public_url',
+                        input_value: urls[0],
+                        source_url: urls[0],
+                        stage: 'maigret',
+                        status: 'running',
+                        message: 'Running exact-site Maigret parser.',
+                    })});
+                    onScanEvent({data: JSON.stringify({
+                        type: 'collector_completed',
+                        collector: 'approved_public_source_fetch',
+                        task_id: 'approved-task-0',
+                        input_type: 'public_url',
+                        input_value: urls[0],
+                        source_url: urls[0],
+                        outcome: 'candidate',
+                        observations: 2,
+                    })});
+                }""",
+                approved_urls,
+            )
+            expect(page.locator("#engine-progress-body tr")).to_have_count(2)
+            expect(page.locator("#stat-approved-completed")).to_have_text("1")
+            expect(page.locator("#engine-progress-body")).to_contain_text(approved_urls[0])
+            expect(page.locator("#engine-progress-body")).to_contain_text(approved_urls[1])
 
             # Live progress keeps fixed proportional columns while changing
             # activity text, exposes the full value on hover, remains sortable,

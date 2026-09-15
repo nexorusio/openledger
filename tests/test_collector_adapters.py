@@ -3424,7 +3424,14 @@ async def test_official_website_fetch_blocks_non_public_resolution_before_reques
 
 
 @pytest.mark.asyncio
-async def test_approved_source_fetch_extracts_only_literal_public_metadata():
+async def test_approved_source_fetch_extracts_literal_and_maigret_fields(monkeypatch):
+    import socid_extractor
+
+    monkeypatch.setattr(
+        socid_extractor,
+        "extract",
+        lambda _html: {"location": "Jakarta, Indonesia"},
+    )
     calls = []
     page = b"""<!doctype html><html><head>
     <title>Jati Pratomo | profile</title>
@@ -3439,7 +3446,16 @@ async def test_approved_source_fetch_extracts_only_literal_public_metadata():
     </head><body>Public profile</body></html>"""
 
     observation = await run_approved_public_source_fetch(
-        {"profile_url": "https://example.org/people/jati"},
+        {
+            "profile_url": "https://example.org/people/jati",
+            "maigret_site_name": "Fixture profile",
+            "maigret_public_headers": {
+                "User-Agent": "Maigret fixture browser",
+                "Accept-Language": "id-ID,id;q=0.9",
+                "Authorization": "Bearer must-not-be-forwarded",
+                "Cookie": "session=must-not-be-forwarded",
+            },
+        },
         host_resolver=lambda _hostname, _port: ["93.184.216.34"],
         session_factory=lambda **options: _FakeSession(
             _FakeResponse(
@@ -3465,7 +3481,10 @@ async def test_approved_source_fetch_extracts_only_literal_public_metadata():
         ("full_name", "Jati Pratomo"),
         ("occupation", "Geospatial analyst"),
         ("affiliation", "Nexorus"),
+        ("current_location", "Jakarta, Indonesia"),
     }
+    assert observation["extra"]["maigret_site_name"] == "Fixture profile"
+    assert observation["extra"]["maigret_parser_fields"] == ["location"]
     request = calls[1][1]
     assert request == {
         "url": "https://93.184.216.34/people/jati",
@@ -3473,6 +3492,11 @@ async def test_approved_source_fetch_extracts_only_literal_public_metadata():
         "headers": {"Host": "example.org"},
         "server_hostname": "example.org",
     }
+    session_headers = calls[0][1]["headers"]
+    assert session_headers["User-Agent"] == "Maigret fixture browser"
+    assert session_headers["Accept-Language"] == "id-ID,id;q=0.9"
+    assert "Authorization" not in session_headers
+    assert "Cookie" not in session_headers
 
 
 @pytest.mark.asyncio
@@ -3492,6 +3516,40 @@ async def test_approved_source_fetch_records_access_block_instead_of_silent_fail
     assert observation["http_status"] == 403
     assert observation["claims"] == []
     assert "not treated as missing evidence" in observation["reason"]
+
+
+def test_approved_source_applies_maigret_parser_only_to_whitelisted_fields(
+    monkeypatch,
+):
+    import socid_extractor
+
+    monkeypatch.setattr(
+        socid_extractor,
+        "extract",
+        lambda _html: {
+            "location": "Jakarta, Indonesia",
+            "job_title": "Data & GeoInt Enthusiast",
+            "avatar": "https://cdn.example.test/jati.jpg",
+            "username": "must-not-become-a-persona-field",
+            "links": ["https://unrelated.example.test/profile"],
+        },
+    )
+
+    claims, fields = collector_module._approved_maigret_parser_claims(
+        b"<html>public profile</html>",
+        "https://www.linkedin.com/in/jati-pratomo/",
+    )
+
+    assert {(claim["predicate"], claim["value"]) for claim in claims} == {
+        ("current_location", "Jakarta, Indonesia"),
+        ("occupation", "Data & GeoInt Enthusiast"),
+        ("photograph", "https://cdn.example.test/jati.jpg"),
+    }
+    assert set(fields) == {"location", "job_title", "avatar"}
+    assert all(
+        claim["qualifiers"]["automatic_approval_allowed"] is False
+        for claim in claims
+    )
 
 
 def test_business_context_states_basis_and_never_converts_dns_to_operations():

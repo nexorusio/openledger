@@ -97,6 +97,20 @@ def test_live_crawl_audit_download_is_bounded_and_redacts_secrets(
             "raw_body": "private response body",
         },
     )
+    persistent_store.append_event(
+        job_id,
+        {
+            "type": "approved_source_stage",
+            "collector": "approved_public_source_fetch",
+            "task_id": "approved-source-task",
+            "source_url": "https://example.test/profile",
+            "stage": "literal_page",
+            "status": "completed",
+            "message": "The public page returned an access block.",
+            "http_status": 403,
+            "claim_count": 0,
+        },
+    )
 
     live_page = client.get(f"/live/{job_id}").get_data(as_text=True)
     assert f'/live/{job_id}/crawl-audit.json' in live_page
@@ -118,7 +132,104 @@ def test_live_crawl_audit_download_is_bounded_and_redacts_secrets(
     assert "do-not-export" not in serialized
     assert "private response body" not in serialized
     assert "[redacted]" in serialized
+    approved_source = next(
+        item
+        for item in payload["engines"]
+        if item["engine"] == "approved_public_source_fetch"
+    )
+    assert approved_source["stages"][0]["stage"] == "literal_page"
+    assert approved_source["stages"][0]["http_status"] == 403
     assert "[raw content omitted]" in serialized
+
+
+def test_approved_source_live_page_tracks_each_url_without_profile_stat_nodes(
+    client, persistent_store
+):
+    urls = [
+        "https://www.linkedin.com/in/jati-pratomo/",
+        "https://www.threads.com/@djhat_prtm",
+    ]
+    job_id = persistent_store.create_investigation(
+        ["jati-pratomo"],
+        {
+            "investigation_spec": {
+                "pipeline_id": "p2-e2e-v1",
+                "processing_mode": "same_subject",
+                "subject_label": "Jati Pratomo",
+                "identifiers": [
+                    {"type": "username", "value": "jati-pratomo"}
+                ],
+                "discovery_basis": "approved_source_fetch",
+                "approved_source_urls": urls,
+            }
+        },
+        kind="refresh",
+    )
+
+    page = client.get(f"/live/{job_id}").get_data(as_text=True)
+
+    assert "const isApprovedSourceFetch = true;" in page
+    assert "const isProfileDiscovery = false;" in page
+    assert 'id="stat-approved-completed">0</span> /' in page
+    assert "const sourceUrl = String(ev.source_url || ev.input_value || '');" in page
+    assert "let key = String(ev.task_id" in page
+    assert "ev.type === 'approved_source_stage'" in page
+
+
+def test_approved_source_events_update_durable_per_url_progress(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:approved-progress")
+    common = {
+        "collector": "approved_public_source_fetch",
+        "task_id": "approved-task-1",
+        "source_url": "https://example.test/alice",
+        "total": 2,
+    }
+    persistent_store.append_event(
+        job_id,
+        {"type": "collector_planned", **common},
+        runtime_guard=True,
+        worker_id=job["worker_id"],
+    )
+    persistent_store.append_event(
+        job_id,
+        {
+            "type": "approved_source_stage",
+            **common,
+            "stage": "cited_fallback",
+            "message": "Checking an exact-profile public index excerpt.",
+        },
+        runtime_guard=True,
+        worker_id=job["worker_id"],
+    )
+    persistent_store.append_event(
+        job_id,
+        {"type": "collector_completed", **common},
+        runtime_guard=True,
+        worker_id=job["worker_id"],
+    )
+    persistent_store.append_event(
+        job_id,
+        {"type": "collector_completed", **common},
+        runtime_guard=True,
+        worker_id=job["worker_id"],
+    )
+
+    progress = persistent_store.get_job(job_id)["progress"]
+    assert progress["checked"] == 1
+    assert progress["total"] == 2
+    assert progress["phase"] == "source_completed"
+    assert progress["source_url"] == "https://example.test/alice"
+    runtime = client.get(f"/api/scan/{job_id}/runtime").get_json()
+    assert runtime["approved_source_progress"] == {
+        "checked": 1,
+        "total": 2,
+        "phase": "source_completed",
+        "message": "Checking an exact-profile public index excerpt.",
+        "source_url": "https://example.test/alice",
+    }
 
 
 def test_legacy_search_route_uses_the_same_governed_persistent_queue(
