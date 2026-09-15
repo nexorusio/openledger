@@ -11,7 +11,7 @@
     </div>
     <div class="heading-actions">
         <a class="btn btn-outline-secondary" href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}"><i data-lucide="refresh-cw"></i> Run investigation</a>
-        <a class="btn btn-outline-secondary" href="{{ url_for('relationships_workspace', mode='persona', case_id=persona.case_id, persona_id=persona.id, view='working') }}"><i data-lucide="share-2"></i> Relationship evidence</a>
+        <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.relationships', case_id=persona.case_id, persona_id=persona.id) }}"><i data-lucide="share-2"></i> Relationship evidence</a>
     </div>
 </section>
 

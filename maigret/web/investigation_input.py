@@ -288,6 +288,7 @@ def build_investigation_plan(
     enable_user_scanner_username = "enable_user_scanner_username" in form
     enable_github_profile_enrichment = "enable_github_profile_enrichment" in form
     enable_archived_url_evidence = "enable_archived_url_evidence" in form
+    enable_approved_source_fetch = "enable_approved_source_fetch" in form
     requested_username_platforms = _form_list(form, "user_scanner_platform")
     if (
         enable_user_scanner_username
@@ -726,6 +727,7 @@ def build_investigation_plan(
         "allow_user_scanner_vxtwitter": allow_user_scanner_vxtwitter,
         "enable_github_profile_enrichment": enable_github_profile_enrichment,
         "enable_archived_url_evidence": enable_archived_url_evidence,
+        "enable_approved_source_fetch": enable_approved_source_fetch,
         "subject_label": subject_label,
         "subject_groups": subject_groups,
         "identifiers": identifiers,
@@ -770,6 +772,7 @@ def build_approved_research_plan(subject_label: Any) -> Dict[str, Any]:
         "allow_user_scanner_vxtwitter": False,
         "enable_github_profile_enrichment": False,
         "enable_archived_url_evidence": False,
+        "enable_approved_source_fetch": False,
         "subject_label": label,
         "subject_groups": [{"label": label, "usernames": [], "identifiers": []}],
         "identifiers": [],

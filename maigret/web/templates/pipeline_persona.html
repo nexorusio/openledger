@@ -25,10 +25,16 @@
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
             <button class="btn btn-outline-secondary" type="submit" data-busy-label="Preparing PDF…"><i data-lucide="file-down"></i> Export Persona PDF</button>
         </form>
+        {% if source_fetch_available %}
+        <form method="post" action="{{ url_for('pipeline.fetch_approved_sources', case_id=persona.case_id, persona_id=persona.id) }}">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-primary" type="submit" data-busy-label="Fetching approved sources…"><i data-lucide="download"></i> Fetch approved sources ({{ approved.source_urls | length }})</button>
+        </form>
+        {% endif %}
         {% if discovery_available %}
         <form method="post" action="{{ url_for('pipeline.discover_related', case_id=persona.case_id, persona_id=persona.id) }}">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="btn btn-primary" type="submit" data-busy-label="Queueing cross-check…"><i data-lucide="sparkles"></i> AI cross-check &amp; discover</button>
+            <button class="btn btn-outline-secondary" type="submit" data-busy-label="Queueing research…"><i data-lucide="sparkles"></i> Research with cited sources</button>
         </form>
         {% endif %}
     </div>
@@ -44,7 +50,7 @@
 
 <section class="persona-notice" aria-label="Discovery policy">
     <i data-lucide="shield-check"></i>
-    <div><strong>All approved evidence is reusable</strong><span>The cross-check sends every approved name, contact, profile, identifier, location, affiliation, role and website as a bounded research anchor. Cited discoveries return to Step 1 and are never auto-approved.</span></div>
+    <div><strong>Approved sources can be fetched deliberately</strong><span>Fetch approved sources makes a bounded, unauthenticated request to each exact approved public URL. Extracted fields return to Step 1 for review. A login wall, rate limit, or access denial is shown as access blocked—not as missing evidence—and OpenLedger does not bypass it. Cited research remains a separate cross-source action.</span></div>
 </section>
 
 {% if approved.map_points %}
@@ -82,7 +88,7 @@
                     <tbody>
                     {% for item in section['items'] %}
                     <tr>
-                        <td data-sort-value="{{ item.label }}">{% if item.url %}<a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.label }}</a>{% else %}{{ item.label }}{% endif %}{% if item.decision_reason %}<small title="{{ item.decision_reason }}">{{ item.decision_reason }}</small>{% endif %}</td>
+                        <td data-sort-value="{{ item.label }}">{% if item.url %}<a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.label }}</a>{% else %}{{ item.label }}{% endif %}{% if item.decision_reason %}<small title="{{ item.decision_reason }}">{{ item.decision_reason }}</small>{% endif %}{% if item.source_fetch %}<small title="{{ item.source_fetch.reason }}">Source fetch: {{ item.source_fetch.status | replace('_', ' ') | title }}{% if item.source_fetch.http_status %} · HTTP {{ item.source_fetch.http_status }}{% endif %}{% if item.source_fetch.claim_candidate_count %} · {{ item.source_fetch.claim_candidate_count }} proposal{{ '' if item.source_fetch.claim_candidate_count == 1 else 's' }}{% endif %}</small>{% endif %}</td>
                         <td data-sort-value="{{ item.kind }} {{ item.normalized.predicate | default('') }}">{{ item.normalized.predicate | default(item.kind, true) | replace('_', ' ') | title }}</td>
                         <td class="approved-persona-actions">
                             <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}">View evidence</a>

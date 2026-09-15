@@ -12,6 +12,7 @@ from maigret.web.collector_adapters import (
     FR_BUSINESS_REGISTRY_URL,
     GLEIF_API_URL,
     GLEIF_ENGINE,
+    APPROVED_SOURCE_FETCH_ENGINE,
     GITHUB_API_BASE_URL,
     GITHUB_API_VERSION,
     GITHUB_ENGINE,
@@ -74,6 +75,7 @@ from maigret.web.collector_adapters import (
     run_gleif_legal_entity_search,
     run_google_places_business_search,
     run_google_places_live_details,
+    run_approved_public_source_fetch,
     run_cloudflare_dns_context,
     run_icij_offshore_match,
     run_official_website_public_content,
@@ -3419,6 +3421,77 @@ async def test_official_website_fetch_blocks_non_public_resolution_before_reques
             ),
         )
     assert [item for item in calls if item[0] == "get"] == []
+
+
+@pytest.mark.asyncio
+async def test_approved_source_fetch_extracts_only_literal_public_metadata():
+    calls = []
+    page = b"""<!doctype html><html><head>
+    <title>Jati Pratomo | profile</title>
+    <meta property="og:description" content="Public profile summary.">
+    <meta property="og:image" content="https://cdn.example.org/jati.jpg">
+    <script type="application/ld+json">{
+      "@type": "Person",
+      "name": "Jati Pratomo",
+      "jobTitle": "Geospatial analyst",
+      "worksFor": {"@type": "Organization", "name": "Nexorus"}
+    }</script>
+    </head><body>Public profile</body></html>"""
+
+    observation = await run_approved_public_source_fetch(
+        {"profile_url": "https://example.org/people/jati"},
+        host_resolver=lambda _hostname, _port: ["93.184.216.34"],
+        session_factory=lambda **options: _FakeSession(
+            _FakeResponse(
+                status=200,
+                body=page,
+                headers={"Content-Type": "text/html; charset=utf-8"},
+            ),
+            calls,
+            **options,
+        ),
+    )
+
+    assert observation["source_engine"] == APPROVED_SOURCE_FETCH_ENGINE
+    assert observation["status"] == "observed"
+    assert observation["extra"]["human_review_required"] is True
+    assert observation["extra"]["automatic_approval_allowed"] is False
+    assert {
+        (claim["predicate"], claim["value"])
+        for claim in observation["claims"]
+    } == {
+        ("summary", "Public profile summary."),
+        ("photograph", "https://cdn.example.org/jati.jpg"),
+        ("full_name", "Jati Pratomo"),
+        ("occupation", "Geospatial analyst"),
+        ("affiliation", "Nexorus"),
+    }
+    request = calls[1][1]
+    assert request == {
+        "url": "https://93.184.216.34/people/jati",
+        "allow_redirects": False,
+        "headers": {"Host": "example.org"},
+        "server_hostname": "example.org",
+    }
+
+
+@pytest.mark.asyncio
+async def test_approved_source_fetch_records_access_block_instead_of_silent_failure():
+    calls = []
+    observation = await run_approved_public_source_fetch(
+        {"profile_url": "https://example.org/people/jati"},
+        host_resolver=lambda _hostname, _port: ["93.184.216.34"],
+        session_factory=lambda **options: _FakeSession(
+            _FakeResponse(status=403, headers={"Content-Type": "text/html"}),
+            calls,
+            **options,
+        ),
+    )
+
+    assert observation["status"] == "access_blocked"
+    assert observation["http_status"] == 403
+    assert observation["claims"] == []
+    assert "not treated as missing evidence" in observation["reason"]
 
 
 def test_business_context_states_basis_and_never_converts_dns_to_operations():
