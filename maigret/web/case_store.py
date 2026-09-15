@@ -2916,6 +2916,35 @@ class CaseStore:
                     pass
             elif event_type == "found":
                 progress["found"] = int(progress.get("found", 0)) + 1
+            elif (
+                event_type == "collector_planned"
+                and event.get("collector") == "approved_public_source_fetch"
+            ):
+                progress["total"] = max(
+                    0, int(event.get("total") or progress.get("total") or 0)
+                )
+            elif event_type == "approved_source_stage":
+                progress["phase"] = str(event.get("stage") or "source")[:64]
+                progress["message"] = str(event.get("message") or "")[:500]
+                progress["source_url"] = str(event.get("source_url") or "")[:8000]
+            elif (
+                event_type == "collector_completed"
+                and event.get("collector") == "approved_public_source_fetch"
+            ):
+                total = max(0, int(event.get("total") or progress.get("total") or 0))
+                progress["total"] = total
+                completed_task_ids = list(
+                    progress.get("approved_source_completed_task_ids") or []
+                )[:20]
+                task_id = str(event.get("task_id") or "")[:200]
+                if task_id and task_id not in completed_task_ids:
+                    completed_task_ids.append(task_id)
+                progress["approved_source_completed_task_ids"] = completed_task_ids
+                progress["checked"] = min(
+                    total or len(completed_task_ids), len(completed_task_ids)
+                )
+                progress["phase"] = "source_completed"
+                progress["source_url"] = str(event.get("source_url") or "")[:8000]
             progress_updates["progress"] = progress
             # Queueing and other control-plane events are not worker activity.
             # Only an owner-guarded runtime event may renew the worker lease.

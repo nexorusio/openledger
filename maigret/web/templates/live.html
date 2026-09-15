@@ -6,7 +6,7 @@
     <div>
         <p class="eyebrow">Active investigation</p>
         <h1>{{ 'Approved source fetch' if is_approved_source_fetch else 'Combined investigation' if job_kind == 'case_fusion' else 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live source discovery' }}</h1>
-        <p class="page-description">{{ 'OpenLedger is fetching only the exact public URLs approved in this Persona. Extracted fields return to Step 1 and are never approved automatically.' if is_approved_source_fetch else 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Every compatible source engine runs independently. Results are consolidated and ranked before the operator sees a concise review list.' }}</p>
+        <p class="page-description">{{ 'For each exact approved profile, OpenLedger matches its Maigret site definition and applies Maigret structured parsing to a safety-bounded public-page response. If useful fields are still unavailable, it checks cited public index excerpts for that same profile. Every recovered field returns to Step 1 and is never approved automatically.' if is_approved_source_fetch else 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Every compatible source engine runs independently. Results are consolidated and ranked before the operator sees a concise review list.' }}</p>
     </div>
     <div class="heading-actions">
         <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open combined case' if job_kind == 'case_fusion' else 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Review findings' }}</a>
@@ -31,7 +31,8 @@
         <div class="live-stat"><span>Output</span><strong>Versioned evidence</strong></div>
         {% elif is_approved_source_fetch %}
         <div class="live-stat"><span>Approved URLs</span><strong>{{ approved_source_count }}</strong></div>
-        <div class="live-stat"><span>Collection scope</span><strong>Exact public pages only</strong></div>
+        <div class="live-stat"><span>URLs completed</span><strong><span id="stat-approved-completed">0</span> / <span id="stat-approved-total">{{ approved_source_count }}</span></strong></div>
+        <div class="live-stat"><span>Collection method</span><strong>Maigret + exact-source fallback</strong></div>
         <div class="live-stat"><span>Output</span><strong>Pending Step 1 review</strong></div>
         {% elif job_kind == 'identity_enrichment' %}
         <div class="live-stat"><span>Sources</span><strong>Wikipedia + ICIJ</strong></div>
@@ -106,7 +107,8 @@
     const isAffiliation = {{ (job_kind == 'affiliation')|tojson }};
     const isIdentityEnrichment = {{ (job_kind == 'identity_enrichment')|tojson }};
     const isApprovedSourceFetch = {{ is_approved_source_fetch|tojson }};
-    const isProfileDiscovery = {{ (job_kind in ('live', 'refresh'))|tojson }};
+    const isProfileDiscovery = {{ (job_kind in ('live', 'refresh') and not is_approved_source_fetch)|tojson }};
+    const tracksRuntimeState = isProfileDiscovery || isApprovedSourceFetch;
     const doneRedirect = {{ done_redirect|tojson }};
     const csrfToken = {{ csrf_token|tojson }};
     const initialRuntimeState = {{ runtime_state|tojson }};
@@ -137,6 +139,7 @@
     let runtimePollTimer = null;
     let runtimeClockTimer = null;
     let evtSource = null;
+    const completedApprovedSources = new Set();
 
     function runtimeIsTerminal(status) {
         return ['completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted'].includes(status);
@@ -175,6 +178,7 @@
         if (!isProfileDiscovery) return;
         const remaining = document.getElementById('stat-remaining');
         const heartbeat = document.getElementById('stat-heartbeat');
+        if (!remaining || !heartbeat) return;
         if (runtimeState.status === 'queued') {
             remaining.textContent = 'Starts when running';
         } else if (runtimeState.deadline_at && !runtimeIsTerminal(runtimeState.status)) {
@@ -209,16 +213,39 @@
 
     function applyRuntimeState(next, updateHeadline = false) {
         runtimeState = {...runtimeState, ...(next || {})};
-        if (!isProfileDiscovery) return;
-        document.getElementById('stat-mode').textContent = runtimeState.mode_label
-            || (runtimeState.mode === 'exhaustive' ? 'Exhaustive' : 'Focused');
-        document.getElementById('stat-budget').textContent =
-            Math.round(Number(runtimeState.budget_seconds || 0) / 60) + ' minutes';
         const badgeStatus = runtimeState.status === 'completed' && runtimeState.collection_status
             ? 'partial · ' + runtimeState.collection_status.replaceAll('_', ' ')
             : String(runtimeState.status || 'queued').replaceAll('_', ' ');
-        document.getElementById('runtime-badge').textContent = badgeStatus;
-        refreshRuntimeClock();
+        const badge = document.getElementById('runtime-badge');
+        if (badge) badge.textContent = badgeStatus;
+        if (isProfileDiscovery) {
+            const mode = document.getElementById('stat-mode');
+            const budget = document.getElementById('stat-budget');
+            if (mode) mode.textContent = runtimeState.mode_label
+                || (runtimeState.mode === 'exhaustive' ? 'Exhaustive' : 'Focused');
+            if (budget) budget.textContent =
+                Math.round(Number(runtimeState.budget_seconds || 0) / 60) + ' minutes';
+            refreshRuntimeClock();
+        }
+        const approvedProgress = runtimeState.approved_source_progress || {};
+        if (isApprovedSourceFetch) {
+            const checked = Math.max(0, Number(approvedProgress.checked || 0));
+            const configuredTotal = Number(
+                document.getElementById('stat-approved-total')?.textContent || 0
+            );
+            const total = Math.max(
+                configuredTotal,
+                Number(approvedProgress.total || 0)
+            );
+            const completed = document.getElementById('stat-approved-completed');
+            const totalElement = document.getElementById('stat-approved-total');
+            if (completed) completed.textContent = checked;
+            if (totalElement) totalElement.textContent = total;
+            if (total > 0) {
+                document.getElementById('live-progress').style.width =
+                    Math.min(checked, total) / total * 100 + '%';
+            }
+        }
 
         const statusEl = document.getElementById('live-status');
         if (runtimeState.status === 'queued') {
@@ -239,6 +266,8 @@
             statusEl.textContent = 'Cancellation confirmed — partial findings were retained for analyst review.';
         } else if (runtimeState.status === 'completed' && runtimeState.collection_status === 'interrupted') {
             statusEl.textContent = 'Investigation interrupted — partial findings were retained; no automatic retry was started.';
+        } else if (isApprovedSourceFetch && runtimeState.status === 'running' && approvedProgress.message) {
+            statusEl.textContent = approvedProgress.message;
         } else if (updateHeadline && runtimeState.status === 'running') {
             statusEl.textContent = 'Running within the server-owned runtime budget…';
         }
@@ -248,7 +277,7 @@
     }
 
     async function pollRuntimeState() {
-        if (!isProfileDiscovery || runtimeIsTerminal(runtimeState.status)) return;
+        if (!tracksRuntimeState || runtimeIsTerminal(runtimeState.status)) return;
         try {
             const response = await fetch('/api/scan/' + jobId + '/runtime', {cache: 'no-store'});
             if (!response.ok) return;
@@ -285,15 +314,18 @@
     function updateCollector(ev, status, activity, result) {
         const collector = String(ev.collector || ev.site || 'discovery');
         const qualifier = String(ev.platform || ev.input_type || '');
-        let key = collector + ':' + qualifier;
+        const sourceUrl = String(ev.source_url || ev.input_value || '');
+        let key = String(ev.task_id || (collector + ':' + qualifier));
         if (!qualifier) {
-            key = Array.from(collectorRows.keys()).find(item => item.startsWith(collector + ':')) || key;
+            key = String(ev.task_id || Array.from(collectorRows.keys()).find(item => item.startsWith(collector + ':')) || key);
         }
         let row = collectorRows.get(key);
         if (!row) {
             row = document.createElement('tr');
             row.dataset.collector = key;
-            row.dataset.label = collectorLabel(collector) + (qualifier ? ' · ' + collectorLabel(qualifier) : '');
+            row.dataset.label = isApprovedSourceFetch && sourceUrl
+                ? sourceUrl
+                : collectorLabel(collector) + (qualifier ? ' · ' + collectorLabel(qualifier) : '');
             row.innerHTML = '<td></td><td></td><td></td><td></td>';
             collectorRows.set(key, row);
             document.getElementById('engine-progress-empty')?.remove();
@@ -388,12 +420,14 @@
                 deadline_at: budget.deadline_at,
             }, true);
         } else if (ev.type === 'start') {
-            document.getElementById('stat-total').textContent = ev.total;
+            const total = document.getElementById('stat-total');
+            if (total) total.textContent = ev.total;
             statusEl.textContent = isCaseFusion
                 ? 'Capturing approved evidence from the selected cases…'
                 : 'Scanning ' + ev.username + '…';
         } else if (ev.type === 'progress') {
-            document.getElementById('stat-checked').textContent = ev.checked;
+            const checked = document.getElementById('stat-checked');
+            if (checked) checked.textContent = ev.checked;
             if (isCaseFusion) statusEl.textContent = 'Finalizing the approved-evidence snapshot…';
             if (ev.total) {
                 const pct = Math.min(ev.checked, ev.total) / ev.total * 100;
@@ -407,14 +441,17 @@
             if (doneRedirect) window.location.replace(doneRedirect);
         } else if (ev.type === 'found') {
             foundCount++;
-            document.getElementById('stat-found').textContent = foundCount;
+            const found = document.getElementById('stat-found');
+            if (found) found.textContent = foundCount;
         } else if (ev.type === 'candidate') {
             candidateCount++;
-            document.getElementById('stat-candidates').textContent = candidateCount;
+            const candidates = document.getElementById('stat-candidates');
+            if (candidates) candidates.textContent = candidateCount;
             statusEl.textContent = ev.site + ' returned a low-signal hit retained for review.';
         } else if (ev.type === 'suppressed') {
             suppressedCount++;
-            document.getElementById('stat-suppressed').textContent = suppressedCount;
+            const suppressed = document.getElementById('stat-suppressed');
+            if (suppressed) suppressed.textContent = suppressedCount;
             statusEl.textContent = ev.site + ' returned an unreliable detector hit; it was suppressed.';
         } else if (ev.type === 'collector_planned') {
             updateCollector(ev, 'queued', 'Waiting for an execution slot', '—');
@@ -438,14 +475,29 @@
                 'official-website-content': 'Reading bounded public content from the supplied organization website…',
                 'cloudflare-dns-context': 'Collecting current DNS context for the supplied official website…',
                 'public-record-enrichment': 'Checking Wikipedia and ICIJ using the approved full name…',
-                'approved_public_source_fetch': 'Reading the exact approved public page without login or script execution…',
+                'approved_public_source_fetch': 'Matching and enriching the exact approved profile with Maigret parsing…',
                 'openai_ranking': 'Ranking the consolidated source-backed findings for operator review…',
             };
             statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
             updateCollector(ev, 'running', statusEl.textContent, 'Collecting');
             const bar = document.getElementById('live-progress');
-            bar.style.width = '100%';
-            bar.classList.add('progress-bar-striped', 'progress-bar-animated');
+            if (!isApprovedSourceFetch) {
+                bar.style.width = '100%';
+                bar.classList.add('progress-bar-striped', 'progress-bar-animated');
+            }
+        } else if (ev.type === 'approved_source_stage') {
+            statusEl.textContent = ev.message || 'Processing one approved source…';
+            const counts = [];
+            if (ev.claim_count !== undefined) counts.push(Number(ev.claim_count) + ' structured fields');
+            if (ev.citation_count !== undefined) counts.push(Number(ev.citation_count) + ' citations');
+            if (ev.proposal_count !== undefined) counts.push(Number(ev.proposal_count) + ' proposals');
+            if (ev.http_status) counts.push('HTTP ' + ev.http_status);
+            updateCollector(
+                ev,
+                String(ev.status || 'running').replaceAll('_', ' '),
+                ev.message || String(ev.stage || 'processing').replaceAll('_', ' '),
+                counts.join(' · ') || 'In progress'
+            );
         } else if (ev.type === 'collector_completed') {
             if (ev.collector === 'github-public-profile') {
                 githubEnrichmentCount += Number(ev.found || 0);
@@ -491,7 +543,7 @@
                 'official-website-content': 'Published website statements were retained with direct provenance and pending review.',
                 'cloudflare-dns-context': 'DNS context collected as observation-only technical evidence.',
                 'public-record-enrichment': 'Public-record checks completed. Every proposal remains pending review.',
-                'approved_public_source_fetch': 'Approved public page processed. Extracted fields remain pending review.',
+                'approved_public_source_fetch': 'Approved-source enrichment completed. Extracted fields remain pending review.',
                 'openai_ranking': 'Consolidated findings ranked. Operator approval is still required.',
             };
             statusEl.textContent = completedMessages[ev.collector] || 'Additional evidence collected.';
@@ -502,6 +554,16 @@
                 ? evidenceCount + ' evidence records' + (warnings ? ' · ' + warnings + ' unavailable checks' : '')
                 : Number(ev.ranked_findings) + ' eligible findings ranked · ' + Number(ev.shortlisted_findings || 0) + ' shortlisted';
             updateCollector(ev, status, ev.diagnostic || 'Finished', result);
+            if (isApprovedSourceFetch && ev.collector === 'approved_public_source_fetch') {
+                completedApprovedSources.add(String(ev.task_id));
+                const completed = document.getElementById('stat-approved-completed');
+                const total = Number(document.getElementById('stat-approved-total')?.textContent || 0);
+                if (completed) completed.textContent = completedApprovedSources.size;
+                if (total > 0) {
+                    document.getElementById('live-progress').style.width =
+                        Math.min(completedApprovedSources.size, total) / total * 100 + '%';
+                }
+            }
         } else if (ev.type === 'collector_error') {
             document.getElementById('live-progress').classList.remove('progress-bar-striped', 'progress-bar-animated');
             const errorMessages = {
@@ -585,7 +647,7 @@
     document.getElementById('stopBtn').addEventListener('click', stopScan);
 
     applyRuntimeState(initialRuntimeState, true);
-    if (isProfileDiscovery && !runtimeIsTerminal(runtimeState.status)) {
+    if (tracksRuntimeState && !runtimeIsTerminal(runtimeState.status)) {
         runtimeClockTimer = window.setInterval(refreshRuntimeClock, 1000);
         runtimePollTimer = window.setInterval(pollRuntimeState, 5000);
         pollRuntimeState();

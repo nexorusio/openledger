@@ -81,6 +81,16 @@ def test_every_registered_builtin_dispatches_through_its_callable(monkeypatch, s
         calls.append((args, kwargs))
         return {"outcome": "candidate", "observations": [{"status": "observed"}]}
 
+    async def approved_envelope(task, context):
+        calls.append(((task, context), {}))
+        observation = {
+            "status": "observed",
+            "source_url": "https://example.test/profile",
+        }
+        context.raw_collector_observations.append(observation)
+        context.emit_observations([observation])
+        return {"outcome": "candidate"}
+
     # Stub only the lower-level provider boundary. Registry selection, wrappers,
     # argument adaptation and observation emission remain real.
     capability = spec.capability
@@ -89,6 +99,7 @@ def test_every_registered_builtin_dispatches_through_its_callable(monkeypatch, s
     monkeypatch.setattr(pipeline_execution, "_maigret_adapter", envelope)
     monkeypatch.setattr(pipeline_execution, "_native_adapter", envelope)
     monkeypatch.setattr(pipeline_execution, "_cited_research_adapter", envelope)
+    monkeypatch.setattr(builtin, "collect_approved_source", approved_envelope)
     monkeypatch.setattr(
         pipeline_public_search, "collect_public_exact_matches", envelope
     )
@@ -205,6 +216,146 @@ def test_exact_profile_url_collector_preserves_linkedin_slug(monkeypatch):
         "investigated_username": "jati-pratomo",
         "site_name": "linkedin.com",
     }
+
+
+def test_approved_maigret_target_requires_the_exact_profile_path():
+    from maigret.web.connectors.builtin import _approved_maigret_target
+
+    sites = [
+        SimpleNamespace(
+            name="LinkedIn",
+            url="https://linkedin.com/in/{username}",
+            disabled=False,
+            type="username",
+        ),
+        SimpleNamespace(
+            name="Threads mirror",
+            url="https://mirror.example/@{username}",
+            disabled=False,
+            type="username",
+        ),
+    ]
+
+    assert _approved_maigret_target(
+        "https://id.linkedin.com/in/jati-pratomo/", sites
+    ) == ("LinkedIn", "jati-pratomo")
+    assert _approved_maigret_target(
+        "https://id.linkedin.com/in/another-person/", sites
+    ) == ("LinkedIn", "another-person")
+    assert _approved_maigret_target(
+        "https://mirror.example/not-the-profile/jati-pratomo", sites
+    ) is None
+
+
+def test_approved_source_runs_exact_cited_fallback_when_parsers_lack_fields(
+    monkeypatch,
+):
+    import maigret.sites as site_module
+    from maigret.web.connectors import builtin
+
+    source_url = "https://www.linkedin.com/in/jati-pratomo/"
+    site = SimpleNamespace(
+        name="LinkedIn",
+        url="https://linkedin.com/in/{username}",
+        disabled=False,
+        type="username",
+        headers={"User-Agent": "Maigret LinkedIn browser"},
+    )
+
+    class Database:
+        sites = [site]
+
+        def load_from_path(self, _path):
+            return self
+
+    direct_target = {}
+
+    async def direct_fetch(target, *, timeout_seconds):
+        direct_target.update(target)
+        return {
+            "source_engine": "approved_public_source_fetch",
+            "source_record_id": "direct",
+            "source_url": source_url,
+            "status": "observed",
+            "claims": [{"predicate": "summary", "value": "Indexed profile"}],
+            "extra": {"maigret_parser_fields": []},
+        }
+
+    fallback_tasks = []
+
+    async def cited_fallback(task, _context):
+        fallback_tasks.append(task)
+        return {"outcome": "candidate", "citation_count": 1, "proposal_count": 2}
+
+    app = SimpleNamespace(
+        app=SimpleNamespace(config={"MAIGRET_DB_FILE": "fixture.json"}),
+        record_internal_error=lambda *_args, **_kwargs: "fixture-error",
+    )
+    runtime = SimpleNamespace(
+        _app=lambda: app,
+        _cited_research_adapter=cited_fallback,
+        _aggregate_outcomes=lambda values: next(iter(values), "inconclusive"),
+    )
+    monkeypatch.setattr(site_module, "MaigretDatabase", Database)
+    monkeypatch.setattr(builtin, "_runtime", lambda: runtime)
+    monkeypatch.setattr(
+        builtin,
+        "_adapters",
+        lambda: SimpleNamespace(run_approved_public_source_fetch=direct_fetch),
+    )
+
+    emitted, events = [], []
+
+    class Pipeline:
+        def iter_observations(self, _case_id, _persona_id):
+            return iter(())
+
+    class Store:
+        def get_persona(self, _persona_id):
+            return {"display_name": "Jati Pratomo"}
+
+    context = SimpleNamespace(
+        task={"id": "task-1"},
+        options={},
+        job={"job_id": "job-1", "case_id": "case-1"},
+        request={"persona_id": "persona-1"},
+        pipeline=Pipeline(),
+        store=Store(),
+        sink=SimpleNamespace(put=events.append),
+        raw_collector_observations=[],
+        normalize=lambda _envelope, **_kwargs: [
+            {"claims": [{"predicate": "social_account", "value": source_url}]}
+        ],
+        emit=lambda envelope, **kwargs: emitted.append((envelope, kwargs)),
+        emit_observations=lambda rows, **kwargs: emitted.append((rows, kwargs)),
+    )
+    result = asyncio.run(
+        builtin.collect_approved_source(
+            {
+                "id": "task-1",
+                "input_value": source_url,
+                "timeout_seconds": 180,
+            },
+            context,
+        )
+    )
+
+    assert result["outcome"] == "candidate"
+    assert direct_target["investigated_username"] == "jati-pratomo"
+    assert direct_target["maigret_site_name"] == "LinkedIn"
+    assert direct_target["maigret_public_headers"] == {
+        "User-Agent": "Maigret LinkedIn browser"
+    }
+    assert fallback_tasks[0]["approved_source_url"] == source_url
+    assert [event["stage"] for event in events] == [
+        "maigret_catalogue",
+        "maigret_catalogue",
+        "literal_page",
+        "literal_page",
+        "maigret_parser",
+        "cited_fallback",
+        "cited_fallback",
+    ]
 
 
 @pytest.mark.parametrize(

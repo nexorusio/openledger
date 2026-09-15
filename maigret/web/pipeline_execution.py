@@ -182,8 +182,11 @@ class CollectorContext:
             self.persisted_ids.update(item["id"] for item in fresh)
             self.observation_count += len(fresh)
 
-    def emit_observations(self, observations):
-        self.emit({"collector_observations": list(observations or [])})
+    def emit_observations(self, observations, *, engine=None):
+        self.emit(
+            {"collector_observations": list(observations or [])},
+            engine=engine,
+        )
 
     def reserve_request(self, count=1, provider=None):
         from maigret.web.pipeline_runtime import PipelineRuntimeStore
@@ -403,6 +406,34 @@ async def dispatch_collector(task, context: CollectorContext):
     return await collect_registered(task, context)
 
 
+def _same_approved_profile_source(candidate_url, approved_url):
+    """Accept only the approved profile URL or a known host-localized alias."""
+    from urllib.parse import urlsplit
+
+    from maigret.web.pipeline_evidence import canonical_origin_url
+
+    candidate = canonical_origin_url(candidate_url)
+    approved = canonical_origin_url(approved_url)
+    if not candidate or not approved:
+        return False
+    if candidate == approved:
+        return True
+    candidate_parts, approved_parts = urlsplit(candidate), urlsplit(approved)
+    candidate_host = (candidate_parts.hostname or "").removeprefix("www.")
+    approved_host = (approved_parts.hostname or "").removeprefix("www.")
+
+    def is_linkedin(host):
+        return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+    host_alias = (
+        candidate_host == approved_host
+        or (is_linkedin(candidate_host) and is_linkedin(approved_host))
+    )
+    return host_alias and candidate_parts.path.rstrip("/").casefold() == (
+        approved_parts.path.rstrip("/").casefold()
+    )
+
+
 async def _cited_research_adapter(task, context):
     from maigret.ai import get_case_chat_response, get_case_chat_claim_proposals
     from maigret.web.persona_intelligence import extract_ai_persona_claims
@@ -414,23 +445,39 @@ async def _cited_research_adapter(task, context):
         raise ValueError("Cited research provider is not configured")
     case_context = context.store.get_case_chat_context(context.job["case_id"])
     model = settings.get("openai_model") or app_module.DEFAULT_SETTINGS["openai_model"]
+    started_at = time.monotonic()
+    total_timeout = max(20, int(task["timeout_seconds"]))
     response = await get_case_chat_response(
         api_key,
         case_context=case_context,
         conversation=[],
         user_message=task["input_value"],
         model=model,
-        timeout_seconds=min(105, task["timeout_seconds"]),
+        timeout_seconds=min(105, max(10, total_timeout - 65)),
         web_search_enabled=True,
         **app_module.ai_endpoint_options(),
     )
     sources = response.get("sources") or []
+    approved_source_url = str(task.get("approved_source_url") or "").strip()
+    if approved_source_url:
+        # Approved-source enrichment is intentionally narrower than ordinary
+        # case research: indexed excerpts must point back to this exact profile
+        # (including a localized LinkedIn hostname), not merely mention a name.
+        sources = [
+            item
+            for item in sources
+            if isinstance(item, Mapping)
+            and _same_approved_profile_source(item.get("url"), approved_source_url)
+        ]
     citation_rows = [
         {
             "source_engine": "openai_web_research",
             "source_record_id": "citation:" + str(index),
             "source_url": item.get("url"),
             "source_name": item.get("title"),
+            "origin_url": item.get("url"),
+            "derived_from": [item.get("url")],
+            "source_dependence": "search_excerpt_of_source",
             "status": "candidate",
             "observation_only": True,
             "payload": {
@@ -447,16 +494,22 @@ async def _cited_research_adapter(task, context):
     target_persona = str(
         persona.get("display_name") or context.request["persona_id"]
     )
-    raw_proposals = await get_case_chat_claim_proposals(
-        api_key=api_key,
-        target_persona=target_persona,
-        user_message=task["input_value"],
-        assistant_answer=response.get("analysis") or "",
-        sources=sources,
-        model=model,
-        timeout_seconds=60,
-        **app_module.ai_endpoint_options(),
-    )
+    raw_proposals = []
+    if sources or not approved_source_url:
+        proposal_timeout = min(
+            60,
+            max(10, total_timeout - int(time.monotonic() - started_at) - 5),
+        )
+        raw_proposals = await get_case_chat_claim_proposals(
+            api_key=api_key,
+            target_persona=target_persona,
+            user_message=task["input_value"],
+            assistant_answer=response.get("analysis") or "",
+            sources=sources,
+            model=model,
+            timeout_seconds=proposal_timeout,
+            **app_module.ai_endpoint_options(),
+        )
     candidates = extract_ai_persona_claims(
         [
             {**proposal, "username": target_persona}
@@ -495,6 +548,9 @@ async def _cited_research_adapter(task, context):
                 + str(candidate.get("fingerprint") or index),
                 "source_url": evidence.get("source_url"),
                 "source_name": evidence.get("source_name"),
+                "origin_url": evidence.get("source_url"),
+                "derived_from": [evidence.get("source_url")],
+                "source_dependence": "search_excerpt_of_source",
                 "status": "candidate",
                 "claims": [
                     {
@@ -511,7 +567,7 @@ async def _cited_research_adapter(task, context):
             }
         )
     rows = [*citation_rows, *claim_rows]
-    context.emit_observations(rows)
+    context.emit_observations(rows, engine="openai_web_research")
     context.raw_collector_observations.extend(rows)
     return {
         "outcome": "candidate" if claim_rows or citation_rows else "inconclusive",
@@ -565,6 +621,18 @@ async def rank_consolidated_findings(
     The model receives only retained, non-conflicting group summaries. It cannot create
     evidence, approve a finding, or change a deterministic assessment.
     """
+    collection_options = dict((context or {}).get("collection_options") or {})
+    specification = dict(collection_options.get("investigation_spec") or {})
+    if specification.get("discovery_basis") == "approved_source_fetch":
+        # This action already evaluates only exact approved URLs and, when
+        # needed, creates cited review proposals. Re-ranking every historic
+        # case finding added a second model wait without improving extraction.
+        return {
+            "status": "not_requested",
+            "ranked": 0,
+            "shortlisted": 0,
+            "reason": "Approved-source enrichment returns its new fields directly to Step 1 review.",
+        }
     controls = dict((context or {}).get("collection_controls") or {})
     if controls.get("allow_ai_context") is not True:
         return {"status": "not_requested", "ranked": 0, "shortlisted": 0}
@@ -695,6 +763,12 @@ async def _execute_requests(
     )
     semaphore = asyncio.Semaphore(_pipeline_concurrency())
     outcomes, collector_contexts = [], []
+    approved_source_total = sum(
+        1
+        for task in queue
+        if task.get("route_state") == "active"
+        and task.get("engine_id") == "approved_public_source_fetch"
+    )
     for task in queue:
         if task.get("route_state") == "active":
             sink.put(
@@ -704,6 +778,21 @@ async def _execute_requests(
                     "task_id": task["id"],
                     "platform": task.get("platform"),
                     "input_type": task.get("input_type"),
+                    "input_value": (
+                        task.get("input_value")
+                        if task.get("input_type") == "public_url"
+                        else None
+                    ),
+                    "source_url": (
+                        task.get("input_value")
+                        if task.get("input_type") == "public_url"
+                        else None
+                    ),
+                    "total": (
+                        approved_source_total
+                        if task.get("engine_id") == "approved_public_source_fetch"
+                        else None
+                    ),
                     "pipeline_id": "p2-e2e-v1",
                 }
             )
@@ -760,6 +849,21 @@ async def _execute_requests(
                         "attempt_id": attempt["id"],
                         "platform": task.get("platform"),
                         "input_type": task.get("input_type"),
+                        "input_value": (
+                            task.get("input_value")
+                            if task.get("input_type") == "public_url"
+                            else None
+                        ),
+                        "source_url": (
+                            task.get("input_value")
+                            if task.get("input_type") == "public_url"
+                            else None
+                        ),
+                        "total": (
+                            approved_source_total
+                            if task.get("engine_id") == "approved_public_source_fetch"
+                            else None
+                        ),
                         "pipeline_id": "p2-e2e-v1",
                     }
                 )
@@ -921,6 +1025,21 @@ async def _execute_requests(
                         "task_id": task["id"],
                         "platform": task.get("platform"),
                         "input_type": task.get("input_type"),
+                        "input_value": (
+                            task.get("input_value")
+                            if task.get("input_type") == "public_url"
+                            else None
+                        ),
+                        "source_url": (
+                            task.get("input_value")
+                            if task.get("input_type") == "public_url"
+                            else None
+                        ),
+                        "total": (
+                            approved_source_total
+                            if task.get("engine_id") == "approved_public_source_fetch"
+                            else None
+                        ),
                         "outcome": outcome,
                         "observations": evidence_observation_count,
                         "evidence_observations": evidence_observation_count,

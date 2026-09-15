@@ -4164,6 +4164,110 @@ def _approved_source_claims(document: Any, source_url: str) -> list[Dict[str, An
     return claims
 
 
+_APPROVED_MAIGRET_FIELD_ALIASES = {
+    "about": "summary",
+    "bio": "summary",
+    "biography": "summary",
+    "description": "summary",
+    "display_name": "full_name",
+    "displayname": "full_name",
+    "full_name": "full_name",
+    "fullname": "full_name",
+    "name": "full_name",
+    "avatar": "photograph",
+    "avatar_url": "photograph",
+    "image": "photograph",
+    "image_url": "photograph",
+    "photo": "photograph",
+    "photo_url": "photograph",
+    "picture": "photograph",
+    "address": "current_location",
+    "city": "current_location",
+    "country": "current_location",
+    "current_location": "current_location",
+    "location": "current_location",
+    "company": "affiliation",
+    "employer": "affiliation",
+    "affiliation": "affiliation",
+    "organization": "affiliation",
+    "organisation": "affiliation",
+    "job": "occupation",
+    "job_title": "occupation",
+    "occupation": "occupation",
+    "email": "email",
+    "mail": "email",
+    "phone": "phone",
+    "telephone": "phone",
+    "website": "website",
+}
+
+
+def _approved_maigret_values(value: Any, *, depth: int = 0) -> Iterable[str]:
+    if depth > 3:
+        return
+    if isinstance(value, dict):
+        for item in list(value.values())[:20]:
+            yield from _approved_maigret_values(item, depth=depth + 1)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in list(value)[:20]:
+            yield from _approved_maigret_values(item, depth=depth + 1)
+        return
+    text = _bounded_text(value, limit=2000)
+    if text:
+        yield text
+
+
+def _approved_maigret_parser_claims(
+    body: bytes, source_url: str
+) -> tuple[list[Dict[str, Any]], list[str]]:
+    """Apply Maigret's structured parser to an already safety-bounded page."""
+    try:
+        from socid_extractor import extract
+
+        extracted = extract(body.decode("utf-8", errors="replace"))
+    except Exception:
+        return [], []
+    if not isinstance(extracted, dict):
+        return [], []
+    claims, fields, seen = [], [], set()
+    for raw_name, raw_value in list(extracted.items())[:100]:
+        name = str(raw_name).strip().casefold().replace(" ", "_")
+        predicate = _APPROVED_MAIGRET_FIELD_ALIASES.get(name)
+        if not predicate:
+            continue
+        for value in _approved_maigret_values(raw_value):
+            if predicate in {"photograph", "website"}:
+                value = _safe_public_url(urljoin(source_url, value)) or ""
+            elif predicate == "email":
+                value = value.casefold() if "@" in value and len(value) <= 254 else ""
+            elif predicate == "phone":
+                digits = re.sub(r"\D", "", value)
+                value = value if 7 <= len(digits) <= 15 else ""
+            if not value:
+                continue
+            marker = (predicate, value.casefold())
+            if marker in seen:
+                continue
+            seen.add(marker)
+            fields.append(name)
+            claims.append(
+                {
+                    "predicate": predicate,
+                    "value": value,
+                    "qualifiers": {
+                        "extraction_basis": "Maigret structured profile parser",
+                        "source_collection": "approved_exact_public_source_fetch",
+                        "human_review_required": True,
+                        "automatic_approval_allowed": False,
+                    },
+                }
+            )
+            if len(claims) >= APPROVED_SOURCE_FETCH_MAX_CLAIMS:
+                return claims, list(dict.fromkeys(fields))
+    return claims, list(dict.fromkeys(fields))
+
+
 async def _bounded_approved_source_request(
     session: Any, url: str, *, resolver: Callable[..., Any]
 ) -> Dict[str, Any]:
@@ -4219,7 +4323,7 @@ async def _bounded_approved_source_request(
 
 @governed_provider(APPROVED_SOURCE_FETCH_PROVIDER)
 async def run_approved_public_source_fetch(
-    target: Dict[str, str],
+    target: Dict[str, Any],
     *,
     timeout_seconds: int = APPROVED_SOURCE_FETCH_TIMEOUT_SECONDS,
     session_factory: Optional[Callable[..., Any]] = None,
@@ -4240,6 +4344,29 @@ async def run_approved_public_source_fetch(
         "Accept-Language": "en-US,en;q=0.8",
         "User-Agent": "OpenLedger-Approved-Source-Fetch/1.0 (+https://github.com/nexorusio/openledger)",
     }
+    # Reuse only ordinary public browser headers from the matched Maigret site.
+    # Authentication, cookies, provider tokens and cross-origin hints are never
+    # carried into this exact-URL collector.
+    allowed_maigret_headers = {
+        "accept": "Accept",
+        "accept-language": "Accept-Language",
+        "cache-control": "Cache-Control",
+        "pragma": "Pragma",
+        "sec-ch-ua": "Sec-CH-UA",
+        "sec-fetch-dest": "Sec-Fetch-Dest",
+        "sec-fetch-mode": "Sec-Fetch-Mode",
+        "sec-fetch-site": "Sec-Fetch-Site",
+        "sec-fetch-user": "Sec-Fetch-User",
+        "upgrade-insecure-requests": "Upgrade-Insecure-Requests",
+        "user-agent": "User-Agent",
+    }
+    site_headers = target.get("maigret_public_headers") or {}
+    if isinstance(site_headers, dict):
+        for raw_name, raw_value in list(site_headers.items())[:30]:
+            name = allowed_maigret_headers.get(str(raw_name).strip().casefold())
+            value = str(raw_value or "").strip()
+            if name and value and "\r" not in value and "\n" not in value:
+                headers[name] = value[:1000]
     current_url = normalized["url"]
     try:
         async with session_factory(timeout=timeout, headers=headers) as session:
@@ -4333,6 +4460,25 @@ async def run_approved_public_source_fetch(
     title = _node_text((document.xpath("//title") or [None])[0], limit=500)
     description = _approved_source_meta(document, "og:description", "description")
     claims = _approved_source_claims(document, current_url)
+    maigret_fields = []
+    if target.get("maigret_site_name"):
+        parsed_claims, maigret_fields = _approved_maigret_parser_claims(
+            response["body"], current_url
+        )
+        seen = {
+            (claim.get("predicate"), str(claim.get("value") or "").casefold())
+            for claim in claims
+        }
+        for claim in parsed_claims:
+            marker = (
+                claim.get("predicate"),
+                str(claim.get("value") or "").casefold(),
+            )
+            if marker not in seen:
+                claims.append(claim)
+                seen.add(marker)
+            if len(claims) >= APPROVED_SOURCE_FETCH_MAX_CLAIMS:
+                break
     return {
         "source_engine": APPROVED_SOURCE_FETCH_ENGINE,
         "subject_type": "approved_public_url",
@@ -4352,6 +4498,8 @@ async def run_approved_public_source_fetch(
         "extra": {
             "access_outcome": "fetched",
             "claim_candidate_count": len(claims),
+            "maigret_site_name": target.get("maigret_site_name"),
+            "maigret_parser_fields": maigret_fields,
             "human_review_required": True,
             "automatic_approval_allowed": False,
         },

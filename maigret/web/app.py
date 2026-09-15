@@ -1757,7 +1757,7 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
     if budget_seconds not in {600, 1800}:
         budget_seconds = 1800 if mode == 'exhaustive' else 600
     collection_status = str(source.get('collection_status') or '').strip()
-    return {
+    runtime_view = {
         'status': str(source.get('status') or 'queued'),
         'mode': mode,
         'mode_label': 'Exhaustive' if mode == 'exhaustive' else 'Focused',
@@ -1770,6 +1770,30 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
         'collection_message': str(source.get('collection_message') or '')[:1000],
         'error': str(source.get('error') or '')[:1000],
     }
+    specification = (
+        options.get('investigation_spec')
+        if isinstance(options.get('investigation_spec'), dict)
+        else {}
+    )
+    if specification.get('discovery_basis') == 'approved_source_fetch':
+        raw_progress = (
+            source.get('progress') if isinstance(source.get('progress'), dict) else {}
+        )
+
+        def progress_count(name):
+            try:
+                return max(0, int(raw_progress.get(name) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        runtime_view['approved_source_progress'] = {
+            'checked': progress_count('checked'),
+            'total': progress_count('total'),
+            'phase': str(raw_progress.get('phase') or '')[:64],
+            'message': str(raw_progress.get('message') or '')[:500],
+            'source_url': str(raw_progress.get('source_url') or '')[:8000],
+        }
+    return runtime_view
 
 
 def provider_circuit_event(error: Exception, collector: str) -> Optional[Dict[str, Any]]:

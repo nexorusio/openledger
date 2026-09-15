@@ -25,7 +25,7 @@
             {% if source_fetch_available %}
             <form method="post" action="{{ url_for('pipeline.fetch_approved_sources', case_id=persona.case_id, persona_id=persona.id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button class="btn btn-primary" type="submit" data-busy-label="Fetching approved sources…"><i data-lucide="download"></i> Fetch approved sources ({{ approved.source_urls | length }})</button>
+                <button class="btn btn-primary" type="submit" data-busy-label="Enriching approved sources…"><i data-lucide="download"></i> Fetch &amp; enrich approved sources ({{ approved.source_urls | length }})</button>
             </form>
             {% endif %}
             {% if discovery_available %}
@@ -56,7 +56,7 @@
 
 <section class="persona-notice" aria-label="Discovery policy">
     <i data-lucide="shield-check"></i>
-    <div><strong>Approved sources can be fetched deliberately</strong><span>Fetch approved sources makes a bounded, unauthenticated request to each exact approved public URL. Extracted fields return to Step 1 for review. A login wall, rate limit, or access denial is shown as access blocked—not as missing evidence—and OpenLedger does not bypass it. Cited research remains a separate cross-source action.</span></div>
+    <div><strong>Approved sources can be enriched deliberately</strong><span>For every exact approved profile URL, OpenLedger matches its Maigret site definition and applies Maigret structured parsing to the same safety-bounded public HTML response, alongside metadata and JSON-LD extraction. If useful Persona fields are still unavailable, it checks cited public index excerpts for that same profile path. Login walls, rate limits, and access denials stay visible; OpenLedger does not bypass them. Every recovered field returns to Step 1 for review.</span></div>
 </section>
 
 {% if approved.map_points %}
