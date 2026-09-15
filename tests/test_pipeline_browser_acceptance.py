@@ -77,6 +77,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                 ],
                 "discovery_basis": "approved_source_fetch",
                 "approved_source_urls": approved_urls,
+                "enable_approved_source_fetch": True,
             }
         },
         kind="refresh",
