@@ -332,7 +332,7 @@ def generate_pipeline_pdf(projection):
     text("Manifest SHA-256: " + str(projection["content_hash"]), "small")
     text("Case ID: " + str(projection["case_id"]), "small")
     text("Persona ID: " + str(projection["persona_id"]), "small")
-    text("Evidence identifier index", "field")
+    text("Evidence ID index", "field")
     text(
         "Every supporting observation in this frozen Persona is indexed below.",
         "small",
