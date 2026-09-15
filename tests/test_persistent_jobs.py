@@ -83,6 +83,44 @@ def test_live_job_is_queued_without_browser_owned_thread(
     assert "Open live progress" in history
 
 
+def test_live_crawl_audit_download_is_bounded_and_redacts_secrets(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.append_event(
+        job_id,
+        {
+            "type": "collector_error",
+            "collector": "fixture",
+            "message": "Timed out while contacting the public source.",
+            "authorization": "Bearer do-not-export",
+            "raw_body": "private response body",
+        },
+    )
+
+    live_page = client.get(f"/live/{job_id}").get_data(as_text=True)
+    assert f'/live/{job_id}/crawl-audit.json' in live_page
+    assert "Export crawl audit" in live_page
+
+    response = client.get(f"/live/{job_id}/crawl-audit.json")
+    assert response.status_code == 200
+    assert response.mimetype == "application/json"
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
+    assert "attachment;" in response.headers["Content-Disposition"]
+    payload = json.loads(response.get_data(as_text=True))
+    serialized = response.get_data(as_text=True)
+
+    assert payload["schema"] == "openledger-crawl-audit-1"
+    assert payload["job"]["job_id"] == job_id
+    assert payload["summary"]["event_count"] >= 2
+    assert payload["summary"]["request_count"] == 1
+    assert payload["engines"]
+    assert "do-not-export" not in serialized
+    assert "private response body" not in serialized
+    assert "[redacted]" in serialized
+    assert "[raw content omitted]" in serialized
+
+
 def test_legacy_search_route_uses_the_same_governed_persistent_queue(
     client, persistent_store, monkeypatch
 ):

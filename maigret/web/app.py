@@ -154,6 +154,7 @@ from maigret.web.persona_intelligence import (
     group_claims,
 )
 from maigret.web.chat_presentation import render_chat_content
+from maigret.web.crawl_audit import MAX_AUDIT_EVENTS, build_crawl_audit
 from maigret.web.persona_pdf import generate_persona_pdf, persona_pdf_filename
 from maigret.web.profile_reliability import (
     DetectorHealthRegistryError,
@@ -5801,6 +5802,65 @@ def scan_runtime(job_id):
     return profile_discovery_runtime_view(current)
 
 
+@app.route("/live/<job_id>/crawl-audit.json")
+def export_crawl_audit(job_id):
+    """Download a bounded diagnostic snapshot without mutating the job."""
+    if case_store is None:
+        raise NotFound("Crawl audit storage is unavailable")
+    job = case_store.get_job(job_id)
+    if job is None:
+        raise NotFound("Unknown investigation job")
+
+    events = []
+    cursor = 0
+    while len(events) < MAX_AUDIT_EVENTS:
+        batch = case_store.get_events(
+            job_id,
+            after_id=cursor,
+            limit=min(1000, MAX_AUDIT_EVENTS - len(events)),
+        )
+        if not batch:
+            break
+        events.extend(batch)
+        cursor = batch[-1]["id"]
+    events_truncated = bool(
+        len(events) >= MAX_AUDIT_EVENTS
+        and case_store.get_events(job_id, after_id=cursor, limit=1)
+    )
+
+    from maigret.web.pipeline_store import PipelineStore
+
+    pipeline_audit = PipelineStore(case_store).crawl_audit_for_job(job_id)
+    profile_search_audits = case_store.list_profile_search_audits(job_id)
+    generated_at = datetime.now(timezone.utc)
+    audit = build_crawl_audit(
+        job,
+        events=events,
+        events_truncated=events_truncated,
+        pipeline_audit=pipeline_audit,
+        profile_search_audits=profile_search_audits,
+        generated_at=generated_at,
+    )
+    content = json.dumps(
+        audit, ensure_ascii=False, sort_keys=True, indent=2
+    ).encode("utf-8")
+    filename = (
+        "openledger-crawl-audit-"
+        + job_id
+        + "-"
+        + generated_at.strftime("%Y%m%dT%H%M%SZ")
+        + ".json"
+    )
+    response = send_file(
+        io.BytesIO(content),
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=filename,
+    )
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    return response
+
+
 @app.route('/api/scan/<job_id>/stop', methods=['POST'])
 def scan_stop(job_id):
     if case_store is not None:
@@ -8476,16 +8536,24 @@ def live_results(job_id):
     legacy_untriaged = bool(
         result
         and result.get("status") == "completed"
+        and not is_pipeline_job
         and result.get("kind")
         not in {"affiliation", "case_fusion", "identity_enrichment"}
         and result.get("profile_reliability_version")
         != PROFILE_RELIABILITY_VERSION
     )
+    approved_source_urls = specification.get("approved_source_urls")
+    if not isinstance(approved_source_urls, list):
+        approved_source_urls = []
 
     return render_template(
         "live.html",
         job_id=job_id,
         job_kind=(result or {}).get("kind", "live"),
+        is_approved_source_fetch=(
+            specification.get("discovery_basis") == "approved_source_fetch"
+        ),
+        approved_source_count=len(approved_source_urls),
         done_redirect=done_redirect,
         completed_found_count=(result or {}).get("found_count", 0),
         completed_candidate_count=(result or {}).get("candidate_count", 0),
@@ -9186,10 +9254,6 @@ def _launch_approved_source_fetch(*, case_id, persona_id, approved_groups, actor
         discovery_basis="approved_source_fetch",
         approved_source_urls=source_urls,
         enable_approved_source_fetch=True,
-        # This satisfies the identifier-free replay guard.  It is never sent to
-        # the AI collector because the source-fetch context selects only the
-        # direct approved-source connector.
-        approved_research_questions=["Fetch the exact approved public sources."],
     )
     form = MultiDict(
         [

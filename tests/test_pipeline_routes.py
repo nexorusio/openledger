@@ -554,6 +554,7 @@ def test_approved_source_fetch_queues_exact_reviewed_urls(monkeypatch):
     assert allow_identifier_free is True
     assert specification["discovery_basis"] == "approved_source_fetch"
     assert specification["enable_approved_source_fetch"] is True
+    assert "approved_research_questions" not in specification
     assert specification["approved_source_urls"] == [
         "https://www.linkedin.com/in/jati-pratomo/",
         "https://example.test/about",

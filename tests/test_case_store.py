@@ -1376,6 +1376,67 @@ def test_identifier_free_repeat_requires_server_approved_research(store):
     ]
 
 
+def test_identifier_free_approved_source_fetch_persists_exact_url_tasks(store):
+    job_id = store.create_investigation(["synthetic.person"], {})
+    source_job = store.claim_next("worker:approved-source-fetch-source")
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "usernames": source_job["usernames"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    persona_id = store.get_case(source_job["case_id"])["personas"][0]["id"]
+    urls = [
+        "https://www.linkedin.com/in/synthetic-person/",
+        "https://example.test/about",
+    ]
+    specification = {
+        "schema_version": 2,
+        "processing_mode": "same_subject",
+        "subject_label": "Synthetic Person",
+        "identifiers": [],
+        "search_targets": [],
+        "discovery_basis": "approved_source_fetch",
+        "approved_source_urls": urls,
+        "enable_approved_source_fetch": True,
+    }
+    options = {
+        "investigation_spec": specification,
+        "pipeline_source_status": {
+            "discovery_enabled": True,
+            "enrichment_enabled": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="No investigation identifiers"):
+        store.repeat_persona_investigation(persona_id, [], options)
+
+    refresh_id = store.repeat_persona_investigation(
+        persona_id,
+        [],
+        options,
+        allow_identifier_free_approved_research=True,
+    )
+    requests = PipelineStore(store).requests_for_job(refresh_id)
+
+    assert len(requests) == 1
+    assert [item["value"] for item in requests[0]["inputs"]] == urls
+    assert {item["type"] for item in requests[0]["inputs"]} == {"public_url"}
+    active = [
+        task["spec"]
+        for task in requests[0]["tasks"]
+        if task["spec"]["route_state"] == "active"
+    ]
+    assert [task["engine_id"] for task in active] == [
+        "approved_public_source_fetch",
+        "approved_public_source_fetch",
+    ]
+    assert [task["input_value"] for task in active] == urls
+
+
 def test_configured_refresh_routes_variants_to_selected_persona_in_multi_person_case(
     store,
 ):

@@ -393,15 +393,9 @@ def approved_context(
         # The Persona action supplies an exact, bounded set of URLs from the
         # approved ledger.  It must not fan out to a username scan, archive
         # service or unrelated enrichment route.
-        requested_urls = specification.get("approved_source_urls") or []
-        if not isinstance(requested_urls, list) or not 1 <= len(requested_urls) <= 20:
-            raise ValueError("Approved source fetch requires 1 to 20 exact public URLs.")
-        public_urls = []
-        for value in requested_urls:
-            normalized = normalize_profile_url(value)
-            if normalized not in public_urls:
-                public_urls.append(normalized)
-        context["public_urls"] = public_urls
+        from maigret.web.pipeline_enqueue import approved_source_fetch_urls
+
+        context["public_urls"] = approved_source_fetch_urls(specification)
         context["requested_engines"] = ["approved_public_source_fetch"]
     if job.get("kind") == "identity_enrichment":
         _append_unique(
