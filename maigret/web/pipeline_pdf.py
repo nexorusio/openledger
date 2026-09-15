@@ -9,8 +9,16 @@ from typing import Any
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
-from reportlab.platypus import PageBreak, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    PageBreak,
+    Preformatted,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 from maigret.web.persona_pdf import (
     _paragraph,
@@ -78,6 +86,15 @@ def generate_pipeline_pdf(projection):
     rendered = json.dumps(projection, ensure_ascii=False, default=str)
     regular, bold, fallbacks = _register_fonts(rendered)
     styles = _styles(regular, bold, fallbacks)
+    identifier_style = ParagraphStyle(
+        "PipelineAuditIdentifier",
+        fontName="Courier",
+        fontSize=7.2,
+        leading=9,
+        textColor=_MUTED,
+        spaceAfter=0.8 * mm,
+        shaping=0,
+    )
     output = io.BytesIO()
     document = SimpleDocTemplate(
         output,
@@ -106,6 +123,13 @@ def generate_pipeline_pdf(projection):
     def audit_payload(value: Any):
         for line in _json_lines(value):
             text(line, "small", space=0.6)
+
+    def identifier(value: Any):
+        # Audit identifiers must survive independent PDF text extraction byte
+        # for byte.  Do not pass UUIDs through the shaped proportional-font
+        # paragraph path, where ligatures can change extracted text.
+        value = str(value or "").replace("\r", " ").replace("\n", " ")
+        story.append(Preformatted(value or "-", identifier_style))
 
     def page(canvas, doc):
         canvas.saveState()
@@ -191,9 +215,26 @@ def generate_pipeline_pdf(projection):
     ]))
     story.extend([summary, Spacer(1, 5 * mm)])
 
+    from maigret.web.pipeline_evidence import observation_evidence_role
+
     evidence: dict[str, dict[str, Any]] = {}
     evidence_uses: dict[str, list[dict[str, Any]]] = {}
-    from maigret.web.pipeline_evidence import observation_evidence_role
+    for item in items:
+        for observation in item.get("evidence") or []:
+            observation_id = str(observation["id"])
+            evidence[observation_id] = observation
+            evidence_uses.setdefault(observation_id, []).append(
+                {
+                    "group_id": item["group_id"],
+                    "role": observation_evidence_role(
+                        observation, item.get("normalized") or {}
+                    ),
+                    "operator_disposition": observation.get(
+                        "operator_disposition"
+                    ),
+                    "source_state": observation.get("source_state"),
+                }
+            )
 
     for section_key, section_title in SHORTLIST_SECTIONS:
         section(section_title)
@@ -229,15 +270,6 @@ def generate_pipeline_pdf(projection):
                 "small",
                 space=1.5,
             )
-            for observation in observations:
-                observation_id = str(observation["id"])
-                evidence[observation_id] = observation
-                evidence_uses.setdefault(observation_id, []).append({
-                    "group_id": item["group_id"],
-                    "role": observation_evidence_role(observation, item.get("normalized") or {}),
-                    "operator_disposition": observation.get("operator_disposition"),
-                    "source_state": observation.get("source_state"),
-                })
 
     section("Limitations and unknowns")
     limitations = list(projection.get("limitations") or [])
@@ -255,7 +287,8 @@ def generate_pipeline_pdf(projection):
         "body",
     )
     for observation_id, observation in evidence.items():
-        text("Observation " + observation_id, "field", space=0.8)
+        text("Observation", "field", space=0.4)
+        identifier(observation_id)
         payload = observation.get("payload") or {}
         source_label = str(
             payload.get("source_name")
@@ -299,6 +332,13 @@ def generate_pipeline_pdf(projection):
     text("Manifest SHA-256: " + str(projection["content_hash"]), "small")
     text("Case ID: " + str(projection["case_id"]), "small")
     text("Persona ID: " + str(projection["persona_id"]), "small")
+    text("Evidence identifier index", "field")
+    text(
+        "Every supporting observation in this frozen Persona is indexed below.",
+        "small",
+    )
+    for observation_id in sorted(evidence):
+        identifier(observation_id)
     text("Frozen scope", "field")
     audit_payload(projection.get("scope") or {})
     text("Frozen exclusions", "field")
