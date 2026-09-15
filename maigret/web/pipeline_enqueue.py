@@ -3,6 +3,27 @@
 from copy import deepcopy
 
 
+def approved_source_fetch_urls(spec):
+    """Validate exact public URLs authorized by the approved-source action."""
+    if spec.get("discovery_basis") != "approved_source_fetch":
+        return []
+    if spec.get("enable_approved_source_fetch") is not True:
+        raise ValueError("Approved source fetch requires explicit operator selection")
+
+    raw = spec.get("approved_source_urls")
+    if not isinstance(raw, list) or not 1 <= len(raw) <= 20:
+        raise ValueError("Approved source fetch requires 1 to 20 exact public URLs")
+
+    from maigret.web.investigation_input import normalize_profile_url
+
+    urls = []
+    for value in raw:
+        normalized = normalize_profile_url(value)
+        if normalized not in urls:
+            urls.append(normalized)
+    return urls
+
+
 def approved_research_questions(spec):
     """Validate the server-owned marker and questions for approved discovery."""
     if spec.get("discovery_basis") != "approved_pipeline_findings" or not spec.get(
@@ -70,6 +91,12 @@ def enqueue_primary_requests(store, connection, *, job_id, case_id, options, bin
             persona_bindings=[binding],
         )
         context = {"collection_options": options}
+        approved_urls = approved_source_fetch_urls(spec)
+        if approved_urls:
+            context.update(
+                public_urls=approved_urls,
+                requested_engines=["approved_public_source_fetch"],
+            )
         approved_questions = approved_research_questions(spec)
         if approved_questions:
             context.update(

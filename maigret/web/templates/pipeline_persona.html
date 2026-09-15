@@ -20,23 +20,29 @@
         </div>
     </div>
     <div class="heading-actions persona-heading-actions">
-        <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}#operator-review"><i data-lucide="pencil-line"></i> Edit approvals</a>
-        <form method="post" action="{{ url_for('pipeline.create_report_snapshot', case_id=persona.case_id, persona_id=persona.id) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="btn btn-outline-secondary" type="submit" data-busy-label="Preparing PDF…"><i data-lucide="file-down"></i> Export Persona PDF</button>
-        </form>
-        {% if source_fetch_available %}
-        <form method="post" action="{{ url_for('pipeline.fetch_approved_sources', case_id=persona.case_id, persona_id=persona.id) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="btn btn-primary" type="submit" data-busy-label="Fetching approved sources…"><i data-lucide="download"></i> Fetch approved sources ({{ approved.source_urls | length }})</button>
-        </form>
+        {% if source_fetch_available or discovery_available %}
+        <div class="persona-action-row" role="group" aria-label="Discovery actions">
+            {% if source_fetch_available %}
+            <form method="post" action="{{ url_for('pipeline.fetch_approved_sources', case_id=persona.case_id, persona_id=persona.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="btn btn-primary" type="submit" data-busy-label="Fetching approved sources…"><i data-lucide="download"></i> Fetch approved sources ({{ approved.source_urls | length }})</button>
+            </form>
+            {% endif %}
+            {% if discovery_available %}
+            <form method="post" action="{{ url_for('pipeline.discover_related', case_id=persona.case_id, persona_id=persona.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="btn btn-outline-secondary" type="submit" data-busy-label="Queueing research…"><i data-lucide="sparkles"></i> Research with cited sources</button>
+            </form>
+            {% endif %}
+        </div>
         {% endif %}
-        {% if discovery_available %}
-        <form method="post" action="{{ url_for('pipeline.discover_related', case_id=persona.case_id, persona_id=persona.id) }}">
-            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-            <button class="btn btn-outline-secondary" type="submit" data-busy-label="Queueing research…"><i data-lucide="sparkles"></i> Research with cited sources</button>
-        </form>
-        {% endif %}
+        <div class="persona-action-row" role="group" aria-label="Persona management actions">
+            <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}#operator-review"><i data-lucide="pencil-line"></i> Edit approvals</a>
+            <form method="post" action="{{ url_for('pipeline.create_report_snapshot', case_id=persona.case_id, persona_id=persona.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="btn btn-outline-secondary" type="submit" data-busy-label="Preparing PDF…"><i data-lucide="file-down"></i> Export Persona PDF</button>
+            </form>
+        </div>
     </div>
 </section>
 

@@ -2537,10 +2537,16 @@ class CaseStore:
                 dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
             )
             if not queued_usernames and not specification.get("identifiers"):
-                from maigret.web.pipeline_enqueue import approved_research_questions
+                from maigret.web.pipeline_enqueue import (
+                    approved_research_questions,
+                    approved_source_fetch_urls,
+                )
 
                 questions = approved_research_questions(specification)
-                if not allow_identifier_free_approved_research or not questions:
+                source_urls = approved_source_fetch_urls(specification)
+                if not allow_identifier_free_approved_research or not (
+                    questions or source_urls
+                ):
                     raise ValueError("No investigation identifiers are available")
             specification["pipeline_id"] = "p2-e2e-v1"
             if not explicit_plan and not grouped:

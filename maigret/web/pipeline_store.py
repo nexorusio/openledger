@@ -695,6 +695,57 @@ class PipelineStore:
 
     list_requests_for_job = requests_for_job
 
+    def crawl_audit_for_job(self, job_id, *, observation_limit=5000):
+        """Return bounded execution lineage for one investigation job.
+
+        This is a read-only diagnostic projection.  It intentionally keeps the
+        stored request/task/attempt lifecycle and source observations separate
+        from Persona approval state.
+        """
+        bounded_limit = min(max(1, int(observation_limit)), 10000)
+        requests = self._table("requests")
+        observations = self._table("observations")
+        with self.engine.connect() as connection:
+            request_rows = list(
+                connection.execute(
+                    select(requests)
+                    .where(requests.c.job_id == job_id)
+                    .order_by(requests.c.created_at, requests.c.id)
+                ).mappings()
+            )
+            request_ids = [row["id"] for row in request_rows]
+            if not request_ids:
+                return {
+                    "requests": [],
+                    "observations": [],
+                    "observation_count": 0,
+                    "observations_truncated": False,
+                }
+            observation_count = int(
+                connection.scalar(
+                    select(func.count())
+                    .select_from(observations)
+                    .where(observations.c.request_id.in_(request_ids))
+                )
+                or 0
+            )
+            observation_rows = list(
+                connection.execute(
+                    select(observations)
+                    .where(observations.c.request_id.in_(request_ids))
+                    .order_by(observations.c.created_at, observations.c.id)
+                    .limit(bounded_limit)
+                ).mappings()
+            )
+            return {
+                "requests": [
+                    self._request(connection, dict(row)) for row in request_rows
+                ],
+                "observations": [_json(dict(row)) for row in observation_rows],
+                "observation_count": observation_count,
+                "observations_truncated": observation_count > len(observation_rows),
+            }
+
     def create_request_with_connection(self, connection, *args, **kwargs):
         return self.create_request(*args, connection=connection, **kwargs)
 

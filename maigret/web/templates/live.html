@@ -5,11 +5,12 @@
 <section class="page-heading">
     <div>
         <p class="eyebrow">Active investigation</p>
-        <h1>{{ 'Combined investigation' if job_kind == 'case_fusion' else 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live source discovery' }}</h1>
-        <p class="page-description">{{ 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Every compatible source engine runs independently. Results are consolidated and ranked before the operator sees a concise review list.' }}</p>
+        <h1>{{ 'Approved source fetch' if is_approved_source_fetch else 'Combined investigation' if job_kind == 'case_fusion' else 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live source discovery' }}</h1>
+        <p class="page-description">{{ 'OpenLedger is fetching only the exact public URLs approved in this Persona. Extracted fields return to Step 1 and are never approved automatically.' if is_approved_source_fetch else 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Every compatible source engine runs independently. Results are consolidated and ranked before the operator sees a concise review list.' }}</p>
     </div>
     <div class="heading-actions">
         <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open combined case' if job_kind == 'case_fusion' else 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Review findings' }}</a>
+        <a id="crawlAuditBtn" href="{{ url_for('export_crawl_audit', job_id=job_id) }}" class="btn btn-outline-secondary"><i data-lucide="file-search-2"></i> Export crawl audit</a>
         <button type="button" id="stopBtn" class="btn btn-outline-danger" {{ 'disabled' if runtime_state.status in ('completed', 'failed', 'cancelled', 'interrupted', 'budget_exhausted') }}>Stop investigation</button>
     </div>
 </section>
@@ -28,6 +29,10 @@
         <div class="live-stat"><span>Source cases</span><strong><span id="stat-checked">0</span> / <span id="stat-total">?</span></strong></div>
         <div class="live-stat"><span>Evidence scope</span><strong>Approved only</strong></div>
         <div class="live-stat"><span>Output</span><strong>Versioned evidence</strong></div>
+        {% elif is_approved_source_fetch %}
+        <div class="live-stat"><span>Approved URLs</span><strong>{{ approved_source_count }}</strong></div>
+        <div class="live-stat"><span>Collection scope</span><strong>Exact public pages only</strong></div>
+        <div class="live-stat"><span>Output</span><strong>Pending Step 1 review</strong></div>
         {% elif job_kind == 'identity_enrichment' %}
         <div class="live-stat"><span>Sources</span><strong>Wikipedia + ICIJ</strong></div>
         <div class="live-stat"><span>Offshore alerts</span><strong id="stat-offshore-alerts">{{ completed_offshore_alert_count }}</strong></div>
@@ -100,6 +105,7 @@
     const isCaseFusion = {{ (job_kind == 'case_fusion')|tojson }};
     const isAffiliation = {{ (job_kind == 'affiliation')|tojson }};
     const isIdentityEnrichment = {{ (job_kind == 'identity_enrichment')|tojson }};
+    const isApprovedSourceFetch = {{ is_approved_source_fetch|tojson }};
     const isProfileDiscovery = {{ (job_kind in ('live', 'refresh'))|tojson }};
     const doneRedirect = {{ done_redirect|tojson }};
     const csrfToken = {{ csrf_token|tojson }};
@@ -332,6 +338,7 @@
         if (isCaseFusion) return 'Completed — the versioned approved-evidence snapshot and exact cross-case findings are ready.';
         if (isIdentityEnrichment) return 'Completed — public-record proposals are ready for analyst review.';
         if (isAffiliation) return 'Completed — ' + registryCandidateCount + ' registry candidates and ' + affiliatedPersonCount + ' people are ready for analyst review.';
+        if (isApprovedSourceFetch) return 'Completed — approved-source results and extracted fields are ready in Step 1 review.';
         if (legacyUntriaged) return 'Completed — ' + completedUntriagedCount + ' legacy hits require rerun before they can be treated as supported profiles.';
         return 'Completed — ' + foundCount + ' supported accounts, ' + candidateCount
             + ' review candidates, ' + suppressedCount + ' suppressed detector hits, ' + githubEnrichmentCount
@@ -431,6 +438,7 @@
                 'official-website-content': 'Reading bounded public content from the supplied organization website…',
                 'cloudflare-dns-context': 'Collecting current DNS context for the supplied official website…',
                 'public-record-enrichment': 'Checking Wikipedia and ICIJ using the approved full name…',
+                'approved_public_source_fetch': 'Reading the exact approved public page without login or script execution…',
                 'openai_ranking': 'Ranking the consolidated source-backed findings for operator review…',
             };
             statusEl.textContent = startedMessages[ev.collector] || 'Collecting additional evidence…';
@@ -483,6 +491,7 @@
                 'official-website-content': 'Published website statements were retained with direct provenance and pending review.',
                 'cloudflare-dns-context': 'DNS context collected as observation-only technical evidence.',
                 'public-record-enrichment': 'Public-record checks completed. Every proposal remains pending review.',
+                'approved_public_source_fetch': 'Approved public page processed. Extracted fields remain pending review.',
                 'openai_ranking': 'Consolidated findings ranked. Operator approval is still required.',
             };
             statusEl.textContent = completedMessages[ev.collector] || 'Additional evidence collected.';
@@ -513,6 +522,7 @@
                 'fr-company-registry': 'The French registry was unavailable; other affiliation sources remain usable.',
                 'official-website-content': 'The supplied website could not be read; other affiliation sources remain usable.',
                 'cloudflare-dns-context': 'DNS context was unavailable; registry and affiliation evidence remain usable.',
+                'approved_public_source_fetch': 'The exact approved page was blocked or unavailable; its explicit status was retained.',
             };
             statusEl.textContent = ev.message || errorMessages[ev.collector] || 'One evidence source was unavailable; continuing…';
             updateCollector(ev, 'unavailable', 'Finished with an error', statusEl.textContent);

@@ -554,6 +554,7 @@ def test_approved_source_fetch_queues_exact_reviewed_urls(monkeypatch):
     assert allow_identifier_free is True
     assert specification["discovery_basis"] == "approved_source_fetch"
     assert specification["enable_approved_source_fetch"] is True
+    assert "approved_research_questions" not in specification
     assert specification["approved_source_urls"] == [
         "https://www.linkedin.com/in/jati-pratomo/",
         "https://example.test/about",
@@ -1295,6 +1296,11 @@ def test_pdf_text_register_contains_every_curated_fact_and_observation():
     assert set(re.findall(r'Observation\s+(obs-\d+)', text)) == {
         item['evidence'][0]['id'] for item in items
     }
+    assert 'Evidence ID index' in text
+    assert all(
+        text.count(item['evidence'][0]['id']) >= 2
+        for item in items
+    )
     assert 'Final Persona' in text and 'version-fidelity' in text
     assert 'a' * 64 in re.sub(r'\s+', '', text)
 

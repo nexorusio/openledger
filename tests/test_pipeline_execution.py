@@ -257,6 +257,106 @@ def test_real_query_and_attempts_reach_grouped_review_without_automatic_final(
     )
 
 
+def test_approved_source_fetch_reaches_review_with_extracted_persona_fields(
+    runtime, monkeypatch
+):
+    import maigret.web.pipeline_execution as execution
+
+    store, pipeline, _ = runtime
+    sources(monkeypatch, {"approved_public_source_fetch"})
+    source_job_id = store.create_investigation(["synthetic-person"], {})
+    source_job = store.claim_next("worker:approved-source-baseline")
+    store.finish(
+        source_job_id,
+        {
+            "status": "completed",
+            "usernames": source_job["usernames"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    persona_id = store.get_case(source_job["case_id"])["personas"][0]["id"]
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    pipeline.reconcile_submitted_inputs(source_job["case_id"], persona_id)
+    assess_consolidated_groups(store, source_job["case_id"], persona_id)
+    for item in pipeline.get_workspace(source_job["case_id"], persona_id)["shortlist"]:
+        pipeline.decide(
+            source_job["case_id"],
+            persona_id,
+            item["id"],
+            "reject",
+            actor="fixture-reviewer",
+            reason="Resolve the baseline input before approved-source fetching.",
+        )
+    source_url = "https://example.test/people/synthetic-person"
+    options = {
+        "pipeline_source_status": execution.source_configuration(),
+        "investigation_spec": {
+            "processing_mode": "same_subject",
+            "subject_label": "Synthetic Person",
+            "identifiers": [],
+            "search_targets": [],
+            "discovery_basis": "approved_source_fetch",
+            "approved_source_urls": [source_url],
+            "enable_approved_source_fetch": True,
+        },
+    }
+    refresh_id = store.repeat_persona_investigation(
+        persona_id,
+        [],
+        options,
+        allow_identifier_free_approved_research=True,
+    )
+    job = store.claim_next("worker:approved-source-fetch")
+    assert job["job_id"] == refresh_id
+
+    async def fetched(task, context):
+        assert task["input_type"] == "public_url"
+        assert task["input_value"] == source_url
+        context.emit_observations(
+            [
+                {
+                    "source_engine": "approved_public_source_fetch",
+                    "source_record_id": "approved-source:synthetic-person",
+                    "subject_type": "approved_public_url",
+                    "subject_value": source_url,
+                    "status": "observed",
+                    "source_url": source_url,
+                    "claims": [
+                        {
+                            "predicate": "photograph",
+                            "value": "https://example.test/photo.jpg",
+                        },
+                        {"predicate": "current_location", "value": "Jakarta"},
+                        {"predicate": "affiliation", "value": "Nexorus"},
+                    ],
+                    "extra": {
+                        "human_review_required": True,
+                        "automatic_approval_allowed": False,
+                    },
+                }
+            ]
+        )
+        return {"outcome": "candidate"}
+
+    result = execute_pipeline_job(
+        store,
+        job,
+        adapters={"run_approved_public_source_fetch": fetched},
+    )
+    workspace = pipeline.get_workspace(job["case_id"], persona_id)
+    predicates = {
+        (item.get("normalized") or {}).get("predicate")
+        for item in workspace["shortlist"]
+    }
+
+    assert result["status"] == "completed"
+    assert workspace["review_pending_count"] == 3
+    assert {"photograph", "current_location", "affiliation"} <= predicates
+    assert pipeline.get_final_version(job["case_id"], persona_id) is None
+
+
 def test_opted_in_openai_ranking_runs_after_collection_and_groups_persona_sections(
     runtime, monkeypatch
 ):
