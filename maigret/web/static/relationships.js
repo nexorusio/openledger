@@ -25,7 +25,6 @@
         if (node.review_status === 'uncertain') return {background: '#41351e', border: '#d5a846', highlight: {background: '#594a2b', border: '#ffe6aa'}};
         return {background: '#26364a', border: '#8296ad', highlight: {background: '#344a64', border: '#d9e7f6'}};
     };
-    const level = (node) => node.kind === 'persona' ? 0 : node.kind === 'source' ? 2 : 1;
     const fieldLabels = {
         company: 'Organization, institution or company',
         company_ownership: 'Ownership or leadership',
@@ -46,7 +45,6 @@
         borderWidth: node.kind === 'persona' || node.review_status === 'approved' ? 2 : 1,
         margin: node.kind === 'claim' || node.kind === 'source' ? 9 : undefined,
         widthConstraint: {maximum: node.kind === 'persona' ? 180 : 190},
-        level: level(node),
     }));
     const originalEdges = graph.edges.map((edge) => ({
         ...edge,
@@ -441,7 +439,10 @@
     });
 
     updateVisibility();
-    applyLayout('force');
+    // Persona graphs are evidence paths, not social-network diagrams.  Start
+    // with the subject → approved finding → source flow so every approved
+    // record is visible as an association before a user chooses a free layout.
+    applyLayout('hierarchical');
     const requestedProposalId = new URLSearchParams(window.location.search).get('proposal_id');
     const requestedEdgeId = requestedProposalId ? `ai-proposal:${requestedProposalId}` : '';
     if (requestedEdgeId && edgeLookup.has(requestedEdgeId)) {

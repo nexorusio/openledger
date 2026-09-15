@@ -181,6 +181,7 @@ def register_pipeline_routes(
     prepare_workspace=None,
     submit_manual_evidence=None,
     launch_approved_discovery=None,
+    launch_approved_source_fetch=None,
     geocode_approved_location=None,
     affiliation_public_web_enabled=None,
     google_places_enabled=None,
@@ -254,7 +255,11 @@ def register_pipeline_routes(
             item_url = public_url(
                 normalized.get("canonical_url")
                 or normalized.get("url")
-                or (value.get("url") if isinstance(value, dict) else "")
+                or (
+                    value.get("url")
+                    if isinstance(value, dict)
+                    else value if isinstance(value, str) else ""
+                )
             )
             items.append(
                 {
@@ -267,6 +272,37 @@ def register_pipeline_routes(
                     "decision_actor": row.get("decision_actor"),
                     "decision_reason": row.get("decision_reason"),
                 }
+            )
+        source_urls = []
+        for item in items:
+            url = str(item.get("url") or "").strip()
+            if url and url.casefold() not in {value.casefold() for value in source_urls}:
+                source_urls.append(url)
+        latest_source_fetches = {}
+        for observation in current.list_observations(
+            case_id, persona_id, limit=500
+        ):
+            if observation.get("engine") != "approved_public_source_fetch":
+                continue
+            payload = observation.get("payload") or {}
+            target_url = str(
+                payload.get("subject_value")
+                or observation.get("source_url")
+                or ""
+            ).strip()
+            if not target_url:
+                continue
+            latest_source_fetches[target_url.casefold()] = {
+                "status": str(payload.get("status") or observation.get("status") or ""),
+                "reason": str(payload.get("reason") or "").strip(),
+                "http_status": payload.get("http_status"),
+                "claim_candidate_count": (
+                    (payload.get("extra") or {}).get("claim_candidate_count", 0)
+                ),
+            }
+        for item in items:
+            item["source_fetch"] = latest_source_fetches.get(
+                str(item.get("url") or "").casefold()
             )
         photographs = [
             item["url"]
@@ -316,6 +352,8 @@ def register_pipeline_routes(
             "items": items,
             "photograph": photographs[0] if photographs else "",
             "map_points": map_points,
+            "source_urls": source_urls,
+            "source_fetches": latest_source_fetches,
             "sections": [
                 {
                     "key": key,
@@ -384,6 +422,7 @@ def register_pipeline_routes(
                     'field_name': predicate,
                     'confidence': confidence,
                     'review_status': 'approved',
+                    'evidence_count': len(row.get('observations') or []),
                 }
             )
             edges.append(
@@ -391,7 +430,7 @@ def register_pipeline_routes(
                     'id': 'persona-group:' + row['id'],
                     'from': subject_node,
                     'to': group_node,
-                    'label': predicate.replace('_', ' '),
+                    'label': 'approved ' + predicate.replace('_', ' '),
                     'field_name': predicate,
                 }
             )
@@ -414,7 +453,7 @@ def register_pipeline_routes(
                         'id': 'group-source:' + row['id'] + ':' + evidence_id,
                         'from': group_node,
                         'to': source_node,
-                        'label': 'supported by',
+                        'label': 'evidence from',
                         'field_name': predicate,
                     }
                 )
@@ -652,6 +691,10 @@ def register_pipeline_routes(
             approved=projection,
             workspace=workspace_data,
             discovery_available=launch_approved_discovery is not None,
+            source_fetch_available=(
+                launch_approved_source_fetch is not None
+                and bool(projection["source_urls"])
+            ),
             affiliation_public_web_available=bool(
                 affiliation_public_web_enabled
                 and affiliation_public_web_enabled()
@@ -731,6 +774,46 @@ def register_pipeline_routes(
         )
         flash(
             "Approved identifiers were queued for an AI-assisted cross-source check. New output will return to the review queue and is not auto-approved.",
+            "success",
+        )
+        return redirect(url_for("live_results", job_id=result["job_id"]), code=303)
+
+    @bp.route(
+        "/cases/<case_id>/pipeline/<persona_id>/fetch-approved-sources",
+        methods=["POST"],
+    )
+    @access(mutate=True)
+    def fetch_approved_sources(case_id, persona_id):
+        scoped_persona(case_id, persona_id)
+        if launch_approved_source_fetch is None:
+            abort(503, description="Approved source fetching is unavailable.")
+        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            abort(
+                409,
+                description=(
+                    "Reconcile submitted and retained evidence before fetching "
+                    "approved sources."
+                ),
+            )
+        if workspace_data["review_pending_count"]:
+            abort(409, description="Resolve the review queue before fetching sources.")
+        projection = approved_persona(case_id, persona_id)
+        if not projection["source_urls"]:
+            abort(409, description="Approve at least one public source URL first.")
+        result = launch_approved_source_fetch(
+            case_id=case_id,
+            persona_id=persona_id,
+            approved_groups=projection["items"],
+            actor=actor(),
+        )
+        flash(
+            f'Fetching {result["source_count"]} exact approved public source(s). '
+            "Public page fields will return to the review queue; access blocks are recorded explicitly and nothing is auto-approved.",
             "success",
         )
         return redirect(url_for("live_results", job_id=result["job_id"]), code=303)

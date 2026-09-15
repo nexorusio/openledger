@@ -14,7 +14,7 @@
 </section>
 
 <nav class="relationship-mode-tabs" aria-label="Relationship workspace mode">
-    <a class="{{ 'active' if mode == 'persona' else '' }}" href="{{ url_for('relationships_workspace', mode='persona', case_id=selected_case_id, persona_id=selected_persona_id, view='working') }}" {{ 'aria-current=page' if mode == 'persona' }}>
+    <a class="{{ 'active' if mode == 'persona' else '' }}" href="{{ url_for('pipeline.relationships', case_id=selected_case_id, persona_id=selected_persona_id) if approved_only else url_for('relationships_workspace', mode='persona', case_id=selected_case_id, persona_id=selected_persona_id) }}" {{ 'aria-current=page' if mode == 'persona' }}>
         <i data-lucide="contact-round"></i><span><strong>Persona evidence</strong><small>One person, attributes, and provenance</small></span>
     </a>
     <a class="{{ 'active' if mode == 'shared' else '' }}" href="{{ url_for('relationships_workspace', mode='shared', case_id=selected_case_id) }}" {{ 'aria-current=page' if mode == 'shared' }}>
@@ -91,8 +91,8 @@
             <section class="relationship-control-section">
                 <label for="relationshipLayout" class="relationship-control-label">Layout</label>
                 <select id="relationshipLayout" class="relationship-layout-select" {{ 'disabled' if not has_graph }}>
+                    <option value="hierarchical" selected>Hierarchical evidence flow</option>
                     <option value="force">Force-directed</option>
-                    <option value="hierarchical">Hierarchical evidence flow</option>
                     <option value="concentric">Concentric investigation</option>
                 </select>
                 <button type="button" class="relationship-action-button" id="fitRelationshipGraph" {{ 'disabled' if not has_graph }}><i data-lucide="maximize-2"></i>Fit visible graph</button>

@@ -3018,6 +3018,7 @@ def parse_investigation_submission(form):
         'allow_user_scanner_vxtwitter': False,
         'enable_github_profile_enrichment': False,
         'enable_archived_url_evidence': False,
+        'enable_approved_source_fetch': False,
         'subject_label': usernames[0],
         'identifiers': [
             {'type': 'username', 'value': username} for username in usernames
@@ -7907,31 +7908,46 @@ def relationships_workspace():
     if selected_persona_id not in available_persona_ids:
         selected_persona_id = available_personas[0]["id"] if available_personas else ""
     if mode == "persona" and selected_persona_id:
-        if request.args.get('view') != 'working':
-            from sqlalchemy import select
-            from maigret.web.pipeline_store import PipelineStore
-            selected = next(item for item in available_personas if item['id'] == selected_persona_id)
-            pipeline = PipelineStore(case_store)
-            final = pipeline.get_final_version(selected['case_id'], selected_persona_id)
-            requests = pipeline._table("requests")
-            with case_store.engine.connect() as connection:
-                has_pipeline = connection.execute(
-                    select(requests.c.id).where(
-                        requests.c.case_id == selected['case_id'],
-                        requests.c.persona_id == selected_persona_id,
-                    ).limit(1)
-                ).first() is not None
-            if has_pipeline:
-                return redirect(
-                    url_for(
-                        'pipeline.relationships',
-                        case_id=selected['case_id'],
-                        persona_id=selected_persona_id,
-                    )
+        # P2 evidence is kept in PipelineStore groups, not the retired
+        # persona_claims projection.  The previous ``view=working`` exception
+        # sent a P2 Persona to that legacy graph, which is why it showed only a
+        # fragment of approved evidence.  Always use the P2 evidence graph when
+        # the Persona has a pipeline request.
+        from sqlalchemy import select
+        from maigret.web.pipeline_store import PipelineStore
+
+        selected = next(
+            item for item in available_personas if item['id'] == selected_persona_id
+        )
+        pipeline = PipelineStore(case_store)
+        final = pipeline.get_final_version(selected['case_id'], selected_persona_id)
+        requests = pipeline._table("requests")
+        with case_store.engine.connect() as connection:
+            has_pipeline = connection.execute(
+                select(requests.c.id)
+                .where(
+                    requests.c.case_id == selected['case_id'],
+                    requests.c.persona_id == selected_persona_id,
                 )
-            if final:
-                return redirect(url_for('pipeline.graph', case_id=selected['case_id'],
-                                        persona_id=selected_persona_id, version_id=final['id']))
+                .limit(1)
+            ).first() is not None
+        if has_pipeline:
+            return redirect(
+                url_for(
+                    'pipeline.relationships',
+                    case_id=selected['case_id'],
+                    persona_id=selected_persona_id,
+                )
+            )
+        if final:
+            return redirect(
+                url_for(
+                    'pipeline.graph',
+                    case_id=selected['case_id'],
+                    persona_id=selected_persona_id,
+                    version_id=final['id'],
+                )
+            )
         graph = case_store.build_persona_graph(selected_persona_id)
     elif mode == "persona":
         graph = {
@@ -9131,6 +9147,73 @@ def _launch_approved_pipeline_discovery(
     return {"job_id": job_id, "case_id": case_id, "persona_id": persona_id}
 
 
+def _launch_approved_source_fetch(*, case_id, persona_id, approved_groups, actor):
+    """Queue exact approved public pages, without a login or broad scan."""
+    from werkzeug.datastructures import MultiDict
+
+    source_urls, seen = [], set()
+    for item in approved_groups:
+        normalized = dict(item.get("normalized") or {})
+        value = normalized.get("value")
+        candidate = (
+            normalized.get("canonical_url")
+            or normalized.get("profile_url")
+            or normalized.get("url")
+            or (value.get("url") if isinstance(value, dict) else value)
+        )
+        if not isinstance(candidate, str):
+            continue
+        try:
+            candidate = normalize_profile_url(candidate)
+        except InvestigationInputError:
+            continue
+        marker = candidate.casefold()
+        if marker not in seen:
+            seen.add(marker)
+            source_urls.append(candidate)
+    if not source_urls:
+        raise ValueError("No approved public source URL is available to fetch.")
+    if len(source_urls) > 20:
+        source_urls = source_urls[:20]
+    subject_label = (case_store.get_persona(persona_id) or {}).get(
+        "display_name", "Persona"
+    )
+    plan = build_approved_research_plan(subject_label)
+    plan.update(
+        processing_mode="same_subject",
+        subject_label=subject_label,
+        target_persona_id=persona_id,
+        discovery_basis="approved_source_fetch",
+        approved_source_urls=source_urls,
+        enable_approved_source_fetch=True,
+        # This satisfies the identifier-free replay guard.  It is never sent to
+        # the AI collector because the source-fetch context selects only the
+        # direct approved-source connector.
+        approved_research_questions=["Fetch the exact approved public sources."],
+    )
+    form = MultiDict(
+        [
+            ("processing_mode", "same_subject"),
+            ("enable_approved_source_fetch", "on"),
+            ("mode", "focused"),
+        ]
+    )
+    options = sanitize_persistent_options(parse_search_options(form, plan))
+    options["requested_by"] = actor
+    job_id = case_store.repeat_persona_investigation(
+        persona_id,
+        [],
+        options,
+        allow_identifier_free_approved_research=True,
+    )
+    return {
+        "job_id": job_id,
+        "case_id": case_id,
+        "persona_id": persona_id,
+        "source_count": len(source_urls),
+    }
+
+
 from maigret.web.pipeline_routes import register_pipeline_routes
 
 register_pipeline_routes(
@@ -9139,6 +9222,7 @@ register_pipeline_routes(
     prepare_workspace=_prepare_pipeline_workspace,
     submit_manual_evidence=_submit_pipeline_evidence,
     launch_approved_discovery=_launch_approved_pipeline_discovery,
+    launch_approved_source_fetch=_launch_approved_source_fetch,
     geocode_approved_location=lambda place: geocode_place_center(
         place,
         endpoint=app.config['GEOCODER_URL'],

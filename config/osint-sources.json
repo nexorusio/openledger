@@ -265,6 +265,97 @@
       }
     },
     {
+      "id": "approved_public_source_fetch",
+      "display_name": "Approved public source fetch",
+      "status": "active",
+      "capability": "bounded_exact_public_page_metadata_and_structured_claim_candidates",
+      "integration_mode": "bounded_public_web",
+      "catalog_reference": "https://www.rfc-editor.org/rfc/rfc9110.html",
+      "official_documentation": "https://www.rfc-editor.org/rfc/rfc9110.html",
+      "usage_terms": "https://www.w3.org/TR/ethical-web-principles/",
+      "api_version": "HTTP-Semantics-and-HTML-current",
+      "network_classification": "operator_supplied_public_web",
+      "access": {
+        "genuinely_free": true,
+        "registration_required": false,
+        "credentials_required": false
+      },
+      "trigger": {
+        "operator_opt_in_required": true,
+        "input_type": "approved_exact_public_url",
+        "accepted_target": "one_to_twenty_exact_public_urls_already_approved_in_the_persona",
+        "maximum_targets_per_investigation": 20
+      },
+      "guardrails": {
+        "fixed_network_origin": false,
+        "dns_resolution_required": true,
+        "public_ip_only": true,
+        "resolved_ip_pinning_required": true,
+        "sensitive_query_parameters_allowed": false,
+        "redirects_allowed": true,
+        "same_site_redirects_only": true,
+        "maximum_redirects": 1,
+        "timeout_seconds": 15,
+        "maximum_response_bytes": 500000,
+        "maximum_pages": 1,
+        "script_execution_allowed": false,
+        "login_or_private_content_access_allowed": false,
+        "human_review_required": true,
+        "automatic_approval_allowed": false
+      },
+      "claim_candidates": [
+        "full_name",
+        "summary",
+        "photograph",
+        "website",
+        "occupation",
+        "affiliation",
+        "current_location",
+        "email",
+        "phone"
+      ],
+      "observation_only_fields": [
+        "http_status",
+        "page_title",
+        "page_description",
+        "canonical_url",
+        "access_outcome"
+      ],
+      "maintenance": {
+        "reviewed_at": "2026-09-14",
+        "review_due_by": "2026-12-13",
+        "owner": "OpenLedger maintainers"
+      },
+      "connector": {
+        "order": 8,
+        "capability": {
+          "engine_id": "approved_public_source_fetch",
+          "execution_key": "run_approved_public_source_fetch",
+          "module": "maigret.web.collector_adapters",
+          "input_types": [
+            "public_url"
+          ],
+          "label": "Approved public source fetch",
+          "platforms": [],
+          "prerequisites": [],
+          "option": "enable_approved_source_fetch",
+          "timeout_seconds": 15,
+          "retry_ceiling": 1,
+          "request_budget": 1,
+          "retention": "bounded_source_evidence",
+          "trigger": "query"
+        },
+        "collector": "maigret.web.connectors.builtin:collect_url",
+        "normalizer": "maigret.web.pipeline_evidence:iter_result_observations",
+        "configuration_validator": "maigret.web.connectors.registry:validate_default_configuration",
+        "adapter_version": "openledger-adapter-1",
+        "parser_version": "pipeline-evidence-2",
+        "policy_group": "enrichment",
+        "provider_key": "approved_public_source_fetch",
+        "execution_mode": "worker"
+      }
+    },
+    {
       "id": "gleif_lei_registry",
       "display_name": "GLEIF Global LEI Index",
       "status": "active",

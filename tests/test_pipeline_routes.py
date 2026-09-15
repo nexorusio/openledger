@@ -123,6 +123,7 @@ def journey(tmp_path):
     )
     launches = []
     discovery_launches = []
+    source_fetch_launches = []
 
     def launch_research(**kwargs):
         launches.append(kwargs)
@@ -140,6 +141,15 @@ def journey(tmp_path):
             "persona_id": kwargs["persona_id"],
         }
 
+    def launch_approved_source_fetch(**kwargs):
+        source_fetch_launches.append(kwargs)
+        return {
+            "job_id": "approved-source-fetch-job",
+            "case_id": kwargs["case_id"],
+            "persona_id": kwargs["persona_id"],
+            "source_count": 1,
+        }
+
     register_pipeline_routes(
         app,
         lambda: case_store,
@@ -148,6 +158,7 @@ def journey(tmp_path):
         launch_research=launch_research,
         prepare_workspace=lambda **_kwargs: {"status": "prepared"},
         launch_approved_discovery=launch_approved_discovery,
+        launch_approved_source_fetch=launch_approved_source_fetch,
         geocode_approved_location=lambda _place: {
             "latitude": -6.1754,
             "longitude": 106.8272,
@@ -175,6 +186,7 @@ def journey(tmp_path):
         observation_id=observation_id,
         launches=launches,
         discovery_launches=discovery_launches,
+        source_fetch_launches=source_fetch_launches,
     )
     yield result
     case_store.dispose()
@@ -355,7 +367,7 @@ def test_review_proceed_persona_and_approved_discovery_are_an_explicit_wizard(
     assert b"Approved Persona" in persona.data
     assert b"Synthetic Person" in persona.data
     assert b"Edit approvals" in persona.data
-    assert b"AI cross-check &amp; discover" in persona.data
+    assert b"Research with cited sources" in persona.data
 
     discovery = client.post(
         base(journey) + "/discover-related",
@@ -468,6 +480,140 @@ def test_approved_discovery_reuses_exact_url_without_generated_aliases(monkeypat
     assert "Jati Pratomo" in research
     assert "https://linkedin.com/in/jati-pratomo" in research
     assert "employment, education, memberships" in research
+
+
+def test_approved_source_fetch_queues_exact_reviewed_urls(monkeypatch):
+    import maigret.web.app as web_app
+
+    class Store:
+        queued = None
+
+        def get_persona(self, persona_id):
+            return {"id": persona_id, "display_name": "Jati Pratomo"}
+
+        def repeat_persona_investigation(
+            self,
+            persona_id,
+            usernames,
+            options,
+            *,
+            allow_identifier_free_approved_research=False,
+        ):
+            self.queued = (
+                persona_id,
+                usernames,
+                options,
+                allow_identifier_free_approved_research,
+            )
+            return "approved-source-fetch-job"
+
+    store = Store()
+    monkeypatch.setattr(web_app, "case_store", store)
+    monkeypatch.setattr(
+        web_app,
+        "parse_search_options",
+        lambda _form, plan: {"investigation_spec": plan},
+    )
+    result = web_app._launch_approved_source_fetch(
+        case_id="case-id",
+        persona_id="persona-id",
+        actor="analyst",
+        approved_groups=[
+            {
+                "kind": "account",
+                "normalized": {
+                    "canonical_url": "https://www.linkedin.com/in/jati-pratomo/"
+                },
+            },
+            {
+                "kind": "claim",
+                "normalized": {
+                    "predicate": "social_account",
+                    "value": {"url": "https://www.linkedin.com/in/jati-pratomo/"},
+                },
+            },
+            {
+                "kind": "claim",
+                "normalized": {
+                    "predicate": "website",
+                    "value": "https://example.test/about",
+                },
+            },
+        ],
+    )
+
+    assert result == {
+        "job_id": "approved-source-fetch-job",
+        "case_id": "case-id",
+        "persona_id": "persona-id",
+        "source_count": 2,
+    }
+    _persona_id, usernames, options, allow_identifier_free = store.queued
+    specification = options["investigation_spec"]
+    assert usernames == []
+    assert allow_identifier_free is True
+    assert specification["discovery_basis"] == "approved_source_fetch"
+    assert specification["enable_approved_source_fetch"] is True
+    assert specification["approved_source_urls"] == [
+        "https://www.linkedin.com/in/jati-pratomo/",
+        "https://example.test/about",
+    ]
+
+
+def test_fetch_approved_sources_route_queues_only_approved_urls(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    assert post(
+        journey,
+        "/groups/" + journey["group_id"] + "/decision",
+        {"decision": "include", "reason": "Approved baseline finding."},
+    ).status_code == 201
+    groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "approved-source-url",
+                    "normalized": {
+                        "predicate": "website",
+                        "value": "https://example.test/about",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                }
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    assert post(
+        journey,
+        "/groups/" + groups[0]["id"] + "/decision",
+        {"decision": "include", "reason": "Exact public page selected."},
+    ).status_code == 201
+
+    response = journey["client"].post(
+        base(journey) + "/fetch-approved-sources",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["Location"].endswith("/live/approved-source-fetch-job")
+    assert len(journey["source_fetch_launches"]) == 1
+    launch = journey["source_fetch_launches"][0]
+    assert launch["case_id"] == journey["case_id"]
+    assert launch["persona_id"] == journey["persona_id"]
+    assert [
+        item["normalized"]["value"]
+        for item in launch["approved_groups"]
+        if item["normalized"].get("predicate") == "website"
+    ] == ["https://example.test/about"]
 
 
 def test_approved_discovery_uses_cited_research_for_affiliation_without_identifier(
