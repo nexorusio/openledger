@@ -32,16 +32,19 @@
             {% if source_fetch_available %}
             <form method="post" action="{{ url_for('pipeline.fetch_approved_sources', case_id=persona.case_id, persona_id=persona.id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button class="btn btn-primary" type="submit" data-busy-label="Enriching approved sources…"><i data-lucide="download"></i> Fetch &amp; enrich approved sources ({{ approved.source_urls | length }})</button>
+                <button class="btn btn-primary" type="submit" data-busy-label="Enriching approved sources…"{% if collection_actions_blocked %} disabled aria-describedby="collection-action-guard"{% endif %}><i data-lucide="download"></i> Fetch &amp; enrich approved sources ({{ approved.source_urls | length }})</button>
             </form>
             {% endif %}
             {% if discovery_available %}
             <form method="post" action="{{ url_for('pipeline.discover_related', case_id=persona.case_id, persona_id=persona.id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button class="btn btn-outline-secondary" type="submit" data-busy-label="Queueing research…"><i data-lucide="sparkles"></i> Research with cited sources</button>
+                <button class="btn btn-outline-secondary" type="submit" data-busy-label="Queueing research…"{% if collection_actions_blocked %} disabled aria-describedby="collection-action-guard"{% endif %}><i data-lucide="sparkles"></i> Research with cited sources</button>
             </form>
             {% endif %}
         </div>
+        {% if collection_actions_blocked %}
+        <p class="persona-action-guard" id="collection-action-guard" role="status">{{ collection_action_block_reason }} <a href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}#operator-review">Open the review queue.</a></p>
+        {% endif %}
         {% endif %}
         <div class="persona-action-row" role="group" aria-label="Persona management actions">
             <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}#operator-review"><i data-lucide="pencil-line"></i> Edit approvals</a>
