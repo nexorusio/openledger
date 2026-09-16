@@ -282,6 +282,118 @@ def _approved_source_stage(context, source_url, stage, status, message, **counts
     )
 
 
+def _approved_public_image_query(subject, source_url):
+    """Build one narrow image query from reviewed Persona/profile anchors."""
+    import hashlib
+    import re
+    from urllib.parse import urlsplit
+
+    from maigret.web.investigation_input import extract_profile_usernames
+    from maigret.web.profile_search_contract import PublicImageSearchQuery
+
+    subject = " ".join(str(subject or "").replace('"', " ").split())[:300]
+    approved_source = urlsplit(source_url)
+    anchors = extract_profile_usernames(source_url)
+    if not anchors:
+        anchors = [
+            segment
+            for segment in approved_source.path.split("/")
+            if segment and segment.casefold() not in {"in", "profile", "user"}
+        ][-1:]
+    anchor = re.sub(r"[^\w.@+-]+", " ", anchors[0]).strip()[:128] if anchors else ""
+    query_text = f'"{subject}"'
+    if anchor and re.sub(r"\W", "", anchor).casefold() != re.sub(
+        r"\W", "", subject
+    ).casefold():
+        query_text += f' "{anchor}"'
+    material = "\0".join((subject, source_url)).encode("utf-8")
+    return PublicImageSearchQuery(
+        query_id="approved-image:" + hashlib.sha256(material).hexdigest(),
+        query_text=query_text,
+        subject=subject,
+        approved_source_url=source_url,
+        max_results=3,
+    )
+
+
+def _approved_public_image_observations(run, source_url):
+    """Convert image-index records to unverified photograph proposals."""
+    import hashlib
+
+    provenance = run.provenance.as_dict() if run.provenance else {}
+    rows = []
+    for evidence in run.evidence:
+        record_id = hashlib.sha256(evidence.image_url.encode("utf-8")).hexdigest()
+        rows.append(
+            {
+                "source_engine": "approved_public_source_fetch",
+                "source_record_id": "public-image:" + record_id,
+                "source_name": (
+                    evidence.title
+                    or evidence.source
+                    or evidence.engine
+                    or "Public image index"
+                ),
+                "source_url": evidence.source_url,
+                "origin_url": evidence.source_url,
+                "derived_from": [],
+                "status": "candidate",
+                "reason": (
+                    "A public image index associated this image with the reviewed "
+                    "Persona/profile anchors; identity must be verified by the operator."
+                ),
+                "claims": [
+                    {
+                        "predicate": "photograph",
+                        "value": evidence.image_url,
+                        "evidence_role": "candidate_support",
+                        "qualifiers": {
+                            "evidence_basis": "public_image_index_candidate",
+                            "approved_source_url": source_url,
+                            "source_page_url": evidence.source_url,
+                            "thumbnail_url": evidence.thumbnail_url,
+                            "result_title": evidence.title,
+                            "result_source": evidence.source,
+                            "result_engine": evidence.engine,
+                            "resolution": evidence.resolution,
+                            "result_rank": evidence.result_rank,
+                            "query_fingerprint": provenance.get(
+                                "query_fingerprint", run.query.fingerprint
+                            ),
+                            "provider": provenance.get("provider", "searxng"),
+                            "retrieved_at": provenance.get("retrieved_at"),
+                            "identity_status": "unverified",
+                            "human_review_required": True,
+                            "automatic_approval_allowed": False,
+                        },
+                    }
+                ],
+                "extra": {
+                    "collection_stage": "public_image_search",
+                    "approved_source_url": source_url,
+                    "query": run.query.as_dict(),
+                    "provenance": provenance,
+                    "provider_warnings": list(run.provider_warnings),
+                    "image_result": evidence.as_dict(),
+                },
+            }
+        )
+    return rows
+
+
+async def _approved_public_image_search(context, subject, source_url):
+    """Use the private SearXNG image category; never fetch or select a face."""
+    app_module = _runtime()._app()
+    query = _approved_public_image_query(subject, source_url)
+    config = app_module.load_profile_search_config()
+    client = app_module.ProfileSearchClient(config)
+    run = await client.search_images(query)
+    rows = _approved_public_image_observations(run, source_url)
+    if rows:
+        context.emit_observations(rows, engine="approved_public_source_fetch")
+    return run, rows
+
+
 def _reusable_maigret_observations(context, source_url):
     """Re-propose structured fields from prior exact-URL Maigret evidence."""
     from maigret.web.pipeline_execution import _same_approved_profile_source
@@ -476,10 +588,114 @@ async def collect_approved_source(task, context):
         *_approved_rich_claims(reused),
         *_approved_rich_claims([direct]),
     ]
+    persona = context.store.get_persona(context.request["persona_id"]) or {}
+    subject = str(persona.get("display_name") or context.request["persona_id"])
+    has_photograph = any(
+        (claim.get("predicate") or claim.get("field_name")) == "photograph"
+        for claim in rich_claims
+    )
+    if has_photograph:
+        _approved_source_stage(
+            context,
+            source_url,
+            "public_image_search",
+            "not_needed",
+            "The exact source already returned a photograph candidate.",
+            image_candidate_count=0,
+        )
+    else:
+        _approved_source_stage(
+            context,
+            source_url,
+            "public_image_search",
+            "running",
+            "Searching public image indexes with the reviewed Persona and profile anchors.",
+        )
+        try:
+            image_run, image_rows = await _approved_public_image_search(
+                context, subject, source_url
+            )
+            if image_run.error:
+                warnings += 1
+                outcomes.append(
+                    "blocked"
+                    if image_run.error.http_status == 429
+                    else "inconclusive"
+                )
+                _approved_source_stage(
+                    context,
+                    source_url,
+                    "public_image_search",
+                    "unavailable",
+                    image_run.error.message,
+                    http_status=image_run.error.http_status,
+                    image_candidate_count=0,
+                )
+            else:
+                provider_warnings = list(
+                    getattr(image_run, "provider_warnings", ())
+                )
+                if provider_warnings:
+                    warnings += 1
+                outcomes.append(
+                    "candidate"
+                    if image_rows
+                    else "inconclusive"
+                    if provider_warnings
+                    else "not_found"
+                )
+                if image_rows:
+                    image_message = (
+                        "Public image candidates were sent to Step 1 for identity "
+                        "review."
+                    )
+                else:
+                    image_message = (
+                        "No image candidates were returned because one or more "
+                        "image indexes were unavailable."
+                        if provider_warnings
+                        else "No public image candidates matched the reviewed "
+                        "search anchors."
+                    )
+                if image_rows and provider_warnings:
+                    image_message += " Some image indexes were unavailable."
+                _approved_source_stage(
+                    context,
+                    source_url,
+                    "public_image_search",
+                    "completed_with_warnings"
+                    if provider_warnings
+                    else "completed",
+                    image_message,
+                    image_candidate_count=len(image_rows),
+                    provider_warnings=provider_warnings,
+                )
+        except Exception as error:
+            from maigret.web.profile_search_backend import (
+                ProfileSearchConfigurationError,
+            )
+
+            warnings += 1
+            diagnostic = (
+                "Public image search is not enabled for the configured search provider."
+                if isinstance(error, ProfileSearchConfigurationError)
+                else app_module.record_internal_error(
+                    "Approved-source public image search was unavailable",
+                    error,
+                    session=context.job["job_id"],
+                )
+            )
+            outcomes.append("inconclusive")
+            _approved_source_stage(
+                context,
+                source_url,
+                "public_image_search",
+                "unavailable",
+                diagnostic,
+                image_candidate_count=0,
+            )
     research_result = None
     if not rich_claims:
-        persona = context.store.get_persona(context.request["persona_id"]) or {}
-        subject = str(persona.get("display_name") or context.request["persona_id"])
         question = (
             "Research public indexed evidence for only this exact approved profile URL: "
             + source_url

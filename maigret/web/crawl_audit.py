@@ -186,6 +186,8 @@ def _engine_summaries(events: Iterable[Dict[str, Any]], requests) -> list[Dict[s
                     "claim_count": event.get("claim_count"),
                     "citation_count": event.get("citation_count"),
                     "proposal_count": event.get("proposal_count"),
+                    "image_candidate_count": event.get("image_candidate_count"),
+                    "provider_warnings": event.get("provider_warnings") or [],
                     "created_at": stored_event.get("created_at"),
                 }
             )

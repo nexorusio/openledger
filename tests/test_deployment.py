@@ -92,6 +92,9 @@ def test_self_hosted_search_is_private_optional_and_resource_bounded():
     assert "- openledger" in service
 
     assert "keep_only:" in settings
+    assert "duckduckgo images" in settings
+    assert "google images" in settings
+    assert "disabled: false" in settings
     assert "- brave" in settings
     assert "- duckduckgo" in settings
     assert "- json" in settings
@@ -136,6 +139,8 @@ def test_updater_starts_self_hosted_search_only_for_searxng_provider():
     assert 'OPENLEDGER_COMPOSE_PROJECT="$(detect_compose_project)"' in update_script
     assert '--project-name "${OPENLEDGER_COMPOSE_PROJECT}"' in update_script
     assert "label=com.docker.compose.project=${OPENLEDGER_COMPOSE_PROJECT}" in update_script
+    assert "--force-recreate searxng" in update_script
+    assert "Private SearXNG did not become ready" in update_script
 
 
 def test_self_hosted_search_operator_flow_is_guarded_and_reversible():

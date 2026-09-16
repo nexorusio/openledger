@@ -91,8 +91,8 @@
             <section class="relationship-control-section">
                 <label for="relationshipLayout" class="relationship-control-label">Layout</label>
                 <select id="relationshipLayout" class="relationship-layout-select" {{ 'disabled' if not has_graph }}>
-                    <option value="hierarchical" selected>Hierarchical evidence flow</option>
-                    <option value="force">Force-directed</option>
+                    <option value="force" selected>Evidence network</option>
+                    <option value="hierarchical">Hierarchical evidence flow</option>
                     <option value="concentric">Concentric investigation</option>
                 </select>
                 <button type="button" class="relationship-action-button" id="fitRelationshipGraph" {{ 'disabled' if not has_graph }}><i data-lucide="maximize-2"></i>Fit visible graph</button>

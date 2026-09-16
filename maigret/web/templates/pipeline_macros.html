@@ -7,7 +7,7 @@
  <div><dt>Stable platform identifier</dt><dd>{{ value.stable_id | default('Not established', true) }}</dd></div>
 {% else %}
  <div><dt>Claim</dt><dd>{{ value.predicate | default(value.field_name, true) | default('Unclassified', true) | replace('_', ' ') | title }}</dd></div>
- <div><dt>Value</dt><dd>{% if value.value is mapping %}{% for key, detail in value.value.items() %}<div>{{ key | replace('_', ' ') | title }}: {{ detail }}</div>{% endfor %}{% else %}{{ value.value | default('Not established', true) }}{% endif %}</dd></div>
+ <div><dt>Value</dt><dd>{% if value.predicate == 'photograph' and (value.value | pipeline_public_url) %}<div class="pipeline-photo-review"><img src="{{ value.value }}" alt="Unverified photograph evidence" loading="lazy" referrerpolicy="no-referrer"><a href="{{ value.value }}" rel="noopener noreferrer" target="_blank">Open candidate image</a></div>{% elif value.value is mapping %}{% for key, detail in value.value.items() %}<div>{{ key | replace('_', ' ') | title }}: {{ detail }}</div>{% endfor %}{% else %}{{ value.value | default('Not established', true) }}{% endif %}</dd></div>
  {% if value.qualifiers %}<div><dt>Qualifiers</dt><dd>{% for key, detail in value.qualifiers.items() %}<div>{{ key | replace('_', ' ') | title }}: {{ detail }}</div>{% endfor %}</dd></div>{% endif %}
  {% if value.valid_from or value.valid_to %}<div><dt>Effective period</dt><dd>{{ value.valid_from | default('Unknown start', true) }} — {{ value.valid_to | default('Unknown end', true) }}</dd></div>{% endif %}
 {% endif %}

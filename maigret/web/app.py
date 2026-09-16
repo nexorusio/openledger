@@ -7761,7 +7761,16 @@ def persona_workspace(persona_id):
                 ).limit(1)
             ).first() is not None
         if has_pipeline:
-            return redirect(url_for('pipeline.workspace', case_id=persona['case_id'], persona_id=persona_id))
+            # Let the approved-Persona route decide whether an unresolved queue
+            # requires Step 1. A reviewed Persona should never be sent back to
+            # the review workspace merely because it has P2 lineage.
+            return redirect(
+                url_for(
+                    'pipeline.persona',
+                    case_id=persona['case_id'],
+                    persona_id=persona_id,
+                )
+            )
     active_claims = [
         claim
         for claim in persona['claims']

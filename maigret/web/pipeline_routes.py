@@ -311,6 +311,36 @@ def register_pipeline_routes(
             == "photograph"
             and item["url"]
         ]
+
+        def approved_hero_value(*predicates):
+            wanted = {str(predicate).casefold() for predicate in predicates}
+            for item in items:
+                predicate = str(
+                    item["normalized"].get("predicate") or ""
+                ).casefold()
+                if predicate in wanted and str(item.get("label") or "").strip():
+                    return str(item["label"]).strip()[:700]
+            return ""
+
+        hero = {
+            "summary": approved_hero_value(
+                "summary", "biography", "bio", "about", "description"
+            ),
+            "location": approved_hero_value("current_location"),
+            "affiliation": approved_hero_value(
+                "affiliation", "company", "organization", "organisation", "employer"
+            ),
+            "occupation": approved_hero_value("occupation", "job_title", "role"),
+        }
+        if not hero["summary"]:
+            context = [
+                value
+                for value in (
+                    hero["occupation"], hero["affiliation"], hero["location"]
+                )
+                if value
+            ]
+            hero["summary"] = " · ".join(context)
         map_points = []
         for item in items:
             normalized = item["normalized"]
@@ -351,6 +381,7 @@ def register_pipeline_routes(
         return {
             "items": items,
             "photograph": photographs[0] if photographs else "",
+            "hero": hero,
             "map_points": map_points,
             "source_urls": source_urls,
             "source_fetches": latest_source_fetches,
@@ -654,33 +685,35 @@ def register_pipeline_routes(
     def persona(case_id, persona_id):
         subject = scoped_persona(case_id, persona_id)
         workspace_data = store().get_workspace(case_id, persona_id, limit=1)
-        if (
-            workspace_data["unreconciled_input_count"]
-            or workspace_data["projection"]["pending"]
-            or workspace_data["projection"]["legacy_available"]
-        ):
-            flash(
-                "Reconcile submitted and retained evidence before opening the Persona.",
-                "warning",
-            )
-            return redirect(
-                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id),
-                code=303,
-            )
-        if workspace_data["review_pending_count"]:
-            flash(
-                "Resolve every review-queue finding before opening the approved Persona.",
-                "warning",
-            )
-            return redirect(
-                url_for(
-                    "pipeline.workspace", case_id=case_id, persona_id=persona_id
-                )
-                + "#operator-review",
-                code=303,
-            )
         projection = approved_persona(case_id, persona_id)
         if not projection["items"]:
+            if workspace_data["review_pending_count"]:
+                flash(
+                    "Approve at least one reviewed finding before opening the Persona.",
+                    "warning",
+                )
+                return redirect(
+                    url_for(
+                        "pipeline.workspace", case_id=case_id, persona_id=persona_id
+                    )
+                    + "#operator-review",
+                    code=303,
+                )
+            if (
+                workspace_data["unreconciled_input_count"]
+                or workspace_data["projection"]["pending"]
+                or workspace_data["projection"]["legacy_available"]
+            ):
+                flash(
+                    "Reconcile submitted and retained evidence before opening the Persona.",
+                    "warning",
+                )
+                return redirect(
+                    url_for(
+                        "pipeline.workspace", case_id=case_id, persona_id=persona_id
+                    ),
+                    code=303,
+                )
             flash("Approve at least one finding before opening the Persona.", "warning")
             return redirect(
                 url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
@@ -813,7 +846,7 @@ def register_pipeline_routes(
         )
         flash(
             f'Fetching {result["source_count"]} exact approved public source(s). '
-            "Public page fields will return to the review queue; access blocks are recorded explicitly and nothing is auto-approved.",
+            "Public page fields and bounded image-index candidates will return to the review queue; access blocks are recorded explicitly and nothing is auto-approved.",
             "success",
         )
         return redirect(url_for("live_results", job_id=result["job_id"]), code=303)

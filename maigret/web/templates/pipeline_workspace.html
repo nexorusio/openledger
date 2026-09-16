@@ -1,7 +1,7 @@
 {% extends 'base.html' %}
 {% block title %}{{ persona.display_name }} · Assessment | OpenLedger{% endblock %}
 {% block breadcrumb %}Assessment{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='pipeline.css') }}">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='pipeline.css') }}"><link rel="stylesheet" href="{{ url_for('static', filename='pipeline-photo.css') }}">{% endblock %}
 {% block content %}
 <section class="page-heading assessment-heading">
     <div>
@@ -83,7 +83,14 @@
                         {% set decision_label = 'Approved' if group.latest_decision == 'include' else 'Rejected' if group.latest_decision in ('reject', 'exclude') else 'Kept in queue' if group.latest_decision == 'unresolved' else 'Needs review' %}
                         <tr id="finding-{{ group.id }}" data-decision="{{ group.latest_decision | default('pending', true) }}">
                             <td data-sort-value="{{ finding_label }}">
+                                {% if group.normalized.predicate == 'photograph' and (finding_label | pipeline_public_url) %}
+                                <a class="assessment-photo-candidate" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}" title="Review this unverified photograph candidate">
+                                    <img src="{{ finding_label }}" alt="Unverified photograph candidate for {{ persona.display_name }}" loading="lazy" referrerpolicy="no-referrer" data-photo-candidate>
+                                    <span><strong>Unverified photo candidate</strong><small>Open evidence and source page before approval</small></span>
+                                </a>
+                                {% else %}
                                 <a class="assessment-finding-link" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}" title="{{ finding_label }}">{{ finding_label }}</a>
+                                {% endif %}
                                 <small>{{ 'Investigator supplied' if group.investigator_supplied else group.kind | title }} · {{ group.assessment.get('operating_scope', {}).get('input_type', group.normalized.predicate | default('source evidence', true)) | replace('_', ' ') }}</small>
                             </td>
                             <td data-sort-value="{{ group.section_title }}">{{ group.section_title }}</td>
@@ -205,6 +212,12 @@
             if (!button) return;
             button.disabled = true;
             button.textContent = button.dataset.busyLabel || 'Working…';
+        });
+    });
+    document.querySelectorAll('[data-photo-candidate]').forEach((image) => {
+        image.addEventListener('error', () => {
+            image.hidden = true;
+            image.closest('.assessment-photo-candidate')?.classList.add('image-unavailable');
         });
     });
 })();

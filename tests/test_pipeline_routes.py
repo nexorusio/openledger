@@ -791,6 +791,24 @@ def test_persona_renders_approved_photo_and_persisted_location_map(
                     },
                     "observation_ids": [journey["observation_id"]],
                 },
+                {
+                    "canonical_key": "approved-occupation",
+                    "normalized": {
+                        "predicate": "occupation",
+                        "value": "Data analyst",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                },
+                {
+                    "canonical_key": "approved-affiliation",
+                    "normalized": {
+                        "predicate": "affiliation",
+                        "value": "Nexorus",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                },
             ]
         },
         projection_revision=journey["pipeline"].projection_revision(
@@ -823,6 +841,10 @@ def test_persona_renders_approved_photo_and_persisted_location_map(
     assert b"Export Persona PDF" in response.data
     assert b"Case AI assistant" in response.data
     assert b"Relationship evidence" in response.data
+    assert b"Data analyst" in response.data
+    assert b"Nexorus" in response.data
+    assert b"Jakarta, Indonesia" in response.data
+    assert b'persona-photo-placeholder" hidden' in response.data
 
     relationships = journey["client"].get(
         base(journey) + "/persona/relationships"
@@ -860,6 +882,76 @@ def test_persona_map_uses_the_configured_tile_service():
 
     assert "window.L.tileLayer({{ map_tile_url | tojson }}" in template
     assert "window.L.tileLayer('https://tile.openstreetmap.org" not in template
+
+
+def test_approved_persona_navigation_uses_the_final_persona_route():
+    source = (
+        Path(__file__).parents[1] / "maigret" / "web" / "app.py"
+    ).read_text()
+
+    persona_workspace = source[source.index("def persona_workspace(") : source.index(
+        "@app.route('/personas/<persona_id>/export.pdf')"
+    )]
+    assert "'pipeline.persona'" in persona_workspace
+    assert "'pipeline.workspace'" not in persona_workspace
+
+
+def test_approved_persona_opens_while_newer_findings_await_review(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    assert post(
+        journey,
+        f"/groups/{journey['group_id']}/decision",
+        {"decision": "include", "reason": "Approved from retained evidence."},
+    ).status_code == 201
+    pending_groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "pending-occupation",
+                    "normalized": {
+                        "predicate": "occupation",
+                        "value": "Pending analyst review",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                }
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    workspace = journey["pipeline"].get_workspace(
+        journey["case_id"], journey["persona_id"]
+    )
+    assert pending_groups[0]["id"] in {
+        item["id"] for item in workspace["shortlist"]
+    }
+    assert workspace["review_pending_count"] >= 1
+
+    response = journey["client"].get(base(journey) + "/persona")
+
+    assert response.status_code == 200
+    assert b"Approved Persona" in response.data
+    assert b"Synthetic Person" in response.data
+    assert b"awaiting review" in response.data
+    assert b"Pending analyst review" not in response.data
+
+
+def test_persona_evidence_network_starts_with_the_readable_force_layout():
+    root = Path(__file__).parents[1] / "maigret" / "web"
+    template = (root / "templates" / "relationships.html").read_text()
+    script = (root / "static" / "relationships.js").read_text()
+
+    assert '<option value="force" selected>Evidence network</option>' in template
+    assert "applyLayout('force');" in script
+    assert "applyLayout('hierarchical');" not in script
 
 
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):

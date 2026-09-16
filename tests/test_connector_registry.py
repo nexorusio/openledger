@@ -287,6 +287,11 @@ def test_approved_source_runs_exact_cited_fallback_when_parsers_lack_fields(
         fallback_tasks.append(task)
         return {"outcome": "candidate", "citation_count": 1, "proposal_count": 2}
 
+    async def image_search(_context, subject, approved_url):
+        assert subject == "Jati Pratomo"
+        assert approved_url == source_url
+        return SimpleNamespace(error=None), []
+
     app = SimpleNamespace(
         app=SimpleNamespace(config={"MAIGRET_DB_FILE": "fixture.json"}),
         record_internal_error=lambda *_args, **_kwargs: "fixture-error",
@@ -298,6 +303,7 @@ def test_approved_source_runs_exact_cited_fallback_when_parsers_lack_fields(
     )
     monkeypatch.setattr(site_module, "MaigretDatabase", Database)
     monkeypatch.setattr(builtin, "_runtime", lambda: runtime)
+    monkeypatch.setattr(builtin, "_approved_public_image_search", image_search)
     monkeypatch.setattr(
         builtin,
         "_adapters",
@@ -353,9 +359,62 @@ def test_approved_source_runs_exact_cited_fallback_when_parsers_lack_fields(
         "literal_page",
         "literal_page",
         "maigret_parser",
+        "public_image_search",
+        "public_image_search",
         "cited_fallback",
         "cited_fallback",
     ]
+
+
+def test_approved_source_image_candidates_require_review_and_keep_lineage():
+    from maigret.web.connectors import builtin
+    from maigret.web.profile_search_backend import PublicImageSearchRun
+    from maigret.web.profile_search_contract import (
+        ProfileSearchProvenance,
+        PublicImageSearchEvidence,
+    )
+
+    source_url = "https://www.linkedin.com/in/jati-pratomo/"
+    query = builtin._approved_public_image_query("Jati Pratomo", source_url)
+    provenance = ProfileSearchProvenance.for_query(
+        query,
+        provider="searxng",
+        provider_request_id="images-42",
+        retrieved_at="2026-09-15T15:00:00Z",
+    )
+    run = PublicImageSearchRun(
+        query=query,
+        provenance=provenance,
+        evidence=(
+            PublicImageSearchEvidence(
+                result_rank=1,
+                source_url="https://example.org/team/jati-pratomo",
+                image_url="https://cdn.example.org/jati.jpg",
+                thumbnail_url="https://thumbs.example.org/jati.jpg",
+                title="Jati Pratomo",
+                source="example.org",
+                engine="duckduckgo images",
+                resolution="800 x 800",
+            ),
+        ),
+    )
+
+    rows = builtin._approved_public_image_observations(run, source_url)
+
+    assert query.query_text == '"Jati Pratomo"'
+    assert len(rows) == 1
+    assert rows[0]["status"] == "candidate"
+    assert rows[0]["source_url"] == "https://example.org/team/jati-pratomo"
+    claim = rows[0]["claims"][0]
+    assert claim["predicate"] == "photograph"
+    assert claim["value"] == "https://cdn.example.org/jati.jpg"
+    assert claim["qualifiers"]["identity_status"] == "unverified"
+    assert claim["qualifiers"]["human_review_required"] is True
+    assert claim["qualifiers"]["automatic_approval_allowed"] is False
+    assert claim["qualifiers"]["approved_source_url"] == source_url
+    assert claim["qualifiers"]["source_page_url"] == rows[0]["source_url"]
+    assert claim["qualifiers"]["result_engine"] == "duckduckgo images"
+    assert claim["qualifiers"]["query_fingerprint"] == query.fingerprint
 
 
 @pytest.mark.parametrize(

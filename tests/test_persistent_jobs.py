@@ -111,6 +111,20 @@ def test_live_crawl_audit_download_is_bounded_and_redacts_secrets(
             "claim_count": 0,
         },
     )
+    persistent_store.append_event(
+        job_id,
+        {
+            "type": "approved_source_stage",
+            "collector": "approved_public_source_fetch",
+            "task_id": "approved-source-task",
+            "source_url": "https://example.test/profile",
+            "stage": "public_image_search",
+            "status": "completed",
+            "message": "Public image candidates were sent to Step 1.",
+            "image_candidate_count": 2,
+            "provider_warnings": ["google images — timeout"],
+        },
+    )
 
     live_page = client.get(f"/live/{job_id}").get_data(as_text=True)
     assert f'/live/{job_id}/crawl-audit.json' in live_page
@@ -139,6 +153,11 @@ def test_live_crawl_audit_download_is_bounded_and_redacts_secrets(
     )
     assert approved_source["stages"][0]["stage"] == "literal_page"
     assert approved_source["stages"][0]["http_status"] == 403
+    assert approved_source["stages"][1]["stage"] == "public_image_search"
+    assert approved_source["stages"][1]["image_candidate_count"] == 2
+    assert approved_source["stages"][1]["provider_warnings"] == [
+        "google images — timeout"
+    ]
     assert "[raw content omitted]" in serialized
 
 
@@ -908,7 +927,7 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert f'/cases/{case["id"]}/delete' in cases_page
 
     case_page = client.get(f'/cases/{case["id"]}').get_data(as_text=True)
-    assert "Open structured profile" in case_page
+    assert "Open Persona" in case_page
     assert f"/personas/{persona_id}" in case_page
     assert "Delete case" in case_page
     assert 'name="confirmation_name"' in case_page

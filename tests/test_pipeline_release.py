@@ -479,6 +479,29 @@ def test_success_drains_backs_up_migrates_verifies_both_and_pins_image(
         assert (records[0] / name).stat().st_size > 0
 
 
+def test_success_reloads_searxng_settings_when_private_search_is_enabled(deployment):
+    environment = deployment[0] / "deploy/.env"
+    environment.write_text(
+        environment.read_text()
+        + "OPENLEDGER_PROFILE_SEARCH_PROVIDER=searxng\n"
+    )
+
+    result, trace = run_update(deployment, *pinned_args(deployment))
+
+    assert result.returncode == 0, result.stderr
+    search_start = next(
+        command
+        for command in trace
+        if command[1] == "compose"
+        and "up" in command
+        and "searxng" in command
+    )
+    assert "--profile" in search_start
+    assert "self-hosted-search" in search_start
+    assert "--no-build" in search_start
+    assert "--force-recreate" in search_start
+
+
 @pytest.mark.parametrize(
     "env",
     [

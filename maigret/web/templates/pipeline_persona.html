@@ -8,12 +8,19 @@
         {% if approved.photograph %}
         <img src="{{ approved.photograph }}" alt="Approved profile photograph for {{ persona.display_name }}" referrerpolicy="no-referrer" data-persona-photograph>
         {% endif %}
-        <span class="persona-photo-placeholder" {{ 'hidden' if approved.photograph }}><i data-lucide="user-round"></i><small>Approved profile</small></span>
+        <span class="persona-photo-placeholder" {{ 'hidden' if approved.photograph }}><i data-lucide="user-round"></i><small>No approved public photo</small></span>
     </div>
     <div class="persona-profile-copy">
         <p class="eyebrow">Step 2 · Approved Persona</p>
         <h1>{{ persona.display_name }}</h1>
-        <p class="page-description">This profile contains only findings approved in the review step. New discoveries return to the queue and never change this view automatically.</p>
+        {% if approved.hero.summary %}<p class="persona-hero-summary">{{ approved.hero.summary }}</p>{% endif %}
+        {% if approved.hero.location or approved.hero.affiliation or approved.hero.occupation %}
+        <dl class="persona-hero-facts" aria-label="Approved Persona summary">
+            {% if approved.hero.location %}<div><dt>Location</dt><dd>{{ approved.hero.location }}</dd></div>{% endif %}
+            {% if approved.hero.affiliation %}<div><dt>Affiliation</dt><dd>{{ approved.hero.affiliation }}</dd></div>{% endif %}
+            {% if approved.hero.occupation %}<div><dt>Role</dt><dd>{{ approved.hero.occupation }}</dd></div>{% endif %}
+        </dl>
+        {% endif %}
         <div class="persona-status-strip" aria-label="Approved Persona status">
             <span><strong>{{ approved['items'] | length }}</strong> approved</span>
             <span><strong>{{ workspace.review_pending_count }}</strong> awaiting review</span>
@@ -56,7 +63,7 @@
 
 <section class="persona-notice" aria-label="Discovery policy">
     <i data-lucide="shield-check"></i>
-    <div><strong>Approved sources can be enriched deliberately</strong><span>For every exact approved profile URL, OpenLedger matches its Maigret site definition and applies Maigret structured parsing to the same safety-bounded public HTML response, alongside metadata and JSON-LD extraction. If useful Persona fields are still unavailable, it checks cited public index excerpts for that same profile path. Login walls, rate limits, and access denials stay visible; OpenLedger does not bypass them. Every recovered field returns to Step 1 for review.</span></div>
+    <div><strong>Approved sources can be enriched deliberately</strong><span>For every exact approved profile URL, OpenLedger applies Maigret structured parsing to a safety-bounded public response. If the page omits a photograph, a bounded public image-index search uses the reviewed Persona name and profile anchor and returns up to three unverified candidates. Login walls, rate limits, and access denials stay visible; OpenLedger does not bypass them. Every recovered field returns to Step 1 for review.</span></div>
 </section>
 
 {% if approved.map_points %}

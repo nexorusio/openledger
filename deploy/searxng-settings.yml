@@ -5,6 +5,14 @@ use_default_settings:
     keep_only:
       - brave
       - duckduckgo
+      - duckduckgo images
+      - google images
+
+engines:
+  # Google Images is disabled in SearXNG's default settings. Enable it here as
+  # an independent index; DuckDuckGo Images remains available if Google blocks.
+  - name: google images
+    disabled: false
 
 general:
   debug: false

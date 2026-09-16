@@ -143,6 +143,24 @@ verify_running_database
 compose run --rm --no-deps migrate
 verify_running_database
 [[ "${DATABASE_REVISION}" == "${TARGET_SCHEMA}" ]]
+if [[ ${#COMPOSE_PROFILE_ARGS[@]} -gt 0 ]]; then
+    # The settings file is a bind mount, but SearXNG reads it only at process
+    # startup. Recreate the pinned service while ingress is stopped so search
+    # engine changes from this reviewed release actually take effect.
+    compose up -d --no-deps --no-build --force-recreate searxng
+    SEARCH_READY=false
+    for _ in $(seq 1 30); do
+        if compose exec -T searxng \
+            /usr/local/searxng/.venv/bin/python -c \
+            "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3)" \
+            >/dev/null 2>&1; then
+            SEARCH_READY=true
+            break
+        fi
+        sleep 2
+    done
+    [[ "${SEARCH_READY}" == "true" ]] || fail "Private SearXNG did not become ready."
+fi
 compose up -d --no-deps --no-build app worker
 READY=false
 for _ in $(seq 1 45); do

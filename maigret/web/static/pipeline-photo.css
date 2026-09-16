@@ -1,0 +1,44 @@
+.assessment-photo-candidate {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: var(--ol-text, #172533);
+    text-decoration: none;
+}
+
+.assessment-photo-candidate img {
+    width: 64px;
+    height: 64px;
+    flex: 0 0 64px;
+    border: 1px solid var(--ol-border, #d8e1e8);
+    border-radius: 4px;
+    object-fit: cover;
+}
+
+.assessment-photo-candidate span,
+.assessment-photo-candidate small {
+    display: block;
+}
+
+.assessment-photo-candidate small {
+    white-space: normal;
+}
+
+.assessment-photo-candidate.image-unavailable::before {
+    content: "Image unavailable";
+    color: var(--ol-muted, #526578);
+    font-size: 0.72rem;
+}
+
+.pipeline-photo-review {
+    display: grid;
+    gap: 10px;
+}
+
+.pipeline-photo-review img {
+    width: min(100%, 320px);
+    max-height: 320px;
+    border: 1px solid var(--ol-border, #d8e1e8);
+    border-radius: 6px;
+    object-fit: contain;
+}
