@@ -1203,6 +1203,34 @@ canvas {
     display: none;
 }
 
+.assessment-decision-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: .45rem;
+    margin: 0 0 .85rem;
+}
+
+.assessment-decision-filters button {
+    min-height: 34px;
+    padding: .35rem .65rem;
+    color: var(--ol-muted, #9ba7b8);
+    background: var(--ol-surface-muted, #121a28);
+    border: 1px solid var(--ol-border, #2a3850);
+    cursor: pointer;
+}
+
+.assessment-decision-filters button.active {
+    color: var(--ol-text, #f3f3f3);
+    border-color: var(--ol-accent, #7c4dff);
+    background: rgba(124, 77, 255, .12);
+}
+
+.assessment-decision-filters span {
+    margin-left: .3rem;
+    color: var(--ol-text, #f3f3f3);
+    font-size: .75rem;
+}
+
 .assessment-note-control summary {
     color: var(--ol-muted);
     font-size: 0.68rem;

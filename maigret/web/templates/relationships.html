@@ -91,9 +91,9 @@
             <section class="relationship-control-section">
                 <label for="relationshipLayout" class="relationship-control-label">Layout</label>
                 <select id="relationshipLayout" class="relationship-layout-select" {{ 'disabled' if not has_graph }}>
-                    <option value="force" selected>Evidence network</option>
+                    <option value="concentric" selected>Stable evidence network</option>
+                    <option value="force">Force-directed evidence network</option>
                     <option value="hierarchical">Hierarchical evidence flow</option>
-                    <option value="concentric">Concentric investigation</option>
                 </select>
                 <button type="button" class="relationship-action-button" id="fitRelationshipGraph" {{ 'disabled' if not has_graph }}><i data-lucide="maximize-2"></i>Fit visible graph</button>
             </section>
@@ -159,6 +159,7 @@
             <div class="relationship-view-switch" role="group" aria-label="Workspace view">
                 <button type="button" class="active" id="relationshipGraphViewButton" aria-pressed="true" aria-controls="relationshipGraphView"><i data-lucide="share-2"></i>Graph</button>
                 <button type="button" id="relationshipTableViewButton" aria-pressed="false" aria-controls="relationshipTableView"><i data-lucide="table-2"></i>Table</button>
+                <button type="button" id="relationshipFullscreenButton" aria-pressed="false" aria-controls="relationshipGraph"><i data-lucide="maximize-2"></i>Full screen</button>
             </div>
         </header>
         {% if has_graph %}

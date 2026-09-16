@@ -13,6 +13,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.platypus import (
+    Image as ReportImage,
     PageBreak,
     Preformatted,
     SimpleDocTemplate,
@@ -27,6 +28,7 @@ from maigret.web.persona_pdf import (
     _source_url_paragraph,
     _styles,
 )
+from maigret.web.persona_report_media import load_approved_portrait
 
 
 _PAGE_WIDTH = A4[0] - 36 * mm - 12
@@ -123,12 +125,49 @@ def _json_lines(value: Any) -> list[str]:
     return json.dumps(value, ensure_ascii=False, indent=2, default=str).splitlines()
 
 
-def generate_pipeline_pdf(projection):
-    """Render a readable report first and a complete technical audit appendix last.
+def _narrative_summary(items: list[dict[str, Any]], subject_name: str) -> str:
+    """Describe the reviewed record without promoting raw social snippets."""
+    fields = _readable_fields(items)
 
-    The supplied projection is an immutable version manifest. This function never
-    looks up live claims, performs network I/O, or changes reviewed evidence.
-    """
+    def first(field: str) -> str:
+        values = fields.get(field) or []
+        return str(values[0]["value"]) if values else ""
+
+    role, organization, location = (
+        first("occupation"), first("company"), first("current_location")
+    )
+    clauses = []
+    if role and organization:
+        clauses.append(f"Approved evidence describes {subject_name} as {role} associated with {organization}")
+    elif role:
+        clauses.append(f"Approved evidence describes {subject_name} as {role}")
+    elif organization:
+        clauses.append(f"Approved evidence associates {subject_name} with {organization}")
+    if location:
+        clauses.append(f"the recorded location is {location}")
+    identifiers = [
+        fact["value"]
+        for field in ("social_account", "username", "website")
+        for fact in (fields.get(field) or [])[:2]
+    ][:3]
+    if identifiers:
+        clauses.append("recorded public identifiers include " + ", ".join(identifiers))
+    return ". ".join(clauses).rstrip(".") + "." if clauses else ""
+
+
+def _portrait_bytes(items: list[dict[str, Any]]) -> bytes | None:
+    for item in items:
+        if _canonical_field(item) != "photograph":
+            continue
+        try:
+            return load_approved_portrait(_fact_value(item))
+        except Exception:
+            continue
+    return None
+
+
+def generate_pipeline_pdf(projection):
+    """Render a concise investigator brief from an immutable review snapshot."""
     rendered = json.dumps(projection, ensure_ascii=False, default=str)
     regular, bold, fallbacks = _register_fonts(rendered)
     styles = _styles(regular, bold, fallbacks)
@@ -207,17 +246,37 @@ def generate_pipeline_pdf(projection):
         canvas.line(18 * mm, 12 * mm, A4[0] - 18 * mm, 12 * mm)
         canvas.setFillColor(_MUTED)
         canvas.setFont(regular, 7)
-        canvas.drawString(18 * mm, 7.5 * mm, "Approved evidence only · full audit appendix included")
+        canvas.drawString(18 * mm, 7.5 * mm, "Approved evidence only · detailed provenance remains in OpenLedger")
         canvas.drawRightString(A4[0] - 18 * mm, 7.5 * mm, f"Page {doc.page}")
         canvas.restoreState()
 
     status = str(projection.get("status") or "reviewed").replace("_", " ").title()
     items = list(projection.get("items") or [])
+    portrait_bytes = _portrait_bytes(items)
+    narrative = _narrative_summary(items, str(projection["subject_name"]))
     title(projection["subject_name"])
-    text("Investigation subject", "field")
-    text(f"Reviewed Persona · Snapshot {projection['sequence']}", "small")
-    text(f"Case: {projection['case_title']}", "small")
-    text(f"Status: {status}", "small")
+    text(f"Investigation brief · Case: {projection['case_title']} · Reviewed Persona {projection['sequence']} · {status}", "small")
+    if portrait_bytes or narrative:
+        portrait = (
+            ReportImage(io.BytesIO(portrait_bytes), width=35 * mm, height=35 * mm)
+            if portrait_bytes
+            else _paragraph("No approved public photograph", styles["small"])
+        )
+        overview = _paragraph(
+            narrative or "No concise narrative can be drawn from the approved findings yet.",
+            styles["body"],
+        )
+        overview_table = Table([[portrait, overview]], colWidths=[42 * mm, _PAGE_WIDTH - 42 * mm])
+        overview_table.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), _PANEL),
+            ("BOX", (0, 0), (-1, -1), 0.5, _LINE),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 8),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 8),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ]))
+        story.extend([overview_table, Spacer(1, 5 * mm)])
     story.append(
         Table(
             [[_paragraph(
@@ -273,27 +332,6 @@ def generate_pipeline_pdf(projection):
     ]))
     story.extend([summary, Spacer(1, 5 * mm)])
 
-    from maigret.web.pipeline_evidence import observation_evidence_role
-
-    evidence: dict[str, dict[str, Any]] = {}
-    evidence_uses: dict[str, list[dict[str, Any]]] = {}
-    for item in items:
-        for observation in item.get("evidence") or []:
-            observation_id = str(observation["id"])
-            evidence[observation_id] = observation
-            evidence_uses.setdefault(observation_id, []).append(
-                {
-                    "group_id": item["group_id"],
-                    "role": observation_evidence_role(
-                        observation, item.get("normalized") or {}
-                    ),
-                    "operator_disposition": observation.get(
-                        "operator_disposition"
-                    ),
-                    "source_state": observation.get("source_state"),
-                }
-            )
-
     for section_key, section_title in SHORTLIST_SECTIONS:
         section(section_title)
         section_items = [
@@ -311,15 +349,30 @@ def generate_pipeline_pdf(projection):
             continue
         for field, facts in _readable_fields(section_items).items():
             text(field_display_label(field), "field", space=0.7)
-            for fact in facts:
-                text(fact["value"], "body", space=0.45)
-                supporting = sum(
-                    len(item.get("evidence") or []) for item in fact["items"]
+            for fact in facts[:5]:
+                text(
+                    "Approved public photograph" if field == "photograph" else fact["value"],
+                    "body",
+                    space=0.45,
+                )
+                supporting = len(
+                    {
+                        str(observation.get("id"))
+                        for item in fact["items"]
+                        for observation in item.get("evidence") or []
+                        if observation.get("id")
+                    }
                 )
                 duplicates = len(fact["items"])
                 text(
                     f"{supporting} supporting observation{'s' if supporting != 1 else ''}"
                     + (f" across {duplicates} approved records" if duplicates > 1 else ""),
+                    "small",
+                    space=1.1,
+                )
+            if len(facts) > 5:
+                text(
+                    f"{len(facts) - 5} additional distinct approved value(s) are retained in OpenLedger.",
                     "small",
                     space=1.1,
                 )
@@ -332,73 +385,13 @@ def generate_pipeline_pdf(projection):
     else:
         text("No additional limitations were recorded in this snapshot.", "body")
 
-    story.append(PageBreak())
-    section("Evidence register")
+    section("Evidence and audit access")
     text(
-        f"{len(evidence)} distinct supporting observations are retained below. "
-        "Each record is linked to its approved finding(s); source restrictions and excluded support remain visible.",
+        "This brief intentionally contains only distinct, approved investigation findings. "
+        "Open the Persona profile to inspect every retained observation, external source link, decision history and immutable version record.",
         "body",
     )
-    for observation_id, observation in evidence.items():
-        text("Observation", "field", space=0.4)
-        identifier(observation_id)
-        payload = observation.get("payload") or {}
-        source_label = str(
-            payload.get("source_name")
-            or payload.get("site_name")
-            or observation.get("engine")
-            or "Source record"
-        )
-        outcome = str(observation.get("status") or payload.get("status") or "observed")
-        text(f"{source_label} · {outcome.replace('_', ' ')}", "small", space=0.8)
-        url = observation.get("source_url") or observation.get("original_url") or ""
-        if url:
-            from maigret.web.pipeline_routes import public_url
-
-            if public_url(url):
-                story.append(_source_url_paragraph(url, styles["small"]))
-                story.append(Spacer(1, 1 * mm))
-        reason = str(payload.get("reason") or "").strip()
-        if reason:
-            text(reason, "small", space=0.8)
-        text("Use of this observation in each curated group", "small_bold", space=0.7)
-        for use in evidence_uses[observation_id]:
-            role = str(use["role"] or "evidence").replace("_", " ")
-            text(f"Group: {use['group_id']} · {role}", "small", space=0.5)
-            disposition = use.get("operator_disposition") or {}
-            if disposition:
-                text(
-                    "Evidence disposition: " + str(disposition.get("reason") or "reviewed"),
-                    "small",
-                    space=0.5,
-                )
-        story.append(Spacer(1, 1.2 * mm))
-
-    story.append(PageBreak())
-    section("Technical audit appendix")
-    text(
-        "The following immutable manifest details support reproducibility and review. "
-        "They are intentionally separated from the investigation report.",
-        "body",
-    )
-    text("Final Persona version: " + str(projection["version_id"]), "small")
+    text("Version: " + str(projection["version_id"]), "small")
     text("Manifest SHA-256: " + str(projection["content_hash"]), "small")
-    text("Case ID: " + str(projection["case_id"]), "small")
-    text("Persona ID: " + str(projection["persona_id"]), "small")
-    text("Evidence ID index", "field")
-    text(
-        "Every supporting observation in this frozen Persona is indexed below.",
-        "small",
-    )
-    for observation_id in sorted(evidence):
-        identifier(observation_id)
-    text("Frozen scope", "field")
-    audit_payload(projection.get("scope") or {})
-    text("Frozen exclusions", "field")
-    audit_payload(projection.get("exclusions") or [])
-    text("Research requirements and dispositions", "field")
-    audit_payload(projection.get("requirements") or [])
-    text("Decision audit", "field")
-    audit_payload(projection.get("qc") or [])
     document.build(story, onFirstPage=page, onLaterPages=page)
     return output.getvalue()

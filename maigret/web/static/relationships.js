@@ -80,6 +80,7 @@
     const fieldButtons = Array.from(document.querySelectorAll('[data-relationship-field]'));
     const graphViewButton = byId('relationshipGraphViewButton');
     const tableViewButton = byId('relationshipTableViewButton');
+    const fullscreenButton = byId('relationshipFullscreenButton');
     const graphView = byId('relationshipGraphView');
     const tableView = byId('relationshipTableView');
     const tableBody = byId('relationshipTableBody');
@@ -392,6 +393,9 @@
         } else {
             unlock();
             network.setOptions({layout: {hierarchical: false, improvedLayout: true, randomSeed: 29}, physics: {enabled: true, solver: 'barnesHut', stabilization: {iterations: 180}, barnesHut: {gravitationalConstant: -4800, springLength: 145, springConstant: 0.035}}, edges: {smooth: {type: 'dynamic'}}});
+            network.once('stabilizationIterationsDone', () => {
+                network.setOptions({physics: {enabled: false}});
+            });
             network.stabilize(180);
         }
         window.setTimeout(() => network.fit({animation: {duration: 240}}), 20);
@@ -427,6 +431,23 @@
     restoreButton.addEventListener('click', () => { manuallyHiddenNodes.clear(); updateVisibility({fit: true}); });
     byId('fitRelationshipGraph').addEventListener('click', () => network.fit({animation: {duration: 240}}));
     layoutSelect.addEventListener('change', () => applyLayout(layoutSelect.value));
+    fullscreenButton?.addEventListener('click', async () => {
+        try {
+            if (document.fullscreenElement === graphElement) await document.exitFullscreen();
+            else await graphElement.requestFullscreen();
+        } catch (_error) {
+            // Browsers may reject full screen until a direct user gesture; leave the graph usable.
+        }
+    });
+    document.addEventListener('fullscreenchange', () => {
+        const active = document.fullscreenElement === graphElement;
+        fullscreenButton?.setAttribute('aria-pressed', String(active));
+        if (fullscreenButton) fullscreenButton.innerHTML = active
+            ? '<i data-lucide="minimize-2"></i>Exit full screen'
+            : '<i data-lucide="maximize-2"></i>Full screen';
+        window.lucide?.createIcons?.();
+        window.setTimeout(() => { network.redraw(); network.fit({animation: false}); }, 0);
+    });
     graphViewButton.addEventListener('click', () => setView('graph'));
     tableViewButton.addEventListener('click', () => setView('table'));
     tableBody.addEventListener('click', (event) => {
@@ -442,7 +463,7 @@
     // Start with the readable evidence network. Hierarchical flow remains an
     // optional inspection layout, but a dense Persona graph must not collapse
     // into one long column on entry.
-    applyLayout('force');
+    applyLayout('concentric');
     const requestedProposalId = new URLSearchParams(window.location.search).get('proposal_id');
     const requestedEdgeId = requestedProposalId ? `ai-proposal:${requestedProposalId}` : '';
     if (requestedEdgeId && edgeLookup.has(requestedEdgeId)) {

@@ -6,6 +6,8 @@ import io
 import json
 import math
 import os
+import re
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any
 from urllib.parse import urlsplit
@@ -43,7 +45,20 @@ def public_url(value):
     return ''
 
 
-def version_projection(version):
+def persona_report_filename(projection):
+    """Create a useful, filesystem-safe report name for investigators."""
+    def slug(value):
+        value = re.sub(r"[^A-Za-z0-9]+", "-", str(value or "").strip())
+        return value.strip("-")[:72] or "untitled"
+
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"OpenLedger-Investigation-{slug(projection.get('case_title'))}-"
+        f"{slug(projection.get('subject_name'))}-{date}.pdf"
+    )
+
+
+def version_projection(version, *, subject_name="", case_title=""):
     """One manifest contract shared by HTML, graph, JSON and PDF."""
     manifest = version['manifest']
     items = manifest.get('items', [])
@@ -72,10 +87,10 @@ def version_projection(version):
         'scope': scope,
         'subject_name': (
             scope.get('subject_name') if isinstance(scope, dict) else ''
-        ) or manifest['persona_id'],
+        ) or subject_name or manifest['persona_id'],
         'case_title': (
             scope.get('case_title') if isinstance(scope, dict) else ''
-        ) or manifest['case_id'],
+        ) or case_title or manifest['case_id'],
         'limitations': manifest.get('limitations', []),
         'items': items,
         'exclusions': manifest.get('exclusions', []),
@@ -272,7 +287,11 @@ def register_pipeline_routes(
         }
 
         current = store()
-        included_rows = list(current.iter_included_groups(case_id, persona_id))
+        included_rows = list(
+            current.iter_included_groups(
+                case_id, persona_id, include_observations=True
+            )
+        )
         included_account_keys = {
             str(value)
             for row in included_rows
@@ -283,7 +302,7 @@ def register_pipeline_routes(
             )
             if value
         }
-        items = []
+        raw_items = []
         for row in included_rows:
             normalized = dict(row.get("normalized") or {})
             predicate = str(
@@ -317,7 +336,7 @@ def register_pipeline_routes(
                     else value if isinstance(value, str) else ""
                 )
             )
-            items.append(
+            raw_items.append(
                 {
                     "id": row["id"],
                     "kind": row["kind"],
@@ -327,6 +346,7 @@ def register_pipeline_routes(
                     "section": _shortlist_section(row["kind"], normalized),
                     "decision_actor": row.get("decision_actor"),
                     "decision_reason": row.get("decision_reason"),
+                    "observations": list(row.get("observations") or []),
                 }
             )
 
@@ -346,8 +366,53 @@ def register_pipeline_routes(
                     if candidate_key == key:
                         return candidate_label
             return key.replace("_", " ").title() if key != "other" else "Other approved findings"
+        # A group is the review/audit unit, but the Persona is a reader-facing
+        # projection. Merge exact field/value duplicates here while retaining
+        # every group and source in the record's evidence modal.
+        merged = {}
+        for item in raw_items:
+            key = field_key(item)
+            identity = (key, str(item["label"]).strip().casefold())
+            record = merged.setdefault(
+                identity,
+                {
+                    **item,
+                    "field_key": key,
+                    "group_ids": [item["id"]],
+                    "evidence": [],
+                },
+            )
+            if item["id"] not in record["group_ids"]:
+                record["group_ids"].append(item["id"])
+            seen_observations = {entry["id"] for entry in record["evidence"]}
+            for observation in item["observations"]:
+                observation_id = str(observation.get("id") or "")
+                if not observation_id or observation_id in seen_observations:
+                    continue
+                seen_observations.add(observation_id)
+                record["evidence"].append(
+                    {
+                        "id": observation_id,
+                        "label": str(
+                            observation.get("engine")
+                            or observation.get("engine_id")
+                            or "Retained source"
+                        ),
+                        "url": public_url(
+                            observation.get("source_url")
+                            or observation.get("original_url")
+                        ),
+                        "outcome": str(
+                            observation.get("outcome")
+                            or observation.get("status")
+                            or "observed"
+                        ).replace("_", " "),
+                    }
+                )
+        items = list(merged.values())
+
         source_urls = []
-        for item in items:
+        for item in raw_items:
             url = str(item.get("url") or "").strip()
             if url and url.casefold() not in {value.casefold() for value in source_urls}:
                 source_urls.append(url)
@@ -396,24 +461,78 @@ def register_pipeline_routes(
             return ""
 
         hero = {
-            "summary": approved_hero_value(
-                "summary", "biography", "bio", "about", "description"
-            ),
+            "summary": "",
             "location": approved_hero_value("current_location"),
             "affiliation": approved_hero_value(
                 "affiliation", "company", "organization", "organisation", "employer"
             ),
             "occupation": approved_hero_value("occupation", "job_title", "role"),
         }
-        if not hero["summary"]:
-            context = [
-                value
-                for value in (
-                    hero["occupation"], hero["affiliation"], hero["location"]
-                )
-                if value
-            ]
-            hero["summary"] = " · ".join(context)
+        name = approved_hero_value("full_name", "display_name", "name")
+        subject = name or persona_id
+        clauses = []
+        if hero["occupation"] and hero["affiliation"]:
+            clauses.append(
+                f"{subject} is described in approved evidence as {hero['occupation']} associated with {hero['affiliation']}"
+            )
+        elif hero["occupation"]:
+            clauses.append(
+                f"{subject} is described in approved evidence as {hero['occupation']}"
+            )
+        elif hero["affiliation"]:
+            clauses.append(
+                f"{subject} is associated in approved evidence with {hero['affiliation']}"
+            )
+        if hero["location"]:
+            clauses.append(f"the approved location is {hero['location']}")
+        digital = [
+            item["label"]
+            for item in items
+            if field_key(item) in {"social_account", "username", "website"}
+        ][:3]
+        if digital:
+            clauses.append("recorded public identifiers include " + ", ".join(digital))
+        raw_summary = approved_hero_value(
+            "summary", "biography", "bio", "about", "description"
+        )
+        if not clauses and raw_summary:
+            clauses.append(f"approved evidence describes {subject} as: {raw_summary}")
+        hero["summary"] = ". ".join(clauses).rstrip(".") + "." if clauses else ""
+        # The named Summary field is a derived, reviewable reading of the
+        # approved profile - never a single raw profile fragment. Its modal
+        # exposes every retained source that contributes to the narrative.
+        summary_items = [item for item in items if field_key(item) == "summary"]
+        if hero["summary"]:
+            summary_item = summary_items[0] if summary_items else {
+                "id": "derived-persona-summary",
+                "kind": "claim",
+                "normalized": {"predicate": "summary", "value": hero["summary"]},
+                "url": "",
+                "section": "identity",
+                "decision_reason": "Derived from the distinct approved Persona findings.",
+                "source_fetch": None,
+            }
+            source_seen, summary_evidence = set(), []
+            for item in items:
+                for evidence in item.get("evidence") or []:
+                    if evidence["id"] not in source_seen:
+                        source_seen.add(evidence["id"])
+                        summary_evidence.append(evidence)
+            summary_item.update(
+                label=hero["summary"],
+                field_key="summary",
+                group_ids=[
+                    group_id
+                    for item in items
+                    for group_id in item.get("group_ids") or []
+                ],
+                evidence=summary_evidence,
+            )
+            items = [item for item in items if field_key(item) != "summary"]
+            items.insert(0, summary_item)
+        for index, item in enumerate(items, start=1):
+            item["modal_id"] = f"persona-evidence-{index}"
+            item["evidence_count"] = len(item.get("evidence") or [])
         map_points = []
         for item in items:
             normalized = item["normalized"]
@@ -1524,12 +1643,18 @@ def register_pipeline_routes(
     def export_pdf(case_id, persona_id, version_id):
         from maigret.web.pipeline_pdf import generate_pipeline_pdf
 
-        projection = version_projection(scoped_version(case_id, persona_id, version_id))
+        subject = scoped_persona(case_id, persona_id)
+        case = store().get_case_shell(case_id) or {}
+        projection = version_projection(
+            scoped_version(case_id, persona_id, version_id),
+            subject_name=subject.get('display_name') or persona_id,
+            case_title=case.get('title') or case_id,
+        )
         response = send_file(
             io.BytesIO(generate_pipeline_pdf(projection)),
             mimetype='application/pdf',
             as_attachment=True,
-            download_name=f'OpenLedger-Persona-v{projection["sequence"]}-{projection["status"]}.pdf',
+            download_name=persona_report_filename(projection),
             max_age=0,
         )
         response.headers['X-OpenLedger-Version'] = projection['version_id']

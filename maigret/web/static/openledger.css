@@ -4332,6 +4332,12 @@ textarea.form-control.compact-textarea {
     border: 1px solid transparent;
     background: radial-gradient(circle at 50% 42%, rgba(15, 139, 141, .08), transparent 38%), var(--ol-surface-muted);
 }
+.relationship-graph:fullscreen {
+    width: 100vw;
+    height: 100vh;
+    border: 0;
+    background: var(--ol-surface, #090909);
+}
 .relationship-graph:focus-visible,
 .relationship-scope-field select:focus-visible,
 .relationship-layout-select:focus-visible,
