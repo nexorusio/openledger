@@ -6,7 +6,7 @@
     <div>
         <p class="eyebrow">Active investigation</p>
         <h1>{{ 'Approved source fetch' if is_approved_source_fetch else 'Combined investigation' if job_kind == 'case_fusion' else 'Affiliation discovery' if job_kind == 'affiliation' else 'Confirmed-name enrichment' if job_kind == 'identity_enrichment' else 'Live source discovery' }}</h1>
-        <p class="page-description">{{ 'For each exact approved profile, OpenLedger matches its Maigret site definition and applies Maigret structured parsing to a safety-bounded public-page response. If useful fields are still unavailable, it checks cited public index excerpts for that same profile. Every recovered field returns to Step 1 and is never approved automatically.' if is_approved_source_fetch else 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Every compatible source engine runs independently. Results are consolidated and ranked before the operator sees a concise review list.' }}</p>
+        <p class="page-description">{{ 'For each exact approved profile, OpenLedger applies its Maigret parser to a safety-bounded public-page response. When the page omits a photograph, it searches public image indexes with the reviewed Persona name and profile anchor. Cited text and every image remain unverified Step 1 proposals; nothing is approved automatically.' if is_approved_source_fetch else 'OpenLedger is capturing one transactionally consistent approved-evidence snapshot and building exact links across the selected source cases.' if job_kind == 'case_fusion' else 'The worker is resolving the organization, jurisdictional registry candidates, explicit affiliations and any opted-in website and domain context.' if job_kind == 'affiliation' else 'Wikipedia biography enrichment and an ICIJ Offshore Leaks exact-name check are running independently.' if job_kind == 'identity_enrichment' else 'Every compatible source engine runs independently. Results are consolidated and ranked before the operator sees a concise review list.' }}</p>
     </div>
     <div class="heading-actions">
         <a id="reportsBtn" href="#" class="btn btn-primary" style="display:none;">{{ 'Open combined case' if job_kind == 'case_fusion' else 'Open case' if job_kind == 'affiliation' else 'Open Persona' if job_kind == 'identity_enrichment' else 'Review findings' }}</a>
@@ -32,7 +32,7 @@
         {% elif is_approved_source_fetch %}
         <div class="live-stat"><span>Approved URLs</span><strong>{{ approved_source_count }}</strong></div>
         <div class="live-stat"><span>URLs completed</span><strong><span id="stat-approved-completed">0</span> / <span id="stat-approved-total">{{ approved_source_count }}</span></strong></div>
-        <div class="live-stat"><span>Collection method</span><strong>Maigret + exact-source fallback</strong></div>
+        <div class="live-stat"><span>Collection method</span><strong>Maigret + text and image indexes</strong></div>
         <div class="live-stat"><span>Output</span><strong>Pending Step 1 review</strong></div>
         {% elif job_kind == 'identity_enrichment' %}
         <div class="live-stat"><span>Sources</span><strong>Wikipedia + ICIJ</strong></div>
@@ -491,6 +491,7 @@
             if (ev.claim_count !== undefined) counts.push(Number(ev.claim_count) + ' structured fields');
             if (ev.citation_count !== undefined) counts.push(Number(ev.citation_count) + ' citations');
             if (ev.proposal_count !== undefined) counts.push(Number(ev.proposal_count) + ' proposals');
+            if (ev.image_candidate_count !== undefined) counts.push(Number(ev.image_candidate_count) + ' image candidates');
             if (ev.http_status) counts.push('HTTP ' + ev.http_status);
             updateCollector(
                 ev,

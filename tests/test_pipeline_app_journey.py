@@ -237,7 +237,11 @@ def test_real_app_manual_review_qc_research_worker_and_final_projection(
     assert len(case['personas']) == 1
     persona_id = case['personas'][0]['id']
     base = f'/cases/{case_id}/pipeline/{persona_id}'
-    assert client.get('/personas/' + persona_id).headers['Location'].endswith(base)
+    persona_entry = client.get('/personas/' + persona_id)
+    assert persona_entry.headers['Location'].endswith(base + '/persona')
+    unreviewed_persona = client.get(persona_entry.headers['Location'])
+    assert unreviewed_persona.status_code == 303
+    assert unreviewed_persona.headers['Location'].endswith(base + '#operator-review')
     legacy_results = client.get('/results/search_' + initial_job_id)
     assert legacy_results.status_code == 302
     assert legacy_results.headers['Location'].endswith('/pipeline')
@@ -289,6 +293,12 @@ def test_real_app_manual_review_qc_research_worker_and_final_projection(
         },
     )
     assert included.status_code == 201
+    approved_persona = client.get(
+        '/personas/' + persona_id, follow_redirects=True
+    )
+    assert approved_persona.status_code == 200
+    assert b'Approved Persona' in approved_persona.data
+    assert b'Synthetic Person' in approved_persona.data
     first = post(
         journey,
         base + '/versions',

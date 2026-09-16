@@ -18,11 +18,14 @@ import aiohttp
 
 from maigret.web.profile_search_contract import (
     MAX_PROFILE_SEARCH_RESULTS,
+    MAX_PUBLIC_IMAGE_SEARCH_RESULTS,
     ProfileSearchContractError,
     ProfileSearchError,
     ProfileSearchEvidence,
     ProfileSearchProvenance,
     ProfileSearchQuery,
+    PublicImageSearchEvidence,
+    PublicImageSearchQuery,
 )
 
 PROFILE_SEARCH_DISABLED_PROVIDER = "disabled"
@@ -217,6 +220,28 @@ class ProfileSearchRun:
         }
 
 
+@dataclass(frozen=True)
+class PublicImageSearchRun:
+    """One bounded public-image provider execution."""
+
+    query: PublicImageSearchQuery
+    provenance: Optional[ProfileSearchProvenance]
+    evidence: Tuple[PublicImageSearchEvidence, ...]
+    provider_warnings: Tuple[str, ...] = ()
+    error: Optional[ProfileSearchError] = None
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "query": self.query.as_dict(),
+            "provenance": (
+                self.provenance.as_dict() if self.provenance else None
+            ),
+            "evidence": [item.as_dict() for item in self.evidence],
+            "provider_warnings": list(self.provider_warnings),
+            "error": self.error.as_dict() if self.error else None,
+        }
+
+
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -333,6 +358,94 @@ def _searxng_evidence(payload: Any, *, limit: int) -> Tuple[ProfileSearchEvidenc
     return tuple(evidence)
 
 
+def _searxng_image_evidence(
+    payload: Any, *, limit: int
+) -> Tuple[PublicImageSearchEvidence, ...]:
+    if not isinstance(payload, dict):
+        raise _ProviderFailure(
+            "invalid_response",
+            "Image search provider returned an invalid response.",
+            retryable=False,
+        )
+    raw_results = payload.get("results", [])
+    if not isinstance(raw_results, list):
+        raise _ProviderFailure(
+            "invalid_response",
+            "Image search provider returned an invalid response.",
+            retryable=False,
+        )
+    evidence = []
+    seen_images = set()
+    for rank, raw_result in enumerate(raw_results[:100], start=1):
+        if len(evidence) >= min(limit, MAX_PUBLIC_IMAGE_SEARCH_RESULTS):
+            break
+        if not isinstance(raw_result, dict):
+            continue
+        image_url = str(raw_result.get("img_src") or "").strip()
+        if image_url.casefold() in seen_images:
+            continue
+        thumbnail_url = str(
+            raw_result.get("thumbnail_src") or raw_result.get("thumbnail") or ""
+        ).strip()
+        engines = raw_result.get("engines")
+        engine = str(raw_result.get("engine") or "")
+        if isinstance(engines, list):
+            engine = ", ".join(str(item) for item in engines[:5])
+        values = {
+            "result_rank": rank,
+            "source_url": str(raw_result.get("url") or "").strip(),
+            "image_url": image_url,
+            "thumbnail_url": thumbnail_url,
+            "title": str(raw_result.get("title") or ""),
+            "source": str(raw_result.get("source") or ""),
+            "engine": engine,
+            "resolution": str(raw_result.get("resolution") or ""),
+        }
+        try:
+            item = PublicImageSearchEvidence(**values)
+        except ProfileSearchContractError:
+            if not thumbnail_url:
+                continue
+            try:
+                item = PublicImageSearchEvidence(
+                    **{**values, "thumbnail_url": ""}
+                )
+            except ProfileSearchContractError:
+                continue
+        seen_images.add(image_url.casefold())
+        evidence.append(item)
+    return tuple(evidence)
+
+
+def _searxng_provider_warnings(payload: Any) -> Tuple[str, ...]:
+    """Retain bounded per-engine failures without copying provider payloads."""
+    if not isinstance(payload, dict):
+        return ()
+    raw_warnings = payload.get("unresponsive_engines")
+    if not isinstance(raw_warnings, list):
+        return ()
+    warnings = []
+    for raw_warning in raw_warnings[:10]:
+        if isinstance(raw_warning, dict):
+            parts = (
+                raw_warning.get("engine"),
+                raw_warning.get("error") or raw_warning.get("reason"),
+            )
+        elif isinstance(raw_warning, (list, tuple)):
+            parts = raw_warning[:2]
+        else:
+            continue
+        bounded = [
+            " ".join(str(part or "").split())[:160]
+            for part in parts
+            if str(part or "").strip()
+        ]
+        warning = " — ".join(bounded)[:300]
+        if warning and warning not in warnings:
+            warnings.append(warning)
+    return tuple(warnings)
+
+
 class ProfileSearchClient:
     """Search without logging queries, results, or secrets."""
 
@@ -400,6 +513,65 @@ class ProfileSearchClient:
                     provider=self.config.provider,
                     code="request_failed",
                     message="Search provider request failed.",
+                    retryable=True,
+                    occurred_at=occurred_at,
+                ),
+            )
+
+    async def search_images(
+        self, query: PublicImageSearchQuery
+    ) -> PublicImageSearchRun:
+        """Search image indexes without interpreting identity or fetching images."""
+        if not self.config.enabled:
+            raise ProfileSearchConfigurationError("Profile search is disabled")
+        if self.config.provider != PROFILE_SEARCH_SEARXNG_PROVIDER:
+            raise ProfileSearchConfigurationError(
+                "Configured profile-search provider does not support image search"
+            )
+        try:
+            return await self._search_searxng_images(query)
+        except _ProviderFailure as exc:
+            occurred_at = self._clock()
+            logger.warning(
+                "Public image search failed provider=%s query_id=%s code=%s "
+                "error_type=%s",
+                self.config.provider,
+                query.query_id,
+                exc.code,
+                type(exc).__name__,
+            )
+            return PublicImageSearchRun(
+                query=query,
+                provenance=None,
+                evidence=(),
+                error=ProfileSearchError(
+                    query_id=query.query_id,
+                    provider=self.config.provider,
+                    code=exc.code,
+                    message=exc.public_message,
+                    retryable=exc.retryable,
+                    occurred_at=occurred_at,
+                    http_status=exc.http_status,
+                ),
+            )
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            occurred_at = self._clock()
+            logger.warning(
+                "Public image search failed provider=%s query_id=%s "
+                "code=request_failed error_type=%s",
+                self.config.provider,
+                query.query_id,
+                type(exc).__name__,
+            )
+            return PublicImageSearchRun(
+                query=query,
+                provenance=None,
+                evidence=(),
+                error=ProfileSearchError(
+                    query_id=query.query_id,
+                    provider=self.config.provider,
+                    code="request_failed",
+                    message="Image search provider request failed.",
                     retryable=True,
                     occurred_at=occurred_at,
                 ),
@@ -550,4 +722,78 @@ class ProfileSearchClient:
             query=query,
             provenance=provenance,
             evidence=_searxng_evidence(payload, limit=result_limit),
+        )
+
+    async def _search_searxng_images(
+        self, query: PublicImageSearchQuery
+    ) -> PublicImageSearchRun:
+        result_limit = min(
+            query.max_results,
+            self.config.max_results,
+            MAX_PUBLIC_IMAGE_SEARCH_RESULTS,
+        )
+        headers = {
+            "Accept": "application/json",
+            "Accept-Encoding": "gzip",
+            "User-Agent": "OpenLedger-Public-Image-Discovery/1.0",
+        }
+        params = {
+            "q": query.query_text,
+            "format": "json",
+            "safesearch": "2",
+            "language": "all",
+            "categories": "images",
+        }
+        timeout = aiohttp.ClientTimeout(total=self.config.timeout_seconds)
+        async with self._session_factory(timeout=timeout, headers=headers) as session:
+            async with session.get(
+                SEARXNG_SEARCH_URL,
+                params=params,
+                allow_redirects=False,
+            ) as response:
+                status = int(response.status)
+                if status == 429:
+                    raise _ProviderFailure(
+                        "rate_limited",
+                        "Image search provider rate limit was reached.",
+                        retryable=True,
+                        http_status=status,
+                    )
+                if status >= 500:
+                    raise _ProviderFailure(
+                        "provider_unavailable",
+                        "Image search provider is temporarily unavailable.",
+                        retryable=True,
+                        http_status=status,
+                    )
+                if status != 200:
+                    raise _ProviderFailure(
+                        "provider_error",
+                        "Image search provider returned an unexpected response.",
+                        retryable=False,
+                        http_status=status,
+                    )
+                body = await _bounded_response_body(response)
+                request_id = _header_value(response.headers, "X-Request-Id")
+        try:
+            payload = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise _ProviderFailure(
+                "invalid_response",
+                "Image search provider returned invalid JSON.",
+                retryable=False,
+                http_status=200,
+            ) from exc
+        retrieved_at = self._clock()
+        provenance = ProfileSearchProvenance.for_query(
+            query,
+            provider=self.config.provider,
+            provider_request_id=request_id,
+            retrieved_at=retrieved_at,
+        )
+        return PublicImageSearchRun(
+            query=query,
+            provenance=provenance,
+            evidence=_searxng_image_evidence(payload, limit=result_limit),
+            provider_warnings=_searxng_provider_warnings(payload),
         )

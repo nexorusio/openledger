@@ -28,6 +28,7 @@ PROFILE_SEARCH_SEED_KINDS = frozenset(
     }
 )
 MAX_PROFILE_SEARCH_RESULTS = 10
+MAX_PUBLIC_IMAGE_SEARCH_RESULTS = 5
 
 _IDENTIFIER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._:-]{0,99}$")
 _ERROR_CODE_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -224,6 +225,72 @@ class ProfileSearchQuery:
 
 
 @dataclass(frozen=True)
+class PublicImageSearchQuery:
+    """One bounded image query anchored to an approved public profile."""
+
+    query_id: str
+    query_text: str
+    subject: str
+    approved_source_url: str
+    max_results: int = MAX_PUBLIC_IMAGE_SEARCH_RESULTS
+    schema_version: int = field(
+        default=PROFILE_SEARCH_SCHEMA_VERSION, init=False
+    )
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "query_id", _identifier(self.query_id, "query_id")
+        )
+        object.__setattr__(
+            self,
+            "query_text",
+            _bounded_text(self.query_text, "query_text", max_chars=500),
+        )
+        object.__setattr__(
+            self,
+            "subject",
+            _bounded_text(self.subject, "subject", max_chars=300),
+        )
+        object.__setattr__(
+            self,
+            "approved_source_url",
+            _public_https_url(self.approved_source_url, "approved_source_url"),
+        )
+        if (
+            isinstance(self.max_results, bool)
+            or not isinstance(self.max_results, int)
+            or not 1 <= self.max_results <= MAX_PUBLIC_IMAGE_SEARCH_RESULTS
+        ):
+            raise ProfileSearchContractError(
+                "max_results must be between 1 and "
+                f"{MAX_PUBLIC_IMAGE_SEARCH_RESULTS}"
+            )
+
+    @property
+    def fingerprint(self) -> str:
+        material = "\0".join(
+            (
+                self.query_text,
+                self.subject,
+                self.approved_source_url,
+                str(self.max_results),
+            )
+        )
+        return f"sha256:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "query_id": self.query_id,
+            "query_text": self.query_text,
+            "subject": self.subject,
+            "approved_source_url": self.approved_source_url,
+            "max_results": self.max_results,
+            "query_fingerprint": self.fingerprint,
+        }
+
+
+@dataclass(frozen=True)
 class ProfileSearchProvenance:
     """Provider lineage for one query execution and its returned records."""
 
@@ -265,7 +332,7 @@ class ProfileSearchProvenance:
     @classmethod
     def for_query(
         cls,
-        query: ProfileSearchQuery,
+        query: ProfileSearchQuery | PublicImageSearchQuery,
         *,
         provider: str,
         retrieved_at: str | datetime,
@@ -333,6 +400,70 @@ class ProfileSearchEvidence:
             "source_url": self.source_url,
             "title": self.title,
             "snippet": self.snippet,
+        }
+
+
+@dataclass(frozen=True)
+class PublicImageSearchEvidence:
+    """A public image candidate and the page where the index found it."""
+
+    result_rank: int
+    source_url: str
+    image_url: str
+    thumbnail_url: str = ""
+    title: str = ""
+    source: str = ""
+    engine: str = ""
+    resolution: str = ""
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.result_rank, bool)
+            or not isinstance(self.result_rank, int)
+            or not 1 <= self.result_rank <= 100
+        ):
+            raise ProfileSearchContractError(
+                "result_rank must be between 1 and 100"
+            )
+        for field_name in ("source_url", "image_url"):
+            object.__setattr__(
+                self,
+                field_name,
+                _public_https_url(getattr(self, field_name), field_name),
+            )
+        if self.thumbnail_url:
+            object.__setattr__(
+                self,
+                "thumbnail_url",
+                _public_https_url(self.thumbnail_url, "thumbnail_url"),
+            )
+        for field_name, max_chars in (
+            ("title", 500),
+            ("source", 200),
+            ("engine", 200),
+            ("resolution", 100),
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _bounded_text(
+                    getattr(self, field_name),
+                    field_name,
+                    max_chars=max_chars,
+                    allow_empty=True,
+                ),
+            )
+
+    def as_dict(self) -> Dict[str, Any]:
+        return {
+            "result_rank": self.result_rank,
+            "source_url": self.source_url,
+            "image_url": self.image_url,
+            "thumbnail_url": self.thumbnail_url,
+            "title": self.title,
+            "source": self.source,
+            "engine": self.engine,
+            "resolution": self.resolution,
         }
 
 

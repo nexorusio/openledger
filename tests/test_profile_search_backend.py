@@ -15,7 +15,10 @@ from maigret.web.profile_search_backend import (
     load_profile_search_config,
     read_profile_search_api_key,
 )
-from maigret.web.profile_search_contract import ProfileSearchQuery
+from maigret.web.profile_search_contract import (
+    ProfileSearchQuery,
+    PublicImageSearchQuery,
+)
 
 
 class _Content:
@@ -63,6 +66,16 @@ def _query(max_results=5):
         query_text='site:instagram.com "alice_example"',
         seed_kind="alias",
         seed_value="alice_example",
+        max_results=max_results,
+    )
+
+
+def _image_query(max_results=3):
+    return PublicImageSearchQuery(
+        query_id="approved-image:1",
+        query_text='"Jati Pratomo" "jati-pratomo"',
+        subject="Jati Pratomo",
+        approved_source_url="https://www.linkedin.com/in/jati-pratomo/",
         max_results=max_results,
     )
 
@@ -231,7 +244,7 @@ async def test_searxng_client_uses_only_the_private_fixed_endpoint():
                     "title": "Alice Work",
                     "content": "Another public candidate.",
                 },
-            ]
+            ],
         }
     ).encode("utf-8")
     response = _Response(200, payload, {"X-Request-Id": "local-42"})
@@ -269,6 +282,87 @@ async def test_searxng_client_uses_only_the_private_fixed_endpoint():
         "Accept-Encoding": "gzip",
         "User-Agent": "OpenLedger-Profile-Discovery/1.0",
     }
+
+
+@pytest.mark.asyncio
+async def test_searxng_image_search_retains_public_image_and_source_urls():
+    config = load_profile_search_config(
+        {
+            "OPENLEDGER_PROFILE_SEARCH_PROVIDER": "searxng",
+            "OPENLEDGER_PROFILE_SEARCH_MAX_RESULTS": "3",
+        }
+    )
+    capture = {}
+    payload = json.dumps(
+        {
+            "results": [
+                {
+                    "url": "https://example.org/team/jati-pratomo",
+                    "img_src": "https://cdn.example.org/jati.jpg",
+                    "thumbnail_src": "https://thumbs.example.org/jati.jpg",
+                    "title": "Jati Pratomo",
+                    "source": "example.org",
+                    "engines": ["google images"],
+                    "resolution": "800 x 800",
+                },
+                {
+                    "url": "https://example.org/team/jati-pratomo",
+                    "img_src": "https://cdn.example.org/jati.jpg",
+                    "title": "Duplicate image",
+                },
+                {
+                    "url": "https://example.net/jati",
+                    "img_src": "https://images.example.net/jati.png",
+                    "thumbnail": "http://127.0.0.1/private.png",
+                    "title": "Second public candidate",
+                    "engines": ["duckduckgo images"],
+                },
+                {
+                    "url": "https://example.test/private",
+                    "img_src": "https://127.0.0.1/private.jpg",
+                    "title": "Unsafe image",
+                },
+            ],
+            "unresponsive_engines": [
+                ["google images", "CAPTCHA"],
+                ["google images", "CAPTCHA"],
+            ],
+        }
+    ).encode("utf-8")
+    response = _Response(200, payload, {"X-Request-Id": "images-42"})
+
+    def session_factory(**kwargs):
+        capture["session"] = kwargs
+        return _Session(response, capture)
+
+    result = await ProfileSearchClient(
+        config,
+        session_factory=session_factory,
+        clock=lambda: datetime(2026, 9, 15, 15, 0, tzinfo=timezone.utc),
+    ).search_images(_image_query())
+
+    assert result.error is None
+    assert [item.image_url for item in result.evidence] == [
+        "https://cdn.example.org/jati.jpg",
+        "https://images.example.net/jati.png",
+    ]
+    assert result.evidence[1].thumbnail_url == ""
+    assert result.evidence[0].engine == "google images"
+    assert result.evidence[1].engine == "duckduckgo images"
+    assert result.provider_warnings == ("google images — CAPTCHA",)
+    assert result.provenance.provider_request_id == "images-42"
+    assert capture["url"] == SEARXNG_SEARCH_URL
+    assert capture["request"]["params"] == {
+        "q": '"Jati Pratomo" "jati-pratomo"',
+        "format": "json",
+        "safesearch": "2",
+        "language": "all",
+        "categories": "images",
+    }
+    assert capture["request"]["allow_redirects"] is False
+    assert capture["session"]["headers"]["User-Agent"] == (
+        "OpenLedger-Public-Image-Discovery/1.0"
+    )
 
 
 @pytest.mark.asyncio

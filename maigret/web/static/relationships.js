@@ -439,10 +439,10 @@
     });
 
     updateVisibility();
-    // Persona graphs are evidence paths, not social-network diagrams.  Start
-    // with the subject → approved finding → source flow so every approved
-    // record is visible as an association before a user chooses a free layout.
-    applyLayout('hierarchical');
+    // Start with the readable evidence network. Hierarchical flow remains an
+    // optional inspection layout, but a dense Persona graph must not collapse
+    // into one long column on entry.
+    applyLayout('force');
     const requestedProposalId = new URLSearchParams(window.location.search).get('proposal_id');
     const requestedEdgeId = requestedProposalId ? `ai-proposal:${requestedProposalId}` : '';
     if (requestedEdgeId && edgeLookup.has(requestedEdgeId)) {
