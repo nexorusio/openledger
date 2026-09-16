@@ -429,9 +429,9 @@ def test_operator_can_resolve_and_reopen_contradictory_evidence_without_erasing_
         extracted = subprocess.run(
             [converter, "-", "-"], input=rendered, capture_output=True, check=True
         ).stdout.decode()
-        assert "excluded evidence" in extracted
-        assert "Use of this observation in each curated group" in extracted
-        assert "Retraction concerns a different person" in extracted
+        assert "Evidence and audit access" in extracted
+        assert final["id"] in extracted
+        assert wrong["id"] not in extracted
     pair[1].decide(
         request["case_id"],
         request["persona_id"],

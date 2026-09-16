@@ -313,7 +313,9 @@ def test_real_app_manual_review_qc_research_worker_and_final_projection(
     draft_pdf = client.get(base + f'/versions/{first["id"]}/export.pdf')
     assert (
         draft_pdf.status_code == 200
-        and 'submitted' in draft_pdf.headers['Content-Disposition']
+        and 'OpenLedger-Investigation-' in draft_pdf.headers['Content-Disposition']
+        and 'Synthetic-Person' in draft_pdf.headers['Content-Disposition']
+        and 'submitted' not in draft_pdf.headers['Content-Disposition']
     )
     rejected = post(
         journey,
@@ -452,6 +454,7 @@ def test_real_app_manual_review_qc_research_worker_and_final_projection(
             check=True,
         ).stdout.decode()
         assert final['content_hash'] in re.sub(r'\s+', '', text)
-        assert all(evidence_id in text for evidence_id in final_evidence_ids)
+        assert 'Evidence and audit access' in text
+        assert final['version_id'] in text
     assert pipeline.get_version(first['id'])['status'] == 'changes_required'
     assert pipeline.get_version(first['id'])['manifest'] == first['manifest']

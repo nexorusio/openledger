@@ -116,12 +116,12 @@
                                     <strong>{{ item.label }}</strong>
                                     {% endif %}
                                 </div>
-                                <div class="approved-persona-record-badges"><span class="badge-soft success">Approved</span></div>
+                                <div class="approved-persona-record-badges"><span class="badge-soft success">Approved</span><span class="approved-persona-evidence-count">{{ item.evidence_count }} supporting {{ 'source' if item.evidence_count == 1 else 'sources' }}</span></div>
                             </div>
                             {% if item.decision_reason %}<p class="approved-persona-record-note">{{ item.decision_reason }}</p>{% endif %}
                             {% if item.source_fetch %}<p class="approved-persona-record-note" title="{{ item.source_fetch.reason }}">Source fetch: {{ item.source_fetch.status | replace('_', ' ') | title }}{% if item.source_fetch.http_status %} · HTTP {{ item.source_fetch.http_status }}{% endif %}{% if item.source_fetch.claim_candidate_count %} · {{ item.source_fetch.claim_candidate_count }} proposal{{ '' if item.source_fetch.claim_candidate_count == 1 else 's' }}{% endif %}</p>{% endif %}
                             <div class="approved-persona-record-actions">
-                                <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}">View evidence</a>
+                                <button class="btn btn-outline-secondary btn-sm" type="button" data-open-evidence-modal="{{ item.modal_id }}">View evidence</button>
                                 {% if section.key == 'affiliations' and item.kind == 'claim' and item.normalized.predicate in ('company', 'organization', 'affiliation') %}
                                 <form class="affiliation-branch-control" method="post" action="{{ url_for('pipeline.branch_affiliation', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-outline-secondary btn-sm" type="submit" data-busy-label="Opening branch…">New investigation branch</button></form>
                                 {% endif %}
@@ -140,6 +140,26 @@
     </section>
     {% endfor %}
 </div>
+
+{% for section in approved.sections %}
+{% for field in section.fields %}
+{% for item in field['items'] %}
+<dialog class="persona-evidence-modal" id="{{ item.modal_id }}" aria-labelledby="{{ item.modal_id }}-title">
+    <header><div><p class="eyebrow">Approved evidence</p><h2 id="{{ item.modal_id }}-title">{{ field.label }}</h2><p>{{ item.label }}</p></div><button type="button" class="persona-evidence-modal-close" data-close-evidence-modal aria-label="Close evidence">×</button></header>
+    <div class="persona-evidence-modal-body">
+        <p>{{ item.evidence_count }} retained {{ 'source supports' if item.evidence_count == 1 else 'sources support' }} this approved record. External links open in a new tab.</p>
+        <ul class="persona-evidence-source-list">
+        {% for source in item.evidence %}
+            <li><div><strong>{{ source.label }}</strong><small>{{ source.outcome | title }} · {{ source.id }}</small></div>{% if source.url %}<a class="btn btn-outline-secondary btn-sm" href="{{ source.url }}" target="_blank" rel="noopener noreferrer">Open source</a>{% else %}<span class="badge-soft warning">No public link</span>{% endif %}</li>
+        {% else %}
+            <li><div><strong>No retained source link is available</strong><small>The approved record remains auditable, but this observation has no public external URL.</small></div></li>
+        {% endfor %}
+        </ul>
+    </div>
+</dialog>
+{% endfor %}
+{% endfor %}
+{% endfor %}
 {% endblock %}
 
 {% block scripts %}
@@ -158,6 +178,15 @@
     document.querySelectorAll('[data-approved-evidence-photo]').forEach((image) => image.addEventListener('error', () => {
         image.hidden = true;
         image.nextElementSibling?.removeAttribute('hidden');
+    }));
+    document.querySelectorAll('[data-open-evidence-modal]').forEach((button) => button.addEventListener('click', () => {
+        document.getElementById(button.dataset.openEvidenceModal)?.showModal();
+    }));
+    document.querySelectorAll('[data-close-evidence-modal]').forEach((button) => button.addEventListener('click', () => {
+        button.closest('dialog')?.close();
+    }));
+    document.querySelectorAll('.persona-evidence-modal').forEach((modal) => modal.addEventListener('click', (event) => {
+        if (event.target === modal) modal.close();
     }));
     const mapElement = document.getElementById('approvedPersonaMap');
     const points = {{ approved.map_points | tojson }};

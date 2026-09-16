@@ -59,6 +59,13 @@
             <span class="review-progress">{{ workspace.shortlist_count - workspace.review_pending_count }} of {{ workspace.shortlist_count }} resolved</span>
         </header>
         <div class="panel-body assessment-review-body">
+            <div class="assessment-decision-filters" role="group" aria-label="Filter review findings by decision">
+                <button type="button" class="active" data-decision-filter="all" aria-pressed="true">All <span>{{ workspace.shortlist_count }}</span></button>
+                <button type="button" data-decision-filter="pending" aria-pressed="false">Needs review</button>
+                <button type="button" data-decision-filter="include" aria-pressed="false">Approved</button>
+                <button type="button" data-decision-filter="rejected" aria-pressed="false">Rejected</button>
+                <button type="button" data-decision-filter="unresolved" aria-pressed="false">Kept in queue</button>
+            </div>
             <div class="pipeline-table-wrap assessment-table-wrap">
                 <table class="table pipeline-table assessment-review-table" data-sortable-table>
                     <colgroup>
@@ -206,6 +213,32 @@
             form.querySelector('button[name="decision"]')?.focus();
         });
     });
+    const scrollKey = `openledger-review-scroll:${window.location.pathname}`;
+    const savedScroll = window.sessionStorage.getItem(scrollKey);
+    if (savedScroll !== null) {
+        window.sessionStorage.removeItem(scrollKey);
+        window.requestAnimationFrame(() => window.scrollTo({top: Number(savedScroll) || 0, behavior: 'instant'}));
+    }
+    document.querySelectorAll('.assessment-table-decision-form').forEach((form) => form.addEventListener('submit', () => {
+        window.sessionStorage.setItem(scrollKey, String(window.scrollY));
+    }));
+    const decisionFilters = Array.from(document.querySelectorAll('[data-decision-filter]'));
+    const findings = Array.from(document.querySelectorAll('.assessment-review-table tbody tr[data-decision]'));
+    const applyDecisionFilter = (selected) => {
+        findings.forEach((row) => {
+            const value = row.dataset.decision;
+            const matches = selected === 'all'
+                || value === selected
+                || (selected === 'rejected' && ['reject', 'exclude'].includes(value));
+            row.hidden = !matches;
+        });
+        decisionFilters.forEach((button) => {
+            const active = button.dataset.decisionFilter === selected;
+            button.classList.toggle('active', active);
+            button.setAttribute('aria-pressed', String(active));
+        });
+    };
+    decisionFilters.forEach((button) => button.addEventListener('click', () => applyDecisionFilter(button.dataset.decisionFilter)));
     document.querySelectorAll('.evidence-preparation-form').forEach((form) => {
         form.addEventListener('submit', () => {
             const button = form.querySelector('button[type="submit"]');

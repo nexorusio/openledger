@@ -849,6 +849,8 @@ def test_persona_renders_approved_photo_and_persisted_location_map(
     assert b'approved-persona-field-label">Organization, institution or company' in response.data
     assert b'approved-persona-field-label">Role or occupation' in response.data
     assert b'approved-persona-evidence-photo' in response.data
+    assert b'data-open-evidence-modal=' in response.data
+    assert b'persona-evidence-modal' in response.data
     assert b'approved-persona-table' not in response.data
 
     relationships = journey["client"].get(
@@ -949,14 +951,19 @@ def test_approved_persona_opens_while_newer_findings_await_review(journey):
     assert b"Pending analyst review" not in response.data
 
 
-def test_persona_evidence_network_starts_with_the_readable_force_layout():
+def test_persona_evidence_network_starts_with_a_stable_layout_and_fullscreen():
     root = Path(__file__).parents[1] / "maigret" / "web"
     template = (root / "templates" / "relationships.html").read_text()
     script = (root / "static" / "relationships.js").read_text()
 
-    assert '<option value="force" selected>Evidence network</option>' in template
-    assert "applyLayout('force');" in script
-    assert "applyLayout('hierarchical');" not in script
+    assert '<option value="concentric" selected>Stable evidence network</option>' in template
+    assert '<option value="force">Force-directed evidence network</option>' in template
+    assert template.count('<option value="concentric"') == 1
+    assert 'id="relationshipFullscreenButton"' in template
+    assert "applyLayout('concentric');" in script
+    assert "requestFullscreen" in script
+    assert "network.once('stabilizationIterationsDone'" in script
+    assert "network.setOptions({physics: {enabled: false}});" in script
 
 
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):
@@ -1079,7 +1086,8 @@ def test_frozen_draft_and_final_pdf_have_same_manifest_identifiers(journey):
     assert response.status_code == 200 and response.data.startswith(b'%PDF-')
     assert response.headers['X-OpenLedger-Version'] == version['id']
     assert response.headers['X-OpenLedger-Manifest-Hash'] == version['content_hash']
-    assert 'submitted' in response.headers['Content-Disposition']
+    assert 'OpenLedger-Investigation-' in response.headers['Content-Disposition']
+    assert 'submitted' not in response.headers['Content-Disposition']
     assert (
         journey['pipeline'].get_final_version(journey['case_id'], journey['persona_id'])
         is None
@@ -1095,7 +1103,7 @@ def test_frozen_draft_and_final_pdf_have_same_manifest_identifiers(journey):
     response = journey['client'].get(url)
     assert (
         response.status_code == 200
-        and 'approved' in response.headers['Content-Disposition']
+        and 'OpenLedger-Investigation-' in response.headers['Content-Disposition']
     )
 
 
@@ -1344,7 +1352,7 @@ def test_split_preserves_observations_and_requires_new_operator_review(journey):
     )
 
 
-def test_pdf_text_register_contains_every_curated_fact_and_observation():
+def test_pdf_brief_deduplicates_the_reader_view_and_keeps_version_access():
     import re
     import shutil
     import subprocess
@@ -1387,18 +1395,11 @@ def test_pdf_text_register_contains_every_curated_fact_and_observation():
     text = subprocess.run(
         [converter, '-', '-'], input=rendered, capture_output=True, check=True
     ).stdout.decode()
-    assert set(re.findall(r'Group:\s+(group-\d+)', text)) == {
-        item['group_id'] for item in items
-    }
-    assert set(re.findall(r'Observation\s+(obs-\d+)', text)) == {
-        item['evidence'][0]['id'] for item in items
-    }
-    assert 'Evidence ID index' in text
-    assert all(
-        text.count(item['evidence'][0]['id']) >= 2
-        for item in items
-    )
-    assert 'Final Persona' in text and 'version-fidelity' in text
+    assert 'Fact number 0' in text
+    assert '132 additional distinct approved value(s) are retained in OpenLedger.' in text
+    assert 'Evidence and audit access' in text
+    assert 'version-fidelity' in text
+    assert 'Evidence ID index' not in text
     assert 'a' * 64 in re.sub(r'\s+', '', text)
 
 
