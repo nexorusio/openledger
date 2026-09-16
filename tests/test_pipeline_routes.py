@@ -338,8 +338,19 @@ def test_review_proceed_persona_and_approved_discovery_are_an_explicit_wizard(
     blocked_discovery = client.post(
         base(journey) + "/discover-related",
         data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
     )
-    assert blocked_discovery.status_code == 409
+    assert blocked_discovery.status_code == 303
+    assert blocked_discovery.location.endswith(base(journey) + "#operator-review")
+    assert journey["discovery_launches"] == []
+    blocked_source_fetch = client.post(
+        base(journey) + "/fetch-approved-sources",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_source_fetch.status_code == 303
+    assert blocked_source_fetch.location.endswith(base(journey) + "#operator-review")
+    assert journey["source_fetch_launches"] == []
     blocked_report = client.post(
         base(journey) + "/report",
         data={"csrf_token": "test-csrf"},
@@ -949,6 +960,28 @@ def test_approved_persona_opens_while_newer_findings_await_review(journey):
     assert b"Synthetic Person" in response.data
     assert b"awaiting review" in response.data
     assert b"Pending analyst review" not in response.data
+    assert b"Research with cited sources" in response.data
+    assert b"disabled" in response.data
+    assert b'aria-describedby="collection-action-guard"' in response.data
+    assert b"Resolve the review queue in Step 1 before collecting more." in response.data
+
+    blocked_discovery = journey["client"].post(
+        base(journey) + "/discover-related",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_discovery.status_code == 303
+    assert blocked_discovery.location.endswith(base(journey) + "#operator-review")
+    assert journey["discovery_launches"] == []
+
+    blocked_source_fetch = journey["client"].post(
+        base(journey) + "/fetch-approved-sources",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_source_fetch.status_code == 303
+    assert blocked_source_fetch.location.endswith(base(journey) + "#operator-review")
+    assert journey["source_fetch_launches"] == []
 
 
 def test_persona_evidence_network_starts_with_a_stable_layout_and_fullscreen():
@@ -964,6 +997,21 @@ def test_persona_evidence_network_starts_with_a_stable_layout_and_fullscreen():
     assert "requestFullscreen" in script
     assert "network.once('stabilizationIterationsDone'" in script
     assert "network.setOptions({physics: {enabled: false}});" in script
+
+
+def test_review_queue_sort_is_applied_before_paginating_all_findings():
+    root = Path(__file__).parents[1] / "maigret" / "web"
+    store = (root / "pipeline_store.py").read_text()
+    template = (root / "templates" / "pipeline_workspace.html").read_text()
+    script = (root / "static" / "openledger.js").read_text()
+
+    assert 'review_sort="default"' in store
+    assert 'if review_sort != "default":' in store
+    assert store.index('balanced_shortlist.sort(') < store.index(
+        'display_shortlist = balanced_shortlist[offset : offset + limit]'
+    )
+    assert 'data-server-sort="true"' in template
+    assert "parameters.delete('page');" in script
 
 
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):

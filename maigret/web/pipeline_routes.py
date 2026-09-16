@@ -792,6 +792,26 @@ def register_pipeline_routes(
             code=303,
         )
 
+    def review_queue_redirect(case_id, persona_id, message):
+        """Return form submissions to the actionable review queue."""
+        flash(message, "warning")
+        return redirect(
+            url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+            + "#operator-review",
+            code=303,
+        )
+
+    def collection_action_block_reason(workspace_data):
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            return "Reconcile submitted and retained evidence in Step 1 before collecting more."
+        if workspace_data["review_pending_count"]:
+            return "Resolve the review queue in Step 1 before collecting more."
+        return ""
+
     @bp.errorhandler(ValueError)
     def invalid_transition(error):
         body = {'error': str(error), 'findings': getattr(error, 'findings', [])}
@@ -834,12 +854,16 @@ def register_pipeline_routes(
         persona = scoped_persona(case_id, persona_id)
         page = max(1, request.args.get("page", 1, type=int))
         history_page = max(1, request.args.get("history_page", 1, type=int))
+        review_sort = request.args.get("sort", "default", type=str)
+        review_direction = request.args.get("direction", "ascending", type=str)
         data = store().get_workspace(
             case_id,
             persona_id,
             limit=25,
             offset=(page - 1) * 25,
             history_offset=(history_page - 1) * 25,
+            review_sort=review_sort,
+            review_direction=review_direction,
         )
         return render_template(
             "pipeline_workspace.html",
@@ -847,6 +871,8 @@ def register_pipeline_routes(
             persona=persona,
             page=page,
             page_size=25,
+            review_sort=review_sort,
+            review_direction=review_direction,
             qc_allowed=current_auth_role() == "admin",
             research_available=launch_research is not None,
             preparation_available=prepare_workspace is not None,
@@ -946,6 +972,7 @@ def register_pipeline_routes(
             return redirect(
                 url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
             )
+        collection_block_reason = collection_action_block_reason(workspace_data)
         return render_template(
             "pipeline_persona.html",
             persona=subject,
@@ -956,6 +983,8 @@ def register_pipeline_routes(
                 launch_approved_source_fetch is not None
                 and bool(projection["source_urls"])
             ),
+            collection_actions_blocked=bool(collection_block_reason),
+            collection_action_block_reason=collection_block_reason,
             affiliation_public_web_available=bool(
                 affiliation_public_web_enabled
                 and affiliation_public_web_enabled()
@@ -1015,18 +1044,24 @@ def register_pipeline_routes(
             or workspace_data["projection"]["pending"]
             or workspace_data["projection"]["legacy_available"]
         ):
-            abort(
-                409,
-                description=(
-                    "Reconcile submitted and retained evidence before launching "
-                    "related discovery."
-                ),
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Reconcile submitted and retained evidence before launching related discovery.",
             )
         if workspace_data["review_pending_count"]:
-            abort(409, description="Resolve the review queue before launching discovery.")
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Resolve the review queue before launching related discovery.",
+            )
         projection = approved_persona(case_id, persona_id)
         if not projection["items"]:
-            abort(409, description="Approve evidence before launching discovery.")
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Approve evidence before launching related discovery.",
+            )
         result = launch_approved_discovery(
             case_id=case_id,
             persona_id=persona_id,
@@ -1054,18 +1089,24 @@ def register_pipeline_routes(
             or workspace_data["projection"]["pending"]
             or workspace_data["projection"]["legacy_available"]
         ):
-            abort(
-                409,
-                description=(
-                    "Reconcile submitted and retained evidence before fetching "
-                    "approved sources."
-                ),
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Reconcile submitted and retained evidence before fetching approved sources.",
             )
         if workspace_data["review_pending_count"]:
-            abort(409, description="Resolve the review queue before fetching sources.")
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Resolve the review queue before fetching approved sources.",
+            )
         projection = approved_persona(case_id, persona_id)
         if not projection["source_urls"]:
-            abort(409, description="Approve at least one public source URL first.")
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Approve at least one public source URL before fetching approved sources.",
+            )
         result = launch_approved_source_fetch(
             case_id=case_id,
             persona_id=persona_id,
