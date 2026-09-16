@@ -291,7 +291,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             download = download_info.value
             report_path = download.path()
             assert report_path and Path(report_path).read_bytes().startswith(b"%PDF")
-            assert download.suggested_filename.startswith("OpenLedger-Persona-v")
+            assert download.suggested_filename.startswith("OpenLedger-Investigation-")
 
             versions = pipeline.get_workspace(case_id, persona_id)["versions"]
             assert len(versions) == 1 and versions[0]["status"] == "submitted"
