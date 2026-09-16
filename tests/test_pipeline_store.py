@@ -794,6 +794,13 @@ def test_engine_coverage_maps_to_every_section_it_can_populate():
     }
 
 
+def test_profile_summary_predicates_are_grouped_with_identity():
+    from maigret.web.pipeline_store import _shortlist_section
+
+    for predicate in ("summary", "about", "bio", "biography", "description"):
+        assert _shortlist_section("claim", {"predicate": predicate}) == "identity"
+
+
 def test_withdraw_preserves_final_version_and_audit(pair):
     request, _, _, version = curated(pair)
     pipeline = pair[1]

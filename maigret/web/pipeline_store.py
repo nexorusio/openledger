@@ -54,6 +54,11 @@ SHORTLIST_SECTIONS = (
 )
 
 SHORTLIST_PREDICATE_SECTIONS = {
+    "summary": "identity",
+    "about": "identity",
+    "bio": "identity",
+    "biography": "identity",
+    "description": "identity",
     "full_name": "identity",
     "name": "identity",
     "alias": "identity",

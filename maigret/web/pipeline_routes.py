@@ -215,6 +215,62 @@ def register_pipeline_routes(
             _shortlist_section,
         )
 
+        # This is the same information architecture as the original Persona
+        # workspace: a subject area contains named fields, rather than a flat
+        # stream of arbitrary approved rows. Keep the P2 section keys stable so
+        # collection coverage and empty-state logic remain unchanged.
+        persona_fields = {
+            "identity": (
+                ("summary", "Summary of the target"),
+                ("full_name", "Full name"),
+                ("alias", "Known aliases"),
+                ("date_of_birth", "Date of birth"),
+                ("photograph", "Photograph"),
+            ),
+            "contact": (
+                ("email", "Email address"),
+                ("phone", "Phone number"),
+                ("address", "Address"),
+                ("current_location", "Current location"),
+            ),
+            "digital": (
+                ("social_account", "Social media and public accounts"),
+                ("username", "Known usernames"),
+                ("platform_identifier", "Stable platform identifiers"),
+                ("linked_profile_lead", "Linked profile leads"),
+                ("account_registration", "Email registration evidence"),
+                ("website", "Website"),
+            ),
+            "affiliations": (
+                ("occupation", "Role or occupation"),
+                ("company", "Organization, institution or company"),
+                ("organization_location", "Organization location"),
+                ("company_ownership", "Ownership or leadership"),
+            ),
+            "records": (
+                ("offshore_database_match", "Offshore Leaks record match"),
+                ("financial_profile", "Financial profile"),
+                ("vehicle_ownership", "Vehicle ownership"),
+                ("criminal_record", "Criminal record"),
+            ),
+        }
+        predicate_aliases = {
+            "about": "summary",
+            "bio": "summary",
+            "biography": "summary",
+            "description": "summary",
+            "display_name": "full_name",
+            "name": "full_name",
+            "employer": "company",
+            "organization": "company",
+            "organisation": "company",
+            "affiliation": "company",
+            "job_title": "occupation",
+            "role": "occupation",
+            "location": "current_location",
+            "city": "current_location",
+        }
+
         current = store()
         included_rows = list(current.iter_included_groups(case_id, persona_id))
         included_account_keys = {
@@ -273,6 +329,23 @@ def register_pipeline_routes(
                     "decision_reason": row.get("decision_reason"),
                 }
             )
+
+        def field_key(item):
+            if item["kind"] == "account":
+                return "social_account"
+            predicate = str(
+                item["normalized"].get("predicate")
+                or item["normalized"].get("field_name")
+                or ""
+            ).casefold()
+            return predicate_aliases.get(predicate, predicate or "other")
+
+        def field_label(key):
+            for fields in persona_fields.values():
+                for candidate_key, candidate_label in fields:
+                    if candidate_key == key:
+                        return candidate_label
+            return key.replace("_", " ").title() if key != "other" else "Other approved findings"
         source_urls = []
         for item in items:
             url = str(item.get("url") or "").strip()
@@ -390,6 +463,42 @@ def register_pipeline_routes(
                     "key": key,
                     "title": title,
                     "items": [item for item in items if item["section"] == key],
+                    "fields": [
+                        {
+                            "key": field_name,
+                            "label": field_label(field_name),
+                            "items": [
+                                item
+                                for item in items
+                                if item["section"] == key and field_key(item) == field_name
+                            ],
+                        }
+                        for field_name, _field_label in persona_fields[key]
+                        if any(
+                            item["section"] == key and field_key(item) == field_name
+                            for item in items
+                        )
+                    ]
+                    + [
+                        {
+                            "key": extra_key,
+                            "label": field_label(extra_key),
+                            "items": [
+                                item
+                                for item in items
+                                if item["section"] == key and field_key(item) == extra_key
+                            ],
+                        }
+                        for extra_key in sorted(
+                            {
+                                field_key(item)
+                                for item in items
+                                if item["section"] == key
+                                and field_key(item)
+                                not in {name for name, _label in persona_fields[key]}
+                            }
+                        )
+                    ],
                 }
                 for key, title in SHORTLIST_SECTIONS
             ],

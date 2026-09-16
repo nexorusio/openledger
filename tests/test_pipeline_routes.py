@@ -845,6 +845,11 @@ def test_persona_renders_approved_photo_and_persisted_location_map(
     assert b"Nexorus" in response.data
     assert b"Jakarta, Indonesia" in response.data
     assert b'persona-photo-placeholder" hidden' in response.data
+    assert b'approved-persona-field-label">Photograph' in response.data
+    assert b'approved-persona-field-label">Organization, institution or company' in response.data
+    assert b'approved-persona-field-label">Role or occupation' in response.data
+    assert b'approved-persona-evidence-photo' in response.data
+    assert b'approved-persona-table' not in response.data
 
     relationships = journey["client"].get(
         base(journey) + "/persona/relationships"
