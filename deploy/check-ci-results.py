@@ -39,7 +39,7 @@ REQUIRED_CASES = (
     "test_legacy_backfill_is_checkpointed_idempotent_and_never_finalizes[postgres]",
     "test_qc_is_explicit_and_final_is_immutable[postgres]",
     "test_real_app_manual_review_qc_research_worker_and_final_projection",
-    "test_pdf_text_register_contains_every_curated_fact_and_observation",
+    "test_pdf_brief_deduplicates_the_reader_view_and_keeps_version_access",
 )
 
 
