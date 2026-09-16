@@ -999,6 +999,21 @@ def test_persona_evidence_network_starts_with_a_stable_layout_and_fullscreen():
     assert "network.setOptions({physics: {enabled: false}});" in script
 
 
+def test_review_queue_sort_is_applied_before_paginating_all_findings():
+    root = Path(__file__).parents[1] / "maigret" / "web"
+    store = (root / "pipeline_store.py").read_text()
+    template = (root / "templates" / "pipeline_workspace.html").read_text()
+    script = (root / "static" / "openledger.js").read_text()
+
+    assert 'review_sort="default"' in store
+    assert 'if review_sort != "default":' in store
+    assert store.index('balanced_shortlist.sort(') < store.index(
+        'display_shortlist = balanced_shortlist[offset : offset + limit]'
+    )
+    assert 'data-server-sort="true"' in template
+    assert "parameters.delete('page');" in script
+
+
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):
     decision = post(
         journey,

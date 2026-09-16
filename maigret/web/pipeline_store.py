@@ -2797,10 +2797,24 @@ class PipelineStore:
             )
 
     def get_workspace(
-        self, case_id, persona_id, *, limit=100, offset=0, history_offset=0
+        self,
+        case_id,
+        persona_id,
+        *,
+        limit=100,
+        offset=0,
+        history_offset=0,
+        review_sort="default",
+        review_direction="ascending",
     ):
         limit, offset = min(max(int(limit), 1), 100), max(int(offset), 0)
         history_offset = max(int(history_offset), 0)
+        review_sort = str(review_sort or "default").casefold()
+        if review_sort not in {"default", "finding", "category", "assessment", "evidence", "decision"}:
+            review_sort = "default"
+        review_direction = str(review_direction or "ascending").casefold()
+        if review_direction not in {"ascending", "descending"}:
+            review_direction = "ascending"
         with self.engine.connect() as connection:
             state = self._scope(connection, case_id, persona_id)
             projection = self._projection_state(connection, case_id, persona_id)
@@ -3232,6 +3246,39 @@ class PipelineStore:
                     if depth < len(items):
                         balanced_shortlist.append(items[depth])
                 depth += 1
+            if review_sort != "default":
+                def review_sort_value(item):
+                    normalized = item["normalized"]
+                    if review_sort == "finding":
+                        return str(
+                            normalized.get("display_value")
+                            or normalized.get("value")
+                            or normalized.get("canonical_url")
+                            or normalized.get("url")
+                            or normalized.get("handle")
+                            or normalized.get("predicate")
+                            or "Finding"
+                        ).casefold()
+                    if review_sort == "category":
+                        return str(item["section_title"]).casefold()
+                    if review_sort == "assessment":
+                        return str(item["ranking_explanation"]).casefold()
+                    if review_sort == "evidence":
+                        return (
+                            item["support_origin_families"],
+                            item["observation_count"],
+                        )
+                    return {
+                        "include": "Approved",
+                        "reject": "Rejected",
+                        "exclude": "Rejected",
+                        "unresolved": "Kept in queue",
+                    }.get(item["latest_decision"], "Needs review").casefold()
+
+                balanced_shortlist.sort(
+                    key=review_sort_value,
+                    reverse=review_direction == "descending",
+                )
             display_shortlist = balanced_shortlist[offset : offset + limit]
             shortlist_sections = [
                 {
@@ -3367,6 +3414,8 @@ class PipelineStore:
                 section_states=section_states,
                 shortlist=display_shortlist,
                 shortlist_count=len(shortlist),
+                review_sort=review_sort,
+                review_direction=review_direction,
                 shortlist_sections=shortlist_sections,
                 approved_count=approved_count,
                 rejected_count=rejected_count,

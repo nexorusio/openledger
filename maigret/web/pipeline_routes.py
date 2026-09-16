@@ -854,12 +854,16 @@ def register_pipeline_routes(
         persona = scoped_persona(case_id, persona_id)
         page = max(1, request.args.get("page", 1, type=int))
         history_page = max(1, request.args.get("history_page", 1, type=int))
+        review_sort = request.args.get("sort", "default", type=str)
+        review_direction = request.args.get("direction", "ascending", type=str)
         data = store().get_workspace(
             case_id,
             persona_id,
             limit=25,
             offset=(page - 1) * 25,
             history_offset=(history_page - 1) * 25,
+            review_sort=review_sort,
+            review_direction=review_direction,
         )
         return render_template(
             "pipeline_workspace.html",
@@ -867,6 +871,8 @@ def register_pipeline_routes(
             persona=persona,
             page=page,
             page_size=25,
+            review_sort=review_sort,
+            review_direction=review_direction,
             qc_allowed=current_auth_role() == "admin",
             research_available=launch_research is not None,
             preparation_available=prepare_workspace is not None,

@@ -67,7 +67,7 @@
                 <button type="button" data-decision-filter="unresolved" aria-pressed="false">Kept in queue</button>
             </div>
             <div class="pipeline-table-wrap assessment-table-wrap">
-                <table class="table pipeline-table assessment-review-table" data-sortable-table>
+                <table class="table pipeline-table assessment-review-table" data-sortable-table data-server-sort="true">
                     <colgroup>
                         <col class="assessment-column-finding">
                         <col class="assessment-column-category">
@@ -77,11 +77,11 @@
                         <col class="assessment-column-actions">
                     </colgroup>
                     <thead><tr>
-                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="0">Finding <span aria-hidden="true">↕</span></button></th>
-                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="1">Category <span aria-hidden="true">↕</span></button></th>
-                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="2">Assessment <span aria-hidden="true">↕</span></button></th>
-                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="3">Evidence <span aria-hidden="true">↕</span></button></th>
-                        <th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="4">Decision <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="{{ review_direction if review_sort == 'finding' else 'none' }}"><button type="button" class="table-sort-button" data-sort-column="0" data-sort-key="finding">Finding <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="{{ review_direction if review_sort == 'category' else 'none' }}"><button type="button" class="table-sort-button" data-sort-column="1" data-sort-key="category">Category <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="{{ review_direction if review_sort == 'assessment' else 'none' }}"><button type="button" class="table-sort-button" data-sort-column="2" data-sort-key="assessment">Assessment <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="{{ review_direction if review_sort == 'evidence' else 'none' }}"><button type="button" class="table-sort-button" data-sort-column="3" data-sort-key="evidence">Evidence <span aria-hidden="true">↕</span></button></th>
+                        <th aria-sort="{{ review_direction if review_sort == 'decision' else 'none' }}"><button type="button" class="table-sort-button" data-sort-column="4" data-sort-key="decision">Decision <span aria-hidden="true">↕</span></button></th>
                         <th>Actions</th>
                     </tr></thead>
                     <tbody>
@@ -137,9 +137,9 @@
             </div>
             {% if workspace.shortlist_count > page_size %}
             <nav class="pipeline-pager" aria-label="Finding pages">
-                {% if page > 1 %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page-1) }}#operator-review">Previous</a>{% else %}<span></span>{% endif %}
+                {% if page > 1 %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page-1, sort=review_sort, direction=review_direction) }}#operator-review">Previous</a>{% else %}<span></span>{% endif %}
                 <span>Page {{ page }} · showing {{ ((page - 1) * page_size) + 1 }}–{{ [page * page_size, workspace.shortlist_count] | min }} of {{ workspace.shortlist_count }}</span>
-                {% if page * page_size < workspace.shortlist_count %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page+1) }}#operator-review">Next</a>{% else %}<span></span>{% endif %}
+                {% if page * page_size < workspace.shortlist_count %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page+1, sort=review_sort, direction=review_direction) }}#operator-review">Next</a>{% else %}<span></span>{% endif %}
             </nav>
             {% endif %}
         </div>

@@ -78,6 +78,29 @@
     function initializeSortableTable(table) {
         const buttons = Array.from(table.querySelectorAll('[data-sort-column]'));
         if (!buttons.length || !table.tBodies.length) return;
+        if (table.dataset.serverSort === 'true') {
+            const parameters = new URLSearchParams(window.location.search);
+            const activeKey = parameters.get('sort') || 'default';
+            const activeDirection = parameters.get('direction') || 'ascending';
+            buttons.forEach(function (button) {
+                button.addEventListener('click', function () {
+                    const key = button.dataset.sortKey;
+                    parameters.set('sort', key);
+                    parameters.set(
+                        'direction',
+                        activeKey === key && activeDirection === 'ascending'
+                            ? 'descending'
+                            : 'ascending'
+                    );
+                    parameters.delete('page');
+                    window.location.assign(
+                        window.location.pathname + '?' + parameters.toString()
+                        + '#operator-review'
+                    );
+                });
+            });
+            return;
+        }
         let activeColumn = null;
         let direction = 'ascending';
 
