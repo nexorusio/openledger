@@ -95,24 +95,42 @@
             <div class="persona-section-status"><strong>Affiliation branches</strong><span>Each approved organization can open a separate governed investigation. Registry and Wikidata checks are included; cited public-web research is {{ 'enabled' if affiliation_public_web_available else 'not configured' }}, and Google Places organization lookup is {{ 'enabled' if google_places_available else 'not configured' }}.</span></div>
             {% endif %}
             {% if section['items'] %}
-            <div class="pipeline-table-wrap">
-                <table class="table pipeline-table approved-persona-table" data-sortable-table>
-                    <thead><tr><th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="0">Approved finding <span aria-hidden="true">↕</span></button></th><th aria-sort="none"><button type="button" class="table-sort-button" data-sort-column="1">Type <span aria-hidden="true">↕</span></button></th><th>Actions</th></tr></thead>
-                    <tbody>
-                    {% for item in section['items'] %}
-                    <tr>
-                        <td data-sort-value="{{ item.label }}">{% if item.url %}<a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.label }}</a>{% else %}{{ item.label }}{% endif %}{% if item.decision_reason %}<small title="{{ item.decision_reason }}">{{ item.decision_reason }}</small>{% endif %}{% if item.source_fetch %}<small title="{{ item.source_fetch.reason }}">Source fetch: {{ item.source_fetch.status | replace('_', ' ') | title }}{% if item.source_fetch.http_status %} · HTTP {{ item.source_fetch.http_status }}{% endif %}{% if item.source_fetch.claim_candidate_count %} · {{ item.source_fetch.claim_candidate_count }} proposal{{ '' if item.source_fetch.claim_candidate_count == 1 else 's' }}{% endif %}</small>{% endif %}</td>
-                        <td data-sort-value="{{ item.kind }} {{ item.normalized.predicate | default('') }}">{{ item.normalized.predicate | default(item.kind, true) | replace('_', ' ') | title }}</td>
-                        <td class="approved-persona-actions">
-                            <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}">View evidence</a>
-                            {% if section.key == 'affiliations' and item.kind == 'claim' and item.normalized.predicate in ('company', 'organization', 'affiliation') %}
-                            <form class="affiliation-branch-control" method="post" action="{{ url_for('pipeline.branch_affiliation', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-outline-secondary btn-sm" type="submit" data-busy-label="Opening branch…">New investigation branch</button></form>
-                            {% endif %}
-                        </td>
-                    </tr>
-                    {% endfor %}
-                    </tbody>
-                </table>
+            <div class="approved-persona-fields">
+                {% for field in section.fields %}
+                <div class="approved-persona-field">
+                    <div class="approved-persona-field-label">{{ field.label }}</div>
+                    <div class="approved-persona-field-content">
+                        {% for item in field['items'] %}
+                        <article class="approved-persona-record">
+                            <div class="approved-persona-record-main">
+                                <div class="approved-persona-record-value">
+                                    {% if field.key == 'photograph' and item.url %}
+                                    <div class="approved-persona-evidence-photo">
+                                        <img src="{{ item.url }}" alt="Approved photograph evidence for {{ persona.display_name }}" loading="lazy" referrerpolicy="no-referrer" data-approved-evidence-photo>
+                                        <span hidden><i data-lucide="image-off"></i> Image unavailable</span>
+                                    </div>
+                                    <a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">Open source image</a>
+                                    {% elif item.url %}
+                                    <a href="{{ item.url }}" target="_blank" rel="noopener noreferrer">{{ item.label }}</a>
+                                    {% else %}
+                                    <strong>{{ item.label }}</strong>
+                                    {% endif %}
+                                </div>
+                                <div class="approved-persona-record-badges"><span class="badge-soft success">Approved</span></div>
+                            </div>
+                            {% if item.decision_reason %}<p class="approved-persona-record-note">{{ item.decision_reason }}</p>{% endif %}
+                            {% if item.source_fetch %}<p class="approved-persona-record-note" title="{{ item.source_fetch.reason }}">Source fetch: {{ item.source_fetch.status | replace('_', ' ') | title }}{% if item.source_fetch.http_status %} · HTTP {{ item.source_fetch.http_status }}{% endif %}{% if item.source_fetch.claim_candidate_count %} · {{ item.source_fetch.claim_candidate_count }} proposal{{ '' if item.source_fetch.claim_candidate_count == 1 else 's' }}{% endif %}</p>{% endif %}
+                            <div class="approved-persona-record-actions">
+                                <a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.group_detail', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}">View evidence</a>
+                                {% if section.key == 'affiliations' and item.kind == 'claim' and item.normalized.predicate in ('company', 'organization', 'affiliation') %}
+                                <form class="affiliation-branch-control" method="post" action="{{ url_for('pipeline.branch_affiliation', case_id=persona.case_id, persona_id=persona.id, group_id=item.id) }}"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="btn btn-outline-secondary btn-sm" type="submit" data-busy-label="Opening branch…">New investigation branch</button></form>
+                                {% endif %}
+                            </div>
+                        </article>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endfor %}
             </div>
             {% else %}
             {% set section_state = workspace.section_states.get(section.key, {}) %}
@@ -137,6 +155,10 @@
     document.querySelectorAll('form button[data-busy-label]').forEach((button) => button.form?.addEventListener('submit', () => { button.disabled = true; button.textContent = button.dataset.busyLabel; }));
     const photo = document.querySelector('[data-persona-photograph]');
     photo?.addEventListener('error', () => { photo.hidden = true; photo.nextElementSibling?.removeAttribute('hidden'); });
+    document.querySelectorAll('[data-approved-evidence-photo]').forEach((image) => image.addEventListener('error', () => {
+        image.hidden = true;
+        image.nextElementSibling?.removeAttribute('hidden');
+    }));
     const mapElement = document.getElementById('approvedPersonaMap');
     const points = {{ approved.map_points | tojson }};
     if (mapElement && points.length && window.L) {

@@ -1670,11 +1670,22 @@ def generate_persona_pdf(
         canvas.saveState()
         canvas.setFillColor(_NAVY)
         canvas.rect(0, A4[1] - 19 * mm, A4[0], 19 * mm, stroke=0, fill=1)
-        canvas.setFillColor(_TEAL)
-        canvas.rect(0, A4[1] - 19.8 * mm, A4[0], 0.8 * mm, stroke=0, fill=1)
+        logo_path = os.path.join(
+            os.path.dirname(__file__), "static", "openledger-icon-white.png"
+        )
+        if os.path.isfile(logo_path):
+            canvas.drawImage(
+                logo_path,
+                18 * mm,
+                A4[1] - 15.3 * mm,
+                width=7.2 * mm,
+                height=7.2 * mm,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
         canvas.setFont(bold_font, 10)
         canvas.setFillColor(colors.white)
-        canvas.drawString(18 * mm, A4[1] - 12 * mm, "OPENLEDGER")
+        canvas.drawString(27.5 * mm, A4[1] - 12 * mm, "OPENLEDGER")
         canvas.setFont(regular_font, 7.5)
         canvas.setFillColor(colors.HexColor("#DDD6FE"))
         canvas.drawRightString(

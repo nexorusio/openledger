@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
 
 from reportlab.lib import colors
@@ -35,6 +36,51 @@ _LINE = colors.HexColor("#E7E5E4")
 _PANEL = colors.HexColor("#FAFAF9")
 _PURPLE = colors.HexColor("#6D28D9")
 _SOFT_PURPLE = colors.HexColor("#F3E8FF")
+_LOGO_PATH = Path(__file__).with_name("static") / "openledger-icon-white.png"
+
+
+def _canonical_field(item: dict[str, Any]) -> str:
+    """Give the readable report the same field structure as the Persona UI."""
+    if item.get("kind") == "account":
+        return "social_account"
+    normalized = item.get("normalized") or {}
+    predicate = str(
+        normalized.get("predicate") or normalized.get("field_name") or "other"
+    ).casefold()
+    return {
+        "about": "summary",
+        "bio": "summary",
+        "biography": "summary",
+        "description": "summary",
+        "display_name": "full_name",
+        "name": "full_name",
+        "employer": "company",
+        "organization": "company",
+        "organisation": "company",
+        "affiliation": "company",
+        "job_title": "occupation",
+        "role": "occupation",
+        "location": "current_location",
+        "city": "current_location",
+    }.get(predicate, predicate)
+
+
+def _readable_fields(items: list[dict[str, Any]]) -> OrderedDict[str, list[dict[str, Any]]]:
+    """Deduplicate the reader-facing profile without losing its audit records."""
+    fields: OrderedDict[str, list[dict[str, Any]]] = OrderedDict()
+    seen: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in items:
+        field = _canonical_field(item)
+        value = _fact_value(item).strip()
+        identity = (field, value.casefold())
+        existing = seen.get(identity)
+        if existing is None:
+            existing = {"value": value, "items": [item]}
+            seen[identity] = existing
+            fields.setdefault(field, []).append(existing)
+        else:
+            existing["items"].append(item)
+    return fields
 
 
 def _display_value(value: Any) -> str:
@@ -137,9 +183,19 @@ def generate_pipeline_pdf(projection):
         canvas.rect(0, A4[1] - 19 * mm, A4[0], 19 * mm, stroke=0, fill=1)
         canvas.setFillColor(_PURPLE)
         canvas.rect(0, A4[1] - 19.8 * mm, A4[0], 0.8 * mm, stroke=0, fill=1)
+        if _LOGO_PATH.is_file():
+            canvas.drawImage(
+                str(_LOGO_PATH),
+                18 * mm,
+                A4[1] - 15.3 * mm,
+                width=7.2 * mm,
+                height=7.2 * mm,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
         canvas.setFillColor(colors.white)
         canvas.setFont(bold, 10)
-        canvas.drawString(18 * mm, A4[1] - 12 * mm, "OPENLEDGER")
+        canvas.drawString(27.5 * mm, A4[1] - 12 * mm, "OPENLEDGER")
         canvas.setFillColor(colors.HexColor("#DDD6FE"))
         canvas.setFont(regular, 7.5)
         canvas.drawRightString(
@@ -158,7 +214,8 @@ def generate_pipeline_pdf(projection):
     status = str(projection.get("status") or "reviewed").replace("_", " ").title()
     items = list(projection.get("items") or [])
     title(projection["subject_name"])
-    text(f"Reviewed Persona · Snapshot {projection['sequence']}", "field")
+    text("Investigation subject", "field")
+    text(f"Reviewed Persona · Snapshot {projection['sequence']}", "small")
     text(f"Case: {projection['case_title']}", "small")
     text(f"Status: {status}", "small")
     story.append(
@@ -184,6 +241,7 @@ def generate_pipeline_pdf(projection):
 
     section_counts: OrderedDict[str, int] = OrderedDict()
     from maigret.web.pipeline_store import SHORTLIST_SECTIONS, _shortlist_section
+    from maigret.web.persona_intelligence import field_display_label
 
     for key, title in SHORTLIST_SECTIONS:
         section_counts[title] = sum(
@@ -251,25 +309,20 @@ def generate_pipeline_pdf(projection):
         if not section_items:
             text("No approved findings in this category. This is not proof of absence.", "body")
             continue
-        for item in section_items:
-            text(_fact_label(item), "field", space=0.7)
-            text(_fact_value(item), "body", space=0.8)
-            decision = item.get("decision") or {}
-            reason = str(decision.get("reason") or "").strip()
-            if reason:
-                text("Analyst review note: " + reason, "small", space=0.8)
-            assessment = item.get("assessment") or {}
-            assessment_reason = str(
-                assessment.get("explanation") or assessment.get("reason") or ""
-            ).strip()
-            if assessment_reason:
-                text("Evidence assessment: " + assessment_reason, "small", space=0.8)
-            observations = list(item.get("evidence") or [])
-            text(
-                f"Supporting observations: {len(observations)} · Group: {item['group_id']}",
-                "small",
-                space=1.5,
-            )
+        for field, facts in _readable_fields(section_items).items():
+            text(field_display_label(field), "field", space=0.7)
+            for fact in facts:
+                text(fact["value"], "body", space=0.45)
+                supporting = sum(
+                    len(item.get("evidence") or []) for item in fact["items"]
+                )
+                duplicates = len(fact["items"])
+                text(
+                    f"{supporting} supporting observation{'s' if supporting != 1 else ''}"
+                    + (f" across {duplicates} approved records" if duplicates > 1 else ""),
+                    "small",
+                    space=1.1,
+                )
 
     section("Limitations and unknowns")
     limitations = list(projection.get("limitations") or [])
