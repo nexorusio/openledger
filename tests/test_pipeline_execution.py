@@ -474,6 +474,7 @@ def test_opted_in_openai_ranking_runs_after_collection_and_groups_persona_sectio
         "contact",
         "digital",
         "affiliations",
+        "public_exposure",
         "records",
     ]
     assert next(

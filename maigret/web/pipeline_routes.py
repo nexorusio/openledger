@@ -262,6 +262,14 @@ def register_pipeline_routes(
                 ("organization_location", "Organization location"),
                 ("company_ownership", "Ownership or leadership"),
             ),
+            "public_exposure": (
+                ("news_mention", "News and media coverage"),
+                ("event_appearance", "Events and public appearances"),
+                ("speaking_engagement", "Speaking engagements"),
+                ("interview", "Interviews and podcasts"),
+                ("publication", "Publications and authored work"),
+                ("award", "Awards and recognition"),
+            ),
             "records": (
                 ("offshore_database_match", "Offshore Leaks record match"),
                 ("financial_profile", "Financial profile"),
@@ -284,6 +292,19 @@ def register_pipeline_routes(
             "role": "occupation",
             "location": "current_location",
             "city": "current_location",
+            "news": "news_mention",
+            "media_mention": "news_mention",
+            "news_article": "news_mention",
+            "event": "event_appearance",
+            "public_event": "event_appearance",
+            "public_appearance": "event_appearance",
+            "conference_appearance": "event_appearance",
+            "panel_appearance": "event_appearance",
+            "talk": "speaking_engagement",
+            "speaker": "speaking_engagement",
+            "podcast_appearance": "interview",
+            "authored_article": "publication",
+            "article": "publication",
         }
 
         current = store()
@@ -469,67 +490,28 @@ def register_pipeline_routes(
             "occupation": approved_hero_value("occupation", "job_title", "role"),
         }
         name = approved_hero_value("full_name", "display_name", "name")
-        subject = name or persona_id
+        subject = name or "This person"
         clauses = []
         if hero["occupation"] and hero["affiliation"]:
             clauses.append(
-                f"{subject} is described in approved evidence as {hero['occupation']} associated with {hero['affiliation']}"
+                f"{subject} is {hero['occupation']} at {hero['affiliation']}"
             )
         elif hero["occupation"]:
-            clauses.append(
-                f"{subject} is described in approved evidence as {hero['occupation']}"
-            )
+            clauses.append(f"{subject} is {hero['occupation']}")
         elif hero["affiliation"]:
-            clauses.append(
-                f"{subject} is associated in approved evidence with {hero['affiliation']}"
-            )
+            clauses.append(f"{subject} is associated with {hero['affiliation']}")
         if hero["location"]:
-            clauses.append(f"the approved location is {hero['location']}")
-        digital = [
-            item["label"]
-            for item in items
-            if field_key(item) in {"social_account", "username", "website"}
-        ][:3]
-        if digital:
-            clauses.append("recorded public identifiers include " + ", ".join(digital))
+            clauses.append(f"Based in {hero['location']}")
         raw_summary = approved_hero_value(
             "summary", "biography", "bio", "about", "description"
         )
         if not clauses and raw_summary:
-            clauses.append(f"approved evidence describes {subject} as: {raw_summary}")
+            clauses.append(raw_summary)
         hero["summary"] = ". ".join(clauses).rstrip(".") + "." if clauses else ""
-        # The named Summary field is a derived, reviewable reading of the
-        # approved profile - never a single raw profile fragment. Its modal
-        # exposes every retained source that contributes to the narrative.
-        summary_items = [item for item in items if field_key(item) == "summary"]
-        if hero["summary"]:
-            summary_item = summary_items[0] if summary_items else {
-                "id": "derived-persona-summary",
-                "kind": "claim",
-                "normalized": {"predicate": "summary", "value": hero["summary"]},
-                "url": "",
-                "section": "identity",
-                "decision_reason": "Derived from the distinct approved Persona findings.",
-                "source_fetch": None,
-            }
-            source_seen, summary_evidence = set(), []
-            for item in items:
-                for evidence in item.get("evidence") or []:
-                    if evidence["id"] not in source_seen:
-                        source_seen.add(evidence["id"])
-                        summary_evidence.append(evidence)
-            summary_item.update(
-                label=hero["summary"],
-                field_key="summary",
-                group_ids=[
-                    group_id
-                    for item in items
-                    for group_id in item.get("group_ids") or []
-                ],
-                evidence=summary_evidence,
-            )
-            items = [item for item in items if field_key(item) != "summary"]
-            items.insert(0, summary_item)
+        # A narrative introduces the profile; the evidence register remains
+        # the source of record. Do not repeat raw or derived summaries as a
+        # separate Persona field.
+        items = [item for item in items if field_key(item) != "summary"]
         for index, item in enumerate(items, start=1):
             item["modal_id"] = f"persona-evidence-{index}"
             item["evidence_count"] = len(item.get("evidence") or [])
@@ -856,6 +838,7 @@ def register_pipeline_routes(
         history_page = max(1, request.args.get("history_page", 1, type=int))
         review_sort = request.args.get("sort", "default", type=str)
         review_direction = request.args.get("direction", "ascending", type=str)
+        review_filter = request.args.get("decision", "all", type=str)
         data = store().get_workspace(
             case_id,
             persona_id,
@@ -864,6 +847,7 @@ def register_pipeline_routes(
             history_offset=(history_page - 1) * 25,
             review_sort=review_sort,
             review_direction=review_direction,
+            review_filter=review_filter,
         )
         return render_template(
             "pipeline_workspace.html",
@@ -873,6 +857,7 @@ def register_pipeline_routes(
             page_size=25,
             review_sort=review_sort,
             review_direction=review_direction,
+            review_filter=review_filter,
             qc_allowed=current_auth_role() == "admin",
             research_available=launch_research is not None,
             preparation_available=prepare_workspace is not None,
@@ -978,10 +963,10 @@ def register_pipeline_routes(
             persona=subject,
             approved=projection,
             workspace=workspace_data,
-            discovery_available=launch_approved_discovery is not None,
-            source_fetch_available=(
-                launch_approved_source_fetch is not None
-                and bool(projection["source_urls"])
+            collection_available=bool(projection["items"]) and bool(
+                launch_approved_discovery or (
+                    launch_approved_source_fetch and projection["source_urls"]
+                )
             ),
             collection_actions_blocked=bool(collection_block_reason),
             collection_action_block_reason=collection_block_reason,
@@ -1028,6 +1013,69 @@ def register_pipeline_routes(
             combined_scope=False,
             approved_only=True,
         )
+
+    @bp.route(
+        "/cases/<case_id>/pipeline/<persona_id>/collect-approved-evidence",
+        methods=["POST"],
+    )
+    @access(mutate=True)
+    def collect_approved_evidence(case_id, persona_id):
+        scoped_persona(case_id, persona_id)
+        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Reconcile submitted and retained evidence before collecting new evidence.",
+            )
+        if workspace_data["review_pending_count"]:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Resolve the review queue before collecting new evidence.",
+            )
+        projection = approved_persona(case_id, persona_id)
+        if not projection["items"]:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Approve evidence before collecting new evidence.",
+            )
+        results = []
+        if launch_approved_source_fetch is not None and projection["source_urls"]:
+            results.append(
+                launch_approved_source_fetch(
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    approved_groups=projection["items"],
+                    actor=actor(),
+                )
+            )
+        if launch_approved_discovery is not None:
+            results.append(
+                launch_approved_discovery(
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    approved_groups=projection["items"],
+                    actor=actor(),
+                )
+            )
+        if not results:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "No approved source or identifier is available to collect from yet.",
+            )
+        flash(
+            "New evidence collection was queued from the approved Persona. "
+            "Every result returns to Step 1 for review.",
+            "success",
+        )
+        return redirect(url_for("live_results", job_id=results[-1]["job_id"]), code=303)
 
     @bp.route(
         "/cases/<case_id>/pipeline/<persona_id>/discover-related",
@@ -1372,12 +1420,20 @@ def register_pipeline_routes(
             return_page = max(
                 1, request.form.get('return_page', 1, type=int) or 1
             )
+            return_sort = request.form.get('return_sort', 'default', type=str)
+            return_direction = request.form.get(
+                'return_direction', 'ascending', type=str
+            )
+            return_filter = request.form.get('return_filter', 'all', type=str)
             return redirect(
                 url_for(
                     'pipeline.workspace',
                     case_id=case_id,
                     persona_id=persona_id,
                     page=return_page,
+                    sort=return_sort,
+                    direction=return_direction,
+                    decision=return_filter,
                 )
                 + '#finding-'
                 + group_id,
