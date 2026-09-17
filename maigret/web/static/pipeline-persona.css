@@ -259,6 +259,44 @@
 .persona-section-status strong { flex: 0 0 auto; }
 .persona-section-status span { color: var(--ol-muted, #8d99a5); }
 
+/* Legacy records use the same Persona surface as P2 records. The claim
+   controls stay intact inside the Review queue, while the profile fields use
+   the current two-column evidence layout. */
+.persona-form { padding: 0; }
+.persona-form .persona-field {
+    display: grid;
+    grid-template-columns: minmax(168px, .27fr) minmax(0, .73fr);
+    border-top: 1px solid var(--ol-border, #2b2b2b);
+}
+.persona-form .persona-field:first-child { border-top: 0; }
+.persona-form .persona-field-label {
+    padding: 1.1rem 1.35rem;
+    color: var(--ol-muted, #8d99a5);
+    background: var(--ol-surface-muted, #121212);
+    font-size: .82rem;
+    font-weight: 700;
+}
+.persona-form .persona-field-content { min-width: 0; padding: .8rem; }
+.persona-form .claim-record {
+    padding: .8rem;
+    border: 1px solid var(--ol-border, #2b2b2b);
+    border-left: 3px solid var(--ol-success, #2fb477);
+    background: var(--ol-surface-muted, #121212);
+}
+.persona-form .claim-record + .claim-record { margin-top: .6rem; }
+.persona-form .claim-main {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: .75rem;
+}
+
+@media (max-width: 680px) {
+    .persona-form .persona-field { grid-template-columns: 1fr; }
+    .persona-form .persona-field-label { padding-bottom: .6rem; }
+    .persona-form .claim-main { flex-direction: column; }
+}
+
 .persona-evidence-modal {
     width: min(720px, calc(100vw - 2rem));
     max-height: min(760px, calc(100vh - 2rem));
