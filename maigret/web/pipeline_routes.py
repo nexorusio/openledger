@@ -228,6 +228,7 @@ def register_pipeline_routes(
         from maigret.web.pipeline_store import (
             SHORTLIST_SECTIONS,
             _shortlist_section,
+            presentation_predicate,
         )
 
         # This is the same information architecture as the original Persona
@@ -374,11 +375,7 @@ def register_pipeline_routes(
         def field_key(item):
             if item["kind"] == "account":
                 return "social_account"
-            predicate = str(
-                item["normalized"].get("predicate")
-                or item["normalized"].get("field_name")
-                or ""
-            ).casefold()
+            predicate = presentation_predicate(item["kind"], item["normalized"])
             return predicate_aliases.get(predicate, predicate or "other")
 
         def field_label(key):

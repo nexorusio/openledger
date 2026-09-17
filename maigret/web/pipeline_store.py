@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -192,14 +193,64 @@ def _task_sections(task):
     return sections
 
 
+_PUBLIC_EXPOSURE_LEGACY_PREDICATES = frozenset(
+    {"affiliation", "organization", "company"}
+)
+_PUBLIC_EXPOSURE_TITLE_PATTERNS = (
+    (
+        "speaking_engagement",
+        re.compile(r"\b(keynote|speaker|speaking|presenter|panelist)\b", re.I),
+    ),
+    (
+        "event_appearance",
+        re.compile(r"\b(ph\.?d|doctoral)\s+defen[cs]e\b", re.I),
+    ),
+    (
+        "event_appearance",
+        re.compile(
+            r"\b(conference|symposium|seminar|workshop|webinar|public event|panel)\b",
+            re.I,
+        ),
+    ),
+    ("interview", re.compile(r"\b(interview|podcast)\b", re.I)),
+    (
+        "publication",
+        re.compile(r"\b(publication|journal|authored article|research paper)\b", re.I),
+    ),
+    ("award", re.compile(r"\b(award|awardee|recipient)\b", re.I)),
+)
+
+
+def presentation_predicate(kind, normalized):
+    """Classify a reader-facing Persona section without mutating source records.
+
+    Earlier releases stored some public appearances as broad affiliations.  The
+    original predicate and its immutable evidence remain intact; this narrow
+    projection corrects unmistakable public-exposure titles for both the review
+    queue and an approved Persona.
+    """
+    if kind != "claim":
+        return ""
+    normalized = normalized or {}
+    predicate = str(
+        normalized.get("predicate") or normalized.get("field_name") or ""
+    ).casefold()
+    if predicate not in _PUBLIC_EXPOSURE_LEGACY_PREDICATES:
+        return predicate
+    value = normalized.get("display_value") or normalized.get("value") or ""
+    if isinstance(value, dict):
+        value = value.get("title") or value.get("name") or ""
+    text = " ".join(str(value).split())
+    for corrected_predicate, pattern in _PUBLIC_EXPOSURE_TITLE_PATTERNS:
+        if pattern.search(text):
+            return corrected_predicate
+    return predicate
+
+
 def _shortlist_section(kind, normalized):
     if kind == "account":
         return "digital"
-    predicate = str(
-        (normalized or {}).get("predicate")
-        or (normalized or {}).get("field_name")
-        or ""
-    ).casefold()
+    predicate = presentation_predicate(kind, normalized)
     return SHORTLIST_PREDICATE_SECTIONS.get(predicate, "records")
 
 

@@ -982,6 +982,50 @@ def test_approved_persona_opens_while_newer_findings_await_review(journey):
     assert journey["source_fetch_launches"] == []
 
 
+def test_approved_persona_projects_legacy_phd_defence_as_public_exposure(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "legacy-phd-defence",
+                    "normalized": {
+                        "predicate": "affiliation",
+                        "value": (
+                            "PhD Defence Jati Pratomo | The Interplay between "
+                            "Uncertainties, Transferability and Policymaking in "
+                            "Remote Sensing-based Slum Mapping | About us"
+                        ),
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                }
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    assert post(
+        journey,
+        f"/groups/{groups[0]['id']}/decision",
+        {"decision": "include", "reason": "Public event confirmed by source."},
+    ).status_code == 201
+
+    response = journey["client"].get(base(journey) + "/persona")
+
+    assert response.status_code == 200
+    assert b"Public exposure" in response.data
+    assert b"Events and public appearances" in response.data
+    assert b"PhD Defence Jati Pratomo" in response.data
+
+
 def test_persona_evidence_network_starts_with_a_stable_layout_and_fullscreen():
     root = Path(__file__).parents[1] / "maigret" / "web"
     template = (root / "templates" / "relationships.html").read_text()
