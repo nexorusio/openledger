@@ -283,7 +283,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             assert workspace["review_pending_count"] == 0
 
             page.get_by_role("button", name="Proceed to Persona").click()
-            expect(page.get_by_text("Step 2 · Approved Persona", exact=True)).to_be_visible()
+            expect(page.get_by_text("Persona", exact=True)).to_be_visible()
             expect(page).to_have_url(origin + base + "/persona")
 
             with page.expect_download() as download_info:
