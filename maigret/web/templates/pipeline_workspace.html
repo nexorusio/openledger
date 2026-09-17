@@ -1,19 +1,32 @@
 {% extends 'base.html' %}
 {% block title %}{{ persona.display_name }} · Assessment | OpenLedger{% endblock %}
 {% block breadcrumb %}Assessment{% endblock %}
-{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='pipeline.css') }}"><link rel="stylesheet" href="{{ url_for('static', filename='pipeline-photo.css') }}">{% endblock %}
+{% block head %}<link rel="stylesheet" href="{{ url_for('static', filename='pipeline.css') }}"><link rel="stylesheet" href="{{ url_for('static', filename='pipeline-photo.css') }}"><link rel="stylesheet" href="{{ url_for('static', filename='pipeline-persona.css') }}">{% endblock %}
 {% block content %}
-<section class="page-heading assessment-heading">
-    <div>
-        <p class="eyebrow">Investigation assessment · working Persona</p>
-        <h1>{{ persona.display_name }}</h1>
-        <p class="page-description">Step 1 reconciles every submitted value and positive engine candidate in one review queue. Coverage failures and no-match checks remain visible in the read-only engine log. When every row is resolved, Proceed opens the approved Persona.</p>
+<section class="persona-profile-header approved-persona-header assessment-heading">
+    <div class="persona-photo-frame">
+        <span class="persona-photo-placeholder"><i data-lucide="user-round"></i><small>No approved public photo</small></span>
     </div>
-    <div class="heading-actions">
-        <a class="btn btn-outline-secondary" href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}"><i data-lucide="refresh-cw"></i> Run investigation</a>
-        <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.relationships', case_id=persona.case_id, persona_id=persona.id) }}"><i data-lucide="share-2"></i> Relationship evidence</a>
+    <div class="persona-profile-copy">
+        <p class="eyebrow">Persona</p>
+        <h1>{{ persona.display_name }}</h1>
+        <p class="persona-hero-summary">Evidence is being reviewed. Approved findings remain visible; unresolved findings stay in the Review queue.</p>
+        <div class="persona-status-strip" aria-label="Persona evidence status">
+            <span><strong>{{ workspace.approved_count }}</strong> approved</span>
+            <span><strong>{{ workspace.review_pending_count }}</strong> awaiting review</span>
+        </div>
+    </div>
+    <div class="heading-actions persona-heading-actions">
+        <a class="btn btn-primary" href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}"><i data-lucide="sparkles"></i> Find new evidence</a>
     </div>
 </section>
+
+<nav class="persona-context-nav" aria-label="Case and Persona tools">
+    <a href="{{ url_for('case_workspace', case_id=persona.case_id) }}"><i data-lucide="folder-search-2"></i> Case workspace</a>
+    <a href="{{ url_for('case_timeline_workspace', case_id=persona.case_id, persona_id=persona.id) }}"><i data-lucide="clock-3"></i> Timeline</a>
+    <a href="{{ url_for('pipeline.relationships', case_id=persona.case_id, persona_id=persona.id) }}"><i data-lucide="share-2"></i> Relationship evidence</a>
+    <a href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}"><i data-lucide="settings-2"></i> Configure investigation</a>
+</nav>
 
 {% if preparation_available and (workspace.unreconciled_input_count or workspace.projection.pending or workspace.projection.legacy_available) %}
 <section class="alert alert-info assessment-import-notice" aria-live="polite">
