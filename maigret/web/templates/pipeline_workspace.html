@@ -23,7 +23,7 @@
 
 <nav class="persona-context-nav" aria-label="Case and Persona tools">
     <a href="{{ url_for('case_workspace', case_id=persona.case_id) }}"><i data-lucide="folder-search-2"></i> Case workspace</a>
-    <a href="{{ url_for('case_timeline_workspace', case_id=persona.case_id, persona_id=persona.id) }}"><i data-lucide="clock-3"></i> Timeline</a>
+    <a href="/cases/{{ persona.case_id }}/timeline"><i data-lucide="clock-3"></i> Timeline</a>
     <a href="{{ url_for('pipeline.relationships', case_id=persona.case_id, persona_id=persona.id) }}"><i data-lucide="share-2"></i> Relationship evidence</a>
     <a href="{{ url_for('configure_persona_investigation', persona_id=persona.id) }}"><i data-lucide="settings-2"></i> Configure investigation</a>
 </nav>
