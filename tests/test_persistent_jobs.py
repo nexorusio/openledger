@@ -946,11 +946,67 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert "Alice Example" in persona_page
     assert "90 legacy evidence score" in persona_page
     assert f'/personas/{persona_id}/export.pdf' in persona_page
-    assert "Export investigation report" in persona_page
+    assert "Export Persona PDF" in persona_page
     assert "No evidence extracted." in persona_page
-    assert "AI proposes; the analyst decides" in persona_page
     assert "Review queue" in persona_page
+    assert "Engine log" in persona_page
     assert "Relationship evidence" in persona_page
+
+
+def test_persona_route_cuts_over_only_after_complete_legacy_convergence(
+    client, persistent_store
+):
+    from maigret.web.pipeline_ingestion import converge_legacy_persona
+
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": "Alice Example"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    for claim in persistent_store.get_persona(persona_id)["claims"]:
+        persistent_store.review_claim(claim["id"], "approved", "analyst")
+
+    # A partial P2 request must not hide the still-canonical legacy records.
+    dry_run = converge_legacy_persona(
+        persistent_store, case["id"], persona_id, dry_run=True
+    )
+    assert dry_run["evidence"]["claim_count"] > 0
+    before = client.get(f"/personas/{persona_id}")
+    assert before.status_code == 200
+    assert "Alice Example" in before.get_data(as_text=True)
+
+    converged = converge_legacy_persona(
+        persistent_store, case["id"], persona_id, dry_run=False
+    )
+    assert converged["auto_finalized"] is False
+    assert converged["qc_created"] is False
+    cutover = client.get(f"/personas/{persona_id}")
+    assert cutover.status_code == 302
+    assert cutover.location.endswith(
+        f"/cases/{case['id']}/pipeline/{persona_id}/persona"
+    )
+    canonical = client.get(cutover.location).get_data(as_text=True)
+    assert "Alice Example" in canonical
+    assert canonical.count("data-persona-tab=") == 8
 
 
 def test_case_scope_displays_one_username_with_attached_profile_sources(
@@ -2192,7 +2248,8 @@ def test_approved_location_and_photo_render_in_persona_workspace(
     assert page.count('src="https://images.example.test/alice.jpg"') >= 2
     assert 'class="persona-photo-frame"' in page
     assert "Amend approved record" in page
-    assert "AI evidence pipeline" in page
+    assert "Review queue" in page
+    assert "Engine log" in page
     assert "Affiliations" in page
     assert "Professional and corporate" not in page
     assert "Organization, institution or company" in page

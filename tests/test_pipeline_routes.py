@@ -333,8 +333,9 @@ def test_review_proceed_persona_and_approved_discovery_are_an_explicit_wizard(
     assert blocked.status_code == 303
     assert blocked.location.endswith(base(journey) + "#operator-review")
     blocked_persona = client.get(base(journey) + "/persona")
-    assert blocked_persona.status_code == 303
-    assert blocked_persona.location.endswith(base(journey) + "#operator-review")
+    assert blocked_persona.status_code == 200
+    assert b"Review queue" in blocked_persona.data
+    assert b'data-persona-panel="review"' in blocked_persona.data
     blocked_discovery = client.post(
         base(journey) + "/discover-related",
         data={"csrf_token": "test-csrf"},
@@ -375,7 +376,7 @@ def test_review_proceed_persona_and_approved_discovery_are_an_explicit_wizard(
 
     persona = client.get(proceeded.location)
     assert persona.status_code == 200
-    assert b"Approved Persona" in persona.data
+    assert b"Persona" in persona.data
     assert b"Synthetic Person" in persona.data
     assert b"Edit approvals" in persona.data
     assert b"Find new evidence" in persona.data
@@ -408,7 +409,7 @@ def test_step_two_exposes_reconciliation_action_at_the_decision_point(
 
     assert response.status_code == 200
     assert b"Reconcile evidence and continue" in response.data
-    assert response.data.count(b'action="' + base(journey).encode() + b'/prepare"') == 2
+    assert response.data.count(b'action="' + base(journey).encode() + b'/prepare"') == 1
 
 
 def test_page_and_persona_titles_share_the_global_sticky_rule():
@@ -879,7 +880,7 @@ def test_persona_map_popup_uses_text_nodes_for_untrusted_precision():
         / "maigret"
         / "web"
         / "templates"
-        / "pipeline_persona.html"
+        / "persona.html"
     ).read_text()
 
     assert "label.textContent = String(point.label ?? '')" in template
@@ -895,7 +896,7 @@ def test_persona_map_uses_the_configured_tile_service():
         / "maigret"
         / "web"
         / "templates"
-        / "pipeline_persona.html"
+        / "persona.html"
     ).read_text()
 
     assert "window.L.tileLayer({{ map_tile_url | tojson }}" in template
@@ -956,10 +957,11 @@ def test_approved_persona_opens_while_newer_findings_await_review(journey):
     response = journey["client"].get(base(journey) + "/persona")
 
     assert response.status_code == 200
-    assert b"Approved Persona" in response.data
+    assert b"Persona" in response.data
     assert b"Synthetic Person" in response.data
     assert b"awaiting review" in response.data
-    assert b"Pending analyst review" not in response.data
+    assert b"Pending analyst review" in response.data
+    assert b'data-persona-panel="review"' in response.data
     assert b"Find new evidence" not in response.data
     assert b"Resolve the review queue in Step 1 before collecting more." in response.data
 
@@ -1044,7 +1046,7 @@ def test_persona_evidence_network_starts_with_a_stable_layout_and_fullscreen():
 def test_review_queue_sort_is_applied_before_paginating_all_findings():
     root = Path(__file__).parents[1] / "maigret" / "web"
     store = (root / "pipeline_store.py").read_text()
-    template = (root / "templates" / "pipeline_workspace.html").read_text()
+    template = (root / "templates" / "_persona_pipeline_review.html").read_text()
     script = (root / "static" / "openledger.js").read_text()
 
     assert 'review_sort="default"' in store
@@ -1057,7 +1059,7 @@ def test_review_queue_sort_is_applied_before_paginating_all_findings():
     assert 'workspace.filtered_shortlist_count' in template
     assert "parameters.delete('page');" in script
     assert 'parameters.set(\'decision\', button.dataset.decisionFilter);' in (
-        (root / "templates" / "pipeline_workspace.html").read_text()
+        (root / "templates" / "persona.html").read_text()
     )
     assert store.index("filtered_shortlist = [") < store.index(
         "display_shortlist = filtered_shortlist[offset : offset + limit]"

@@ -425,9 +425,86 @@ def bootstrap_legacy_workspace(store, case_id, persona_id):
         report["observation_count"] += imported["observation_count"]
         report["chat_count"] += 1
     report["group_count"] = len(_refresh(store, case_id, persona_id))
-    pipeline.mark_legacy_imported(case_id, persona_id)
     report["request_ids"] = list(dict.fromkeys(report["request_ids"]))
     return report
+
+
+def converge_legacy_persona(store, case_id, persona_id, *, dry_run=True):
+    """Converge one Persona without deleting or rewriting legacy evidence.
+
+    Dry-run reports the retained legacy inventory and any mappings that already
+    exist.  Apply is explicit: it first performs the restartable evidence import
+    and consolidation, then appends provenance-bearing review decisions.
+    """
+    pipeline = _pipeline(store)
+    if dry_run:
+        after = None
+        seen_cursors = set()
+        evidence = {
+            "case_id": case_id,
+            "persona_id": persona_id,
+            "dry_run": True,
+            "claim_count": 0,
+            "pending_claim_count": 0,
+            "observation_count": 0,
+            "missing_provenance_count": 0,
+            "auto_finalized": False,
+            "request_ids": [],
+        }
+        while True:
+            batch = pipeline.backfill_legacy(
+                case_id,
+                persona_id,
+                actor=IMPORT_ACTOR,
+                dry_run=True,
+                limit=2000,
+                after_claim_id=after,
+                materialize=False,
+            )
+            for key in (
+                "claim_count",
+                "pending_claim_count",
+                "observation_count",
+                "missing_provenance_count",
+            ):
+                evidence[key] += batch.get(key, 0)
+            next_after = batch.get("next_after_claim_id")
+            if not next_after:
+                break
+            if next_after in seen_cursors:
+                raise ValueError(
+                    "Legacy convergence dry-run stopped because its cursor did not advance."
+                )
+            seen_cursors.add(next_after)
+            after = next_after
+        decisions = pipeline.converge_legacy_reviews(
+            case_id, persona_id, dry_run=True
+        )
+        return {
+            "case_id": case_id,
+            "persona_id": persona_id,
+            "dry_run": True,
+            "evidence": evidence,
+            "decisions": decisions,
+            "requires_evidence_import": bool(evidence["pending_claim_count"]),
+            "auto_finalized": False,
+            "qc_created": False,
+        }
+    evidence = bootstrap_legacy_workspace(store, case_id, persona_id)
+    decisions = pipeline.converge_legacy_reviews(case_id, persona_id, dry_run=False)
+    # Write the dedicated convergence checkpoint last so an interrupted
+    # evidence or review import cannot make runtime routing hide retained
+    # legacy state. The older evidence-only checkpoint is not trusted here.
+    pipeline.mark_legacy_converged(case_id, persona_id)
+    return {
+        "case_id": case_id,
+        "persona_id": persona_id,
+        "dry_run": False,
+        "evidence": evidence,
+        "decisions": decisions,
+        "auto_finalized": False,
+        "qc_created": False,
+    }
 
 
 def ingest_legacy_claim_updates(store, case_id, persona_id):
@@ -458,12 +535,17 @@ def ingest_legacy_claim_updates(store, case_id, persona_id):
         if not after:
             break
     groups = _refresh(store, case_id, persona_id)
+    decisions = pipeline.converge_legacy_reviews(
+        case_id, persona_id, dry_run=False
+    )
     return {
         "case_id": case_id,
         "persona_id": persona_id,
         "pending_claim_count": pending_claim_count,
         "request_ids": list(dict.fromkeys(request_ids)),
         "group_count": len(groups),
+        "decision_count": decisions["decision_count"],
+        "conflict_count": decisions["conflict_count"],
         "auto_included": False,
         "auto_finalized": False,
     }

@@ -9,10 +9,13 @@ import os
 from pathlib import Path
 import re
 import threading
+import uuid
 
 import pytest
+from sqlalchemy import insert
 from werkzeug.serving import make_server
 
+from maigret.web.case_store import claim_evidence, persona_claims, utcnow
 from tests.test_pipeline_app_journey import application_journey, form, run_queued
 
 
@@ -82,6 +85,49 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
         },
         kind="refresh",
     )
+    legacy_job_id = store.create_investigation(
+        ["legacy.synthetic"],
+        {"subject_label": "Legacy Synthetic Person"},
+    )
+    legacy_case_id = store.get_job(legacy_job_id)["case_id"]
+    legacy_persona_id = store.get_case(legacy_case_id)["personas"][0]["id"]
+    legacy_claim_id = str(uuid.uuid4())
+    legacy_evidence_id = str(uuid.uuid4())
+    now = utcnow()
+    with store.engine.begin() as connection:
+        connection.execute(
+            insert(persona_claims).values(
+                id=legacy_claim_id,
+                persona_id=legacy_persona_id,
+                field_name="occupation",
+                value="Synthetic researcher",
+                display_value="Synthetic researcher",
+                normalized_value="synthetic researcher",
+                confidence=80,
+                review_status="approved",
+                source_engine="synthetic_public_document",
+                source_job_id=None,
+                fingerprint=uuid.uuid4().hex * 2,
+                first_seen_at=now,
+                last_seen_at=now,
+                created_at=now,
+                updated_at=now,
+                reviewed_at=now,
+                reviewed_by="legacy-analyst",
+            )
+        )
+        connection.execute(
+            insert(claim_evidence).values(
+                id=legacy_evidence_id,
+                claim_id=legacy_claim_id,
+                evidence_type="public_document",
+                source_name="Synthetic retained source",
+                source_url="https://example.test/legacy-source",
+                details={"fixture": True},
+                fingerprint=uuid.uuid4().hex * 2,
+                observed_at=now,
+            )
+        )
     server = make_server("127.0.0.1", 0, journey["web"].app, threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -239,6 +285,19 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             ).to_be_visible()
             for tab_name in ("Review queue", "Engine log"):
                 expect(page.get_by_role("tab", name=tab_name, exact=False)).to_be_visible()
+            draft_persona_tabs = page.locator("[data-persona-tab]").evaluate_all(
+                "tabs => tabs.map(tab => tab.dataset.personaTab)"
+            )
+            assert draft_persona_tabs == [
+                "identity",
+                "contact",
+                "digital",
+                "affiliations",
+                "public_exposure",
+                "records",
+                "review",
+                "engines",
+            ]
             expect(page.get_by_text("Step 1", exact=True)).to_be_visible()
             expect(page.get_by_text("Step 2", exact=True)).to_be_visible()
             review_table = page.locator("table.assessment-review-table")
@@ -285,6 +344,36 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             page.get_by_role("button", name="Proceed to Persona").click()
             expect(page.get_by_text("Persona", exact=True)).to_be_visible()
             expect(page).to_have_url(origin + base + "/persona")
+            approved_persona_tabs = page.locator("[data-persona-tab]").evaluate_all(
+                "tabs => tabs.map(tab => tab.dataset.personaTab)"
+            )
+            assert approved_persona_tabs == draft_persona_tabs
+
+            # A retained legacy-only Persona and a P2 Persona must render the
+            # same page/component contract at every supported viewport. State
+            # may change actions and badges, never the product layout.
+            for viewport, label in (
+                ({"width": 1440, "height": 1000}, "desktop"),
+                ({"width": 768, "height": 1024}, "tablet"),
+                ({"width": 390, "height": 844}, "mobile"),
+            ):
+                page.set_viewport_size(viewport)
+                for model, path in (
+                    ("legacy", f"/personas/{legacy_persona_id}"),
+                    ("p2", base + "/persona"),
+                ):
+                    page.goto(origin + path)
+                    expect(page.locator(".persona-profile-header")).to_be_visible()
+                    expect(page.locator(".persona-context-nav")).to_be_visible()
+                    expect(page.locator(".persona-tabs")).to_be_visible()
+                    assert page.locator("[data-persona-tab]").evaluate_all(
+                        "tabs => tabs.map(tab => tab.dataset.personaTab)"
+                    ) == draft_persona_tabs
+                    assert_no_page_overflow(page, f"{label} {model} Persona")
+                    page.screenshot(
+                        path=str(evidence / f"persona-{model}-{label}.png"),
+                        full_page=True,
+                    )
 
             with page.expect_download() as download_info:
                 page.get_by_role("button", name="Export Persona PDF").click()

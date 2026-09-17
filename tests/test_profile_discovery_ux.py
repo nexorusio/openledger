@@ -66,9 +66,12 @@ def test_live_progress_and_pipeline_workspace_keep_collection_separate_from_appr
     live = (ROOT / "maigret" / "web" / "templates" / "live.html").read_text(
         encoding="utf-8"
     )
-    pipeline = (
-        ROOT / "maigret" / "web" / "templates" / "pipeline_workspace.html"
-    ).read_text(encoding="utf-8")
+    pipeline = "\n".join(
+        (
+            ROOT / "maigret" / "web" / "templates" / name
+        ).read_text(encoding="utf-8")
+        for name in ("persona.html", "_persona_pipeline_review.html")
+    )
 
     # Discovery shows source execution without drawing premature relationships;
     # operator action is limited to the evidence-ranked shortlist.
@@ -92,9 +95,12 @@ def test_live_progress_and_pipeline_workspace_keep_collection_separate_from_appr
 
 
 def test_assessment_explains_reconciliation_and_plain_language_engine_results():
-    pipeline = (
-        ROOT / "maigret" / "web" / "templates" / "pipeline_workspace.html"
-    ).read_text(encoding="utf-8")
+    pipeline = "\n".join(
+        (
+            ROOT / "maigret" / "web" / "templates" / name
+        ).read_text(encoding="utf-8")
+        for name in ("persona.html", "_persona_pipeline_review.html")
+    )
 
     for required in (
         "Evidence reconciliation is required",
