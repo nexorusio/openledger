@@ -11,7 +11,7 @@
         <span class="persona-photo-placeholder" {{ 'hidden' if approved.photograph }}><i data-lucide="user-round"></i><small>No approved public photo</small></span>
     </div>
     <div class="persona-profile-copy">
-        <p class="eyebrow">Step 2 · Approved Persona</p>
+        <p class="eyebrow">Persona</p>
         <h1>{{ persona.display_name }}</h1>
         {% if approved.hero.summary %}<p class="persona-hero-summary">{{ approved.hero.summary }}</p>{% endif %}
         {% if approved.hero.location or approved.hero.affiliation or approved.hero.occupation %}
@@ -27,32 +27,16 @@
         </div>
     </div>
     <div class="heading-actions persona-heading-actions">
-        {% if source_fetch_available or discovery_available %}
+        {% if collection_available and not collection_actions_blocked %}
         <div class="persona-action-row" role="group" aria-label="Discovery actions">
-            {% if source_fetch_available %}
-            <form method="post" action="{{ url_for('pipeline.fetch_approved_sources', case_id=persona.case_id, persona_id=persona.id) }}">
+            <form method="post" action="{{ url_for('pipeline.collect_approved_evidence', case_id=persona.case_id, persona_id=persona.id) }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button class="btn btn-primary" type="submit" data-busy-label="Enriching approved sources…"{% if collection_actions_blocked %} disabled aria-describedby="collection-action-guard"{% endif %}><i data-lucide="download"></i> Fetch &amp; enrich approved sources ({{ approved.source_urls | length }})</button>
+                <button class="btn btn-primary" type="submit" data-busy-label="Collecting new evidence…"><i data-lucide="sparkles"></i> Find new evidence</button>
             </form>
-            {% endif %}
-            {% if discovery_available %}
-            <form method="post" action="{{ url_for('pipeline.discover_related', case_id=persona.case_id, persona_id=persona.id) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button class="btn btn-outline-secondary" type="submit" data-busy-label="Queueing research…"{% if collection_actions_blocked %} disabled aria-describedby="collection-action-guard"{% endif %}><i data-lucide="sparkles"></i> Research with cited sources</button>
-            </form>
-            {% endif %}
         </div>
-        {% if collection_actions_blocked %}
+        {% elif collection_available and collection_actions_blocked %}
         <p class="persona-action-guard" id="collection-action-guard" role="status">{{ collection_action_block_reason }} <a href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}#operator-review">Open the review queue.</a></p>
         {% endif %}
-        {% endif %}
-        <div class="persona-action-row" role="group" aria-label="Persona management actions">
-            <a class="btn btn-outline-secondary" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}#operator-review"><i data-lucide="pencil-line"></i> Edit approvals</a>
-            <form method="post" action="{{ url_for('pipeline.create_report_snapshot', case_id=persona.case_id, persona_id=persona.id) }}">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-                <button class="btn btn-outline-secondary" type="submit" data-busy-label="Preparing PDF…"><i data-lucide="file-down"></i> Export Persona PDF</button>
-            </form>
-        </div>
     </div>
 </section>
 
@@ -61,13 +45,13 @@
     <a href="/cases/{{ persona.case_id }}/chat"><i data-lucide="message-square-text"></i> Case AI assistant</a>
     <a href="/cases/{{ persona.case_id }}/timeline"><i data-lucide="clock-3"></i> Timeline</a>
     <a href="{{ url_for('pipeline.relationships', case_id=persona.case_id, persona_id=persona.id) }}"><i data-lucide="share-2"></i> Relationship evidence</a>
+    <a href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id) }}#operator-review"><i data-lucide="pencil-line"></i> Edit approvals</a>
+    <form method="post" action="{{ url_for('pipeline.create_report_snapshot', case_id=persona.case_id, persona_id=persona.id) }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button class="persona-context-action" type="submit" data-busy-label="Preparing PDF…"><i data-lucide="file-down"></i> Export Persona PDF</button>
+    </form>
     <a href="/personas/{{ persona.id }}/investigate"><i data-lucide="settings-2"></i> Configure another investigation</a>
 </nav>
-
-<section class="persona-notice" aria-label="Discovery policy">
-    <i data-lucide="shield-check"></i>
-    <div><strong>Approved sources can be enriched deliberately</strong><span>For every exact approved profile URL, OpenLedger applies Maigret structured parsing to a safety-bounded public response. If the page omits a photograph, a bounded public image-index search uses the reviewed Persona name and profile anchor and returns up to three unverified candidates. Login walls, rate limits, and access denials stay visible; OpenLedger does not bypass them. Every recovered field returns to Step 1 for review.</span></div>
-</section>
 
 {% if approved.map_points %}
 <section class="panel-card persona-map-card" aria-labelledby="approvedPersonaMapHeading">
@@ -86,7 +70,7 @@
     {% for section in approved.sections %}
     <section class="panel-card persona-group persona-tab-panel" id="approved-{{ section.key }}" data-persona-panel="{{ section.key }}" {% if not loop.first %}hidden{% endif %}>
         <header class="panel-header">
-            <div><h2>{{ section.title }}</h2><p>Only explicitly approved findings appear here.</p></div>
+            <div><h2>{{ section.title }}</h2></div>
             {% set section_state = workspace.section_states.get(section.key, {}) %}
             <span class="badge-soft {{ 'success' if section['items'] else 'warning' }}">{{ 'Approved evidence' if section['items'] else section_state.get('label', 'Not assessed') }}</span>
         </header>

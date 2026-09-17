@@ -74,6 +74,21 @@ FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
         ),
     },
     {
+        "key": "public_exposure",
+        "title": "Public exposure",
+        "description": (
+            "Publicly documented news, events, speaking, interviews and authored work."
+        ),
+        "fields": (
+            ("news_mention", "News and media coverage"),
+            ("event_appearance", "Events and public appearances"),
+            ("speaking_engagement", "Speaking engagements"),
+            ("interview", "Interviews and podcasts"),
+            ("publication", "Publications and authored work"),
+            ("award", "Awards and recognition"),
+        ),
+    },
+    {
         "key": "assets",
         "title": "Assets and risk records",
         "fields": (
@@ -251,6 +266,12 @@ AI_PROPOSAL_FIELDS = {
     "social_account",
     "website",
     "photograph",
+    "news_mention",
+    "event_appearance",
+    "speaking_engagement",
+    "interview",
+    "publication",
+    "award",
 }
 
 AI_FIELD_LIMITS = {
@@ -266,6 +287,12 @@ AI_FIELD_LIMITS = {
     "social_account": 2000,
     "website": 2000,
     "photograph": 2000,
+    "news_mention": 1200,
+    "event_appearance": 1200,
+    "speaking_engagement": 1200,
+    "interview": 1200,
+    "publication": 1200,
+    "award": 800,
 }
 
 _EMAIL_VALUE_PATTERN = re.compile(

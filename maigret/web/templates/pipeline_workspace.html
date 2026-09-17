@@ -60,11 +60,11 @@
         </header>
         <div class="panel-body assessment-review-body">
             <div class="assessment-decision-filters" role="group" aria-label="Filter review findings by decision">
-                <button type="button" class="active" data-decision-filter="all" aria-pressed="true">All <span>{{ workspace.shortlist_count }}</span></button>
-                <button type="button" data-decision-filter="pending" aria-pressed="false">Needs review</button>
-                <button type="button" data-decision-filter="include" aria-pressed="false">Approved</button>
-                <button type="button" data-decision-filter="rejected" aria-pressed="false">Rejected</button>
-                <button type="button" data-decision-filter="unresolved" aria-pressed="false">Kept in queue</button>
+                <button type="button" class="{{ 'active' if review_filter == 'all' }}" data-decision-filter="all" aria-pressed="{{ 'true' if review_filter == 'all' else 'false' }}">All <span>{{ workspace.decision_filter_counts.all }}</span></button>
+                <button type="button" class="{{ 'active' if review_filter == 'pending' }}" data-decision-filter="pending" aria-pressed="{{ 'true' if review_filter == 'pending' else 'false' }}">Needs review <span>{{ workspace.decision_filter_counts.pending }}</span></button>
+                <button type="button" class="{{ 'active' if review_filter == 'include' }}" data-decision-filter="include" aria-pressed="{{ 'true' if review_filter == 'include' else 'false' }}">Approved <span>{{ workspace.decision_filter_counts.include }}</span></button>
+                <button type="button" class="{{ 'active' if review_filter == 'rejected' }}" data-decision-filter="rejected" aria-pressed="{{ 'true' if review_filter == 'rejected' else 'false' }}">Rejected <span>{{ workspace.decision_filter_counts.rejected }}</span></button>
+                <button type="button" class="{{ 'active' if review_filter == 'unresolved' }}" data-decision-filter="unresolved" aria-pressed="{{ 'true' if review_filter == 'unresolved' else 'false' }}">Kept in queue <span>{{ workspace.decision_filter_counts.unresolved }}</span></button>
             </div>
             <div class="pipeline-table-wrap assessment-table-wrap">
                 <table class="table pipeline-table assessment-review-table" data-sortable-table data-server-sort="true">
@@ -116,6 +116,9 @@
                                 <form method="post" action="{{ url_for('pipeline.group_decision', case_id=persona.case_id, persona_id=persona.id, group_id=group.id) }}" class="assessment-table-decision-form" {% if group.latest_decision %}hidden{% endif %}>
                                     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
                                     <input type="hidden" name="return_page" value="{{ page }}">
+                                    <input type="hidden" name="return_sort" value="{{ review_sort }}">
+                                    <input type="hidden" name="return_direction" value="{{ review_direction }}">
+                                    <input type="hidden" name="return_filter" value="{{ review_filter }}">
                                     <details class="assessment-note-control">
                                         <summary>Decision note (optional)</summary>
                                         <label class="visually-hidden" for="reason-{{ group.id }}">Decision note (optional)</label>
@@ -135,11 +138,11 @@
                     </tbody>
                 </table>
             </div>
-            {% if workspace.shortlist_count > page_size %}
+            {% if workspace.filtered_shortlist_count > page_size %}
             <nav class="pipeline-pager" aria-label="Finding pages">
-                {% if page > 1 %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page-1, sort=review_sort, direction=review_direction) }}#operator-review">Previous</a>{% else %}<span></span>{% endif %}
-                <span>Page {{ page }} · showing {{ ((page - 1) * page_size) + 1 }}–{{ [page * page_size, workspace.shortlist_count] | min }} of {{ workspace.shortlist_count }}</span>
-                {% if page * page_size < workspace.shortlist_count %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page+1, sort=review_sort, direction=review_direction) }}#operator-review">Next</a>{% else %}<span></span>{% endif %}
+                {% if page > 1 %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page-1, sort=review_sort, direction=review_direction, decision=review_filter) }}#operator-review">Previous</a>{% else %}<span></span>{% endif %}
+                <span>Page {{ page }} · showing {{ ((page - 1) * page_size) + 1 }}–{{ [page * page_size, workspace.filtered_shortlist_count] | min }} of {{ workspace.filtered_shortlist_count }}</span>
+                {% if page * page_size < workspace.filtered_shortlist_count %}<a class="btn btn-outline-secondary btn-sm" href="{{ url_for('pipeline.workspace', case_id=persona.case_id, persona_id=persona.id, page=page+1, sort=review_sort, direction=review_direction, decision=review_filter) }}#operator-review">Next</a>{% else %}<span></span>{% endif %}
             </nav>
             {% endif %}
         </div>
@@ -223,22 +226,12 @@
         window.sessionStorage.setItem(scrollKey, String(window.scrollY));
     }));
     const decisionFilters = Array.from(document.querySelectorAll('[data-decision-filter]'));
-    const findings = Array.from(document.querySelectorAll('.assessment-review-table tbody tr[data-decision]'));
-    const applyDecisionFilter = (selected) => {
-        findings.forEach((row) => {
-            const value = row.dataset.decision;
-            const matches = selected === 'all'
-                || value === selected
-                || (selected === 'rejected' && ['reject', 'exclude'].includes(value));
-            row.hidden = !matches;
-        });
-        decisionFilters.forEach((button) => {
-            const active = button.dataset.decisionFilter === selected;
-            button.classList.toggle('active', active);
-            button.setAttribute('aria-pressed', String(active));
-        });
-    };
-    decisionFilters.forEach((button) => button.addEventListener('click', () => applyDecisionFilter(button.dataset.decisionFilter)));
+    decisionFilters.forEach((button) => button.addEventListener('click', () => {
+        const parameters = new URLSearchParams(window.location.search);
+        parameters.set('decision', button.dataset.decisionFilter);
+        parameters.delete('page');
+        window.location.assign(window.location.pathname + '?' + parameters.toString() + '#operator-review');
+    }));
     document.querySelectorAll('.evidence-preparation-form').forEach((form) => {
         form.addEventListener('submit', () => {
             const button = form.querySelector('button[type="submit"]');

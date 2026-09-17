@@ -206,7 +206,8 @@
     margin: 0 0 1rem;
 }
 
-.persona-context-nav a {
+.persona-context-nav a,
+.persona-context-action {
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -215,13 +216,21 @@
     padding: .55rem .75rem;
     color: var(--ol-text, #f3f3f3);
     border: 1px solid var(--ol-border, #2b2b2b);
+    background: transparent;
+    font: inherit;
     text-decoration: none;
+    cursor: pointer;
 }
 
 .persona-context-nav a:hover,
-.persona-context-nav a:focus-visible { border-color: var(--ol-accent, #7c4dff); }
+.persona-context-nav a:focus-visible,
+.persona-context-action:hover,
+.persona-context-action:focus-visible { border-color: var(--ol-accent, #7c4dff); }
 
-.persona-context-nav svg { width: 16px; height: 16px; }
+.persona-context-nav svg,
+.persona-context-action svg { width: 16px; height: 16px; }
+
+.persona-context-nav form { margin: 0; display: inline-flex; }
 
 .persona-map-card { margin: 0 0 1rem; }
 .approved-persona-map { min-height: 360px; width: 100%; background: #101010; }

@@ -30,6 +30,12 @@ AI_EVIDENCE_FIELDS = (
     "social_account",
     "website",
     "photograph",
+    "news_mention",
+    "event_appearance",
+    "speaking_engagement",
+    "interview",
+    "publication",
+    "award",
 )
 
 AI_EVIDENCE_SCHEMA = {
@@ -1242,6 +1248,13 @@ embedded inside the occupation value, and do not infer one from a role title.
 Use organization_location only for an explicitly published office, campus, or
 other public organization location. Name the exact related organization in the
 reason and never represent its location as the person's current location.
+For an explicitly cited news or media record, use news_mention. For a cited
+public event, use event_appearance; use speaking_engagement only where the
+source identifies the person as a speaker, panelist, or presenter. Use
+interview for a cited interview or podcast, publication for a cited authored
+article or publication, and award only for a cited public award. Put the
+specific article, event, outlet, program, publication, or award in the value;
+do not infer participation from a matching name alone.
 Propose a photograph only when its exact public image URL appears in the
 citation catalogue and the cited source associates it with the target.
 Never propose finances, vehicles, criminal records, sensitive

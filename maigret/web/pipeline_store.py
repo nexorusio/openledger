@@ -50,6 +50,7 @@ SHORTLIST_SECTIONS = (
     ("contact", "Contact and location"),
     ("digital", "Digital presence"),
     ("affiliations", "Affiliations"),
+    ("public_exposure", "Public exposure"),
     ("records", "Assets and risk records"),
 )
 
@@ -80,6 +81,20 @@ SHORTLIST_PREDICATE_SECTIONS = {
     "organization": "affiliations",
     "affiliation": "affiliations",
     "company_ownership": "affiliations",
+    "news_mention": "public_exposure",
+    "media_mention": "public_exposure",
+    "news_article": "public_exposure",
+    "public_event": "public_exposure",
+    "event_appearance": "public_exposure",
+    "public_appearance": "public_exposure",
+    "speaking_engagement": "public_exposure",
+    "conference_appearance": "public_exposure",
+    "panel_appearance": "public_exposure",
+    "interview": "public_exposure",
+    "podcast_appearance": "public_exposure",
+    "publication": "public_exposure",
+    "authored_article": "public_exposure",
+    "award": "public_exposure",
 }
 
 INPUT_EVIDENCE_ENGINE = "investigation_input"
@@ -2806,6 +2821,7 @@ class PipelineStore:
         history_offset=0,
         review_sort="default",
         review_direction="ascending",
+        review_filter="all",
     ):
         limit, offset = min(max(int(limit), 1), 100), max(int(offset), 0)
         history_offset = max(int(history_offset), 0)
@@ -2815,6 +2831,9 @@ class PipelineStore:
         review_direction = str(review_direction or "ascending").casefold()
         if review_direction not in {"ascending", "descending"}:
             review_direction = "ascending"
+        review_filter = str(review_filter or "all").casefold()
+        if review_filter not in {"all", "pending", "include", "rejected", "unresolved"}:
+            review_filter = "all"
         with self.engine.connect() as connection:
             state = self._scope(connection, case_id, persona_id)
             projection = self._projection_state(connection, case_id, persona_id)
@@ -3279,7 +3298,39 @@ class PipelineStore:
                     key=review_sort_value,
                     reverse=review_direction == "descending",
                 )
-            display_shortlist = balanced_shortlist[offset : offset + limit]
+            decision_filter_counts = {
+                "all": len(shortlist),
+                "pending": sum(
+                    item["latest_decision"] is None for item in shortlist
+                ),
+                "include": sum(
+                    item["latest_decision"] == "include" for item in shortlist
+                ),
+                "rejected": sum(
+                    item["latest_decision"] in {"reject", "exclude"}
+                    for item in shortlist
+                ),
+                "unresolved": sum(
+                    item["latest_decision"] == "unresolved" for item in shortlist
+                ),
+            }
+
+            def matches_review_filter(item):
+                decision = item["latest_decision"]
+                return (
+                    review_filter == "all"
+                    or (review_filter == "pending" and decision is None)
+                    or decision == review_filter
+                    or (
+                        review_filter == "rejected"
+                        and decision in {"reject", "exclude"}
+                    )
+                )
+
+            filtered_shortlist = [
+                item for item in balanced_shortlist if matches_review_filter(item)
+            ]
+            display_shortlist = filtered_shortlist[offset : offset + limit]
             shortlist_sections = [
                 {
                     "key": key,
@@ -3414,8 +3465,11 @@ class PipelineStore:
                 section_states=section_states,
                 shortlist=display_shortlist,
                 shortlist_count=len(shortlist),
+                filtered_shortlist_count=len(filtered_shortlist),
+                decision_filter_counts=decision_filter_counts,
                 review_sort=review_sort,
                 review_direction=review_direction,
+                review_filter=review_filter,
                 shortlist_sections=shortlist_sections,
                 approved_count=approved_count,
                 rejected_count=rejected_count,

@@ -378,10 +378,10 @@ def test_review_proceed_persona_and_approved_discovery_are_an_explicit_wizard(
     assert b"Approved Persona" in persona.data
     assert b"Synthetic Person" in persona.data
     assert b"Edit approvals" in persona.data
-    assert b"Research with cited sources" in persona.data
+    assert b"Find new evidence" in persona.data
 
     discovery = client.post(
-        base(journey) + "/discover-related",
+        base(journey) + "/collect-approved-evidence",
         data={"csrf_token": "test-csrf"},
         follow_redirects=False,
     )
@@ -960,9 +960,7 @@ def test_approved_persona_opens_while_newer_findings_await_review(journey):
     assert b"Synthetic Person" in response.data
     assert b"awaiting review" in response.data
     assert b"Pending analyst review" not in response.data
-    assert b"Research with cited sources" in response.data
-    assert b"disabled" in response.data
-    assert b'aria-describedby="collection-action-guard"' in response.data
+    assert b"Find new evidence" not in response.data
     assert b"Resolve the review queue in Step 1 before collecting more." in response.data
 
     blocked_discovery = journey["client"].post(
@@ -1006,12 +1004,20 @@ def test_review_queue_sort_is_applied_before_paginating_all_findings():
     script = (root / "static" / "openledger.js").read_text()
 
     assert 'review_sort="default"' in store
+    assert 'review_filter="all"' in store
     assert 'if review_sort != "default":' in store
     assert store.index('balanced_shortlist.sort(') < store.index(
-        'display_shortlist = balanced_shortlist[offset : offset + limit]'
+        'display_shortlist = filtered_shortlist[offset : offset + limit]'
     )
     assert 'data-server-sort="true"' in template
+    assert 'workspace.filtered_shortlist_count' in template
     assert "parameters.delete('page');" in script
+    assert 'parameters.set(\'decision\', button.dataset.decisionFilter);' in (
+        (root / "templates" / "pipeline_workspace.html").read_text()
+    )
+    assert store.index("filtered_shortlist = [") < store.index(
+        "display_shortlist = filtered_shortlist[offset : offset + limit]"
+    )
 
 
 def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):

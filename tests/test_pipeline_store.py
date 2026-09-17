@@ -662,6 +662,7 @@ def test_submitted_inputs_are_idempotently_reconciled_across_persona_sections(pa
         "contact": 2,
         "digital": 3,
         "affiliations": 0,
+        "public_exposure": 0,
         "records": 0,
     }
     assert pipeline.reconcile_submitted_inputs(scope[0], scope[1])[
@@ -768,12 +769,17 @@ def test_positive_engine_output_reaches_every_persona_section(pair):
         "contact": 2,
         "digital": 1,
         "affiliations": 1,
+        "public_exposure": 0,
         "records": 1,
     }
 
 
 def test_engine_coverage_maps_to_every_section_it_can_populate():
-    from maigret.web.pipeline_store import SHORTLIST_SECTIONS, _task_sections
+    from maigret.web.pipeline_store import (
+        SHORTLIST_SECTIONS,
+        _shortlist_section,
+        _task_sections,
+    )
 
     assert _task_sections({"engine": "github_public_profile"}) == {
         "identity",
@@ -792,6 +798,8 @@ def test_engine_coverage_maps_to_every_section_it_can_populate():
     assert _task_sections({"engine": "ai_cited_research"}) == {
         key for key, _title in SHORTLIST_SECTIONS
     }
+    assert _shortlist_section("claim", {"predicate": "news_mention"}) == "public_exposure"
+    assert _shortlist_section("claim", {"predicate": "event_appearance"}) == "public_exposure"
 
 
 def test_profile_summary_predicates_are_grouped_with_identity():
