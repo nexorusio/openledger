@@ -779,6 +779,7 @@ def test_engine_coverage_maps_to_every_section_it_can_populate():
         SHORTLIST_SECTIONS,
         _shortlist_section,
         _task_sections,
+        presentation_predicate,
     )
 
     assert _task_sections({"engine": "github_public_profile"}) == {
@@ -800,6 +801,12 @@ def test_engine_coverage_maps_to_every_section_it_can_populate():
     }
     assert _shortlist_section("claim", {"predicate": "news_mention"}) == "public_exposure"
     assert _shortlist_section("claim", {"predicate": "event_appearance"}) == "public_exposure"
+    legacy_phd_defence = {
+        "predicate": "affiliation",
+        "value": "PhD Defence Jati Pratomo | The Interplay between Uncertainties, Transferability and Policymaking in Remote Sensing-based Slum Mapping | About us",
+    }
+    assert presentation_predicate("claim", legacy_phd_defence) == "event_appearance"
+    assert _shortlist_section("claim", legacy_phd_defence) == "public_exposure"
 
 
 def test_profile_summary_predicates_are_grouped_with_identity():
