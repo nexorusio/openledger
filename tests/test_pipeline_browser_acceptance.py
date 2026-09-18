@@ -346,7 +346,9 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             assert workspace["review_pending_count"] == 0
 
             page.get_by_role("button", name="Proceed to Persona").click()
-            expect(page.get_by_text("Persona", exact=True)).to_be_visible()
+            expect(
+                page.locator(".persona-profile-header .eyebrow", has_text="Persona")
+            ).to_be_visible()
             expect(page).to_have_url(origin + base + "/persona")
             approved_persona_tabs = page.locator("[data-persona-tab]").evaluate_all(
                 "tabs => tabs.map(tab => tab.dataset.personaTab)"
