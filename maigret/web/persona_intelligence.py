@@ -28,83 +28,12 @@ from maigret.web.profile_search_tiktok import (
     parse_tiktok_profile_url,
 )
 from maigret.web.profile_search_x import X_PROFILE_HOSTS, parse_x_profile_url
-
-FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
-    {
-        "key": "identity",
-        "title": "Identity",
-        "fields": (
-            ("summary", "Summary of the target"),
-            ("full_name", "Full name"),
-            ("photograph", "Photograph"),
-        ),
-    },
-    {
-        "key": "contact",
-        "title": "Contact and location",
-        "fields": (
-            ("email", "Email address"),
-            ("phone", "Phone number"),
-            ("address", "Address"),
-            ("current_location", "Current location"),
-        ),
-    },
-    {
-        "key": "online",
-        "title": "Digital presence",
-        "fields": (
-            ("social_account", "Social media and public accounts"),
-            ("platform_identifier", "Stable platform identifiers"),
-            ("linked_profile_lead", "Linked profile leads"),
-            ("account_registration", "Email registration evidence"),
-            ("website", "Website"),
-        ),
-    },
-    {
-        "key": "affiliations",
-        "title": "Affiliations",
-        "description": (
-            "Employment, education, membership, institutional and ownership links."
-        ),
-        "fields": (
-            ("occupation", "Role or occupation"),
-            ("company", "Organization, institution or company"),
-            ("organization_location", "Organization location"),
-            ("company_ownership", "Ownership or leadership"),
-        ),
-    },
-    {
-        "key": "public_exposure",
-        "title": "Public exposure",
-        "description": (
-            "Publicly documented news, events, speaking, interviews and authored work."
-        ),
-        "fields": (
-            ("news_mention", "News and media coverage"),
-            ("event_appearance", "Events and public appearances"),
-            ("speaking_engagement", "Speaking engagements"),
-            ("interview", "Interviews and podcasts"),
-            ("publication", "Publications and authored work"),
-            ("award", "Awards and recognition"),
-        ),
-    },
-    {
-        "key": "assets",
-        "title": "Assets and risk records",
-        "fields": (
-            ("offshore_database_match", "Offshore Leaks record match"),
-            ("financial_profile", "Financial profile"),
-            ("vehicle_ownership", "Vehicle ownership"),
-            ("criminal_record", "Criminal record"),
-        ),
-    },
+from maigret.web.persona_schema import (
+    FIELD_LABELS as FIELD_DISPLAY_LABELS,
+    PERSONA_SECTIONS as FIELD_GROUPS,
+    display_label as canonical_field_display_label,
+    presentation_predicate,
 )
-
-FIELD_DISPLAY_LABELS = {
-    field_name: label
-    for group in FIELD_GROUPS
-    for field_name, label in group["fields"]
-}
 
 _SUPPORTED_SOCIAL_PROFILE_PARSERS = (
     (FACEBOOK_PROFILE_HOSTS, parse_facebook_profile_url, "facebook"),
@@ -131,10 +60,7 @@ def _supported_social_profile_reference(
 
 def field_display_label(field_name: Any) -> str:
     """Return the current product label for a backward-compatible storage key."""
-    normalized = str(field_name or "").strip()
-    return FIELD_DISPLAY_LABELS.get(
-        normalized, normalized.replace("_", " ").title()
-    )
+    return canonical_field_display_label(field_name)
 
 
 FIELD_ALIASES = {
@@ -1523,7 +1449,15 @@ def group_claims(claims: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return the fixed persona form, including empty evidence categories."""
     by_field: Dict[str, List[Dict[str, Any]]] = {}
     for claim in claims:
-        by_field.setdefault(str(claim["field_name"]), []).append(claim)
+        field_name = presentation_predicate(
+            "claim",
+            {
+                "predicate": claim.get("field_name"),
+                "value": claim.get("value"),
+                "display_value": claim.get("display_value"),
+            },
+        )
+        by_field.setdefault(field_name, []).append(claim)
     groups = []
     for group in FIELD_GROUPS:
         fields = []

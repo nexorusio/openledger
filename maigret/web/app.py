@@ -151,7 +151,6 @@ from maigret.web.persona_intelligence import (
     extract_explicit_public_urls,
     extract_case_chat_persona_claims,
     field_display_label,
-    group_claims,
 )
 from maigret.web.chat_presentation import render_chat_content
 from maigret.web.crawl_audit import MAX_AUDIT_EVENTS, build_crawl_audit
@@ -7748,47 +7747,43 @@ def persona_workspace(persona_id):
     if not persona:
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
-    if request.args.get('view') != 'working':
-        from sqlalchemy import select
-        from maigret.web.pipeline_store import PipelineStore
-        pipeline = PipelineStore(case_store)
-        requests = pipeline._table("requests")
-        with case_store.engine.connect() as connection:
-            has_pipeline = connection.execute(
-                select(requests.c.id).where(
-                    requests.c.case_id == persona['case_id'],
-                    requests.c.persona_id == persona_id,
-                ).limit(1)
-            ).first() is not None
-        if has_pipeline:
-            # Let the approved-Persona route decide whether an unresolved queue
-            # requires Step 1. A reviewed Persona should never be sent back to
-            # the review workspace merely because it has P2 lineage.
-            return redirect(
-                url_for(
-                    'pipeline.persona',
-                    case_id=persona['case_id'],
-                    persona_id=persona_id,
-                )
+    from sqlalchemy import func, select
+    from maigret.web.case_store import persona_claims
+    from maigret.web.pipeline_store import PipelineStore
+    pipeline = PipelineStore(case_store)
+    requests = pipeline._table("requests")
+    projection_state = pipeline._table("projection_state")
+    with case_store.engine.connect() as connection:
+        has_pipeline = connection.execute(
+            select(requests.c.id).where(
+                requests.c.case_id == persona['case_id'],
+                requests.c.persona_id == persona_id,
+            ).limit(1)
+        ).first() is not None
+        legacy_claim_count = connection.scalar(
+            select(func.count()).select_from(persona_claims).where(
+                persona_claims.c.persona_id == persona_id
             )
-    active_claims = [
-        claim
-        for claim in persona['claims']
-        if claim['review_status'] != 'rejected'
-        and claim.get('reliability_status') != 'legacy_untriaged'
-    ]
+        )
+        convergence_completed = connection.execute(
+            select(projection_state.c.legacy_converged_at).where(
+                projection_state.c.case_id == persona['case_id'],
+                projection_state.c.persona_id == persona_id,
+            )
+        ).scalar_one_or_none()
+    if has_pipeline and (not legacy_claim_count or convergence_completed):
+        # P2 becomes canonical only after the complete convergence checkpoint;
+        # a partially imported request must not hide retained legacy evidence.
+        return redirect(
+            url_for(
+                'pipeline.persona',
+                case_id=persona['case_id'],
+                persona_id=persona_id,
+            )
+        )
     review_claims = [
         claim for claim in persona['claims'] if claim['review_status'] != 'approved'
     ]
-    approved_photograph = next(
-        (
-            claim
-            for claim in persona['claims']
-            if claim['field_name'] == 'photograph'
-            and claim['review_status'] == 'approved'
-        ),
-        None,
-    )
     approved_full_name = next(
         (
             claim
@@ -7805,31 +7800,6 @@ def persona_workspace(persona_id):
         and claim['review_status'] != 'rejected'
     ]
     identity_enrichment = case_store.get_persona_identity_enrichment(persona_id)
-    map_locations = [
-        {
-            'id': claim['id'],
-            'label': claim['display_value'],
-            'latitude': claim['latitude'],
-            'longitude': claim['longitude'],
-            'field_name': claim['field_name'],
-            'confidence': claim['confidence'],
-            'coordinate_precision': next(
-                (
-                    evidence.get('details', {}).get('coordinate_precision')
-                    for evidence in claim['evidence']
-                    if evidence.get('details', {}).get('coordinate_precision')
-                ),
-                None,
-            ),
-        }
-        for claim in persona['claims']
-        if claim['field_name'] in (
-            'address', 'current_location', 'organization_location'
-        )
-        and claim['review_status'] == 'approved'
-        and claim['latitude'] is not None
-        and claim['longitude'] is not None
-    ]
     review_counts = {
         status: sum(
             1 for claim in persona['claims'] if claim['review_status'] == status
@@ -7842,18 +7812,23 @@ def persona_workspace(persona_id):
             if claim['field_name'] == 'occupation'
             else ''
         )
+    from maigret.web.persona_presenter import (
+        legacy_persona_projection,
+        legacy_workspace_projection,
+    )
+    approved = legacy_persona_projection(persona)
     return render_template(
         'persona.html',
+        source_model='legacy',
+        active_tab='identity' if approved['items'] else 'review',
         persona=persona,
-        claim_groups=group_claims(active_claims),
+        approved=approved,
+        workspace=legacy_workspace_projection(persona),
         review_claims=review_claims,
         review_counts=review_counts,
-        approved_photograph=approved_photograph,
         approved_full_name=approved_full_name,
         offshore_matches=offshore_matches,
         identity_enrichment=identity_enrichment,
-        map_locations=map_locations,
-        ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
         field_display_label=field_display_label,
         map_tile_url=os.getenv(
             'OPENLEDGER_MAP_TILE_URL',
@@ -9065,7 +9040,7 @@ def download_report(filename):
 
 
 def _prepare_pipeline_workspace(case_id, persona_id):
-    from maigret.web.pipeline_ingestion import bootstrap_legacy_workspace
+    from maigret.web.pipeline_ingestion import converge_legacy_persona
     from maigret.web.pipeline_execution import refresh_consolidation
     from maigret.web.pipeline_store import PipelineStore
 
@@ -9087,12 +9062,18 @@ def _prepare_pipeline_workspace(case_id, persona_id):
         # to discover that the same button must be pressed twice.
         workspace = pipeline.get_workspace(case_id, persona_id, limit=1)
     if workspace["projection"]["legacy_available"]:
-        legacy = bootstrap_legacy_workspace(case_store, case_id, persona_id)
+        legacy = converge_legacy_persona(
+            case_store, case_id, persona_id, dry_run=False
+        )
+        evidence = legacy["evidence"]
+        decisions = legacy["decisions"]
         if report:
             report.update(
-                legacy_observation_count=legacy["observation_count"],
-                legacy_claim_count=legacy["claim_count"],
-                group_count=legacy["group_count"],
+                legacy_observation_count=evidence["observation_count"],
+                legacy_claim_count=evidence["claim_count"],
+                legacy_decision_count=decisions["decision_count"],
+                legacy_conflict_count=decisions["conflict_count"],
+                group_count=evidence["group_count"],
                 mode="reconcile_all",
             )
             return report

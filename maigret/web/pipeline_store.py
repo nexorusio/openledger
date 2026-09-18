@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -29,6 +28,12 @@ from maigret.web.case_store import (
     _heartbeat_expired,
 )
 from maigret.web.pipeline_schema import PIPELINE_ID
+from maigret.web.persona_schema import (
+    FIELD_SECTIONS as SHORTLIST_PREDICATE_SECTIONS,
+    PERSONA_SECTIONS,
+    presentation_predicate,
+    section_for,
+)
 
 OUTCOMES = frozenset(
     {
@@ -46,57 +51,9 @@ OUTCOMES = frozenset(
 )
 TRANSIENT_OUTCOMES = frozenset({"partial", "timeout", "error"})
 
-SHORTLIST_SECTIONS = (
-    ("identity", "Identity"),
-    ("contact", "Contact and location"),
-    ("digital", "Digital presence"),
-    ("affiliations", "Affiliations"),
-    ("public_exposure", "Public exposure"),
-    ("records", "Assets and risk records"),
+SHORTLIST_SECTIONS = tuple(
+    (section["key"], section["title"]) for section in PERSONA_SECTIONS
 )
-
-SHORTLIST_PREDICATE_SECTIONS = {
-    "summary": "identity",
-    "about": "identity",
-    "bio": "identity",
-    "biography": "identity",
-    "description": "identity",
-    "full_name": "identity",
-    "name": "identity",
-    "alias": "identity",
-    "date_of_birth": "identity",
-    "photograph": "identity",
-    "email": "contact",
-    "phone": "contact",
-    "address": "contact",
-    "current_location": "contact",
-    "organization_location": "affiliations",
-    "social_account": "digital",
-    "platform_identifier": "digital",
-    "linked_profile_lead": "digital",
-    "account_registration": "digital",
-    "website": "digital",
-    "username": "digital",
-    "occupation": "affiliations",
-    "company": "affiliations",
-    "organization": "affiliations",
-    "affiliation": "affiliations",
-    "company_ownership": "affiliations",
-    "news_mention": "public_exposure",
-    "media_mention": "public_exposure",
-    "news_article": "public_exposure",
-    "public_event": "public_exposure",
-    "event_appearance": "public_exposure",
-    "public_appearance": "public_exposure",
-    "speaking_engagement": "public_exposure",
-    "conference_appearance": "public_exposure",
-    "panel_appearance": "public_exposure",
-    "interview": "public_exposure",
-    "podcast_appearance": "public_exposure",
-    "publication": "public_exposure",
-    "authored_article": "public_exposure",
-    "award": "public_exposure",
-}
 
 INPUT_EVIDENCE_ENGINE = "investigation_input"
 INPUT_EVIDENCE_TASK_KEY = "system:submitted-inputs"
@@ -193,65 +150,8 @@ def _task_sections(task):
     return sections
 
 
-_PUBLIC_EXPOSURE_LEGACY_PREDICATES = frozenset(
-    {"affiliation", "organization", "company"}
-)
-_PUBLIC_EXPOSURE_TITLE_PATTERNS = (
-    (
-        "speaking_engagement",
-        re.compile(r"\b(keynote|speaker|speaking|presenter|panelist)\b", re.I),
-    ),
-    (
-        "event_appearance",
-        re.compile(r"\b(ph\.?d|doctoral)\s+defen[cs]e\b", re.I),
-    ),
-    (
-        "event_appearance",
-        re.compile(
-            r"\b(conference|symposium|seminar|workshop|webinar|public event|panel)\b",
-            re.I,
-        ),
-    ),
-    ("interview", re.compile(r"\b(interview|podcast)\b", re.I)),
-    (
-        "publication",
-        re.compile(r"\b(publication|journal|authored article|research paper)\b", re.I),
-    ),
-    ("award", re.compile(r"\b(award|awardee|recipient)\b", re.I)),
-)
-
-
-def presentation_predicate(kind, normalized):
-    """Classify a reader-facing Persona section without mutating source records.
-
-    Earlier releases stored some public appearances as broad affiliations.  The
-    original predicate and its immutable evidence remain intact; this narrow
-    projection corrects unmistakable public-exposure titles for both the review
-    queue and an approved Persona.
-    """
-    if kind != "claim":
-        return ""
-    normalized = normalized or {}
-    predicate = str(
-        normalized.get("predicate") or normalized.get("field_name") or ""
-    ).casefold()
-    if predicate not in _PUBLIC_EXPOSURE_LEGACY_PREDICATES:
-        return predicate
-    value = normalized.get("display_value") or normalized.get("value") or ""
-    if isinstance(value, dict):
-        value = value.get("title") or value.get("name") or ""
-    text = " ".join(str(value).split())
-    for corrected_predicate, pattern in _PUBLIC_EXPOSURE_TITLE_PATTERNS:
-        if pattern.search(text):
-            return corrected_predicate
-    return predicate
-
-
 def _shortlist_section(kind, normalized):
-    if kind == "account":
-        return "digital"
-    predicate = presentation_predicate(kind, normalized)
-    return SHORTLIST_PREDICATE_SECTIONS.get(predicate, "records")
+    return section_for(kind, normalized)
 
 
 def _reviewable_request_inputs(request):
@@ -491,6 +391,7 @@ class PipelineStore:
             evidence_revision=0,
             projected_revision=0,
             legacy_imported_at=None,
+            legacy_converged_at=None,
             updated_at=_now(),
         )
         if create:
@@ -507,7 +408,13 @@ class PipelineStore:
             .values(evidence_revision=table.c.evidence_revision + 1, updated_at=_now())
         )
 
-    def mark_legacy_imported(self, case_id, persona_id):
+    def mark_legacy_converged(self, case_id, persona_id):
+        """Record the compatibility cutover after evidence and reviews converge.
+
+        The older ``legacy_imported_at`` value proves only that evidence was
+        copied. ``legacy_converged_at`` is deliberately separate so an older
+        hybrid database cannot be mistaken for a completed review cutover.
+        """
         with self.engine.begin() as connection:
             self._scope(connection, case_id, persona_id, lock=True)
             self._projection_state(connection, case_id, persona_id, create=True)
@@ -515,8 +422,18 @@ class PipelineStore:
             connection.execute(
                 update(table)
                 .where(table.c.persona_id == persona_id)
-                .values(legacy_imported_at=_now(), updated_at=_now())
+                .values(
+                    legacy_imported_at=func.coalesce(
+                        table.c.legacy_imported_at, _now()
+                    ),
+                    legacy_converged_at=_now(),
+                    updated_at=_now(),
+                )
             )
+
+    def mark_legacy_imported(self, case_id, persona_id):
+        """Compatibility alias for callers written before full convergence."""
+        self.mark_legacy_converged(case_id, persona_id)
 
     def _assert_projection_current(self, connection, case_id, persona_id):
         state = self._projection_state(connection, case_id, persona_id)
@@ -2889,7 +2806,7 @@ class PipelineStore:
             state = self._scope(connection, case_id, persona_id)
             projection = self._projection_state(connection, case_id, persona_id)
             legacy_counts = {"claims": 0, "messages": 0, "jobs": 0}
-            if projection["legacy_imported_at"] is None:
+            if projection["legacy_converged_at"] is None:
                 legacy_counts["claims"] = connection.scalar(select(func.count()).select_from(persona_claims).where(
                     persona_claims.c.persona_id == persona_id))
                 legacy_counts["messages"] = connection.scalar(select(func.count()).select_from(case_chat_messages).where(
@@ -4469,6 +4386,230 @@ class PipelineStore:
             report["request_ids"][0] if report["request_ids"] else None
         )
         return report
+
+    def converge_legacy_reviews(self, case_id, persona_id, *, dry_run=True):
+        """Project retained legacy review state into the P2 decision ledger.
+
+        Evidence must already have been imported and consolidated.  Original
+        claims, evidence and review rows are never changed.  One deterministic
+        decision records the complete legacy history for each consolidated
+        group.  Conflicting legacy states, or disagreement with an existing P2
+        decision, become unresolved instead of being silently promoted.
+        Pending-only groups remain undecided.
+        """
+        decision_map = {
+            "approved": "include",
+            "rejected": "reject",
+            "uncertain": "unresolved",
+            "pending": None,
+        }
+
+        def comparable(value):
+            return "reject" if value in {"reject", "exclude"} else value
+
+        groups = self._table("groups")
+        observations = self._table("observations")
+        memberships = self._table("group_observations")
+        decisions = self._table("operator_decisions")
+        with self.engine.begin() as connection:
+            self._scope(connection, case_id, persona_id, lock=not dry_run)
+            claims = [
+                dict(row)
+                for row in connection.execute(
+                    select(persona_claims)
+                    .where(persona_claims.c.persona_id == persona_id)
+                    .order_by(persona_claims.c.id)
+                ).mappings()
+            ]
+            reviews_by_claim = {claim["id"]: [] for claim in claims}
+            if reviews_by_claim:
+                for row in connection.execute(
+                    select(claim_reviews)
+                    .where(claim_reviews.c.claim_id.in_(reviews_by_claim))
+                    .order_by(claim_reviews.c.created_at, claim_reviews.c.id)
+                ).mappings():
+                    reviews_by_claim[row["claim_id"]].append(_json(dict(row)))
+
+            group_claims = {}
+            membership_rows = connection.execute(
+                select(
+                    memberships.c.group_id,
+                    observations.c.payload,
+                )
+                .join(observations, observations.c.id == memberships.c.observation_id)
+                .join(groups, groups.c.id == memberships.c.group_id)
+                .where(
+                    groups.c.case_id == case_id,
+                    groups.c.persona_id == persona_id,
+                )
+            ).mappings()
+            known_claims = {claim["id"]: claim for claim in claims}
+            for row in membership_rows:
+                document = (
+                    row["payload"] if isinstance(row["payload"], dict) else {}
+                )
+                native_payload = (
+                    document.get("payload")
+                    if isinstance(document.get("payload"), dict)
+                    else {}
+                )
+                claim_id = str(
+                    native_payload.get("legacy_claim_id")
+                    or document.get("legacy_claim_id")
+                    or ""
+                )
+                if claim_id in known_claims:
+                    group_claims.setdefault(row["group_id"], set()).add(claim_id)
+
+            existing_by_group = {}
+            for row in connection.execute(
+                select(decisions)
+                .where(
+                    decisions.c.case_id == case_id,
+                    decisions.c.persona_id == persona_id,
+                )
+                .order_by(decisions.c.group_id, decisions.c.sequence)
+            ).mappings():
+                existing_by_group.setdefault(row["group_id"], []).append(dict(row))
+
+            report = {
+                "case_id": case_id,
+                "persona_id": persona_id,
+                "dry_run": bool(dry_run),
+                "legacy_claim_count": len(claims),
+                "mapped_claim_count": len(
+                    {claim_id for values in group_claims.values() for claim_id in values}
+                ),
+                "group_count": len(group_claims),
+                "decision_count": 0,
+                "undecided_group_count": 0,
+                "conflict_count": 0,
+                "already_converged_count": 0,
+                "conflicts": [],
+                "auto_finalized": False,
+                "qc_created": False,
+            }
+            planned = []
+            for group_id in sorted(group_claims):
+                claim_ids = sorted(group_claims[group_id])
+                claim_documents = []
+                desired = set()
+                for claim_id in claim_ids:
+                    claim = known_claims[claim_id]
+                    target = decision_map[claim["review_status"]]
+                    desired.add(
+                        comparable(target) if target else "undecided"
+                    )
+                    claim_documents.append(
+                        {
+                            "legacy_claim_id": claim_id,
+                            "current_status": claim["review_status"],
+                            "reviewed_by": claim.get("reviewed_by"),
+                            "reviewed_at": _json(claim.get("reviewed_at")),
+                            "reviews": reviews_by_claim[claim_id],
+                        }
+                    )
+                existing = existing_by_group.get(group_id, [])
+                imported_fingerprints = {
+                    str(
+                        (row.get("details") or {})
+                        .get("legacy_convergence", {})
+                        .get("fingerprint", "")
+                    )
+                    for row in existing
+                }
+                # Imported checkpoints must never hide a later comparison with
+                # an operator-authored P2 decision.  Scan the full append-only
+                # ledger so replaying this importer cannot silently override a
+                # human judgement that predates an earlier import.
+                latest_human = next(
+                    (
+                        row
+                        for row in reversed(existing)
+                        if not (row.get("details") or {}).get(
+                            "legacy_convergence"
+                        )
+                    ),
+                    None,
+                )
+                conflict_reasons = []
+                if len(desired) > 1:
+                    conflict_reasons.append("legacy_states_disagree")
+                target = next(iter(desired)) if len(desired) == 1 else None
+                if target == "undecided":
+                    target = None
+                if (
+                    target
+                    and latest_human
+                    and comparable(latest_human["decision"]) != target
+                ):
+                    conflict_reasons.append("legacy_and_p2_states_disagree")
+                if target is None and not conflict_reasons:
+                    report["undecided_group_count"] += 1
+                    continue
+                decision = "unresolved" if conflict_reasons else target
+                convergence = {
+                    "version": "p2-legacy-review-v1",
+                    "group_id": group_id,
+                    "decision": decision,
+                    "conflicts": conflict_reasons,
+                    "claims": claim_documents,
+                }
+                convergence["fingerprint"] = _digest(convergence)
+                if convergence["fingerprint"] in imported_fingerprints:
+                    report["already_converged_count"] += 1
+                    continue
+                if conflict_reasons:
+                    report["conflict_count"] += 1
+                    report["conflicts"].append(
+                        {
+                            "group_id": group_id,
+                            "claim_ids": claim_ids,
+                            "reasons": conflict_reasons,
+                        }
+                    )
+                planned.append((group_id, decision, convergence))
+
+            report["decision_count"] = len(planned)
+            if dry_run:
+                return _json(report)
+
+            for group_id, decision, convergence in planned:
+                sequence = (
+                    connection.scalar(
+                        select(func.max(decisions.c.sequence)).where(
+                            decisions.c.group_id == group_id
+                        )
+                    )
+                    or 0
+                ) + 1
+                connection.execute(
+                    insert(decisions).values(
+                        id=str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                "openledger:legacy-convergence:"
+                                + convergence["fingerprint"],
+                            )
+                        ),
+                        case_id=case_id,
+                        persona_id=persona_id,
+                        group_id=group_id,
+                        sequence=sequence,
+                        decision=decision,
+                        actor="system:legacy-persona-convergence",
+                        reason=(
+                            "Legacy review states conflict; operator review is required."
+                            if convergence["conflicts"]
+                            else "Imported the current legacy review state with its complete audit history."
+                        ),
+                        details={"legacy_convergence": convergence},
+                        created_at=_now(),
+                    )
+                )
+            if planned:
+                self._bump(connection, persona_id)
+            return _json(report)
 
     def withdraw_final(
         self,
