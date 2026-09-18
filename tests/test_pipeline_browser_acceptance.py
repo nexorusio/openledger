@@ -314,7 +314,9 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             assert decision_action
             assert decision.locator('[name="reason"]').get_attribute("required") is None
             decision.get_by_role("button", name="Reject").click()
-            expect(page.get_by_text("Rejected", exact=True).first).to_be_visible()
+            expect(
+                page.locator(".badge-soft.danger:visible", has_text="Rejected").first
+            ).to_be_visible()
             decision_cell = page.locator(
                 f'form[action="{decision_action}"]'
             ).locator("xpath=ancestor::td")
@@ -323,7 +325,9 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             decision.locator("summary").click()
             decision.locator('[name="reason"]').fill("Approved after reviewing the cited source.")
             decision.get_by_role("button", name="Approve").click()
-            expect(page.get_by_text("Approved", exact=True).first).to_be_visible()
+            expect(
+                page.locator(".badge-soft.success:visible", has_text="Approved").first
+            ).to_be_visible()
 
             workspace = pipeline.get_workspace(case_id, persona_id)
             assert any(item.get("latest_decision") == "include" for item in workspace["shortlist"])
