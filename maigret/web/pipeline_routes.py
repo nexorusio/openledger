@@ -225,87 +225,20 @@ def register_pipeline_routes(
         return session.get('username') or 'local-operator'
 
     def approved_persona(case_id, persona_id):
-        from maigret.web.pipeline_store import (
-            SHORTLIST_SECTIONS,
-            _shortlist_section,
+        from maigret.web.persona_schema import (
+            PERSONA_SECTIONS,
+            display_label,
             presentation_predicate,
+            section_for,
         )
+        from maigret.web.pipeline_store import SHORTLIST_SECTIONS
 
         # This is the same information architecture as the original Persona
         # workspace: a subject area contains named fields, rather than a flat
         # stream of arbitrary approved rows. Keep the P2 section keys stable so
         # collection coverage and empty-state logic remain unchanged.
         persona_fields = {
-            "identity": (
-                ("summary", "Summary of the target"),
-                ("full_name", "Full name"),
-                ("alias", "Known aliases"),
-                ("date_of_birth", "Date of birth"),
-                ("photograph", "Photograph"),
-            ),
-            "contact": (
-                ("email", "Email address"),
-                ("phone", "Phone number"),
-                ("address", "Address"),
-                ("current_location", "Current location"),
-            ),
-            "digital": (
-                ("social_account", "Social media and public accounts"),
-                ("username", "Known usernames"),
-                ("platform_identifier", "Stable platform identifiers"),
-                ("linked_profile_lead", "Linked profile leads"),
-                ("account_registration", "Email registration evidence"),
-                ("website", "Website"),
-            ),
-            "affiliations": (
-                ("occupation", "Role or occupation"),
-                ("company", "Organization, institution or company"),
-                ("organization_location", "Organization location"),
-                ("company_ownership", "Ownership or leadership"),
-            ),
-            "public_exposure": (
-                ("news_mention", "News and media coverage"),
-                ("event_appearance", "Events and public appearances"),
-                ("speaking_engagement", "Speaking engagements"),
-                ("interview", "Interviews and podcasts"),
-                ("publication", "Publications and authored work"),
-                ("award", "Awards and recognition"),
-            ),
-            "records": (
-                ("offshore_database_match", "Offshore Leaks record match"),
-                ("financial_profile", "Financial profile"),
-                ("vehicle_ownership", "Vehicle ownership"),
-                ("criminal_record", "Criminal record"),
-            ),
-        }
-        predicate_aliases = {
-            "about": "summary",
-            "bio": "summary",
-            "biography": "summary",
-            "description": "summary",
-            "display_name": "full_name",
-            "name": "full_name",
-            "employer": "company",
-            "organization": "company",
-            "organisation": "company",
-            "affiliation": "company",
-            "job_title": "occupation",
-            "role": "occupation",
-            "location": "current_location",
-            "city": "current_location",
-            "news": "news_mention",
-            "media_mention": "news_mention",
-            "news_article": "news_mention",
-            "event": "event_appearance",
-            "public_event": "event_appearance",
-            "public_appearance": "event_appearance",
-            "conference_appearance": "event_appearance",
-            "panel_appearance": "event_appearance",
-            "talk": "speaking_engagement",
-            "speaker": "speaking_engagement",
-            "podcast_appearance": "interview",
-            "authored_article": "publication",
-            "article": "publication",
+            section["key"]: section["fields"] for section in PERSONA_SECTIONS
         }
 
         current = store()
@@ -365,7 +298,7 @@ def register_pipeline_routes(
                     "normalized": normalized,
                     "label": str(label),
                     "url": item_url,
-                    "section": _shortlist_section(row["kind"], normalized),
+                    "section": section_for(row["kind"], normalized),
                     "decision_actor": row.get("decision_actor"),
                     "decision_reason": row.get("decision_reason"),
                     "observations": list(row.get("observations") or []),
@@ -373,17 +306,12 @@ def register_pipeline_routes(
             )
 
         def field_key(item):
-            if item["kind"] == "account":
-                return "social_account"
-            predicate = presentation_predicate(item["kind"], item["normalized"])
-            return predicate_aliases.get(predicate, predicate or "other")
+            return presentation_predicate(item["kind"], item["normalized"])
 
         def field_label(key):
-            for fields in persona_fields.values():
-                for candidate_key, candidate_label in fields:
-                    if candidate_key == key:
-                        return candidate_label
-            return key.replace("_", " ").title() if key != "other" else "Other approved findings"
+            return (
+                "Other approved findings" if key == "other" else display_label(key)
+            )
         # A group is the review/audit unit, but the Persona is a reader-facing
         # projection. Merge exact field/value duplicates here while retaining
         # every group and source in the record's evidence modal.
@@ -572,10 +500,6 @@ def register_pipeline_routes(
                             ],
                         }
                         for field_name, _field_label in persona_fields[key]
-                        if any(
-                            item["section"] == key and field_key(item) == field_name
-                            for item in items
-                        )
                     ]
                     + [
                         {
@@ -791,6 +715,54 @@ def register_pipeline_routes(
             return "Resolve the review queue in Step 1 before collecting more."
         return ""
 
+    def render_persona_page(
+        subject,
+        workspace_data,
+        projection,
+        *,
+        active_tab,
+        page=1,
+        history_page=1,
+        review_sort="default",
+        review_direction="ascending",
+        review_filter="all",
+    ):
+        """One Persona shell for draft, review, and approved P2 states."""
+        collection_block_reason = collection_action_block_reason(workspace_data)
+        return render_template(
+            "persona.html",
+            source_model="pipeline",
+            active_tab=active_tab,
+            persona=subject,
+            approved=projection,
+            workspace=workspace_data,
+            page=page,
+            page_size=25,
+            history_page=history_page,
+            review_sort=review_sort,
+            review_direction=review_direction,
+            review_filter=review_filter,
+            qc_allowed=current_auth_role() == "admin",
+            research_available=launch_research is not None,
+            preparation_available=prepare_workspace is not None,
+            collection_available=bool(projection["items"]) and bool(
+                launch_approved_discovery
+                or (launch_approved_source_fetch and projection["source_urls"])
+            ),
+            collection_actions_blocked=bool(collection_block_reason),
+            collection_action_block_reason=collection_block_reason,
+            affiliation_public_web_available=bool(
+                affiliation_public_web_enabled and affiliation_public_web_enabled()
+            ),
+            google_places_available=bool(
+                google_places_enabled and google_places_enabled()
+            ),
+            map_tile_url=os.getenv(
+                "OPENLEDGER_MAP_TILE_URL",
+                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+            ),
+        )
+
     @bp.errorhandler(ValueError)
     def invalid_transition(error):
         body = {'error': str(error), 'findings': getattr(error, 'findings', [])}
@@ -846,18 +818,15 @@ def register_pipeline_routes(
             review_direction=review_direction,
             review_filter=review_filter,
         )
-        return render_template(
-            "pipeline_workspace.html",
-            workspace=data,
-            persona=persona,
+        return render_persona_page(
+            persona,
+            data,
+            approved_persona(case_id, persona_id),
+            active_tab="review",
             page=page,
-            page_size=25,
             review_sort=review_sort,
             review_direction=review_direction,
             review_filter=review_filter,
-            qc_allowed=current_auth_role() == "admin",
-            research_available=launch_research is not None,
-            preparation_available=prepare_workspace is not None,
             history_page=history_page,
         )
 
@@ -920,64 +889,29 @@ def register_pipeline_routes(
     @access()
     def persona(case_id, persona_id):
         subject = scoped_persona(case_id, persona_id)
-        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        page = max(1, request.args.get("page", 1, type=int))
+        review_sort = request.args.get("sort", "default", type=str)
+        review_direction = request.args.get("direction", "ascending", type=str)
+        review_filter = request.args.get("decision", "all", type=str)
+        workspace_data = store().get_workspace(
+            case_id,
+            persona_id,
+            limit=25,
+            offset=(page - 1) * 25,
+            review_sort=review_sort,
+            review_direction=review_direction,
+            review_filter=review_filter,
+        )
         projection = approved_persona(case_id, persona_id)
-        if not projection["items"]:
-            if workspace_data["review_pending_count"]:
-                flash(
-                    "Approve at least one reviewed finding before opening the Persona.",
-                    "warning",
-                )
-                return redirect(
-                    url_for(
-                        "pipeline.workspace", case_id=case_id, persona_id=persona_id
-                    )
-                    + "#operator-review",
-                    code=303,
-                )
-            if (
-                workspace_data["unreconciled_input_count"]
-                or workspace_data["projection"]["pending"]
-                or workspace_data["projection"]["legacy_available"]
-            ):
-                flash(
-                    "Reconcile submitted and retained evidence before opening the Persona.",
-                    "warning",
-                )
-                return redirect(
-                    url_for(
-                        "pipeline.workspace", case_id=case_id, persona_id=persona_id
-                    ),
-                    code=303,
-                )
-            flash("Approve at least one finding before opening the Persona.", "warning")
-            return redirect(
-                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
-            )
-        collection_block_reason = collection_action_block_reason(workspace_data)
-        return render_template(
-            "pipeline_persona.html",
-            persona=subject,
-            approved=projection,
-            workspace=workspace_data,
-            collection_available=bool(projection["items"]) and bool(
-                launch_approved_discovery or (
-                    launch_approved_source_fetch and projection["source_urls"]
-                )
-            ),
-            collection_actions_blocked=bool(collection_block_reason),
-            collection_action_block_reason=collection_block_reason,
-            affiliation_public_web_available=bool(
-                affiliation_public_web_enabled
-                and affiliation_public_web_enabled()
-            ),
-            google_places_available=bool(
-                google_places_enabled and google_places_enabled()
-            ),
-            map_tile_url=os.getenv(
-                "OPENLEDGER_MAP_TILE_URL",
-                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-            ),
+        return render_persona_page(
+            subject,
+            workspace_data,
+            projection,
+            active_tab="identity" if projection["items"] else "review",
+            page=page,
+            review_sort=review_sort,
+            review_direction=review_direction,
+            review_filter=review_filter,
         )
 
     @bp.route("/cases/<case_id>/pipeline/<persona_id>/persona/relationships")

@@ -152,12 +152,12 @@ def test_postgres_upgrades_existing_legacy_case_and_preserves_backfill_evidence(
             if name != "alembic_version"
         ]
         before = snapshot(store.engine, legacy_tables)
-        migrate(url, "e2e2b8d0a502")
+        migrate(url, "e2e4d0e2a804")
         assert snapshot(store.engine, legacy_tables) == before
         with store.engine.connect() as connection:
             assert connection.execute(
                 text("SELECT version_num FROM alembic_version")
-            ).scalars().all() == ["e2e2b8d0a502"]
+            ).scalars().all() == ["e2e4d0e2a804"]
         pipeline = PipelineStore(store)
         dry = pipeline.backfill_legacy(case_id, persona_id, actor="migration-reviewer")
         assert dry["dry_run"] is True and dry["claim_count"] > 0
@@ -179,7 +179,11 @@ def test_postgres_upgrades_existing_legacy_case_and_preserves_backfill_evidence(
             text=True,
             capture_output=True,
         )
-        assert refused.returncode != 0 and "Pipeline records exist" in refused.stderr
+        assert refused.returncode != 0
+        assert (
+            "Pipeline records exist" in refused.stderr
+            or "cannot be downgraded safely" in refused.stderr
+        )
         assert list(pipeline.iter_observations(case_id, persona_id)) == evidence_before
     finally:
         if store is not None:

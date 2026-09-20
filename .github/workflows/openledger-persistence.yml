@@ -65,7 +65,7 @@ jobs:
 
       - name: Apply and verify database migrations
         run: |
-          poetry run alembic upgrade e2e3c9d1f703
+          poetry run alembic upgrade e2e4d0e2a804
           poetry run alembic check
 
       - name: Require PostgreSQL and complete pipeline acceptance with no skips
@@ -115,5 +115,7 @@ jobs:
         with:
           name: p2-pipeline-acceptance
           path: runtime/ci/
-          if-no-files-found: error
+          # A prior failing gate must remain the reported failure; artifact
+          # absence is diagnostic, not an independent release failure.
+          if-no-files-found: warn
           retention-days: 14

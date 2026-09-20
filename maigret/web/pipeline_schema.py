@@ -25,7 +25,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import JSONB
 
 PIPELINE_ID = "p2-e2e-v1"
-SCHEMA_REVISION = "e2e3c9d1f703"
+SCHEMA_REVISION = "e2e4d0e2a804"
 PREFIX = "pipeline_"
 IMMUTABLE_TABLES = (
     "pipeline_observations",
