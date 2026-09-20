@@ -1056,6 +1056,8 @@ def test_review_queue_sort_is_applied_before_paginating_all_findings():
         'display_shortlist = filtered_shortlist[offset : offset + limit]'
     )
     assert 'data-server-sort="true"' in template
+    for key in ("finding", "category", "assessment", "evidence", "decision"):
+        assert f'data-sort-key="{key}"' in template
     assert 'workspace.filtered_shortlist_count' in template
     assert "parameters.delete('page');" in script
     assert 'parameters.set(\'decision\', button.dataset.decisionFilter);' in (

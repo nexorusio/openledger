@@ -7771,7 +7771,7 @@ def persona_workspace(persona_id):
                 projection_state.c.persona_id == persona_id,
             )
         ).scalar_one_or_none()
-    if has_pipeline and (not legacy_claim_count or convergence_completed):
+    if convergence_completed or (has_pipeline and not legacy_claim_count):
         # P2 becomes canonical only after the complete convergence checkpoint;
         # a partially imported request must not hide retained legacy evidence.
         return redirect(
@@ -7846,10 +7846,12 @@ def export_persona_pdf(persona_id):
     if not persona:
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
-    from sqlalchemy import select
+    from sqlalchemy import func, select
+    from maigret.web.case_store import persona_claims
     from maigret.web.pipeline_store import PipelineStore
     pipeline = PipelineStore(case_store)
     requests = pipeline._table("requests")
+    projection_state = pipeline._table("projection_state")
     with case_store.engine.connect() as connection:
         has_pipeline = connection.execute(
             select(requests.c.id).where(
@@ -7857,7 +7859,20 @@ def export_persona_pdf(persona_id):
                 requests.c.persona_id == persona_id,
             ).limit(1)
         ).first() is not None
-    if has_pipeline:
+        legacy_claim_count = connection.scalar(
+            select(func.count()).select_from(persona_claims).where(
+                persona_claims.c.persona_id == persona_id
+            )
+        )
+        convergence_completed = connection.execute(
+            select(projection_state.c.legacy_converged_at).where(
+                projection_state.c.case_id == persona['case_id'],
+                projection_state.c.persona_id == persona_id,
+            )
+        ).scalar_one_or_none()
+    # A P2 request may exist while retained legacy claims are still canonical.
+    # Only an explicit completed convergence checkpoint may replace their PDF.
+    if convergence_completed or (has_pipeline and not legacy_claim_count):
         final = pipeline.get_final_version(persona['case_id'], persona_id)
         if not final:
             flash('Create a curated version and complete QC before exporting a final Persona.', 'warning')

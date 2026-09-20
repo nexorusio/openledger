@@ -1711,6 +1711,74 @@ def test_persona_pdf_route_exports_only_curated_records(client, persistent_store
     assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
 
 
+def test_legacy_pdf_remains_available_until_convergence_completes(
+    client, persistent_store
+):
+    """A partial P2 request must not replace the retained legacy PDF."""
+    from maigret.web.pipeline_store import PipelineStore
+
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:legacy-pdf-test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": "Alice Example"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    full_name = next(
+        claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    persistent_store.review_claim(full_name["id"], "approved", "analyst")
+
+    PipelineStore(persistent_store).create_request(
+        case["id"],
+        persona_id,
+        [{"type": "username", "value": "alice"}],
+        {"pipeline_id": "p2-e2e-v1", "tasks": []},
+        actor="fixture:partial-convergence",
+    )
+
+    response = client.get(f"/personas/{persona_id}/export.pdf")
+
+    assert response.status_code == 200
+    assert response.mimetype == "application/pdf"
+    assert response.data.startswith(b"%PDF-")
+
+
+def test_checkpointed_persona_without_request_uses_the_p2_route(
+    client, persistent_store
+):
+    """The completed checkpoint, not request existence, owns the cutover."""
+    from maigret.web.pipeline_store import PipelineStore
+
+    job_id = persistent_store.create_investigation(["alice"], {})
+    case_id = persistent_store.get_job(job_id)["case_id"]
+    persona_id = persistent_store.get_case(case_id)["personas"][0]["id"]
+    PipelineStore(persistent_store).mark_legacy_converged(case_id, persona_id)
+
+    response = client.get(f"/personas/{persona_id}")
+
+    assert response.status_code == 302
+    assert response.location.endswith(f"/cases/{case_id}/pipeline/{persona_id}/persona")
+
+
 def test_case_timeline_renders_bounded_provenance_and_escapes_evidence(
     client, persistent_store
 ):
