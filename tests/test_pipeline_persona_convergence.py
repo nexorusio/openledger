@@ -346,6 +346,59 @@ def test_public_event_affiliation_uses_public_exposure_without_storage_rewrite()
     assert item["legacy_claim"]["field_name"] == "affiliation"
 
 
+def test_approved_legacy_summary_remains_a_reviewable_evidence_card():
+    persona = {
+        "display_name": "Jati Pratomo",
+        "claims": [
+            {
+                "id": "legacy-summary",
+                "field_name": "summary",
+                "value": "Retained public profile summary",
+                "display_value": "Retained public profile summary",
+                "review_status": "approved",
+                "reviewed_by": "analyst",
+                "reviews": [],
+                "evidence": [],
+                "latitude": None,
+                "longitude": None,
+            }
+        ],
+    }
+
+    projection = legacy_persona_projection(persona)
+
+    summary = next(
+        item for item in projection["items"] if item["field_key"] == "summary"
+    )
+    assert summary["legacy_claim"]["id"] == "legacy-summary"
+    assert projection["hero"]["summary"] == "Retained public profile summary."
+
+
+def test_convergence_preserves_approved_summary_in_the_p2_ledger(
+    convergence_store,
+):
+    store = convergence_store
+    pipeline = PipelineStore(store)
+    case_id, persona_id = _scope(store)
+    with store.engine.begin() as connection:
+        _legacy_claim(
+            connection,
+            persona_id,
+            field_name="summary",
+            value="Retained public profile summary",
+            status="approved",
+        )
+
+    converge_legacy_persona(store, case_id, persona_id, dry_run=False)
+
+    summary = next(
+        item
+        for item in pipeline.get_workspace(case_id, persona_id, limit=100)["shortlist"]
+        if item["normalized"].get("predicate") == "summary"
+    )
+    assert summary["latest_decision"] == "include"
+
+
 @pytest.mark.parametrize(
     ("predicate", "section"),
     (

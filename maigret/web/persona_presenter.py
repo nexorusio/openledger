@@ -166,7 +166,6 @@ def legacy_persona_projection(persona: dict[str, Any]) -> dict[str, Any]:
             clauses.append(summary)
     hero["summary"] = ". ".join(clauses).rstrip(".") + "." if clauses else ""
 
-    items = [item for item in items if item["field_key"] != "summary"]
     for index, item in enumerate(items, start=1):
         item["modal_id"] = f"persona-evidence-{index}"
         item["evidence_count"] = len(item["evidence"])

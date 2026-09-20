@@ -93,6 +93,8 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
     legacy_persona_id = store.get_case(legacy_case_id)["personas"][0]["id"]
     legacy_claim_id = str(uuid.uuid4())
     legacy_evidence_id = str(uuid.uuid4())
+    legacy_summary_claim_id = str(uuid.uuid4())
+    legacy_summary_evidence_id = str(uuid.uuid4())
     now = utcnow()
     with store.engine.begin() as connection:
         connection.execute(
@@ -123,6 +125,39 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                 evidence_type="public_document",
                 source_name="Synthetic retained source",
                 source_url="https://example.test/legacy-source",
+                details={"fixture": True},
+                fingerprint=uuid.uuid4().hex * 2,
+                observed_at=now,
+            )
+        )
+        connection.execute(
+            insert(persona_claims).values(
+                id=legacy_summary_claim_id,
+                persona_id=legacy_persona_id,
+                field_name="summary",
+                value="Retained legacy profile summary",
+                display_value="Retained legacy profile summary",
+                normalized_value="retained legacy profile summary",
+                confidence=80,
+                review_status="approved",
+                source_engine="synthetic_public_document",
+                source_job_id=None,
+                fingerprint=uuid.uuid4().hex * 2,
+                first_seen_at=now,
+                last_seen_at=now,
+                created_at=now,
+                updated_at=now,
+                reviewed_at=now,
+                reviewed_by="legacy-analyst",
+            )
+        )
+        connection.execute(
+            insert(claim_evidence).values(
+                id=legacy_summary_evidence_id,
+                claim_id=legacy_summary_claim_id,
+                evidence_type="public_document",
+                source_name="Synthetic summary source",
+                source_url="https://example.test/legacy-summary-source",
                 details={"fixture": True},
                 fingerprint=uuid.uuid4().hex * 2,
                 observed_at=now,
@@ -306,6 +341,9 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                 "Finding ↕", "Category ↕", "Assessment ↕", "Evidence ↕",
                 "Decision ↕", "Actions",
             ]
+            page.get_by_role("button", name="Finding", exact=True).click()
+            expect(page).to_have_url(re.compile(r"[?&]sort=finding&direction=ascending"))
+            expect(page.locator("table.assessment-review-table")).to_be_visible()
 
             # Reject and then approve the same finding to prove both controls work
             # while retaining the complete decision trail used by report snapshots.
@@ -375,6 +413,19 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                     assert page.locator("[data-persona-tab]").evaluate_all(
                         "tabs => tabs.map(tab => tab.dataset.personaTab)"
                     ) == draft_persona_tabs
+                    if model == "legacy":
+                        summary_record = page.locator(
+                            ".approved-persona-record",
+                            has_text="Retained legacy profile summary",
+                        )
+                        expect(summary_record).to_be_visible()
+                        summary_record.get_by_role(
+                            "button", name="View evidence"
+                        ).click()
+                        expect(
+                            page.locator("dialog[open]", has_text="Summary")
+                        ).to_be_visible()
+                        page.get_by_role("button", name="Close evidence").click()
                     assert_no_page_overflow(page, f"{label} {model} Persona")
                     page.screenshot(
                         path=str(evidence / f"persona-{model}-{label}.png"),
