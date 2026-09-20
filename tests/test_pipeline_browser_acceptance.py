@@ -341,7 +341,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                 "Finding ↕", "Category ↕", "Assessment ↕", "Evidence ↕",
                 "Decision ↕", "Actions",
             ]
-            page.get_by_role("button", name="Finding ↕").click()
+            page.get_by_role("button", name="Finding", exact=True).click()
             expect(page).to_have_url(re.compile(r"[?&]sort=finding&direction=ascending"))
             expect(page.locator("table.assessment-review-table")).to_be_visible()
 
