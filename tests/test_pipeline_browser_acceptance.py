@@ -240,7 +240,32 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch()
             context = browser.new_context(viewport={"width": 1440, "height": 1000})
-            context.route("**/*", lambda route: route.continue_() if route.request.url.startswith(origin + "/") else route.abort())
+            map_tile_requests = []
+            external_tile_requests = []
+
+            def route_browser_request(route):
+                url = route.request.url
+                if url.startswith(origin + "/map-tiles/"):
+                    map_tile_requests.append(url)
+                    route.fulfill(
+                        status=200,
+                        content_type="image/png",
+                        body=(
+                            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+                            b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+                            b"\x00\x00\x00\x0dIDAT\x08\xd7c\xf8\xcf\xc0\xf0\x1f\x00\x05\x00\x01\xff\x89\x99=\x1d"
+                            b"\x00\x00\x00\x00IEND\xaeB`\x82"
+                        ),
+                    )
+                else:
+                    if "tile.openstreetmap.org" in url:
+                        external_tile_requests.append(url)
+                    if url.startswith(origin + "/"):
+                        route.continue_()
+                    else:
+                        route.abort()
+
+            context.route("**/*", route_browser_request)
             page = context.new_page()
             failures = []
             page.on("pageerror", lambda error: failures.append(str(error)))
@@ -489,6 +514,11 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(
                         expect(page.locator("#personaLocationMap")).to_be_visible()
                         assert "-5.3971" in page.content()
                         assert "105.2668" in page.content()
+                        expect(
+                            page.locator(".leaflet-tile-loaded").first
+                        ).to_be_visible()
+                        assert map_tile_requests
+                        assert not external_tile_requests
                     if model == "legacy":
                         summary_record = page.locator(
                             ".approved-persona-record",

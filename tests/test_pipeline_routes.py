@@ -874,6 +874,19 @@ def test_persona_renders_approved_photo_and_persisted_location_map(
     assert journey["observation_id"].encode() in relationships.data
 
 
+def test_persona_uses_same_origin_tiles_for_empty_or_legacy_osm_setting(
+    journey, monkeypatch
+):
+    for configured in (None, "https://tile.openstreetmap.org/{z}/{x}/{y}.png"):
+        if configured is None:
+            monkeypatch.delenv("OPENLEDGER_MAP_TILE_URL", raising=False)
+        else:
+            monkeypatch.setenv("OPENLEDGER_MAP_TILE_URL", configured)
+        response = journey["client"].get(base(journey) + "/persona")
+        assert response.status_code == 200
+        assert b'"/map-tiles/{z}/{x}/{y}.png"' in response.data
+
+
 def test_persona_map_popup_uses_text_nodes_for_untrusted_precision():
     template = (
         Path(__file__).parents[1]

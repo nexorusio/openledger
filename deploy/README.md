@@ -224,9 +224,11 @@ offered because the source database has no reliable per-source language field.
 When an analyst approves a place without coordinates, OpenLedger sends that
 approved label to the configured HTTPS geocoder and stores the returned
 bounding-box centroid. Cited AI research may also prefill a visibly approximate
-city or region map center. The defaults use Nominatim and OpenStreetMap tiles;
-set `OPENLEDGER_GEOCODER_URL` and `OPENLEDGER_MAP_TILE_URL` in `deploy/.env` to
-approved internal endpoints for an isolated or sensitive deployment. Set
+city or region map center. The default browser map uses OpenLedger's same-origin
+cached tile endpoint, which fetches OpenStreetMap tiles with an identifying user
+agent and never passes an upstream error page to the browser. Set
+`OPENLEDGER_GEOCODER_URL` and `OPENLEDGER_MAP_TILE_URL` in `deploy/.env` only to
+use approved internal endpoints or another approved tile provider. Set
 `OPENLEDGER_GEOCODER_TIMEOUT_SECONDS` to change the default 10-second timeout.
 
 ### Investigation-report media and cost boundary

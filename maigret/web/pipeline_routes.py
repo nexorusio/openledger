@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import math
-import os
 import re
 from datetime import datetime, timezone
 from functools import wraps
@@ -24,6 +23,7 @@ from flask import (
     session,
     url_for,
 )
+from maigret.web.map_tiles import browser_map_tile_url
 
 PIPELINE_ID = "p2-e2e-v1"
 
@@ -769,10 +769,7 @@ def register_pipeline_routes(
             google_places_available=bool(
                 google_places_enabled and google_places_enabled()
             ),
-            map_tile_url=os.getenv(
-                "OPENLEDGER_MAP_TILE_URL",
-                "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-            ),
+            map_tile_url=browser_map_tile_url(),
         )
 
     @bp.errorhandler(ValueError)

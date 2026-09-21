@@ -32,9 +32,12 @@ import uuid
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
+from pathlib import Path
 from threading import Lock, Thread
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 import maigret
 import maigret.settings
 from maigret.ai import (
@@ -65,6 +68,7 @@ from maigret.web.case_store import (
     database_url_from_environment,
 )
 from maigret.web.external_evidence import MAX_DOCUMENT_BYTES
+from maigret.web.map_tiles import OSM_TILE_UPSTREAM, browser_map_tile_url
 from maigret.web.collector_adapters import (
     CLOUDFLARE_DNS_ENGINE,
     FR_BUSINESS_REGISTRY_ENGINE,
@@ -192,6 +196,61 @@ app.config.update(
     MAX_FORM_MEMORY_SIZE=256 * 1024,
     MAX_FORM_PARTS=100,
 )
+
+MAP_TILE_UPSTREAM = OSM_TILE_UPSTREAM
+MAP_TILE_MAX_ZOOM = 19
+MAP_TILE_CACHE_SECONDS = 7 * 24 * 60 * 60
+MAP_TILE_MAX_BYTES = 1024 * 1024
+MAP_TILE_USER_AGENT = (
+    "OpenLedger/1.0 (+https://openledger.nexorus.io; cached map tiles)"
+)
+
+
+def persona_map_tile_url():
+    """Compatibility wrapper for the shared Persona map configuration."""
+    return browser_map_tile_url()
+
+
+def _map_tile_cache_path(zoom, tile_x, tile_y):
+    root = Path("/tmp/maigret_reports")
+    if not root.is_dir():
+        root = Path("/tmp/openledger-map-tiles")
+    return root / ".browser-map-tile-cache" / str(zoom) / str(tile_x) / f"{tile_y}.png"
+
+
+def _cached_map_tile(zoom, tile_x, tile_y):
+    path = _map_tile_cache_path(zoom, tile_x, tile_y)
+    try:
+        if (
+            path.is_file()
+            and time.time() - path.stat().st_mtime <= MAP_TILE_CACHE_SECONDS
+        ):
+            return path
+    except OSError:
+        pass
+    return None
+
+
+def _store_map_tile(path, payload):
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_bytes(payload)
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def _map_tile_response(path):
+    response = send_file(path, mimetype="image/png", conditional=True, max_age=86400)
+    response.cache_control.public = True
+    response.cache_control.max_age = 86400
+    return response
+
+
+def _map_tile_unavailable():
+    """Do not let a temporary upstream failure become a cached browser tile."""
+    response = Response(status=503)
+    response.cache_control.no_store = True
+    return response
 
 # add background job tracking
 background_jobs: Dict[str, Any] = {}
@@ -2426,7 +2485,7 @@ def protect_sensitive_responses(response):
         )
     )
     results_page = request.endpoint == 'results'
-    if request.endpoint != 'static' and (
+    if request.endpoint not in {'static', 'map_tile'} and (
         app.config.get('AUTH_REQUIRED') or session.get('authenticated')
     ):
         response.headers['Cache-Control'] = 'no-store'
@@ -2478,6 +2537,38 @@ def protect_sensitive_responses(response):
             'max-age=31536000; includeSubDomains',
         )
     return response
+
+
+@app.get('/map-tiles/<int:zoom>/<int:tile_x>/<int:tile_y>.png')
+def map_tile(zoom, tile_x, tile_y):
+    """Serve one bounded, cached OSM tile without exposing the browser to 403 pages."""
+    tile_count = 2**zoom
+    if not (
+        0 <= zoom <= MAP_TILE_MAX_ZOOM
+        and 0 <= tile_x < tile_count
+        and 0 <= tile_y < tile_count
+    ):
+        raise NotFound()
+    cached = _cached_map_tile(zoom, tile_x, tile_y)
+    if cached:
+        return _map_tile_response(cached)
+    url = MAP_TILE_UPSTREAM.format(z=zoom, x=tile_x, y=tile_y)
+    try:
+        with urlopen(
+            Request(url, headers={"User-Agent": MAP_TILE_USER_AGENT}), timeout=8
+        ) as upstream:
+            content_type = upstream.headers.get_content_type()
+            payload = upstream.read(MAP_TILE_MAX_BYTES + 1)
+    except (HTTPError, URLError, OSError):
+        return _map_tile_unavailable()
+    if content_type != 'image/png' or not payload or len(payload) > MAP_TILE_MAX_BYTES:
+        return _map_tile_unavailable()
+    path = _map_tile_cache_path(zoom, tile_x, tile_y)
+    try:
+        _store_map_tile(path, payload)
+    except OSError:
+        return Response(payload, mimetype='image/png')
+    return _map_tile_response(path)
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -7830,10 +7921,7 @@ def persona_workspace(persona_id):
         offshore_matches=offshore_matches,
         identity_enrichment=identity_enrichment,
         field_display_label=field_display_label,
-        map_tile_url=os.getenv(
-            'OPENLEDGER_MAP_TILE_URL',
-            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        ),
+        map_tile_url=persona_map_tile_url(),
     )
 
 
