@@ -1346,6 +1346,7 @@ def iter_legacy_claim_observations(
     task_id: str,
     attempt_id: str,
     observed_at: Any = None,
+    coordinate_repair: bool = False,
 ) -> Iterator[Dict[str, Any]]:
     """Backfill existing Persona claim/evidence rows with explicit legacy lineage.
 
@@ -1363,6 +1364,7 @@ def iter_legacy_claim_observations(
             raise ObservationContractError("Legacy claim belongs to a different case")
         evidence_rows = claim.get("evidence") or [{}]
         for evidence in evidence_rows:
+            imported_claim = legacy_claim_with_coordinates(claim, evidence=evidence)
             lineage = claim.get("observations") or claim.get("lineage") or []
             raw = {
                 "source_engine": claim.get("source_engine") or "legacy_unknown",
@@ -1379,7 +1381,7 @@ def iter_legacy_claim_observations(
                 "source_name": evidence.get("source_name"),
                 "evidence_type": evidence.get("evidence_type"),
                 "evidence": evidence,
-                "claims": [dict(claim)],
+                "claims": [imported_claim],
                 "original_evidence_id": evidence.get("id"),
                 "derived_from": [str(row["id"]) for row in lineage if row.get("id")],
                 "legacy_claim_id": claim.get("id"),
@@ -1389,6 +1391,8 @@ def iter_legacy_claim_observations(
                 or claim.get("observed_at")
                 or observed_at,
             }
+            if coordinate_repair:
+                raw["legacy_coordinate_repair"] = True
             yield normalize_observation(
                 raw,
                 case_id=case_id,
@@ -1398,3 +1402,82 @@ def iter_legacy_claim_observations(
                 attempt_id=attempt_id,
                 legacy=True,
             )
+
+
+_LEGACY_LOCATION_PREDICATES = frozenset(
+    {
+        "address",
+        "campus_location",
+        "city",
+        "company_location",
+        "country",
+        "current_location",
+        "location",
+        "office_location",
+        "organization_location",
+    }
+)
+
+
+def legacy_claim_with_coordinates(
+    claim: Mapping[str, Any], *, evidence: Optional[Mapping[str, Any]] = None
+) -> Dict[str, Any]:
+    """Copy persisted legacy place coordinates into canonical P2 qualifiers.
+
+    Legacy coordinates are columns on ``persona_claims`` rather than part of the
+    claim document consumed by P2.  This adapter is deliberately pure: it never
+    updates the source claim or evidence row, and it refuses partial, non-finite,
+    or out-of-range coordinates instead of inventing a map point.
+    """
+    document = dict(claim)
+    raw_predicate = str(
+        document.get("predicate") or document.get("field_name") or ""
+    ).strip()
+    predicate = _FIELD_ALIASES.get(raw_predicate.casefold(), raw_predicate)
+    if raw_predicate.casefold() not in _LEGACY_LOCATION_PREDICATES:
+        return document
+    latitude, longitude = document.get("latitude"), document.get("longitude")
+    if isinstance(latitude, bool) or isinstance(longitude, bool):
+        return document
+    try:
+        latitude, longitude = float(latitude), float(longitude)
+    except (TypeError, ValueError):
+        return document
+    if not (
+        math.isfinite(latitude)
+        and math.isfinite(longitude)
+        and -90 <= latitude <= 90
+        and -180 <= longitude <= 180
+    ):
+        return document
+    details = (
+        evidence.get("details")
+        if isinstance(evidence, Mapping)
+        and isinstance(evidence.get("details"), Mapping)
+        else {}
+    )
+    precision = details.get("coordinate_precision")
+    if not precision:
+        precision = next(
+            (
+                row["details"]["coordinate_precision"]
+                for row in document.get("evidence") or []
+                if isinstance(row, Mapping)
+                and isinstance(row.get("details"), Mapping)
+                and row["details"].get("coordinate_precision")
+            ),
+            "place",
+        )
+    qualifiers = (
+        dict(document.get("qualifiers"))
+        if isinstance(document.get("qualifiers"), Mapping)
+        else {}
+    )
+    qualifiers.update(
+        latitude=latitude,
+        longitude=longitude,
+        coordinate_precision=str(precision or "place"),
+    )
+    document["predicate"] = predicate
+    document["qualifiers"] = qualifiers
+    return document

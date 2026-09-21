@@ -19,6 +19,7 @@ from maigret.web.pipeline_ingestion import (
     bootstrap_legacy_workspace,
     converge_legacy_persona,
 )
+from maigret.web.pipeline_evidence import legacy_claim_with_coordinates
 from maigret.web.pipeline_store import PipelineStore
 
 
@@ -48,6 +49,9 @@ def _legacy_claim(
     value,
     status,
     reviews=None,
+    latitude=None,
+    longitude=None,
+    coordinate_precision=None,
 ):
     claim_id = str(uuid.uuid4())
     now = utcnow()
@@ -70,6 +74,8 @@ def _legacy_claim(
             updated_at=now,
             reviewed_at=now if status != "pending" else None,
             reviewed_by="legacy-analyst" if status != "pending" else None,
+            latitude=latitude,
+            longitude=longitude,
         )
     )
     evidence_id = str(uuid.uuid4())
@@ -80,7 +86,14 @@ def _legacy_claim(
             evidence_type="public_document",
             source_name="Synthetic retained source",
             source_url="https://example.test/evidence/" + evidence_id,
-            details={"fixture": True},
+            details={
+                "fixture": True,
+                **(
+                    {"coordinate_precision": coordinate_precision}
+                    if coordinate_precision
+                    else {}
+                ),
+            },
             fingerprint=uuid.uuid4().hex * 2,
             observed_at=now,
         )
@@ -111,6 +124,33 @@ def _snapshot(connection, table, persona_id):
             persona_claims, persona_claims.c.id == claim_reviews.c.claim_id
         ).where(persona_claims.c.persona_id == persona_id)
     return [dict(row) for row in connection.execute(statement).mappings()]
+
+
+@pytest.mark.parametrize(
+    ("latitude", "longitude"),
+    (
+        (None, None),
+        (-5.3971, None),
+        (None, 105.2668),
+        (float("nan"), 105.2668),
+        (-5.3971, 181),
+    ),
+)
+def test_legacy_coordinate_adapter_keeps_missing_or_invalid_coordinates_explicit(
+    latitude, longitude
+):
+    claim = {
+        "id": "legacy-location",
+        "field_name": "current_location",
+        "value": "Bandar Lampung, Indonesia",
+        "latitude": latitude,
+        "longitude": longitude,
+    }
+
+    imported = legacy_claim_with_coordinates(claim)
+
+    assert imported == claim
+    assert "qualifiers" not in imported
 
 
 def test_convergence_is_complete_idempotent_and_never_finalizes(convergence_store):
@@ -262,6 +302,108 @@ def test_convergence_is_complete_idempotent_and_never_finalizes(convergence_stor
             )
             == decision_count
         )
+        after = {
+            table.name: _snapshot(connection, table, persona_id)
+            for table in (persona_claims, claim_evidence, claim_reviews)
+        }
+    assert after == before
+
+
+def test_convergence_repairs_omitted_stored_coordinates_append_only(
+    convergence_store, monkeypatch
+):
+    from maigret.web import pipeline_evidence
+
+    store = convergence_store
+    pipeline = PipelineStore(store)
+    case_id, persona_id = _scope(store)
+    with store.engine.begin() as connection:
+        location_id, _ = _legacy_claim(
+            connection,
+            persona_id,
+            field_name="current_location",
+            value="Bandar Lampung, Indonesia",
+            status="approved",
+            latitude=-5.3971,
+            longitude=105.2668,
+            coordinate_precision="city",
+        )
+    with store.engine.connect() as connection:
+        before = {
+            table.name: _snapshot(connection, table, persona_id)
+            for table in (persona_claims, claim_evidence, claim_reviews)
+        }
+
+    original_adapter = pipeline_evidence.legacy_claim_with_coordinates
+    monkeypatch.setattr(
+        pipeline_evidence,
+        "legacy_claim_with_coordinates",
+        lambda claim, **_kwargs: dict(claim),
+    )
+    converge_legacy_persona(store, case_id, persona_id, dry_run=False)
+    original_observations = pipeline.list_observations(
+        case_id, persona_id, limit=500
+    )
+    assert not any(
+        (claim.get("qualifiers") or {}).get("latitude") is not None
+        for observation in original_observations
+        for claim in (observation.get("payload") or {}).get("claims") or []
+    )
+
+    monkeypatch.setattr(
+        pipeline_evidence, "legacy_claim_with_coordinates", original_adapter
+    )
+    dry = converge_legacy_persona(store, case_id, persona_id, dry_run=True)
+    assert dry["evidence"]["pending_claim_count"] == 0
+    assert dry["evidence"]["pending_coordinate_repair_count"] == 1
+    assert dry["requires_evidence_import"] is True
+
+    repaired = converge_legacy_persona(store, case_id, persona_id, dry_run=False)
+    assert len(repaired["evidence"]["coordinate_repair_request_ids"]) == 1
+    coordinate_group = next(
+        group
+        for group in pipeline.get_workspace(case_id, persona_id, limit=100)[
+            "shortlist"
+        ]
+        if group["normalized"].get("predicate") == "current_location"
+        and (group["normalized"].get("qualifiers") or {}).get("latitude")
+        == -5.3971
+    )
+    assert coordinate_group["normalized"]["qualifiers"] == {
+        "coordinate_precision": "city",
+        "latitude": -5.3971,
+        "longitude": 105.2668,
+    }
+    assert coordinate_group["latest_decision"] == "include"
+    coordinate_group = pipeline.get_group(
+        case_id, persona_id, coordinate_group["id"]
+    )
+    assert any(
+        (
+            ((row.get("payload") or {}).get("payload") or {}).get(
+                "legacy_claim_id"
+            )
+            == location_id
+            and ((row.get("payload") or {}).get("payload") or {}).get(
+                "legacy_coordinate_repair"
+            )
+            is True
+        )
+        for row in coordinate_group["observations"]
+    )
+    repaired_observation_count = len(
+        pipeline.list_observations(case_id, persona_id, limit=500)
+    )
+
+    replay = converge_legacy_persona(store, case_id, persona_id, dry_run=False)
+    assert replay["evidence"]["pending_coordinate_repair_count"] == 0
+    assert replay["decisions"]["decision_count"] == 0
+    assert (
+        len(pipeline.list_observations(case_id, persona_id, limit=500))
+        == repaired_observation_count
+    )
+    assert pipeline.get_final_version(case_id, persona_id) is None
+    with store.engine.connect() as connection:
         after = {
             table.name: _snapshot(connection, table, persona_id)
             for table in (persona_claims, claim_evidence, claim_reviews)

@@ -302,6 +302,15 @@ def register_pipeline_routes(
                     "decision_actor": row.get("decision_actor"),
                     "decision_reason": row.get("decision_reason"),
                     "observations": list(row.get("observations") or []),
+                    "coordinate_repair": any(
+                        bool(
+                            (
+                                (observation.get("payload") or {}).get("payload")
+                                or {}
+                            ).get("legacy_coordinate_repair")
+                        )
+                        for observation in row.get("observations") or []
+                    ),
                 }
             )
 
@@ -328,6 +337,9 @@ def register_pipeline_routes(
                     "evidence": [],
                 },
             )
+            if item["coordinate_repair"] and not record["coordinate_repair"]:
+                record["normalized"] = item["normalized"]
+                record["coordinate_repair"] = True
             if item["id"] not in record["group_ids"]:
                 record["group_ids"].append(item["id"])
             seen_observations = {entry["id"] for entry in record["evidence"]}

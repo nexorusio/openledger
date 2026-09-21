@@ -3540,6 +3540,7 @@ textarea.form-control.compact-textarea {
 
 .persona-profile-copy h1 {
     margin-bottom: 5px;
+    overflow-wrap: anywhere;
 }
 
 .persona-status-strip {
