@@ -263,7 +263,10 @@ def bootstrap_legacy_workspace(store, case_id, persona_id):
         "claim_count": 0,
         "observation_count": 0,
         "missing_provenance_count": 0,
+        "coordinate_claim_count": 0,
+        "pending_coordinate_repair_count": 0,
         "request_ids": [],
+        "coordinate_repair_request_ids": [],
         "job_count": 0,
         "chat_count": 0,
         "auto_included": False,
@@ -287,11 +290,20 @@ def bootstrap_legacy_workspace(store, case_id, persona_id):
             after_claim_id=after,
             materialize=False,
         )
-        for key in ("claim_count", "observation_count", "missing_provenance_count"):
+        for key in (
+            "claim_count",
+            "observation_count",
+            "missing_provenance_count",
+            "coordinate_claim_count",
+            "pending_coordinate_repair_count",
+        ):
             report[key] += batch.get(key, 0)
         report["request_ids"].extend(
             batch.get("request_ids")
             or ([batch["request_id"]] if batch.get("request_id") else [])
+        )
+        report["coordinate_repair_request_ids"].extend(
+            batch.get("coordinate_repair_request_ids") or []
         )
         next_after = batch.get("next_after_claim_id")
         if not next_after:
@@ -426,6 +438,9 @@ def bootstrap_legacy_workspace(store, case_id, persona_id):
         report["chat_count"] += 1
     report["group_count"] = len(_refresh(store, case_id, persona_id))
     report["request_ids"] = list(dict.fromkeys(report["request_ids"]))
+    report["coordinate_repair_request_ids"] = list(
+        dict.fromkeys(report["coordinate_repair_request_ids"])
+    )
     return report
 
 
@@ -448,6 +463,8 @@ def converge_legacy_persona(store, case_id, persona_id, *, dry_run=True):
             "pending_claim_count": 0,
             "observation_count": 0,
             "missing_provenance_count": 0,
+            "coordinate_claim_count": 0,
+            "pending_coordinate_repair_count": 0,
             "auto_finalized": False,
             "request_ids": [],
         }
@@ -466,6 +483,8 @@ def converge_legacy_persona(store, case_id, persona_id, *, dry_run=True):
                 "pending_claim_count",
                 "observation_count",
                 "missing_provenance_count",
+                "coordinate_claim_count",
+                "pending_coordinate_repair_count",
             ):
                 evidence[key] += batch.get(key, 0)
             next_after = batch.get("next_after_claim_id")
@@ -486,7 +505,10 @@ def converge_legacy_persona(store, case_id, persona_id, *, dry_run=True):
             "dry_run": True,
             "evidence": evidence,
             "decisions": decisions,
-            "requires_evidence_import": bool(evidence["pending_claim_count"]),
+            "requires_evidence_import": bool(
+                evidence["pending_claim_count"]
+                or evidence["pending_coordinate_repair_count"]
+            ),
             "auto_finalized": False,
             "qc_created": False,
         }
@@ -519,6 +541,7 @@ def ingest_legacy_claim_updates(store, case_id, persona_id):
     after = None
     request_ids = []
     pending_claim_count = 0
+    pending_coordinate_repair_count = 0
     while True:
         batch = pipeline.backfill_legacy(
             case_id,
@@ -530,6 +553,9 @@ def ingest_legacy_claim_updates(store, case_id, persona_id):
             materialize=False,
         )
         pending_claim_count += batch.get("pending_claim_count", 0)
+        pending_coordinate_repair_count += batch.get(
+            "pending_coordinate_repair_count", 0
+        )
         request_ids.extend(batch.get("request_ids") or [])
         after = batch.get("next_after_claim_id")
         if not after:
@@ -542,6 +568,7 @@ def ingest_legacy_claim_updates(store, case_id, persona_id):
         "case_id": case_id,
         "persona_id": persona_id,
         "pending_claim_count": pending_claim_count,
+        "pending_coordinate_repair_count": pending_coordinate_repair_count,
         "request_ids": list(dict.fromkeys(request_ids)),
         "group_count": len(groups),
         "decision_count": decisions["decision_count"],

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -4261,11 +4262,78 @@ class PipelineStore:
         imported twice merely because a batch boundary shifted. Existing source
         rows and review history are retained unchanged inside the native payload.
         """
+        from maigret.web.pipeline_evidence import (
+            iter_legacy_claim_observations,
+            legacy_claim_with_coordinates,
+        )
+
         actor = _text(actor, "migration actor", 200)
         limit = min(max(int(limit), 1), 2000)
         records = []
+
+        def coordinate_signature(claim, claim_id=None):
+            document = legacy_claim_with_coordinates(claim)
+            qualifiers = (
+                document.get("qualifiers")
+                if isinstance(document.get("qualifiers"), dict)
+                else {}
+            )
+            try:
+                latitude = float(qualifiers.get("latitude"))
+                longitude = float(qualifiers.get("longitude"))
+            except (TypeError, ValueError):
+                return None
+            identifier = str(claim_id or document.get("id") or "")
+            return (identifier, latitude, longitude) if identifier else None
+
+        def imported_coordinate_signature(claim, claim_id):
+            qualifiers = (
+                claim.get("qualifiers")
+                if isinstance(claim.get("qualifiers"), dict)
+                else {}
+            )
+            try:
+                latitude = float(qualifiers.get("latitude"))
+                longitude = float(qualifiers.get("longitude"))
+            except (TypeError, ValueError):
+                return None
+            return (
+                (str(claim_id), latitude, longitude)
+                if (
+                    claim_id
+                    and math.isfinite(latitude)
+                    and math.isfinite(longitude)
+                    and -90 <= latitude <= 90
+                    and -180 <= longitude <= 180
+                )
+                else None
+            )
+
         with self.engine.connect() as connection:
             self._scope(connection, case_id, persona_id)
+            observations_table = self._table("observations")
+            existing_coordinate_signatures = set()
+            for row in connection.execute(
+                select(observations_table.c.payload).where(
+                    observations_table.c.case_id == case_id,
+                    observations_table.c.persona_id == persona_id,
+                )
+            ).mappings():
+                document = row["payload"] if isinstance(row["payload"], dict) else {}
+                native = (
+                    document.get("payload")
+                    if isinstance(document.get("payload"), dict)
+                    else {}
+                )
+                legacy_claim_id = str(native.get("legacy_claim_id") or "")
+                for imported_claim in document.get("claims") or []:
+                    if not isinstance(imported_claim, dict):
+                        continue
+                    signature = imported_coordinate_signature(
+                        imported_claim, claim_id=legacy_claim_id
+                    )
+                    if signature:
+                        existing_coordinate_signatures.add(signature)
             statement = select(persona_claims).where(
                 persona_claims.c.persona_id == persona_id
             )
@@ -4308,33 +4376,129 @@ class PipelineStore:
                     .mappings()
                     .first()
                 )
-                records.append((claim, key, dict(existing) if existing else None))
+                signature = coordinate_signature(claim)
+                repair_key = (
+                    "legacy-coordinate-repair-v1:"
+                    + _digest([case_id, persona_id, signature])
+                    if (
+                        existing
+                        and existing["status"] == "completed"
+                        and signature
+                        and signature not in existing_coordinate_signatures
+                    )
+                    else None
+                )
+                repair_existing = (
+                    connection.execute(
+                        select(requests.c.id, requests.c.status).where(
+                            requests.c.case_id == case_id,
+                            requests.c.persona_id == persona_id,
+                            requests.c.idempotency_key == repair_key,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                    if repair_key
+                    else None
+                )
+                records.append(
+                    {
+                        "claim": claim,
+                        "key": key,
+                        "existing": dict(existing) if existing else None,
+                        "coordinate_signature": signature,
+                        "repair_key": repair_key,
+                        "repair_existing": (
+                            dict(repair_existing) if repair_existing else None
+                        ),
+                    }
+                )
         report = {
             "case_id": case_id,
             "persona_id": persona_id,
             "dry_run": bool(dry_run),
             "claim_count": len(records),
             "pending_claim_count": sum(
-                not item[2] or item[2]["status"] != "completed" for item in records
+                not item["existing"]
+                or item["existing"]["status"] != "completed"
+                for item in records
             ),
             "observation_count": sum(
-                max(1, len(item[0]["evidence"])) for item in records
+                max(1, len(item["claim"]["evidence"])) for item in records
             ),
             "missing_provenance_count": sum(
-                not item[0]["evidence"] for item in records
+                not item["claim"]["evidence"] for item in records
+            ),
+            "coordinate_claim_count": sum(
+                item["coordinate_signature"] is not None for item in records
+            ),
+            "pending_coordinate_repair_count": sum(
+                item["repair_key"] is not None for item in records
             ),
             "next_after_claim_id": claims[-1]["id"] if len(claims) == limit else None,
             "auto_finalized": False,
             "request_ids": [],
+            "coordinate_repair_request_ids": [],
         }
         if dry_run or not records:
             return report
-        from maigret.web.pipeline_evidence import iter_legacy_claim_observations
         from maigret.web.pipeline_consolidation import consolidate_observations
 
-        for claim, key, existing in records:
+        for record in records:
+            claim = record["claim"]
+            existing = record["existing"]
             if existing and existing["status"] == "completed":
                 report["request_ids"].append(existing["id"])
+                repair_key = record["repair_key"]
+                if not repair_key:
+                    continue
+                repair_existing = record["repair_existing"]
+                if repair_existing and repair_existing["status"] == "completed":
+                    raise ValueError(
+                        "A completed legacy coordinate repair has no coordinate-bearing observation."
+                    )
+                request = self.create_request(
+                    case_id,
+                    persona_id,
+                    [{"type": "legacy_coordinate", "value": claim["id"]}],
+                    {
+                        "pipeline_id": PIPELINE_ID,
+                        "tasks": [
+                            {
+                                "engine_id": "legacy_coordinate_repair",
+                                "route_state": "active",
+                                "task_id": repair_key,
+                            }
+                        ],
+                    },
+                    actor=actor,
+                    idempotency_key=repair_key,
+                )
+                task = request["tasks"][0]
+                attempt = (
+                    task["attempts"][0]
+                    if task["attempts"]
+                    else self.start_attempt(task["id"], "legacy-coordinate:" + actor)
+                )
+                observations = list(
+                    iter_legacy_claim_observations(
+                        [claim],
+                        case_id=case_id,
+                        subject_id=persona_id,
+                        request_id=request["id"],
+                        task_id=task["id"],
+                        attempt_id=attempt["id"],
+                        coordinate_repair=True,
+                    )
+                )
+                self.record_observations(
+                    attempt["id"],
+                    observations,
+                    outcome="candidate",
+                    worker_id=attempt["worker_id"],
+                )
+                report["request_ids"].append(request["id"])
+                report["coordinate_repair_request_ids"].append(request["id"])
                 continue
             request = self.create_request(
                 case_id,
@@ -4346,12 +4510,12 @@ class PipelineStore:
                         {
                             "engine_id": "legacy_evidence_import",
                             "route_state": "active",
-                            "task_id": key,
+                            "task_id": record["key"],
                         }
                     ],
                 },
                 actor=actor,
-                idempotency_key=key,
+                idempotency_key=record["key"],
             )
             task = request["tasks"][0]
             attempt = (

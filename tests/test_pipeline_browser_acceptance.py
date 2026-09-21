@@ -16,6 +16,7 @@ from sqlalchemy import insert
 from werkzeug.serving import make_server
 
 from maigret.web.case_store import claim_evidence, persona_claims, utcnow
+from maigret.web.pipeline_ingestion import converge_legacy_persona
 from tests.test_pipeline_app_journey import application_journey, form, run_queued
 
 
@@ -43,7 +44,9 @@ def assert_no_page_overflow(page, label):
     )
 
 
-def test_browser_four_inputs_assessment_reject_approve_and_report(application_journey, tmp_path):
+def test_browser_four_inputs_assessment_reject_approve_and_report(
+    application_journey, tmp_path, monkeypatch
+):
     from playwright.sync_api import sync_playwright, expect
 
     journey = application_journey
@@ -163,6 +166,70 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                 observed_at=now,
             )
         )
+    converted_job_id = store.create_investigation(
+        ["converted.synthetic"],
+        {"subject_label": "Converted Synthetic Person"},
+    )
+    converted_case_id = store.get_job(converted_job_id)["case_id"]
+    converted_persona_id = store.get_case(converted_case_id)["personas"][0]["id"]
+    converted_location_claim_id = str(uuid.uuid4())
+    with store.engine.begin() as connection:
+        connection.execute(
+            insert(persona_claims).values(
+                id=converted_location_claim_id,
+                persona_id=converted_persona_id,
+                field_name="current_location",
+                value="Bandar Lampung, Indonesia",
+                display_value="Bandar Lampung, Indonesia",
+                normalized_value="bandar lampung, indonesia",
+                confidence=80,
+                review_status="approved",
+                source_engine="synthetic_public_document",
+                source_job_id=None,
+                fingerprint=uuid.uuid4().hex * 2,
+                first_seen_at=now,
+                last_seen_at=now,
+                created_at=now,
+                updated_at=now,
+                reviewed_at=now,
+                reviewed_by="legacy-analyst",
+                latitude=-5.3971,
+                longitude=105.2668,
+            )
+        )
+        connection.execute(
+            insert(claim_evidence).values(
+                id=str(uuid.uuid4()),
+                claim_id=converted_location_claim_id,
+                evidence_type="public_document",
+                source_name="Synthetic location source",
+                source_url="https://example.test/legacy-location-source",
+                details={"fixture": True, "coordinate_precision": "city"},
+                fingerprint=uuid.uuid4().hex * 2,
+                observed_at=now,
+            )
+        )
+    from maigret.web import pipeline_evidence
+
+    coordinate_adapter = pipeline_evidence.legacy_claim_with_coordinates
+    monkeypatch.setattr(
+        pipeline_evidence,
+        "legacy_claim_with_coordinates",
+        lambda claim, **_kwargs: dict(claim),
+    )
+    convergence = converge_legacy_persona(
+        store, converted_case_id, converted_persona_id, dry_run=False
+    )
+    assert convergence["auto_finalized"] is False
+    assert convergence["qc_created"] is False
+    monkeypatch.setattr(
+        pipeline_evidence, "legacy_claim_with_coordinates", coordinate_adapter
+    )
+    repair = converge_legacy_persona(
+        store, converted_case_id, converted_persona_id, dry_run=False
+    )
+    assert repair["evidence"]["pending_coordinate_repair_count"] == 1
+    assert len(repair["evidence"]["coordinate_repair_request_ids"]) == 1
     server = make_server("127.0.0.1", 0, journey["web"].app, threaded=True)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -393,9 +460,10 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
             )
             assert approved_persona_tabs == draft_persona_tabs
 
-            # A retained legacy-only Persona and a P2 Persona must render the
-            # same page/component contract at every supported viewport. State
-            # may change actions and badges, never the product layout.
+            # A legacy archive, a converted legacy Persona, and a native P2
+            # Persona must render the same page/component contract at every
+            # supported viewport. State may change actions and badges, never
+            # the product layout.
             for viewport, label in (
                 ({"width": 1440, "height": 1000}, "desktop"),
                 ({"width": 768, "height": 1024}, "tablet"),
@@ -404,6 +472,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                 page.set_viewport_size(viewport)
                 for model, path in (
                     ("legacy", f"/personas/{legacy_persona_id}"),
+                    ("converted", f"/personas/{converted_persona_id}"),
                     ("p2", base + "/persona"),
                 ):
                     page.goto(origin + path)
@@ -413,6 +482,13 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(application_jo
                     assert page.locator("[data-persona-tab]").evaluate_all(
                         "tabs => tabs.map(tab => tab.dataset.personaTab)"
                     ) == draft_persona_tabs
+                    if model == "converted":
+                        expect(
+                            page.get_by_role("heading", name="Approved locations")
+                        ).to_be_visible()
+                        expect(page.locator("#personaLocationMap")).to_be_visible()
+                        assert "-5.3971" in page.content()
+                        assert "105.2668" in page.content()
                     if model == "legacy":
                         summary_record = page.locator(
                             ".approved-persona-record",
