@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import threading
 import uuid
+from urllib.parse import urlsplit
 
 import pytest
 from sqlalchemy import insert
@@ -258,7 +259,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(
                         ),
                     )
                 else:
-                    if "tile.openstreetmap.org" in url:
+                    if urlsplit(url).hostname == "tile.openstreetmap.org":
                         external_tile_requests.append(url)
                     if url.startswith(origin + "/"):
                         route.continue_()

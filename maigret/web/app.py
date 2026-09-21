@@ -33,7 +33,7 @@ from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from threading import Lock, Thread
+from threading import BoundedSemaphore, Lock, Thread
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
 from urllib.error import HTTPError, URLError
@@ -201,9 +201,14 @@ MAP_TILE_UPSTREAM = OSM_TILE_UPSTREAM
 MAP_TILE_MAX_ZOOM = 19
 MAP_TILE_CACHE_SECONDS = 7 * 24 * 60 * 60
 MAP_TILE_MAX_BYTES = 1024 * 1024
+MAP_TILE_CACHE_MAX_BYTES = 32 * 1024 * 1024
+MAP_TILE_FETCH_TIMEOUT_SECONDS = 2
+MAP_TILE_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAP_TILE_USER_AGENT = (
     "OpenLedger/1.0 (+https://openledger.nexorus.io; cached map tiles)"
 )
+map_tile_cache_lock = Lock()
+map_tile_fetch_slots = BoundedSemaphore(value=1)
 
 
 def persona_map_tile_url():
@@ -212,10 +217,8 @@ def persona_map_tile_url():
 
 
 def _map_tile_cache_path(zoom, tile_x, tile_y):
-    root = Path("/tmp/maigret_reports")
-    if not root.is_dir():
-        root = Path("/tmp/openledger-map-tiles")
-    return root / ".browser-map-tile-cache" / str(zoom) / str(tile_x) / f"{tile_y}.png"
+    root = Path("/tmp/openledger-map-tiles")
+    return root / str(zoom) / str(tile_x) / f"{tile_y}.png"
 
 
 def _cached_map_tile(zoom, tile_x, tile_y):
@@ -232,11 +235,48 @@ def _cached_map_tile(zoom, tile_x, tile_y):
 
 
 def _store_map_tile(path, payload):
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_bytes(payload)
-    temporary.chmod(0o600)
-    temporary.replace(path)
+    with map_tile_cache_lock:
+        root = path.parents[2]
+        entries = []
+        total = 0
+        if root.is_dir():
+            for entry in root.rglob("*.png"):
+                try:
+                    stat_result = entry.stat()
+                except OSError:
+                    continue
+                entries.append((stat_result.st_mtime, entry, stat_result.st_size))
+                total += stat_result.st_size
+        for _modified, entry, size in sorted(entries):
+            if total + len(payload) <= MAP_TILE_CACHE_MAX_BYTES:
+                break
+            try:
+                entry.unlink()
+                total -= size
+            except OSError:
+                pass
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_bytes(payload)
+        temporary.chmod(0o600)
+        temporary.replace(path)
+
+
+def _valid_png(payload):
+    """Require a complete PNG stream before it becomes a seven-day cache entry."""
+    if not payload.startswith(MAP_TILE_PNG_SIGNATURE):
+        return False
+    offset = len(MAP_TILE_PNG_SIGNATURE)
+    while offset + 12 <= len(payload):
+        length = int.from_bytes(payload[offset : offset + 4], "big")
+        chunk_end = offset + 12 + length
+        if chunk_end > len(payload):
+            return False
+        chunk_type = payload[offset + 4 : offset + 8]
+        if chunk_type == b"IEND":
+            return length == 0 and chunk_end == len(payload)
+        offset = chunk_end
+    return False
 
 
 def _map_tile_response(path):
@@ -2542,26 +2582,33 @@ def protect_sensitive_responses(response):
 @app.get('/map-tiles/<int:zoom>/<int:tile_x>/<int:tile_y>.png')
 def map_tile(zoom, tile_x, tile_y):
     """Serve one bounded, cached OSM tile without exposing the browser to 403 pages."""
-    tile_count = 2**zoom
-    if not (
-        0 <= zoom <= MAP_TILE_MAX_ZOOM
-        and 0 <= tile_x < tile_count
-        and 0 <= tile_y < tile_count
-    ):
+    if not 0 <= zoom <= MAP_TILE_MAX_ZOOM:
+        raise NotFound()
+    tile_count = 1 << zoom
+    if not 0 <= tile_x < tile_count or not 0 <= tile_y < tile_count:
         raise NotFound()
     cached = _cached_map_tile(zoom, tile_x, tile_y)
     if cached:
         return _map_tile_response(cached)
+    if not map_tile_fetch_slots.acquire(blocking=False):
+        return _map_tile_unavailable()
     url = MAP_TILE_UPSTREAM.format(z=zoom, x=tile_x, y=tile_y)
     try:
         with urlopen(
-            Request(url, headers={"User-Agent": MAP_TILE_USER_AGENT}), timeout=8
+            Request(url, headers={"User-Agent": MAP_TILE_USER_AGENT}),
+            timeout=MAP_TILE_FETCH_TIMEOUT_SECONDS,
         ) as upstream:
             content_type = upstream.headers.get_content_type()
             payload = upstream.read(MAP_TILE_MAX_BYTES + 1)
     except (HTTPError, URLError, OSError):
         return _map_tile_unavailable()
-    if content_type != 'image/png' or not payload or len(payload) > MAP_TILE_MAX_BYTES:
+    finally:
+        map_tile_fetch_slots.release()
+    if (
+        content_type != 'image/png'
+        or len(payload) > MAP_TILE_MAX_BYTES
+        or not _valid_png(payload)
+    ):
         return _map_tile_unavailable()
     path = _map_tile_cache_path(zoom, tile_x, tile_y)
     try:
