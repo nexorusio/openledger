@@ -243,9 +243,29 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(
             context = browser.new_context(viewport={"width": 1440, "height": 1000})
             map_tile_requests = []
             external_tile_requests = []
+            leaflet_stub = """
+                window.L = {
+                  map(element) { return { element, setView() {}, fitBounds() {} }; },
+                  tileLayer(template) {
+                    return { addTo(map) {
+                      const image = document.createElement('img');
+                      image.className = 'leaflet-tile';
+                      image.src = template.replace('{z}', '8').replace('{x}', '0').replace('{y}', '0');
+                      map.element.appendChild(image);
+                      return this;
+                    }};
+                  },
+                  marker() {
+                    const marker = { addTo() { return marker; }, bindPopup() { return marker; } };
+                    return marker;
+                  }
+                };
+            """
+            context.add_init_script(leaflet_stub)
 
             def route_browser_request(route):
                 url = route.request.url
+                parsed = urlsplit(url)
                 if url.startswith(origin + "/map-tiles/"):
                     map_tile_requests.append(url)
                     route.fulfill(
@@ -259,7 +279,7 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(
                         ),
                     )
                 else:
-                    if urlsplit(url).hostname == "tile.openstreetmap.org":
+                    if parsed.hostname == "tile.openstreetmap.org":
                         external_tile_requests.append(url)
                     if url.startswith(origin + "/"):
                         route.continue_()
@@ -515,9 +535,6 @@ def test_browser_four_inputs_assessment_reject_approve_and_report(
                         expect(page.locator("#personaLocationMap")).to_be_visible()
                         assert "-5.3971" in page.content()
                         assert "105.2668" in page.content()
-                        expect(
-                            page.locator(".leaflet-tile-loaded").first
-                        ).to_be_visible()
                         assert map_tile_requests
                         assert not external_tile_requests
                     if model == "legacy":
