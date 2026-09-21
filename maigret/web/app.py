@@ -203,12 +203,13 @@ MAP_TILE_CACHE_SECONDS = 7 * 24 * 60 * 60
 MAP_TILE_MAX_BYTES = 1024 * 1024
 MAP_TILE_CACHE_MAX_BYTES = 32 * 1024 * 1024
 MAP_TILE_FETCH_TIMEOUT_SECONDS = 2
+MAP_TILE_FETCH_QUEUE_SECONDS = 5
 MAP_TILE_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 MAP_TILE_USER_AGENT = (
     "OpenLedger/1.0 (+https://openledger.nexorus.io; cached map tiles)"
 )
 map_tile_cache_lock = Lock()
-map_tile_fetch_slots = BoundedSemaphore(value=1)
+map_tile_fetch_slots = BoundedSemaphore(value=3)
 
 
 def persona_map_tile_url():
@@ -217,7 +218,10 @@ def persona_map_tile_url():
 
 
 def _map_tile_cache_path(zoom, tile_x, tile_y):
-    root = Path("/tmp/openledger-map-tiles")
+    # The reports directory is a durable bind mount in the reviewed release
+    # compose file. Keeping browser tiles below it avoids a cold cache after
+    # every immutable app-container replacement.
+    root = Path("/tmp/maigret_reports/.map-tile-cache/browser")
     return root / str(zoom) / str(tile_x) / f"{tile_y}.png"
 
 
@@ -280,9 +284,14 @@ def _valid_png(payload):
 
 
 def _map_tile_response(path):
-    response = send_file(path, mimetype="image/png", conditional=True, max_age=86400)
+    response = send_file(
+        path,
+        mimetype="image/png",
+        conditional=True,
+        max_age=MAP_TILE_CACHE_SECONDS,
+    )
     response.cache_control.public = True
-    response.cache_control.max_age = 86400
+    response.cache_control.max_age = MAP_TILE_CACHE_SECONDS
     return response
 
 
@@ -2590,7 +2599,9 @@ def map_tile(zoom, tile_x, tile_y):
     cached = _cached_map_tile(zoom, tile_x, tile_y)
     if cached:
         return _map_tile_response(cached)
-    if not map_tile_fetch_slots.acquire(blocking=False):
+    # Leaflet requests a viewport's tiles together. Wait for a bounded slot
+    # instead of immediately returning holes for every request after the first.
+    if not map_tile_fetch_slots.acquire(timeout=MAP_TILE_FETCH_QUEUE_SECONDS):
         return _map_tile_unavailable()
     url = MAP_TILE_UPSTREAM.format(z=zoom, x=tile_x, y=tile_y)
     try:
