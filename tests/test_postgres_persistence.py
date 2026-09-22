@@ -7,6 +7,8 @@ from sqlalchemy import text
 
 from maigret.web.case_store import CaseStore
 from maigret.web.external_evidence import ExternalEvidenceValidationError
+from maigret.web.pipeline_runtime import PipelineRuntimeStore
+from maigret.web.pipeline_store import PipelineStore
 
 POSTGRES_URL = os.getenv("OPENLEDGER_TEST_POSTGRES_URL", "")
 pytestmark = pytest.mark.skipif(
@@ -163,7 +165,7 @@ def test_postgres_allows_only_one_investigation_worker_lock(postgres_store):
     competing_store.dispose()
 
 
-def test_postgres_case_delete_requires_terminal_jobs_and_retains_pipeline_history(
+def test_postgres_case_delete_requires_terminal_jobs_then_purges_pipeline_history(
     postgres_store,
 ):
     job_id = postgres_store.create_investigation(["alice"], {})
@@ -172,14 +174,40 @@ def test_postgres_case_delete_requires_terminal_jobs_and_retains_pipeline_histor
         postgres_store.delete_case(case_id)
 
     job = postgres_store.claim_next("worker:integration")
+    case = postgres_store.get_case(case_id)
+    pipeline = PipelineStore(postgres_store)
+    request = pipeline.create_request(
+        case_id,
+        case["personas"][0]["id"],
+        [{"type": "username", "value": "alice"}],
+        {
+            "pipeline_id": "p2-e2e-v1",
+            "budgets": {"max_requests": 2},
+            "tasks": [
+                {
+                    "task_id": "postgres-budgeted-delete-fixture",
+                    "engine_id": "fixture",
+                    "route_state": "active",
+                }
+            ],
+        },
+        actor="operator",
+        job_id=job_id,
+    )
+    attempt = pipeline.start_attempt(request["tasks"][0]["id"], job["worker_id"])
+    PipelineRuntimeStore(postgres_store).reserve_request(
+        request["id"], attempt["id"], job["worker_id"]
+    )
+    pipeline.finish_attempt(
+        attempt["id"], "partial", worker_id=job["worker_id"]
+    )
     postgres_store.finish(
         job_id,
         {"status": "cancelled", "usernames": job["usernames"]},
     )
-    with pytest.raises(ValueError, match="retained P2 pipeline"):
-        postgres_store.delete_case(case_id)
-    assert postgres_store.get_case(case_id) is not None
-    assert postgres_store.get_job(job_id) is not None
+    assert postgres_store.delete_case(case_id) is True
+    assert postgres_store.get_case(case_id) is None
+    assert postgres_store.get_job(job_id) is None
 
 
 def test_postgres_enforces_external_evidence_receipt_and_immutability_guards(

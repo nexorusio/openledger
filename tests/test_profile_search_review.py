@@ -665,11 +665,8 @@ async def test_case_api_and_ui_are_bounded_and_review_safe(store, monkeypatch):
     page = client.get(f"/cases/{seeded['case_id']}")
     html = page.get_data(as_text=True)
     assert page.status_code == 200
-    assert "Major-platform profile candidates" in html
-    assert "Unverified candidate" in html
-    assert "is not an identity-confidence score" in html
-    assert "Send to Persona review" in html
-    assert "0</strong> automatically approved" in html
+    assert "Major-platform profile candidates" not in html
+    assert "Send to Persona review" not in html
 
 
 @pytest.mark.asyncio
@@ -716,7 +713,10 @@ async def test_review_route_requires_csrf_and_targets_owned_persona(
         },
     )
     assert accepted.status_code == 302
-    assert "#profile-candidate-" in accepted.location
+    assert accepted.location.endswith(
+        f"/cases/{seeded['case_id']}/pipeline/{seeded['persona_id']}"
+        "#shortlist-digital"
+    )
     claim = store.get_persona(seeded["persona_id"])["claims"][0]
     assert claim["review_status"] == "pending"
 

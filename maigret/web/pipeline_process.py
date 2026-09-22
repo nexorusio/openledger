@@ -15,6 +15,7 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import select
 import subprocess
@@ -30,6 +31,50 @@ MAX_DIAGNOSTIC_BYTES = 64 * 1024
 
 class CollectorProcessError(RuntimeError):
     """A process/contract error, with no provider payload or credentials exposed."""
+
+    def __init__(
+        self,
+        message,
+        *,
+        diagnostic_code="collector_process_error",
+        returncode=None,
+        exception_type=None,
+    ):
+        super().__init__(message)
+        self.safe_diagnostic = {
+            "code": str(diagnostic_code)[:100],
+            "returncode": (
+                int(returncode) if isinstance(returncode, int) else None
+            ),
+            "exception_type": (
+                str(exception_type)[:100] if exception_type else None
+            ),
+        }
+
+
+_CHILD_EXCEPTION_PATTERN = re.compile(
+    rb"^Collector process failed: ([A-Za-z][A-Za-z0-9_.]{0,99})$"
+)
+
+
+def _safe_child_diagnostic(diagnostic, returncode):
+    """Classify a bounded child exit without retaining arbitrary stderr."""
+    exception_type = None
+    for line in bytes(diagnostic or b"").splitlines():
+        match = _CHILD_EXCEPTION_PATTERN.fullmatch(line.strip())
+        if match:
+            exception_type = match.group(1).decode("ascii")
+    return {
+        "code": (
+            "collector_terminated_by_signal"
+            if returncode < 0
+            else "collector_child_exception"
+            if exception_type
+            else "collector_child_exit"
+        ),
+        "returncode": returncode,
+        "exception_type": exception_type,
+    }
 
 
 def process_is_alive(pid):
@@ -253,14 +298,20 @@ async def supervise_collector(task, context, *, timeout_seconds, cancelled):
             "Collector process request exceeds its input budget"
         )
     try:
-        stdout, _diagnostic, code = await run_bounded_process(
+        stdout, diagnostic, code = await run_bounded_process(
             [sys.executable, str(Path(__file__).resolve()), "--collector"],
             encoded,
             timeout_seconds=timeout_seconds,
             cancelled=cancelled,
         )
         if code != 0:
-            raise CollectorProcessError(f"Collector process exited with status {code}")
+            detail = _safe_child_diagnostic(diagnostic, code)
+            raise CollectorProcessError(
+                "Collector process exited unexpectedly",
+                diagnostic_code=detail["code"],
+                returncode=detail["returncode"],
+                exception_type=detail["exception_type"],
+            )
         try:
             response = json.loads(stdout)
         except (ValueError, UnicodeDecodeError) as error:

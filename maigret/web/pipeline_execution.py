@@ -13,10 +13,11 @@ import copy
 import hashlib
 import inspect
 import json
+import os
 import threading
 import time
 import uuid
-from collections import defaultdict, deque
+from collections import Counter, defaultdict, deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping
 
@@ -36,6 +37,15 @@ def _app():
     import importlib
 
     return importlib.import_module("maigret.web.app")
+
+
+def _pipeline_concurrency() -> int:
+    """Bound simultaneous collector processes for predictable host load."""
+    try:
+        configured = int(os.getenv("OPENLEDGER_PIPELINE_CONCURRENCY", "2"))
+    except ValueError:
+        configured = 2
+    return max(1, min(4, configured))
 
 
 def _run_coroutine_sync(factory):
@@ -172,8 +182,11 @@ class CollectorContext:
             self.persisted_ids.update(item["id"] for item in fresh)
             self.observation_count += len(fresh)
 
-    def emit_observations(self, observations):
-        self.emit({"collector_observations": list(observations or [])})
+    def emit_observations(self, observations, *, engine=None):
+        self.emit(
+            {"collector_observations": list(observations or [])},
+            engine=engine,
+        )
 
     def reserve_request(self, count=1, provider=None):
         from maigret.web.pipeline_runtime import PipelineRuntimeStore
@@ -274,11 +287,43 @@ async def _maigret_adapter(task, context: CollectorContext):
     context.emit({"general_results": [general]})
     from maigret.web.pipeline_evidence import normalize_status
 
-    return {
-        "outcome": _aggregate_outcomes(
-            normalize_status(row)[0] for row in results.values()
+    counts = Counter(normalize_status(row)[0] for row in results.values())
+    failure_count = sum(
+        counts[value]
+        for value in (
+            "blocked",
+            "error",
+            "timeout",
+            "cancelled",
+            "inconclusive",
+            "partial",
         )
+    )
+    # A completed Maigret sweep with retained findings is usable even when a
+    # minority of independent sites are unavailable. Preserve those failures
+    # as coverage warnings instead of relabelling all findings "partial".
+    outcome = (
+        "found"
+        if counts["found"]
+        else "candidate" if counts["candidate"] else _aggregate_outcomes(counts)
+    )
+    result = {
+        "outcome": outcome,
+        "outcome_counts": dict(counts),
+        "warning_count": failure_count if outcome in {"found", "candidate"} else 0,
+        "display_status": (
+            "completed_with_warnings"
+            if failure_count and outcome in {"found", "candidate"}
+            else outcome
+        ),
     }
+    if failure_count:
+        result["diagnostic"] = (
+            f"{failure_count} site check"
+            f"{'s were' if failure_count != 1 else ' was'} unavailable; "
+            "retained site-level outcomes remain in the audit history."
+        )
+    return result
 
 
 def _aggregate_outcomes(outcomes):
@@ -361,8 +406,37 @@ async def dispatch_collector(task, context: CollectorContext):
     return await collect_registered(task, context)
 
 
+def _same_approved_profile_source(candidate_url, approved_url):
+    """Accept only the approved profile URL or a known host-localized alias."""
+    from urllib.parse import urlsplit
+
+    from maigret.web.pipeline_evidence import canonical_origin_url
+
+    candidate = canonical_origin_url(candidate_url)
+    approved = canonical_origin_url(approved_url)
+    if not candidate or not approved:
+        return False
+    if candidate == approved:
+        return True
+    candidate_parts, approved_parts = urlsplit(candidate), urlsplit(approved)
+    candidate_host = (candidate_parts.hostname or "").removeprefix("www.")
+    approved_host = (approved_parts.hostname or "").removeprefix("www.")
+
+    def is_linkedin(host):
+        return host == "linkedin.com" or host.endswith(".linkedin.com")
+
+    host_alias = (
+        candidate_host == approved_host
+        or (is_linkedin(candidate_host) and is_linkedin(approved_host))
+    )
+    return host_alias and candidate_parts.path.rstrip("/").casefold() == (
+        approved_parts.path.rstrip("/").casefold()
+    )
+
+
 async def _cited_research_adapter(task, context):
     from maigret.ai import get_case_chat_response, get_case_chat_claim_proposals
+    from maigret.web.persona_intelligence import extract_ai_persona_claims
 
     app_module = _app()
     settings = app_module.load_settings()
@@ -371,24 +445,41 @@ async def _cited_research_adapter(task, context):
         raise ValueError("Cited research provider is not configured")
     case_context = context.store.get_case_chat_context(context.job["case_id"])
     model = settings.get("openai_model") or app_module.DEFAULT_SETTINGS["openai_model"]
+    started_at = time.monotonic()
+    total_timeout = max(20, int(task["timeout_seconds"]))
     response = await get_case_chat_response(
         api_key,
         case_context=case_context,
         conversation=[],
         user_message=task["input_value"],
         model=model,
-        timeout_seconds=min(120, task["timeout_seconds"]),
+        timeout_seconds=min(105, max(10, total_timeout - 65)),
         web_search_enabled=True,
         **app_module.ai_endpoint_options(),
     )
     sources = response.get("sources") or []
-    rows = [
+    approved_source_url = str(task.get("approved_source_url") or "").strip()
+    if approved_source_url:
+        # Approved-source enrichment is intentionally narrower than ordinary
+        # case research: indexed excerpts must point back to this exact profile
+        # (including a localized LinkedIn hostname), not merely mention a name.
+        sources = [
+            item
+            for item in sources
+            if isinstance(item, Mapping)
+            and _same_approved_profile_source(item.get("url"), approved_source_url)
+        ]
+    citation_rows = [
         {
             "source_engine": "openai_web_research",
             "source_record_id": "citation:" + str(index),
             "source_url": item.get("url"),
             "source_name": item.get("title"),
+            "origin_url": item.get("url"),
+            "derived_from": [item.get("url")],
+            "source_dependence": "search_excerpt_of_source",
             "status": "candidate",
+            "observation_only": True,
             "payload": {
                 "source": item,
                 "analysis": response.get("analysis"),
@@ -399,9 +490,90 @@ async def _cited_research_adapter(task, context):
         }
         for index, item in enumerate(sources)
     ]
-    context.emit_observations(rows)
+    persona = context.store.get_persona(context.request["persona_id"]) or {}
+    target_persona = str(
+        persona.get("display_name") or context.request["persona_id"]
+    )
+    raw_proposals = []
+    if sources or not approved_source_url:
+        proposal_timeout = min(
+            60,
+            max(10, total_timeout - int(time.monotonic() - started_at) - 5),
+        )
+        raw_proposals = await get_case_chat_claim_proposals(
+            api_key=api_key,
+            target_persona=target_persona,
+            user_message=task["input_value"],
+            assistant_answer=response.get("analysis") or "",
+            sources=sources,
+            model=model,
+            timeout_seconds=proposal_timeout,
+            **app_module.ai_endpoint_options(),
+        )
+    candidates = extract_ai_persona_claims(
+        [
+            {**proposal, "username": target_persona}
+            for proposal in list(raw_proposals or [])
+            if isinstance(proposal, Mapping)
+            and proposal.get("evidence_basis") in {None, "public_web"}
+        ],
+        sources=sources,
+        usernames=[target_persona],
+        model=model,
+    )
+    claim_rows = []
+    for index, candidate in enumerate(candidates):
+        evidence = (candidate.get("evidence") or [{}])[0]
+        details = dict(evidence.get("details") or {})
+        qualifiers = {
+            "confidence": candidate.get("confidence"),
+            "evidence_basis": "cited_public_web",
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+            "reason": details.get("proposal_reason"),
+            "source_title": evidence.get("source_name"),
+        }
+        if details.get("coordinate_role") == "approximate_map_center":
+            qualifiers.update(
+                latitude=candidate.get("latitude"),
+                longitude=candidate.get("longitude"),
+                coordinate_precision=details.get("coordinate_precision"),
+                coordinate_role="approximate_map_center",
+                coordinate_source="cited_ai_proposal",
+            )
+        claim_rows.append(
+            {
+                "source_engine": "openai_web_research",
+                "source_record_id": "proposal:"
+                + str(candidate.get("fingerprint") or index),
+                "source_url": evidence.get("source_url"),
+                "source_name": evidence.get("source_name"),
+                "origin_url": evidence.get("source_url"),
+                "derived_from": [evidence.get("source_url")],
+                "source_dependence": "search_excerpt_of_source",
+                "status": "candidate",
+                "claims": [
+                    {
+                        "predicate": candidate["field_name"],
+                        "value": candidate["value"],
+                        "qualifiers": qualifiers,
+                    }
+                ],
+                "payload": {
+                    "candidate": candidate,
+                    "analysis": response.get("analysis"),
+                    "model": model,
+                },
+            }
+        )
+    rows = [*citation_rows, *claim_rows]
+    context.emit_observations(rows, engine="openai_web_research")
     context.raw_collector_observations.extend(rows)
-    return {"outcome": "candidate" if rows else "inconclusive"}
+    return {
+        "outcome": "candidate" if claim_rows or citation_rows else "inconclusive",
+        "citation_count": len(citation_rows),
+        "proposal_count": len(claim_rows),
+    }
 
 
 async def _await_collector(call, *, timeout_seconds, cancelled):
@@ -435,8 +607,130 @@ async def _await_collector(call, *, timeout_seconds, cancelled):
 
 def refresh_consolidation(store, case_id, persona_id):
     from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+    from maigret.web.pipeline_store import PipelineStore
 
+    PipelineStore(store).reconcile_submitted_inputs(case_id, persona_id)
     return assess_consolidated_groups(store, case_id, persona_id)
+
+
+async def rank_consolidated_findings(
+    store, pipeline, sink, job, persona_id, context
+):
+    """Run one bounded AI ranking pass after deterministic consolidation.
+
+    The model receives only retained, non-conflicting group summaries. It cannot create
+    evidence, approve a finding, or change a deterministic assessment.
+    """
+    collection_options = dict((context or {}).get("collection_options") or {})
+    specification = dict(collection_options.get("investigation_spec") or {})
+    if specification.get("discovery_basis") == "approved_source_fetch":
+        # This action already evaluates only exact approved URLs and, when
+        # needed, creates cited review proposals. Re-ranking every historic
+        # case finding added a second model wait without improving extraction.
+        return {
+            "status": "not_requested",
+            "ranked": 0,
+            "shortlisted": 0,
+            "reason": "Approved-source enrichment returns its new fields directly to Step 1 review.",
+        }
+    controls = dict((context or {}).get("collection_controls") or {})
+    if controls.get("allow_ai_context") is not True:
+        return {"status": "not_requested", "ranked": 0, "shortlisted": 0}
+    app_module = _app()
+    api_key = app_module.get_openai_api_key()
+    if not api_key:
+        return {
+            "status": "unavailable",
+            "ranked": 0,
+            "shortlisted": 0,
+            "reason": "OpenAI ranking is enabled for this query but is not configured.",
+        }
+    candidates = pipeline.ai_ranking_candidates(job["case_id"], persona_id, limit=50)
+    if not candidates:
+        return {"status": "completed", "ranked": 0, "shortlisted": 0}
+    task_id = "openai-ranking:" + persona_id
+    sink.put(
+        {
+            "type": "collector_started",
+            "collector": "openai_ranking",
+            "task_id": task_id,
+            "pipeline_id": "p2-e2e-v1",
+        }
+    )
+    settings = app_module.load_settings()
+    model = settings.get("openai_model") or app_module.DEFAULT_SETTINGS["openai_model"]
+    try:
+        from maigret.ai import get_pipeline_group_rankings
+
+        persona = store.get_persona(persona_id) or {}
+        # Ranking is advisory and must never make an otherwise completed
+        # investigation appear to run forever.
+        rankings = await asyncio.wait_for(
+            get_pipeline_group_rankings(
+                api_key,
+                subject_label=persona.get("display_name") or persona_id,
+                groups=candidates,
+                model=model,
+                timeout_seconds=40,
+                **app_module.ai_endpoint_options(),
+            ),
+            timeout=45,
+        )
+        expected_ids = {item["group_id"] for item in candidates}
+        returned_ids = [str(item.get("group_id") or "") for item in rankings]
+        if len(returned_ids) != len(set(returned_ids)) or set(returned_ids) != expected_ids:
+            raise ValueError(
+                "OpenAI ranking response did not cover the exact candidate set"
+            )
+        applied = pipeline.apply_ai_rankings(
+            job["case_id"], persona_id, rankings, model=model
+        )
+    except Exception as exc:
+        diagnostic = app_module.record_internal_error(
+            "Post-collection OpenAI ranking failed",
+            exc,
+            session=job["job_id"],
+            persona_id=persona_id,
+        )
+        sink.put(
+            {
+                "type": "collector_completed",
+                "collector": "openai_ranking",
+                "task_id": task_id,
+                "outcome": "inconclusive",
+                "observations": 0,
+                "evidence_observations": 0,
+                "diagnostic": diagnostic,
+                "pipeline_id": "p2-e2e-v1",
+            }
+        )
+        return {
+            "status": "unavailable",
+            "ranked": 0,
+            "shortlisted": 0,
+            "reason": diagnostic,
+        }
+    shortlisted = sum(1 for item in rankings if item.get("shortlisted") is True)
+    sink.put(
+        {
+            "type": "collector_completed",
+            "collector": "openai_ranking",
+            "task_id": task_id,
+            "outcome": "found",
+            "observations": 0,
+            "evidence_observations": 0,
+            "ranked_findings": applied["ranked"],
+            "shortlisted_findings": shortlisted,
+            "display_status": "completed",
+            "pipeline_id": "p2-e2e-v1",
+        }
+    )
+    return {
+        "status": "completed",
+        "ranked": applied["ranked"],
+        "shortlisted": shortlisted,
+        "model": model,
+    }
 
 
 async def _execute_requests(
@@ -444,7 +738,7 @@ async def _execute_requests(
 ):
     from maigret.web.pipeline_contract import validate_task
     from maigret.web.pipeline_runtime import ProviderCooldown, RequestBudgetExceeded
-    from maigret.web.pipeline_process import supervise_collector
+    from maigret.web.pipeline_process import CollectorProcessError, supervise_collector
     from maigret.web.pipeline_store import (
         PipelineStore,
         collection_status as collection_status_for_request,
@@ -467,8 +761,41 @@ async def _execute_requests(
             for task in request.get("tasks", [])
         ]
     )
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(_pipeline_concurrency())
     outcomes, collector_contexts = [], []
+    approved_source_total = sum(
+        1
+        for task in queue
+        if task.get("route_state") == "active"
+        and task.get("engine_id") == "approved_public_source_fetch"
+    )
+    for task in queue:
+        if task.get("route_state") == "active":
+            sink.put(
+                {
+                    "type": "collector_planned",
+                    "collector": task["engine_id"],
+                    "task_id": task["id"],
+                    "platform": task.get("platform"),
+                    "input_type": task.get("input_type"),
+                    "input_value": (
+                        task.get("input_value")
+                        if task.get("input_type") == "public_url"
+                        else None
+                    ),
+                    "source_url": (
+                        task.get("input_value")
+                        if task.get("input_type") == "public_url"
+                        else None
+                    ),
+                    "total": (
+                        approved_source_total
+                        if task.get("engine_id") == "approved_public_source_fetch"
+                        else None
+                    ),
+                    "pipeline_id": "p2-e2e-v1",
+                }
+            )
 
     async def execute_task(task):
         request = task.pop("_request")
@@ -520,6 +847,23 @@ async def _execute_requests(
                         "collector": task["engine_id"],
                         "task_id": task["id"],
                         "attempt_id": attempt["id"],
+                        "platform": task.get("platform"),
+                        "input_type": task.get("input_type"),
+                        "input_value": (
+                            task.get("input_value")
+                            if task.get("input_type") == "public_url"
+                            else None
+                        ),
+                        "source_url": (
+                            task.get("input_value")
+                            if task.get("input_type") == "public_url"
+                            else None
+                        ),
+                        "total": (
+                            approved_source_total
+                            if task.get("engine_id") == "approved_public_source_fetch"
+                            else None
+                        ),
                         "pipeline_id": "p2-e2e-v1",
                     }
                 )
@@ -577,7 +921,10 @@ async def _execute_requests(
                     outcome, error = "inconclusive", "request_budget_exhausted"
                     returned = {"retryable": False, "completeness": "partial"}
                 except ProviderCooldown as exc:
-                    outcome, error = "error", "provider_cooldown"
+                    # Provider throttle is a partial collection state, not a
+                    # collector fault. Preserve already committed evidence and
+                    # make the retry window explicit to the operator.
+                    outcome, error = "inconclusive", "provider_cooldown"
                     returned = {
                         "retryable": True,
                         "retry_after_seconds": exc.retry_after_seconds,
@@ -590,6 +937,28 @@ async def _execute_requests(
                     )
                 except (asyncio.TimeoutError, TimeoutError):
                     outcome, error = "timeout", "The task reached its deadline"
+                except CollectorProcessError as exc:
+                    # A fenced child ending unexpectedly is an unavailable
+                    # source, not a fatal investigation error. Avoid an
+                    # immediate resource-heavy retry, retain any observations
+                    # already committed by the child, and give operators a
+                    # stable server-log reference.
+                    error = app_module.record_internal_error(
+                        "Collector process became unavailable; retained evidence is safe",
+                        exc,
+                        collector=task["engine_id"],
+                        session=job["job_id"],
+                    )
+                    outcome = "partial"
+                    diagnostic = getattr(exc, "safe_diagnostic", {})
+                    returned = {
+                        "retryable": False,
+                        "completeness": "partial",
+                        "display_status": "unavailable",
+                        "error_code": diagnostic.get(
+                            "code", "collector_process_unavailable"
+                        ),
+                    }
                 except Exception as exc:
                     error = app_module.record_internal_error(
                         "Pipeline collector failed",
@@ -620,19 +989,23 @@ async def _execute_requests(
                     # group is drained, using the separate cancellation boundary.
                     outcomes.append("cancelled")
                     return
+                evidence_observation_count = context.observation_count
+                lifecycle_diagnostic = error or returned.get("diagnostic")
                 context.emit_observations(
                     [
                         {
                             "source_engine": task["engine_id"],
                             "source_record_id": "task-outcome",
                             "status": outcome,
-                            "reason": error or "Task completed",
+                            "reason": lifecycle_diagnostic or "Task completed",
                             "extra": {
                                 "task_id": task["id"],
                                 "route_state": task["route_state"],
                                 "input_type": task.get("input_type"),
                                 "platform": task.get("platform"),
-                                "observations": context.observation_count,
+                                "observations": evidence_observation_count,
+                                "outcome_counts": returned.get("outcome_counts", {}),
+                                "warning_count": int(returned.get("warning_count") or 0),
                                 "retry": retry_state,
                             },
                         }
@@ -650,8 +1023,30 @@ async def _execute_requests(
                         "type": "collector_completed",
                         "collector": task["engine_id"],
                         "task_id": task["id"],
+                        "platform": task.get("platform"),
+                        "input_type": task.get("input_type"),
+                        "input_value": (
+                            task.get("input_value")
+                            if task.get("input_type") == "public_url"
+                            else None
+                        ),
+                        "source_url": (
+                            task.get("input_value")
+                            if task.get("input_type") == "public_url"
+                            else None
+                        ),
+                        "total": (
+                            approved_source_total
+                            if task.get("engine_id") == "approved_public_source_fetch"
+                            else None
+                        ),
                         "outcome": outcome,
-                        "observations": context.observation_count,
+                        "observations": evidence_observation_count,
+                        "evidence_observations": evidence_observation_count,
+                        "outcome_counts": returned.get("outcome_counts", {}),
+                        "warning_count": int(returned.get("warning_count") or 0),
+                        "display_status": returned.get("display_status"),
+                        "diagnostic": lifecycle_diagnostic,
                         "pipeline_id": "p2-e2e-v1",
                     }
                 )
@@ -690,8 +1085,23 @@ async def _execute_requests(
         # Persistence/ownership failure is fatal and must never look like empty
         # successful collection. Let the worker's fenced failure path own it.
         raise errors[0]
+    ranking_results = {}
     for request in requests:
-        refresh_consolidation(store, job["case_id"], request["persona_id"])
+        persona_id = request["persona_id"]
+        refresh_consolidation(store, job["case_id"], persona_id)
+        if (
+            persona_id not in ranking_results
+            and not operator_stopped()
+            and not shutting_down()
+        ):
+            ranking_results[persona_id] = await rank_consolidated_findings(
+                store,
+                pipeline,
+                sink,
+                job,
+                persona_id,
+                contexts.get(persona_id, {}),
+            )
     active = [
         task
         for request in requests
@@ -757,6 +1167,7 @@ async def _execute_requests(
         "account_candidate_count": len(observed_accounts),
         "successful_source_task_count": outcomes.count("found")
         + outcomes.count("candidate"),
+        "ai_ranking": ranking_results,
         "individual_reports": [],
         "collector_observations": [],
         "error": (

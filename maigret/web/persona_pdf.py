@@ -57,17 +57,17 @@ except ImportError:  # pragma: no cover - compatibility with older python-bidi
     except ImportError:  # PDF extras are optional outside the production web image.
         _bidi_get_display = None
 
-_NAVY = colors.HexColor("#0C1B2A")
-_NAVY_LIGHT = colors.HexColor("#13283A")
-_TEAL = colors.HexColor("#12B8B0")
-_INK = colors.HexColor("#172533")
-_MUTED = colors.HexColor("#526578")
-_LINE = colors.HexColor("#D8E1E8")
-_PANEL = colors.HexColor("#F3F7F9")
+_NAVY = colors.HexColor("#09090B")
+_NAVY_LIGHT = colors.HexColor("#18181B")
+_TEAL = colors.HexColor("#6D28D9")
+_INK = colors.HexColor("#18181B")
+_MUTED = colors.HexColor("#57534E")
+_LINE = colors.HexColor("#E7E5E4")
+_PANEL = colors.HexColor("#FAFAF9")
 _APPROVED = colors.HexColor("#087A55")
 _AMBER = colors.HexColor("#A45C08")
 _RISK = colors.HexColor("#A23A3A")
-_SOFT_TEAL = colors.HexColor("#EAF7F7")
+_SOFT_TEAL = colors.HexColor("#F3E8FF")
 _SOFT_AMBER = colors.HexColor("#FFF5DF")
 _SOFT_RISK = colors.HexColor("#FBECEC")
 # SimpleDocTemplate's content frame has six-point padding on both sides in
@@ -521,8 +521,16 @@ def build_investigation_report_view(
     photograph_claim = next(iter(claims.get("photograph") or []), None)
     summary_claim = next(iter(claims.get("summary") or []), None)
     locations = [
-        _report_item(claim, label="Current location")
-        for claim in claims.get("current_location") or []
+        _report_item(
+            claim,
+            label=(
+                "Current location"
+                if field == "current_location"
+                else "Organization location"
+            ),
+        )
+        for field in ("current_location", "organization_location")
+        for claim in claims.get(field) or []
     ]
     address_items = [
         _report_item(claim, label="Approved public address")
@@ -1662,13 +1670,24 @@ def generate_persona_pdf(
         canvas.saveState()
         canvas.setFillColor(_NAVY)
         canvas.rect(0, A4[1] - 19 * mm, A4[0], 19 * mm, stroke=0, fill=1)
-        canvas.setFillColor(_TEAL)
-        canvas.rect(0, A4[1] - 19.8 * mm, A4[0], 0.8 * mm, stroke=0, fill=1)
+        logo_path = os.path.join(
+            os.path.dirname(__file__), "static", "openledger-icon-white.png"
+        )
+        if os.path.isfile(logo_path):
+            canvas.drawImage(
+                logo_path,
+                18 * mm,
+                A4[1] - 15.3 * mm,
+                width=7.2 * mm,
+                height=7.2 * mm,
+                preserveAspectRatio=True,
+                mask="auto",
+            )
         canvas.setFont(bold_font, 10)
         canvas.setFillColor(colors.white)
-        canvas.drawString(18 * mm, A4[1] - 12 * mm, "OPENLEDGER")
+        canvas.drawString(27.5 * mm, A4[1] - 12 * mm, "OPENLEDGER")
         canvas.setFont(regular_font, 7.5)
-        canvas.setFillColor(colors.HexColor("#C4D5E2"))
+        canvas.setFillColor(colors.HexColor("#DDD6FE"))
         canvas.drawRightString(
             A4[0] - 18 * mm,
             A4[1] - 12 * mm,

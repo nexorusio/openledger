@@ -27,9 +27,17 @@ def test_stacked_p2_pr_runs_broad_python_regressions():
     assert '"codex/rollback-to-p2"' in trigger and "main" in trigger
 
 
-def test_persistence_runs_for_prs_without_duplicate_feature_branch_push():
+def test_persistence_runs_for_prs_and_protected_branch_pushes_only():
     text = (ROOT / ".github/workflows/openledger-persistence.yml").read_text()
     push = text.split("  push:", 1)[1].split("  workflow_dispatch:", 1)[0]
-    assert "branches: [main]" in push
+    assert "branches: [main, dev]" in push
     assert "codex/p2-" not in push
-    assert "  pull_request:\n" in text
+    pull_request = text.split("  pull_request:", 1)[1].split("permissions:", 1)[0]
+    assert "branches: [main, dev]" in pull_request
+
+
+def test_main_pull_requests_must_be_promoted_from_dev():
+    text = (ROOT / ".github/workflows/promotion-policy.yml").read_text()
+    assert 'BASE_BRANCH" == "main"' in text
+    assert 'HEAD_BRANCH" != "dev"' in text
+    assert "Pull requests into main must be promoted from dev." in text

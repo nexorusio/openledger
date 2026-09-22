@@ -7,14 +7,14 @@
 {% block content %}
 <section class="page-heading relationship-page-heading">
     <div>
-        <p class="eyebrow">Working evidence · {{ 'Cross-case correlations' if mode == 'shared' else 'Draft Persona' }}</p>
-        <h1>{{ 'Working cross-case correlations' if mode == 'shared' else 'Working evidence graph' }}</h1>
-        <p class="page-description">These are working investigative leads. Final Persona graphs are projected from an explicitly QC-approved version.</p>
+        <p class="eyebrow">{{ 'Approved Persona' if approved_only else 'Working evidence' }} · {{ 'Cross-case correlations' if mode == 'shared' else ('Approved evidence' if approved_only else 'Draft Persona') }}</p>
+        <h1>{{ 'Working cross-case correlations' if mode == 'shared' else ('Approved Persona evidence graph' if approved_only else 'Working evidence graph') }}</h1>
+        <p class="page-description">This view makes evidence paths inspectable. It never infers a relationship from a visual proximity or an AI summary.</p>
     </div>
 </section>
 
 <nav class="relationship-mode-tabs" aria-label="Relationship workspace mode">
-    <a class="{{ 'active' if mode == 'persona' else '' }}" href="{{ url_for('relationships_workspace', mode='persona', case_id=selected_case_id, persona_id=selected_persona_id, view='working') }}" {{ 'aria-current=page' if mode == 'persona' }}>
+    <a class="{{ 'active' if mode == 'persona' else '' }}" href="{{ url_for('pipeline.relationships', case_id=selected_case_id, persona_id=selected_persona_id) if approved_only else url_for('relationships_workspace', mode='persona', case_id=selected_case_id, persona_id=selected_persona_id) }}" {{ 'aria-current=page' if mode == 'persona' }}>
         <i data-lucide="contact-round"></i><span><strong>Persona evidence</strong><small>One person, attributes, and provenance</small></span>
     </a>
     <a class="{{ 'active' if mode == 'shared' else '' }}" href="{{ url_for('relationships_workspace', mode='shared', case_id=selected_case_id) }}" {{ 'aria-current=page' if mode == 'shared' }}>
@@ -25,7 +25,10 @@
 <section class="relationship-policy" aria-label="Evidence policy">
     <i data-lucide="{{ 'file-search-2' if mode == 'persona' else 'shield-check' }}"></i>
     <div>
-        {% if mode == 'persona' %}
+        {% if approved_only %}
+        <strong>Complete approved evidence paths</strong>
+        <span>Every approved P2 finding and every retained supporting observation is shown without a claim or source limit. Review decisions remain available in the Persona workspace.</span>
+        {% elif mode == 'persona' %}
         <strong>Review status remains visible</strong>
         <span>Approved, pending, and uncertain records can be traced to their sources. Rejected records are excluded from the graph but retained in the audit trail.</span>
         {% elif combined_scope %}
@@ -88,9 +91,9 @@
             <section class="relationship-control-section">
                 <label for="relationshipLayout" class="relationship-control-label">Layout</label>
                 <select id="relationshipLayout" class="relationship-layout-select" {{ 'disabled' if not has_graph }}>
-                    <option value="force">Force-directed</option>
+                    <option value="concentric" selected>Stable evidence network</option>
+                    <option value="force">Force-directed evidence network</option>
                     <option value="hierarchical">Hierarchical evidence flow</option>
-                    <option value="concentric">Concentric investigation</option>
                 </select>
                 <button type="button" class="relationship-action-button" id="fitRelationshipGraph" {{ 'disabled' if not has_graph }}><i data-lucide="maximize-2"></i>Fit visible graph</button>
             </section>
@@ -156,6 +159,7 @@
             <div class="relationship-view-switch" role="group" aria-label="Workspace view">
                 <button type="button" class="active" id="relationshipGraphViewButton" aria-pressed="true" aria-controls="relationshipGraphView"><i data-lucide="share-2"></i>Graph</button>
                 <button type="button" id="relationshipTableViewButton" aria-pressed="false" aria-controls="relationshipTableView"><i data-lucide="table-2"></i>Table</button>
+                <button type="button" id="relationshipFullscreenButton" aria-pressed="false" aria-controls="relationshipGraph"><i data-lucide="maximize-2"></i>Full screen</button>
             </div>
         </header>
         {% if has_graph %}

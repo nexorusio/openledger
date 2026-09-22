@@ -1,0 +1,30 @@
+name: Branch promotion policy
+
+on:
+  pull_request:
+    branches: [main, dev]
+    types: [opened, synchronize, reopened, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  route:
+    name: Require feature to dev to main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate pull request route
+        env:
+          BASE_BRANCH: ${{ github.base_ref }}
+          HEAD_BRANCH: ${{ github.head_ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$BASE_BRANCH" == "main" && "$HEAD_BRANCH" != "dev" ]]; then
+            echo "Pull requests into main must be promoted from dev." >&2
+            exit 1
+          fi
+          if [[ "$BASE_BRANCH" == "dev" && "$HEAD_BRANCH" == "main" ]]; then
+            echo "main cannot be merged back into dev as a development change." >&2
+            exit 1
+          fi
+          echo "Approved branch route: $HEAD_BRANCH -> $BASE_BRANCH"

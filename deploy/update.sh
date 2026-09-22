@@ -8,7 +8,7 @@ Usage: bash deploy/update.sh --commit <reviewed-full-P2-commit> --manifest <revi
 Deploy only p2-e2e-v1 from an exact clean reviewed commit and immutable image.
 This updater never fetches, pulls, checks out, builds, or selects latest/main.
 --check performs read-only checkout, image, manifest and database checks.
-The running database must be b3e9d7c4a610, e2e1a7c9d401 or e2e2b8d0a502. A stopped database
+The running database must be b3e9d7c4a610, e2e1a7c9d401, e2e2b8d0a502, e2e3c9d1f703 or e2e4d0e2a804. A stopped database
 must be inspected and started separately. No downgrade or legacy fallback exists.
 An application/worker mismatch stops BOTH runtimes and preserves the new schema.
 EOF
@@ -32,7 +32,7 @@ DEPLOY_DIR="${REPO_ROOT}/deploy"
 ENV_FILE="${DEPLOY_DIR}/.env"
 COMPOSE_FILE="${DEPLOY_DIR}/compose.yaml"
 BACKUP_DIR="${REPO_ROOT}/runtime/backups"
-TARGET_SCHEMA=e2e2b8d0a502
+TARGET_SCHEMA=e2e4d0e2a804
 fail() { echo "P2 update refused: $*" >&2; exit 1; }
 cd "${REPO_ROOT}"
 [[ -f "${ENV_FILE}" ]] || fail "Restore the existing deployment configuration first."
@@ -71,8 +71,8 @@ verify_running_database() {
         -c 'SELECT version_num FROM public.alembic_version ORDER BY version_num;')"; then
         fail "Could not read the existing database revision."
     fi
-    [[ "${DATABASE_REVISION}" == "b3e9d7c4a610" || "${DATABASE_REVISION}" == "e2e1a7c9d401" || "${DATABASE_REVISION}" == "${TARGET_SCHEMA}" ]] || \
-        fail "Database must have exactly approved source b3e9d7c4a610, e2e1a7c9d401 or target ${TARGET_SCHEMA}; no downgrade is permitted."
+    [[ "${DATABASE_REVISION}" == "b3e9d7c4a610" || "${DATABASE_REVISION}" == "e2e1a7c9d401" || "${DATABASE_REVISION}" == "e2e2b8d0a502" || "${DATABASE_REVISION}" == "e2e3c9d1f703" || "${DATABASE_REVISION}" == "${TARGET_SCHEMA}" ]] || \
+        fail "Database must have exactly approved source b3e9d7c4a610, e2e1a7c9d401, e2e2b8d0a502, e2e3c9d1f703 or target ${TARGET_SCHEMA}; no downgrade is permitted."
 }
 # All checks before --check exit are read-only. No service start, build, pull,
 # migration, credential bootstrap, generated files or database writes occur here.
@@ -143,6 +143,24 @@ verify_running_database
 compose run --rm --no-deps migrate
 verify_running_database
 [[ "${DATABASE_REVISION}" == "${TARGET_SCHEMA}" ]]
+if [[ ${#COMPOSE_PROFILE_ARGS[@]} -gt 0 ]]; then
+    # The settings file is a bind mount, but SearXNG reads it only at process
+    # startup. Recreate the pinned service while ingress is stopped so search
+    # engine changes from this reviewed release actually take effect.
+    compose up -d --no-deps --no-build --force-recreate searxng
+    SEARCH_READY=false
+    for _ in $(seq 1 30); do
+        if compose exec -T searxng \
+            /usr/local/searxng/.venv/bin/python -c \
+            "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/', timeout=3)" \
+            >/dev/null 2>&1; then
+            SEARCH_READY=true
+            break
+        fi
+        sleep 2
+    done
+    [[ "${SEARCH_READY}" == "true" ]] || fail "Private SearXNG did not become ready."
+fi
 compose up -d --no-deps --no-build app worker
 READY=false
 for _ in $(seq 1 45); do

@@ -4,18 +4,30 @@
     const sidebarToggle = document.getElementById('sidebarToggle');
     const sidebarClose = document.getElementById('sidebarClose');
     const sidebarBackdrop = document.getElementById('sidebarBackdrop');
-    const themeToggle = document.getElementById('themeToggle');
+    const workspaceClock = document.getElementById('workspaceClock');
     const desktopQuery = window.matchMedia('(min-width: 992px)');
 
-    function setTheme(theme) {
-        html.setAttribute('data-bs-theme', theme);
-        localStorage.setItem('openledger-theme', theme);
-        if (themeToggle) {
-            themeToggle.setAttribute(
-                'aria-label',
-                theme === 'dark' ? 'Use light theme' : 'Use dark theme'
-            );
-        }
+    function setOperationalTheme() {
+        html.setAttribute('data-bs-theme', 'dark');
+        localStorage.removeItem('openledger-theme');
+    }
+
+    function updateWorkspaceClock() {
+        if (!workspaceClock) return;
+        const parts = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Jakarta',
+            day: '2-digit',
+            month: 'short',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            hour12: false
+        }).formatToParts(new Date());
+        const values = Object.fromEntries(
+            parts.filter(part => part.type !== 'literal')
+                .map(part => [part.type, part.value])
+        );
+        workspaceClock.textContent = `${values.day} ${values.month.toUpperCase()} ${values.year} · ${values.hour}:${values.minute} WIB`;
     }
 
     function closeMobileSidebar() {
@@ -36,8 +48,9 @@
         }
     }
 
-    const storedTheme = localStorage.getItem('openledger-theme');
-    setTheme(storedTheme || 'dark');
+    setOperationalTheme();
+    updateWorkspaceClock();
+    if (workspaceClock) window.setInterval(updateWorkspaceClock, 30000);
 
     if (
         shell &&
@@ -56,16 +69,81 @@
     if (sidebarBackdrop) {
         sidebarBackdrop.addEventListener('click', closeMobileSidebar);
     }
-    if (themeToggle) {
-        themeToggle.addEventListener('click', function () {
-            setTheme(html.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark');
-        });
-    }
     if (shell) desktopQuery.addEventListener('change', closeMobileSidebar);
 
     document.addEventListener('keydown', function (event) {
         if (event.key === 'Escape') closeMobileSidebar();
     });
+
+    function initializeSortableTable(table) {
+        const buttons = Array.from(table.querySelectorAll('[data-sort-column]'));
+        if (!buttons.length || !table.tBodies.length) return;
+        if (table.dataset.serverSort === 'true') {
+            const parameters = new URLSearchParams(window.location.search);
+            const activeKey = parameters.get('sort') || 'default';
+            const activeDirection = parameters.get('direction') || 'ascending';
+            buttons.forEach(function (button) {
+                button.addEventListener('click', function () {
+                    const key = button.dataset.sortKey;
+                    parameters.set('sort', key);
+                    parameters.set(
+                        'direction',
+                        activeKey === key && activeDirection === 'ascending'
+                            ? 'descending'
+                            : 'ascending'
+                    );
+                    parameters.delete('page');
+                    window.location.assign(
+                        window.location.pathname + '?' + parameters.toString()
+                        + '#operator-review'
+                    );
+                });
+            });
+            return;
+        }
+        let activeColumn = null;
+        let direction = 'ascending';
+
+        function valueFor(row, column) {
+            const cell = row.cells[column];
+            return String(cell?.dataset.sortValue || cell?.textContent || '').trim();
+        }
+
+        function applySort() {
+            if (activeColumn === null) return;
+            const body = table.tBodies[0];
+            const rows = Array.from(body.rows).filter(row => row.cells.length > activeColumn);
+            rows.sort(function (left, right) {
+                const comparison = valueFor(left, activeColumn).localeCompare(
+                    valueFor(right, activeColumn),
+                    undefined,
+                    { numeric: true, sensitivity: 'base' }
+                );
+                return direction === 'ascending' ? comparison : -comparison;
+            });
+            rows.forEach(row => body.appendChild(row));
+        }
+
+        buttons.forEach(function (button) {
+            button.addEventListener('click', function () {
+                const column = Number(button.dataset.sortColumn);
+                direction = activeColumn === column && direction === 'ascending'
+                    ? 'descending'
+                    : 'ascending';
+                activeColumn = column;
+                buttons.forEach(function (candidate) {
+                    const selected = Number(candidate.dataset.sortColumn) === activeColumn;
+                    candidate.closest('th')?.setAttribute(
+                        'aria-sort', selected ? direction : 'none'
+                    );
+                });
+                applySort();
+            });
+        });
+        table.addEventListener('openledger:table-updated', applySort);
+    }
+
+    document.querySelectorAll('[data-sortable-table]').forEach(initializeSortableTable);
 
     const caseDeleteForms = document.querySelectorAll('.case-delete-form');
     const caseDeleteElement = document.getElementById('caseDeleteModal');

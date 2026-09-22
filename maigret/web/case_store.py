@@ -2449,6 +2449,8 @@ class CaseStore:
         persona_id: str,
         usernames: Optional[Iterable[str]] = None,
         options: Optional[Dict[str, Any]] = None,
+        *,
+        allow_identifier_free_approved_research: bool = False,
     ) -> str:
         """Queue a fresh collection for one existing persona in the same case."""
         now = utcnow()
@@ -2535,7 +2537,17 @@ class CaseStore:
                 dict(investigation_spec) if isinstance(investigation_spec, dict) else {}
             )
             if not queued_usernames and not specification.get("identifiers"):
-                raise ValueError("No investigation identifiers are available")
+                from maigret.web.pipeline_enqueue import (
+                    approved_research_questions,
+                    approved_source_fetch_urls,
+                )
+
+                questions = approved_research_questions(specification)
+                source_urls = approved_source_fetch_urls(specification)
+                if not allow_identifier_free_approved_research or not (
+                    questions or source_urls
+                ):
+                    raise ValueError("No investigation identifiers are available")
             specification["pipeline_id"] = "p2-e2e-v1"
             if not explicit_plan and not grouped:
                 target_keys = {value.casefold() for value in queued_usernames}
@@ -2904,6 +2916,35 @@ class CaseStore:
                     pass
             elif event_type == "found":
                 progress["found"] = int(progress.get("found", 0)) + 1
+            elif (
+                event_type == "collector_planned"
+                and event.get("collector") == "approved_public_source_fetch"
+            ):
+                progress["total"] = max(
+                    0, int(event.get("total") or progress.get("total") or 0)
+                )
+            elif event_type == "approved_source_stage":
+                progress["phase"] = str(event.get("stage") or "source")[:64]
+                progress["message"] = str(event.get("message") or "")[:500]
+                progress["source_url"] = str(event.get("source_url") or "")[:8000]
+            elif (
+                event_type == "collector_completed"
+                and event.get("collector") == "approved_public_source_fetch"
+            ):
+                total = max(0, int(event.get("total") or progress.get("total") or 0))
+                progress["total"] = total
+                completed_task_ids = list(
+                    progress.get("approved_source_completed_task_ids") or []
+                )[:20]
+                task_id = str(event.get("task_id") or "")[:200]
+                if task_id and task_id not in completed_task_ids:
+                    completed_task_ids.append(task_id)
+                progress["approved_source_completed_task_ids"] = completed_task_ids
+                progress["checked"] = min(
+                    total or len(completed_task_ids), len(completed_task_ids)
+                )
+                progress["phase"] = "source_completed"
+                progress["source_url"] = str(event.get("source_url") or "")[:8000]
             progress_updates["progress"] = progress
             # Queueing and other control-plane events are not worker activity.
             # Only an owner-guarded runtime event may renew the worker lease.
@@ -8130,6 +8171,42 @@ class CaseStore:
                     "deletion cannot erase the existing research lineage."
                 )
 
+    @staticmethod
+    def _purge_pipeline_case_with_connection(connection, case_id):
+        """Erase one case's P2 records inside its confirmed deletion transaction.
+
+        Pipeline records stay immutable for normal operation.  A case deletion
+        is different: once all workers are terminal and the operator confirms
+        the exact title, there must not be an undeletable test/research case.
+        The authorization row is transactional and enables only DELETE triggers
+        for this one case; a rollback restores both the records and the guard.
+        """
+        authorization = metadata.tables["pipeline_case_purge_authorizations"]
+        connection.execute(insert(authorization).values(case_id=case_id))
+
+        # Runtime request allowances are scoped through pipeline_requests rather
+        # than carrying their own case_id. Delete them before the case-scoped
+        # request rows so PostgreSQL's RESTRICT foreign key can continue to
+        # protect every ordinary request deletion.
+        requests = metadata.tables["pipeline_requests"]
+        request_budgets = metadata.tables.get("pipeline_request_budgets")
+        if request_budgets is not None:
+            connection.execute(
+                delete(request_budgets).where(
+                    request_budgets.c.request_id.in_(
+                        select(requests.c.id).where(requests.c.case_id == case_id)
+                    )
+                )
+            )
+        for table in reversed(metadata.sorted_tables):
+            if (
+                not table.name.startswith("pipeline_")
+                or table.name == authorization.name
+                or "case_id" not in table.c
+            ):
+                continue
+            connection.execute(delete(table).where(table.c.case_id == case_id))
+
     def delete_job(
         self, job_id: str, *, confirmation_name: Optional[str] = None
     ) -> bool:
@@ -8244,13 +8321,13 @@ class CaseStore:
                 raise ActiveInvestigationError(
                     "Cases with active investigations cannot be deleted"
                 )
-            self._assert_pipeline_lineage_retained_with_connection(connection, case_id)
             if stored_case["case_type"] == "standalone":
                 references = self._combined_case_references_with_connection(
                     connection, case_id
                 )
                 if references:
                     raise ReferencedCaseError(references)
+            self._purge_pipeline_case_with_connection(connection, case_id)
             connection.execute(delete(cases).where(cases.c.id == case_id))
         return True
 

@@ -41,6 +41,10 @@ _CONTEXT_INPUTS = {
     "case_references": "case_reference",
     "snapshot_references": "snapshot_reference",
 }
+_CONTEXT_INPUT_LIMITS = {
+    "research_questions": (100, 10000),
+    "approved_research_questions": (100, 10000),
+}
 
 
 def runtime_source_status() -> dict[str, Any]:
@@ -222,16 +226,39 @@ def _source_snapshot(
     return result
 
 
-def _values(value: Any) -> list[str]:
+def _values(
+    value: Any,
+    *,
+    max_items: int = 24,
+    max_length: int = 2000,
+    strict_length: bool = False,
+) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
         value = [value]
     if not isinstance(value, (list, tuple)):
         raise ValueError("Query context inputs must be a bounded list.")
-    if len(value) > 24:
-        raise ValueError("Query context accepts at most 24 values per input type.")
-    return [str(item).strip()[:2000] for item in value if str(item).strip()]
+    if len(value) > max_items:
+        raise ValueError(
+            f"Query context accepts at most {max_items} values per input type."
+        )
+    values = [str(item).strip() for item in value if str(item).strip()]
+    if strict_length and any(len(item) > max_length for item in values):
+        raise ValueError(
+            f"Query context values must contain at most {max_length} characters."
+        )
+    return [item[:max_length] for item in values]
+
+
+def _context_values(context: Mapping[str, Any], name: str) -> list[str]:
+    max_items, max_length = _CONTEXT_INPUT_LIMITS.get(name, (24, 2000))
+    return _values(
+        context.get(name),
+        max_items=max_items,
+        max_length=max_length,
+        strict_length=name in _CONTEXT_INPUT_LIMITS,
+    )
 
 
 def _inputs(
@@ -279,15 +306,12 @@ def _inputs(
                     "value": row.get("source_value"),
                 },
             )
-    for url, usernames in (plan.get("profile_url_usernames") or {}).items():
-        for username in usernames:
-            add(
-                "username",
-                str(username),
-                derived_from={"type": "profile_url", "value": url},
-            )
+    # ``profile_url_usernames`` is display/provenance metadata.  A handle parsed
+    # from a supplied URL is not permission to scan the same spelling across
+    # unrelated platforms; only explicit username inputs/search targets route
+    # to username collectors.
     for name, kind in _CONTEXT_INPUTS.items():
-        for value in _values(context.get(name)):
+        for value in _context_values(context, name):
             add(kind, value, derived_from={"context": name, "operator_selected": True})
     return list(inputs.values())
 
@@ -329,7 +353,9 @@ def _missing_prerequisites(
             )
             met = met or value in _values(context.get("github_usernames"))
         elif prerequisite == "approved_research_question":
-            met = value in _values(context.get("approved_research_questions"))
+            met = value in _context_values(
+                context, "approved_research_questions"
+            )
         elif prerequisite == "operator_live_detail_request":
             met = context.get("operator_live_detail_request") is True
         elif prerequisite == "operator_submission":
@@ -459,10 +485,30 @@ def build_query_plan(
                     )
                 if not snapshot["enabled"]:
                     state, reason = "unavailable", snapshot["reason"]
-                if engine.option and not investigation_plan.get(engine.option):
+                if (
+                    engine.option
+                    and not investigation_plan.get(engine.option)
+                    and not (
+                        engine.engine_id == "unfurl_url_analysis"
+                        and item.get("type") == "profile_url"
+                        and item.get("value")
+                        not in investigation_plan.get("unresolved_profile_urls", [])
+                    )
+                ):
                     state, reason = (
                         "excluded",
                         "The operator has not selected this collection option.",
+                    )
+                elif (
+                    engine.engine_id == "unfurl_url_analysis"
+                    and item.get("type") == "profile_url"
+                    and item.get("value")
+                    not in investigation_plan.get("unresolved_profile_urls", [])
+                    and not investigation_plan.get(engine.option)
+                ):
+                    reason = (
+                        "Exact operator-supplied profile URL; local URL analysis "
+                        "preserves the target without making a network request."
                     )
                 if (
                     engine.engine_id == "user_scanner_username"

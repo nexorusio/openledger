@@ -38,6 +38,7 @@ def register_projection_schema(metadata):
         Column("evidence_revision", Integer, nullable=False, server_default="0"),
         Column("projected_revision", Integer, nullable=False, server_default="0"),
         Column("legacy_imported_at", DateTime(timezone=True)),
+        Column("legacy_converged_at", DateTime(timezone=True)),
         Column("updated_at", DateTime(timezone=True), nullable=False),
     )
     summaries = Table(

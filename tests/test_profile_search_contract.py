@@ -12,6 +12,8 @@ from maigret.web.profile_search_contract import (
     ProfileSearchEvidence,
     ProfileSearchProvenance,
     ProfileSearchQuery,
+    PublicImageSearchEvidence,
+    PublicImageSearchQuery,
 )
 
 
@@ -24,6 +26,38 @@ def _query():
         seed_value="alice_example",
         max_results=5,
     )
+
+
+def test_public_image_contract_keeps_source_and_image_lineage_bounded():
+    query = PublicImageSearchQuery(
+        query_id="approved-image:1",
+        query_text='"Jati Pratomo" "jati-pratomo"',
+        subject="Jati Pratomo",
+        approved_source_url="https://www.linkedin.com/in/jati-pratomo/",
+        max_results=3,
+    )
+    evidence = PublicImageSearchEvidence(
+        result_rank=1,
+        source_url="https://example.org/team/jati-pratomo",
+        image_url="https://cdn.example.org/jati.jpg",
+        thumbnail_url="https://thumbs.example.org/jati.jpg",
+        title="Jati Pratomo",
+        source="duckduckgo images",
+        engine="google images",
+        resolution="800 x 800",
+    )
+
+    assert query.as_dict()["query_fingerprint"] == query.fingerprint
+    assert evidence.as_dict()["source_url"].endswith("/team/jati-pratomo")
+    assert evidence.as_dict()["image_url"].endswith("/jati.jpg")
+    assert evidence.as_dict()["engine"] == "google images"
+
+    with pytest.raises(ProfileSearchContractError, match="public HTTPS URL"):
+        PublicImageSearchEvidence(
+            result_rank=2,
+            source_url="https://example.org/jati",
+            image_url="https://127.0.0.1/private.jpg",
+        )
 
 
 def test_contract_serializes_unverified_candidate_with_complete_lineage():

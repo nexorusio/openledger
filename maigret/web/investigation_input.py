@@ -226,7 +226,7 @@ def generate_username_variants(full_name: str) -> List[str]:
     return [
         candidate["value"]
         for candidate in rank_username_aliases([full_name])
-        if candidate.get("selected")
+        if int(candidate.get("score") or 0) >= 78
     ][:MAX_VARIANTS]
 
 
@@ -288,6 +288,7 @@ def build_investigation_plan(
     enable_user_scanner_username = "enable_user_scanner_username" in form
     enable_github_profile_enrichment = "enable_github_profile_enrichment" in form
     enable_archived_url_evidence = "enable_archived_url_evidence" in form
+    enable_approved_source_fetch = "enable_approved_source_fetch" in form
     requested_username_platforms = _form_list(form, "user_scanner_platform")
     if (
         enable_user_scanner_username
@@ -397,7 +398,10 @@ def build_investigation_plan(
             if not profile_usernames[normalized]:
                 unresolved_profile_urls.append(normalized)
             for username in profile_usernames[normalized]:
-                add_target(username, identifier_type, normalized)
+                # A handle parsed from an exact profile URL remains provenance
+                # for that URL.  It must not silently become a cross-platform
+                # username scan target (for example, LinkedIn jati-pratomo must
+                # not fan out into speculative jati.pratomo profiles).
                 confirmed_usernames.append(username)
         elif identifier_type == "full_name":
             normalized = _normalize_text(raw_value)
@@ -468,6 +472,16 @@ def build_investigation_plan(
         if generate_variants
         else []
     )
+    exact_profile_username_keys = {
+        str(username).casefold()
+        for usernames in profile_usernames.values()
+        for username in usernames
+    }
+    generated_aliases = [
+        candidate
+        for candidate in generated_aliases
+        if str(candidate["value"]).casefold() not in exact_profile_username_keys
+    ]
     generated_by_value = {
         str(candidate["value"]).casefold(): candidate for candidate in generated_aliases
     }
@@ -549,22 +563,6 @@ def build_investigation_plan(
                     f"{MAX_USER_SCANNER_USERNAME_TARGETS} total account targets. "
                     "Deselect aliases or disable the additional verification."
                 )
-        else:
-            selected_alias_count = 0
-            for candidate in alias_candidates:
-                candidate_key = str(candidate["value"]).casefold()
-                candidate["selected"] = bool(
-                    int(candidate["score"]) >= 78
-                    and candidate_key not in scanner_target_keys
-                    and len(scanner_target_keys) < MAX_USER_SCANNER_USERNAME_TARGETS
-                    and selected_alias_count < MAX_SELECTED_ALIASES
-                )
-                if candidate["selected"]:
-                    scanner_target_keys.add(candidate_key)
-                    selected_alias_count += 1
-            selected_aliases = [
-                candidate for candidate in alias_candidates if candidate.get("selected")
-            ]
     for candidate in selected_aliases:
         source_names = alias_source_names.get(str(candidate["value"]).casefold())
         if not source_names:
@@ -610,8 +608,18 @@ def build_investigation_plan(
         ),
         "",
     )
+    first_profile_username = next(
+        (
+            username
+            for usernames in profile_usernames.values()
+            for username in usernames
+        ),
+        "",
+    )
     subject_label = full_name or (
-        search_targets[0]["value"] if search_targets else identifiers[0]["value"]
+        search_targets[0]["value"]
+        if search_targets
+        else first_profile_username or identifiers[0]["value"]
     )
     if processing_mode == "same_subject":
         subject_groups = [
@@ -658,12 +666,13 @@ def build_investigation_plan(
                 )
                 continue
 
-            targets = (
-                profile_usernames[value]
+            targets = [] if identifier_type == "profile_url" else [value]
+            grouping_targets = (
+                profile_usernames.get(value, [])
                 if identifier_type == "profile_url"
-                else [value]
+                else targets
             )
-            target_keys = {target.casefold() for target in targets}
+            target_keys = {target.casefold() for target in grouping_targets}
             matching_groups = [
                 group
                 for group in subject_groups
@@ -675,7 +684,11 @@ def build_investigation_plan(
             if not matching_groups:
                 subject_groups.append(
                     {
-                        "label": targets[0] if targets else value,
+                        "label": (
+                            (profile_usernames.get(value) or [value])[0]
+                            if identifier_type == "profile_url"
+                            else targets[0]
+                        ),
                         "usernames": list(targets),
                         "identifiers": [identifier],
                         "account_group": True,
@@ -714,6 +727,7 @@ def build_investigation_plan(
         "allow_user_scanner_vxtwitter": allow_user_scanner_vxtwitter,
         "enable_github_profile_enrichment": enable_github_profile_enrichment,
         "enable_archived_url_evidence": enable_archived_url_evidence,
+        "enable_approved_source_fetch": enable_approved_source_fetch,
         "subject_label": subject_label,
         "subject_groups": subject_groups,
         "identifiers": identifiers,
@@ -731,6 +745,49 @@ def build_investigation_plan(
         "exclude_terms": parse_terms(form.get("exclude_terms", "")),
         "search_targets": search_targets,
         "profile_url_usernames": profile_usernames,
+    }
+
+
+def build_approved_research_plan(subject_label: Any) -> Dict[str, Any]:
+    """Build the server-owned plan for cited research without direct identifiers.
+
+    This path is deliberately separate from ``build_investigation_plan``: public
+    investigation submissions still require at least one validated identifier.
+    The caller must attach bounded, server-generated approved research questions
+    before the plan can be queued.
+    """
+    label = _normalize_text(subject_label)
+    if not label:
+        raise InvestigationInputError(
+            "Approved-evidence research requires an existing Persona label."
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "processing_mode": "same_subject",
+        "generate_name_variants": False,
+        "allow_ai_context": True,
+        "enable_user_scanner_email": False,
+        "enable_user_scanner_username": False,
+        "user_scanner_username_platforms": [],
+        "allow_user_scanner_vxtwitter": False,
+        "enable_github_profile_enrichment": False,
+        "enable_archived_url_evidence": False,
+        "enable_approved_source_fetch": False,
+        "subject_label": label,
+        "subject_groups": [{"label": label, "usernames": [], "identifiers": []}],
+        "identifiers": [],
+        "input_provenance": [],
+        "unresolved_profile_urls": [],
+        "phone_context": {},
+        "alias_nicknames": [],
+        "alias_context_numbers": [],
+        "alias_candidates": [],
+        "tags": [],
+        "excluded_tags": [],
+        "include_terms": [],
+        "exclude_terms": [],
+        "search_targets": [],
+        "profile_url_usernames": {},
     }
 
 
@@ -805,7 +862,6 @@ def public_identifier_scope(plan: Any) -> Dict[str, List[Dict[str, Any]]]:
                     continue
                 if normalized.casefold() not in {item.casefold() for item in linked}:
                     linked.append(normalized)
-                    add("username", normalized)
             if not linked:
                 raw_linked = [
                     target.get("value")
@@ -823,7 +879,6 @@ def public_identifier_scope(plan: Any) -> Dict[str, List[Dict[str, Any]]]:
                         item.casefold() for item in linked
                     }:
                         linked.append(normalized)
-                        add("username", normalized)
             profile_urls.append({"url": url, "usernames": linked})
         elif identifier_type in {"full_name", "email", "phone"}:
             add(identifier_type, value)

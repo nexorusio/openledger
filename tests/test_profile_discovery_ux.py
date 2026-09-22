@@ -62,21 +62,57 @@ def test_live_ux_exposes_runtime_and_recovery_states_without_auto_approval():
     ).read_text(encoding="utf-8")
 
 
-def test_live_graph_and_pipeline_workspace_keep_collection_separate_from_approval():
+def test_live_progress_and_pipeline_workspace_keep_collection_separate_from_approval():
     live = (ROOT / "maigret" / "web" / "templates" / "live.html").read_text(
         encoding="utf-8"
     )
-    pipeline = (
-        ROOT / "maigret" / "web" / "templates" / "pipeline_workspace.html"
-    ).read_text(encoding="utf-8")
+    pipeline = "\n".join(
+        (
+            ROOT / "maigret" / "web" / "templates" / name
+        ).read_text(encoding="utf-8")
+        for name in ("persona.html", "_persona_pipeline_review.html")
+    )
 
-    # Discovery continues to render unverified candidate connections, while
+    # Discovery shows source execution without drawing premature relationships;
     # operator action is limited to the evidence-ranked shortlist.
-    for required in ("Live engine progress", "addCandidate(ev)", "updateCollector"):
+    for required in ("Live engine progress", "updateCollector"):
         assert required in live
-    assert "Automated ranked curated findings" in pipeline
-    assert "Approve curated finding" in pipeline
+    for forbidden in ('id="graph"', "addCandidate(ev)", "vis.Network"):
+        assert forbidden not in live
+    assert "assessment-review-table" in pipeline
+    assert "Review queue" in pipeline
+    assert "Engine log" in pipeline
+    assert "Proceed to approved Persona" in pipeline
+    assert "Decision note (optional)" in pipeline
+    assert "Decision note (required)" not in pipeline
+    assert "shortlist_sections" not in pipeline
+    assert "Digital presence" not in live
+    assert ">Approve<" in pipeline
+    assert ">Reject<" in pipeline
+    assert ">Keep in queue<" in pipeline
+    assert "Edit decision" in pipeline
     assert "Record decision" not in pipeline
+
+
+def test_assessment_explains_reconciliation_and_plain_language_engine_results():
+    pipeline = "\n".join(
+        (
+            ROOT / "maigret" / "web" / "templates" / name
+        ).read_text(encoding="utf-8")
+        for name in ("persona.html", "_persona_pipeline_review.html")
+    )
+
+    for required in (
+        "Evidence reconciliation is required",
+        "Reconcile evidence",
+        "submitted values retained",
+        "sources could not check",
+        "What these results mean",
+        "No match:",
+        "Could not check:",
+        "internal hypothesis groups are retained for audit and are not a discovery count",
+    ):
+        assert required in pipeline
 
 
 def test_active_case_has_a_safe_stop_then_archive_path():
@@ -84,9 +120,9 @@ def test_active_case_has_a_safe_stop_then_archive_path():
         encoding="utf-8"
     )
     app = (ROOT / "maigret" / "web" / "app.py").read_text(encoding="utf-8")
-    assert "Stop and archive case" in case_template
-    assert "stop_and_archive_case_workspace" in case_template
-    assert '"/cases/<case_id>/stop-and-archive"' in app
+    assert "Stop collection" in case_template
+    assert "stop_and_delete_case_workspace" in case_template
+    assert '"/cases/<case_id>/stop-and-delete"' in app
 
 
 def test_partial_outcomes_are_distinct_in_history_and_results():

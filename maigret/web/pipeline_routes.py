@@ -1,13 +1,12 @@
-"""Operator curation and explicit QC for the complete P2 pipeline.
-
-Every presentation endpoint projects the stored version manifest. Neither a legacy
-approved claim nor an export request may designate a Persona as final.
-"""
+"""Operator curation and immutable report snapshots for the complete pipeline."""
 
 from __future__ import annotations
 
 import io
 import json
+import math
+import re
+from datetime import datetime, timezone
 from functools import wraps
 from typing import Any
 from urllib.parse import urlsplit
@@ -24,6 +23,7 @@ from flask import (
     session,
     url_for,
 )
+from maigret.web.map_tiles import browser_map_tile_url
 
 PIPELINE_ID = "p2-e2e-v1"
 
@@ -45,7 +45,20 @@ def public_url(value):
     return ''
 
 
-def version_projection(version):
+def persona_report_filename(projection):
+    """Create a useful, filesystem-safe report name for investigators."""
+    def slug(value):
+        value = re.sub(r"[^A-Za-z0-9]+", "-", str(value or "").strip())
+        return value.strip("-")[:72] or "untitled"
+
+    date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return (
+        f"OpenLedger-Investigation-{slug(projection.get('case_title'))}-"
+        f"{slug(projection.get('subject_name'))}-{date}.pdf"
+    )
+
+
+def version_projection(version, *, subject_name="", case_title=""):
     """One manifest contract shared by HTML, graph, JSON and PDF."""
     manifest = version['manifest']
     items = manifest.get('items', [])
@@ -57,7 +70,8 @@ def version_projection(version):
         'approved': 'Final Persona',
         'withdrawn': 'Withdrawn Persona',
         'superseded': 'Superseded final Persona',
-    }.get(status, 'Draft Persona')
+    }.get(status, 'Reviewed Investigation Snapshot')
+    scope = manifest.get('scope', '')
     return {
         'pipeline_id': manifest.get('pipeline_id', PIPELINE_ID),
         'case_id': manifest['case_id'],
@@ -70,7 +84,13 @@ def version_projection(version):
         'label': label,
         'publication_status': publication,
         'review_needed': version.get('review_needed', False),
-        'scope': manifest.get('scope', ''),
+        'scope': scope,
+        'subject_name': (
+            scope.get('subject_name') if isinstance(scope, dict) else ''
+        ) or subject_name or manifest['persona_id'],
+        'case_title': (
+            scope.get('case_title') if isinstance(scope, dict) else ''
+        ) or case_title or manifest['case_id'],
         'limitations': manifest.get('limitations', []),
         'items': items,
         'exclusions': manifest.get('exclusions', []),
@@ -175,6 +195,11 @@ def register_pipeline_routes(
     launch_research=None,
     prepare_workspace=None,
     submit_manual_evidence=None,
+    launch_approved_discovery=None,
+    launch_approved_source_fetch=None,
+    geocode_approved_location=None,
+    affiliation_public_web_enabled=None,
+    google_places_enabled=None,
 ):
     from maigret.web.pipeline_store import PipelineStore
 
@@ -198,6 +223,427 @@ def register_pipeline_routes(
 
     def actor():
         return session.get('username') or 'local-operator'
+
+    def approved_persona(case_id, persona_id):
+        from maigret.web.persona_schema import (
+            PERSONA_SECTIONS,
+            display_label,
+            presentation_predicate,
+            section_for,
+        )
+        from maigret.web.pipeline_store import SHORTLIST_SECTIONS
+
+        # This is the same information architecture as the original Persona
+        # workspace: a subject area contains named fields, rather than a flat
+        # stream of arbitrary approved rows. Keep the P2 section keys stable so
+        # collection coverage and empty-state logic remain unchanged.
+        persona_fields = {
+            section["key"]: section["fields"] for section in PERSONA_SECTIONS
+        }
+
+        current = store()
+        included_rows = list(
+            current.iter_included_groups(
+                case_id, persona_id, include_observations=True
+            )
+        )
+        included_account_keys = {
+            str(value)
+            for row in included_rows
+            if row.get("kind") == "account"
+            for value in (
+                (row.get("normalized") or {}).get("key"),
+                (row.get("normalized") or {}).get("canonical_key"),
+            )
+            if value
+        }
+        raw_items = []
+        for row in included_rows:
+            normalized = dict(row.get("normalized") or {})
+            predicate = str(
+                normalized.get("predicate")
+                or normalized.get("field_name")
+                or ""
+            ).casefold()
+            if (
+                row.get("kind") == "claim"
+                and predicate == "social_account"
+                and str(normalized.get("account_key") or "")
+                in included_account_keys
+            ):
+                continue
+            value = normalized.get("value")
+            label = (
+                normalized.get("display_value")
+                or (value.get("url") if isinstance(value, dict) else value)
+                or normalized.get("canonical_url")
+                or normalized.get("url")
+                or normalized.get("handle")
+                or normalized.get("predicate")
+                or "Approved finding"
+            )
+            item_url = public_url(
+                normalized.get("canonical_url")
+                or normalized.get("url")
+                or (
+                    value.get("url")
+                    if isinstance(value, dict)
+                    else value if isinstance(value, str) else ""
+                )
+            )
+            raw_items.append(
+                {
+                    "id": row["id"],
+                    "kind": row["kind"],
+                    "normalized": normalized,
+                    "label": str(label),
+                    "url": item_url,
+                    "section": section_for(row["kind"], normalized),
+                    "decision_actor": row.get("decision_actor"),
+                    "decision_reason": row.get("decision_reason"),
+                    "observations": list(row.get("observations") or []),
+                    "coordinate_repair": any(
+                        bool(
+                            (
+                                (observation.get("payload") or {}).get("payload")
+                                or {}
+                            ).get("legacy_coordinate_repair")
+                        )
+                        for observation in row.get("observations") or []
+                    ),
+                }
+            )
+
+        def field_key(item):
+            return presentation_predicate(item["kind"], item["normalized"])
+
+        def field_label(key):
+            return (
+                "Other approved findings" if key == "other" else display_label(key)
+            )
+        # A group is the review/audit unit, but the Persona is a reader-facing
+        # projection. Merge exact field/value duplicates here while retaining
+        # every group and source in the record's evidence modal.
+        merged = {}
+        for item in raw_items:
+            key = field_key(item)
+            identity = (key, str(item["label"]).strip().casefold())
+            record = merged.setdefault(
+                identity,
+                {
+                    **item,
+                    "field_key": key,
+                    "group_ids": [item["id"]],
+                    "evidence": [],
+                },
+            )
+            if item["coordinate_repair"] and not record["coordinate_repair"]:
+                record["normalized"] = item["normalized"]
+                record["coordinate_repair"] = True
+            if item["id"] not in record["group_ids"]:
+                record["group_ids"].append(item["id"])
+            seen_observations = {entry["id"] for entry in record["evidence"]}
+            for observation in item["observations"]:
+                observation_id = str(observation.get("id") or "")
+                if not observation_id or observation_id in seen_observations:
+                    continue
+                seen_observations.add(observation_id)
+                record["evidence"].append(
+                    {
+                        "id": observation_id,
+                        "label": str(
+                            observation.get("engine")
+                            or observation.get("engine_id")
+                            or "Retained source"
+                        ),
+                        "url": public_url(
+                            observation.get("source_url")
+                            or observation.get("original_url")
+                        ),
+                        "outcome": str(
+                            observation.get("outcome")
+                            or observation.get("status")
+                            or "observed"
+                        ).replace("_", " "),
+                    }
+                )
+        items = list(merged.values())
+
+        source_urls = []
+        for item in raw_items:
+            url = str(item.get("url") or "").strip()
+            if url and url.casefold() not in {value.casefold() for value in source_urls}:
+                source_urls.append(url)
+        latest_source_fetches = {}
+        for observation in current.list_observations(
+            case_id, persona_id, limit=500
+        ):
+            if observation.get("engine") != "approved_public_source_fetch":
+                continue
+            payload = observation.get("payload") or {}
+            target_url = str(
+                payload.get("subject_value")
+                or observation.get("source_url")
+                or ""
+            ).strip()
+            if not target_url:
+                continue
+            latest_source_fetches[target_url.casefold()] = {
+                "status": str(payload.get("status") or observation.get("status") or ""),
+                "reason": str(payload.get("reason") or "").strip(),
+                "http_status": payload.get("http_status"),
+                "claim_candidate_count": (
+                    (payload.get("extra") or {}).get("claim_candidate_count", 0)
+                ),
+            }
+        for item in items:
+            item["source_fetch"] = latest_source_fetches.get(
+                str(item.get("url") or "").casefold()
+            )
+        photographs = [
+            item["url"]
+            for item in items
+            if str(item["normalized"].get("predicate") or "").casefold()
+            == "photograph"
+            and item["url"]
+        ]
+
+        def approved_hero_value(*predicates):
+            wanted = {str(predicate).casefold() for predicate in predicates}
+            for item in items:
+                predicate = str(
+                    item["normalized"].get("predicate") or ""
+                ).casefold()
+                if predicate in wanted and str(item.get("label") or "").strip():
+                    return str(item["label"]).strip()[:700]
+            return ""
+
+        hero = {
+            "summary": "",
+            "location": approved_hero_value("current_location"),
+            "affiliation": approved_hero_value(
+                "affiliation", "company", "organization", "organisation", "employer"
+            ),
+            "occupation": approved_hero_value("occupation", "job_title", "role"),
+        }
+        name = approved_hero_value("full_name", "display_name", "name")
+        subject = name or "This person"
+        clauses = []
+        if hero["occupation"] and hero["affiliation"]:
+            clauses.append(
+                f"{subject} is {hero['occupation']} at {hero['affiliation']}"
+            )
+        elif hero["occupation"]:
+            clauses.append(f"{subject} is {hero['occupation']}")
+        elif hero["affiliation"]:
+            clauses.append(f"{subject} is associated with {hero['affiliation']}")
+        if hero["location"]:
+            clauses.append(f"Based in {hero['location']}")
+        raw_summary = approved_hero_value(
+            "summary", "biography", "bio", "about", "description"
+        )
+        if not clauses and raw_summary:
+            clauses.append(raw_summary)
+        hero["summary"] = ". ".join(clauses).rstrip(".") + "." if clauses else ""
+        # A narrative introduces the profile; the evidence register remains
+        # the source of record. Do not repeat raw or derived summaries as a
+        # separate Persona field.
+        items = [item for item in items if field_key(item) != "summary"]
+        for index, item in enumerate(items, start=1):
+            item["modal_id"] = f"persona-evidence-{index}"
+            item["evidence_count"] = len(item.get("evidence") or [])
+        map_points = []
+        for item in items:
+            normalized = item["normalized"]
+            predicate = str(normalized.get("predicate") or "").casefold()
+            if predicate not in {
+                "address",
+                "current_location",
+                "organization_location",
+            }:
+                continue
+            qualifiers = (
+                normalized.get("qualifiers")
+                if isinstance(normalized.get("qualifiers"), dict)
+                else {}
+            )
+            try:
+                latitude = float(qualifiers.get("latitude"))
+                longitude = float(qualifiers.get("longitude"))
+            except (TypeError, ValueError):
+                continue
+            if (
+                math.isfinite(latitude)
+                and math.isfinite(longitude)
+                and -90 <= latitude <= 90
+                and -180 <= longitude <= 180
+            ):
+                map_points.append(
+                    {
+                        "id": item["id"],
+                        "label": item["label"],
+                        "latitude": latitude,
+                        "longitude": longitude,
+                        "predicate": predicate,
+                        "precision": qualifiers.get("coordinate_precision")
+                        or "place",
+                    }
+                )
+        return {
+            "items": items,
+            "photograph": photographs[0] if photographs else "",
+            "hero": hero,
+            "map_points": map_points,
+            "source_urls": source_urls,
+            "source_fetches": latest_source_fetches,
+            "sections": [
+                {
+                    "key": key,
+                    "title": title,
+                    "items": [item for item in items if item["section"] == key],
+                    "fields": [
+                        {
+                            "key": field_name,
+                            "label": field_label(field_name),
+                            "items": [
+                                item
+                                for item in items
+                                if item["section"] == key and field_key(item) == field_name
+                            ],
+                        }
+                        for field_name, _field_label in persona_fields[key]
+                    ]
+                    + [
+                        {
+                            "key": extra_key,
+                            "label": field_label(extra_key),
+                            "items": [
+                                item
+                                for item in items
+                                if item["section"] == key and field_key(item) == extra_key
+                            ],
+                        }
+                        for extra_key in sorted(
+                            {
+                                field_key(item)
+                                for item in items
+                                if item["section"] == key
+                                and field_key(item)
+                                not in {name for name, _label in persona_fields[key]}
+                            }
+                        )
+                    ],
+                }
+                for key, title in SHORTLIST_SECTIONS
+            ],
+        }
+
+    def approved_relationship_graph(case_id, persona_id, subject):
+        """Project every approved P2 group and supporting observation."""
+        current = store()
+        rows = list(
+            current.iter_included_groups(
+                case_id, persona_id, include_observations=True
+            )
+        )
+        subject_node = 'persona:' + persona_id
+        nodes = [
+            {
+                'id': subject_node,
+                'kind': 'persona',
+                'label': subject.get('display_name') or persona_id,
+                'persona_id': persona_id,
+                'case_id': case_id,
+                'case_title': subject.get('case_title') or '',
+            }
+        ]
+        edges = []
+        field_counts = {}
+        evidence_seen = set()
+        for row in rows:
+            normalized = dict(row.get('normalized') or {})
+            predicate = str(
+                normalized.get('predicate')
+                or normalized.get('field_name')
+                or row.get('kind')
+                or 'finding'
+            ).casefold()
+            value = normalized.get('value')
+            label = (
+                normalized.get('display_value')
+                or (value.get('url') if isinstance(value, dict) else value)
+                or normalized.get('canonical_url')
+                or normalized.get('url')
+                or normalized.get('handle')
+                or predicate
+            )
+            group_node = 'claim:' + row['id']
+            field_counts[predicate] = field_counts.get(predicate, 0) + 1
+            probability = (
+                ((row.get('assessment') or {}).get('probability') or {}).get('value')
+            )
+            confidence = (
+                round(float(probability) * 100)
+                if isinstance(probability, (int, float))
+                else None
+            )
+            nodes.append(
+                {
+                    'id': group_node,
+                    'kind': 'claim',
+                    'label': str(label),
+                    'claim_id': row['id'],
+                    'field_name': predicate,
+                    'confidence': confidence,
+                    'review_status': 'approved',
+                    'evidence_count': len(row.get('observations') or []),
+                }
+            )
+            edges.append(
+                {
+                    'id': 'persona-group:' + row['id'],
+                    'from': subject_node,
+                    'to': group_node,
+                    'label': 'approved ' + predicate.replace('_', ' '),
+                    'field_name': predicate,
+                }
+            )
+            for observation in row.get('observations') or []:
+                evidence_id = str(observation['id'])
+                source_node = 'source:' + evidence_id
+                if evidence_id not in evidence_seen:
+                    nodes.append(
+                        {
+                            'id': source_node,
+                            'kind': 'source',
+                            'label': observation.get('engine') or evidence_id,
+                            'url': public_url(observation.get('source_url')),
+                            'evidence_type': observation.get('status') or 'observation',
+                        }
+                    )
+                    evidence_seen.add(evidence_id)
+                edges.append(
+                    {
+                        'id': 'group-source:' + row['id'] + ':' + evidence_id,
+                        'from': group_node,
+                        'to': source_node,
+                        'label': 'evidence from',
+                        'field_name': predicate,
+                    }
+                )
+        return {
+            'mode': 'persona',
+            'nodes': nodes,
+            'edges': edges,
+            'stats': {
+                'persona_count': 1,
+                'claim_count': len(rows),
+                'source_count': len(evidence_seen),
+                'pending_count': 0,
+                'field_counts': field_counts,
+                'truncated_count': 0,
+            },
+        }
 
     def payload():
         if request.is_json:
@@ -261,6 +707,71 @@ def register_pipeline_routes(
             code=303,
         )
 
+    def review_queue_redirect(case_id, persona_id, message):
+        """Return form submissions to the actionable review queue."""
+        flash(message, "warning")
+        return redirect(
+            url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+            + "#operator-review",
+            code=303,
+        )
+
+    def collection_action_block_reason(workspace_data):
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            return "Reconcile submitted and retained evidence in Step 1 before collecting more."
+        if workspace_data["review_pending_count"]:
+            return "Resolve the review queue in Step 1 before collecting more."
+        return ""
+
+    def render_persona_page(
+        subject,
+        workspace_data,
+        projection,
+        *,
+        active_tab,
+        page=1,
+        history_page=1,
+        review_sort="default",
+        review_direction="ascending",
+        review_filter="all",
+    ):
+        """One Persona shell for draft, review, and approved P2 states."""
+        collection_block_reason = collection_action_block_reason(workspace_data)
+        return render_template(
+            "persona.html",
+            source_model="pipeline",
+            active_tab=active_tab,
+            persona=subject,
+            approved=projection,
+            workspace=workspace_data,
+            page=page,
+            page_size=25,
+            history_page=history_page,
+            review_sort=review_sort,
+            review_direction=review_direction,
+            review_filter=review_filter,
+            qc_allowed=current_auth_role() == "admin",
+            research_available=launch_research is not None,
+            preparation_available=prepare_workspace is not None,
+            collection_available=bool(projection["items"]) and bool(
+                launch_approved_discovery
+                or (launch_approved_source_fetch and projection["source_urls"])
+            ),
+            collection_actions_blocked=bool(collection_block_reason),
+            collection_action_block_reason=collection_block_reason,
+            affiliation_public_web_available=bool(
+                affiliation_public_web_enabled and affiliation_public_web_enabled()
+            ),
+            google_places_available=bool(
+                google_places_enabled and google_places_enabled()
+            ),
+            map_tile_url=browser_map_tile_url(),
+        )
+
     @bp.errorhandler(ValueError)
     def invalid_transition(error):
         body = {'error': str(error), 'findings': getattr(error, 'findings', [])}
@@ -303,22 +814,28 @@ def register_pipeline_routes(
         persona = scoped_persona(case_id, persona_id)
         page = max(1, request.args.get("page", 1, type=int))
         history_page = max(1, request.args.get("history_page", 1, type=int))
+        review_sort = request.args.get("sort", "default", type=str)
+        review_direction = request.args.get("direction", "ascending", type=str)
+        review_filter = request.args.get("decision", "all", type=str)
         data = store().get_workspace(
             case_id,
             persona_id,
             limit=25,
             offset=(page - 1) * 25,
             history_offset=(history_page - 1) * 25,
+            review_sort=review_sort,
+            review_direction=review_direction,
+            review_filter=review_filter,
         )
-        return render_template(
-            "pipeline_workspace.html",
-            workspace=data,
-            persona=persona,
+        return render_persona_page(
+            persona,
+            data,
+            approved_persona(case_id, persona_id),
+            active_tab="review",
             page=page,
-            page_size=25,
-            qc_allowed=current_auth_role() == "admin",
-            research_available=launch_research is not None,
-            preparation_available=prepare_workspace is not None,
+            review_sort=review_sort,
+            review_direction=review_direction,
+            review_filter=review_filter,
             history_page=history_page,
         )
 
@@ -337,6 +854,321 @@ def register_pipeline_routes(
                 history_offset=max(0, request.args.get("history_offset", 0, type=int)),
             )
         )
+
+    @bp.route("/cases/<case_id>/pipeline/<persona_id>/proceed", methods=["POST"])
+    @access(mutate=True)
+    def proceed(case_id, persona_id):
+        scoped_persona(case_id, persona_id)
+        data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            data["unreconciled_input_count"]
+            or data["projection"]["pending"]
+            or data["projection"]["legacy_available"]
+        ):
+            flash(
+                "Reconcile submitted and retained evidence before proceeding.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id),
+                code=303,
+            )
+        if data["review_pending_count"]:
+            flash(
+                "Resolve every review-queue finding before proceeding to the Persona.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+                + "#operator-review",
+                code=303,
+            )
+        if not data["approved_count"]:
+            flash("Approve at least one finding before proceeding.", "warning")
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id),
+                code=303,
+            )
+        return redirect(
+            url_for("pipeline.persona", case_id=case_id, persona_id=persona_id),
+            code=303,
+        )
+
+    @bp.route("/cases/<case_id>/pipeline/<persona_id>/persona")
+    @access()
+    def persona(case_id, persona_id):
+        subject = scoped_persona(case_id, persona_id)
+        page = max(1, request.args.get("page", 1, type=int))
+        review_sort = request.args.get("sort", "default", type=str)
+        review_direction = request.args.get("direction", "ascending", type=str)
+        review_filter = request.args.get("decision", "all", type=str)
+        workspace_data = store().get_workspace(
+            case_id,
+            persona_id,
+            limit=25,
+            offset=(page - 1) * 25,
+            review_sort=review_sort,
+            review_direction=review_direction,
+            review_filter=review_filter,
+        )
+        projection = approved_persona(case_id, persona_id)
+        return render_persona_page(
+            subject,
+            workspace_data,
+            projection,
+            active_tab="identity" if projection["items"] else "review",
+            page=page,
+            review_sort=review_sort,
+            review_direction=review_direction,
+            review_filter=review_filter,
+        )
+
+    @bp.route("/cases/<case_id>/pipeline/<persona_id>/persona/relationships")
+    @access()
+    def relationships(case_id, persona_id):
+        subject = scoped_persona(case_id, persona_id)
+        case_store = get_case_store()
+        cases = case_store.list_cases()
+        available_personas = [
+            {
+                'id': item['id'],
+                'display_name': item['display_name'],
+                'case_id': case['id'],
+                'case_title': case['title'],
+            }
+            for case in cases
+            for item in case.get('personas', [])
+        ]
+        from maigret.web.persona_intelligence import field_display_label
+
+        return render_template(
+            'relationships.html',
+            graph=approved_relationship_graph(case_id, persona_id, subject),
+            cases=cases,
+            mode='persona',
+            selected_case_id=case_id,
+            available_personas=available_personas,
+            selected_persona_id=persona_id,
+            field_display_label=field_display_label,
+            combined_scope=False,
+            approved_only=True,
+        )
+
+    @bp.route(
+        "/cases/<case_id>/pipeline/<persona_id>/collect-approved-evidence",
+        methods=["POST"],
+    )
+    @access(mutate=True)
+    def collect_approved_evidence(case_id, persona_id):
+        scoped_persona(case_id, persona_id)
+        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Reconcile submitted and retained evidence before collecting new evidence.",
+            )
+        if workspace_data["review_pending_count"]:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Resolve the review queue before collecting new evidence.",
+            )
+        projection = approved_persona(case_id, persona_id)
+        if not projection["items"]:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Approve evidence before collecting new evidence.",
+            )
+        results = []
+        if launch_approved_source_fetch is not None and projection["source_urls"]:
+            results.append(
+                launch_approved_source_fetch(
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    approved_groups=projection["items"],
+                    actor=actor(),
+                )
+            )
+        if launch_approved_discovery is not None:
+            results.append(
+                launch_approved_discovery(
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    approved_groups=projection["items"],
+                    actor=actor(),
+                )
+            )
+        if not results:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "No approved source or identifier is available to collect from yet.",
+            )
+        flash(
+            "New evidence collection was queued from the approved Persona. "
+            "Every result returns to Step 1 for review.",
+            "success",
+        )
+        return redirect(url_for("live_results", job_id=results[-1]["job_id"]), code=303)
+
+    @bp.route(
+        "/cases/<case_id>/pipeline/<persona_id>/discover-related",
+        methods=["POST"],
+    )
+    @access(mutate=True)
+    def discover_related(case_id, persona_id):
+        scoped_persona(case_id, persona_id)
+        if launch_approved_discovery is None:
+            abort(503, description="Related-evidence discovery is unavailable.")
+        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Reconcile submitted and retained evidence before launching related discovery.",
+            )
+        if workspace_data["review_pending_count"]:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Resolve the review queue before launching related discovery.",
+            )
+        projection = approved_persona(case_id, persona_id)
+        if not projection["items"]:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Approve evidence before launching related discovery.",
+            )
+        result = launch_approved_discovery(
+            case_id=case_id,
+            persona_id=persona_id,
+            approved_groups=projection["items"],
+            actor=actor(),
+        )
+        flash(
+            "Approved identifiers were queued for an AI-assisted cross-source check. New output will return to the review queue and is not auto-approved.",
+            "success",
+        )
+        return redirect(url_for("live_results", job_id=result["job_id"]), code=303)
+
+    @bp.route(
+        "/cases/<case_id>/pipeline/<persona_id>/fetch-approved-sources",
+        methods=["POST"],
+    )
+    @access(mutate=True)
+    def fetch_approved_sources(case_id, persona_id):
+        scoped_persona(case_id, persona_id)
+        if launch_approved_source_fetch is None:
+            abort(503, description="Approved source fetching is unavailable.")
+        workspace_data = store().get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Reconcile submitted and retained evidence before fetching approved sources.",
+            )
+        if workspace_data["review_pending_count"]:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Resolve the review queue before fetching approved sources.",
+            )
+        projection = approved_persona(case_id, persona_id)
+        if not projection["source_urls"]:
+            return review_queue_redirect(
+                case_id,
+                persona_id,
+                "Approve at least one public source URL before fetching approved sources.",
+            )
+        result = launch_approved_source_fetch(
+            case_id=case_id,
+            persona_id=persona_id,
+            approved_groups=projection["items"],
+            actor=actor(),
+        )
+        flash(
+            f'Fetching {result["source_count"]} exact approved public source(s). '
+            "Public page fields and bounded image-index candidates will return to the review queue; access blocks are recorded explicitly and nothing is auto-approved.",
+            "success",
+        )
+        return redirect(url_for("live_results", job_id=result["job_id"]), code=303)
+
+    @bp.route(
+        "/cases/<case_id>/pipeline/<persona_id>/groups/<group_id>/branch-affiliation",
+        methods=["POST"],
+    )
+    @access(mutate=True)
+    def branch_affiliation(case_id, persona_id, group_id):
+        scoped_persona(case_id, persona_id)
+        current = store()
+        workspace_data = current.get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+            or workspace_data["review_pending_count"]
+        ):
+            abort(
+                409,
+                description=(
+                    "Complete evidence reconciliation and review before opening "
+                    "an affiliation branch."
+                ),
+            )
+        included = {
+            row["id"]: row
+            for row in current.iter_included_groups(case_id, persona_id)
+        }
+        row = included.get(group_id)
+        if row is None or row.get("kind") != "claim":
+            abort(409, description="Only an approved affiliation can open a branch.")
+        normalized = dict(row.get("normalized") or {})
+        predicate = str(normalized.get("predicate") or "").casefold()
+        if predicate not in {"company", "organization", "affiliation"}:
+            abort(409, description="Select an approved organization affiliation.")
+        organization = normalized.get("value")
+        if isinstance(organization, dict):
+            organization = organization.get("name") or organization.get("label")
+        current = get_case_store()
+        try:
+            job_id = current.create_affiliation_investigation(
+                str(organization or ""),
+                source_claim_id=group_id,
+                source_claim_field="company",
+                target_basis="approved_affiliation_claim",
+                enable_public_web_research=bool(
+                    affiliation_public_web_enabled
+                    and affiliation_public_web_enabled()
+                ),
+                enable_google_places_search=bool(
+                    google_places_enabled and google_places_enabled()
+                ),
+            )
+        except ValueError as error:
+            flash(str(error), "warning")
+            return redirect(
+                url_for("pipeline.persona", case_id=case_id, persona_id=persona_id)
+            )
+        flash(
+            "A separate affiliation investigation was opened. Its findings require their own review.",
+            "success",
+        )
+        return redirect(url_for("live_results", job_id=job_id), code=303)
 
     @bp.route('/cases/<case_id>/pipeline/<persona_id>/requests/<request_id>/resume', methods=['POST'])
     @access(mutate=True)
@@ -447,6 +1279,51 @@ def register_pipeline_routes(
             if group['kind'] != 'claim':
                 abort(400, description='Claim corrections require a claim group.')
             corrected = {**group['normalized'], **changes}
+        geocoding_warning = None
+        if data.get('decision') == 'include' and geocode_approved_location:
+            group = store().get_group(case_id, persona_id, group_id, limit=1)
+            candidate = dict(corrected or group.get('normalized') or {})
+            predicate = str(
+                candidate.get('predicate') or candidate.get('field_name') or ''
+            ).casefold()
+            qualifiers = (
+                dict(candidate.get('qualifiers'))
+                if isinstance(candidate.get('qualifiers'), dict)
+                else {}
+            )
+            has_coordinates = all(
+                qualifiers.get(key) is not None
+                for key in ('latitude', 'longitude')
+            )
+            if predicate in {
+                'address',
+                'current_location',
+                'organization_location',
+            } and not has_coordinates:
+                place_value = candidate.get('value')
+                if not isinstance(place_value, (dict, list)):
+                    try:
+                        center = geocode_approved_location(str(place_value or ''))
+                    except Exception:
+                        center = None
+                        geocoding_warning = (
+                            'The location was approved, but its map point could not '
+                            'be generated. The evidence remains approved.'
+                        )
+                    if center:
+                        qualifiers.update(
+                            latitude=center['latitude'],
+                            longitude=center['longitude'],
+                            coordinate_precision=center.get('precision') or 'place',
+                            coordinate_role='approximate_map_center',
+                            coordinate_source='approved_place_geocoder',
+                        )
+                        corrected = dict(candidate, qualifiers=qualifiers)
+                    elif geocoding_warning is None:
+                        geocoding_warning = (
+                            'The location was approved, but no approximate map '
+                            'point was found. The evidence remains approved.'
+                        )
         dispositions = (
             structured(data, 'evidence_dispositions', [])
             if 'evidence_dispositions' in data
@@ -470,6 +1347,38 @@ def register_pipeline_routes(
             corrected_claim=corrected,
             evidence_dispositions=dispositions,
         )
+        if not (
+            request.is_json
+            or request.accept_mimetypes.best == 'application/json'
+        ):
+            flash(
+                'Operator decision recorded. Previous evidence and decisions are retained.',
+                'success',
+            )
+            if geocoding_warning:
+                flash(geocoding_warning, 'warning')
+            return_page = max(
+                1, request.form.get('return_page', 1, type=int) or 1
+            )
+            return_sort = request.form.get('return_sort', 'default', type=str)
+            return_direction = request.form.get(
+                'return_direction', 'ascending', type=str
+            )
+            return_filter = request.form.get('return_filter', 'all', type=str)
+            return redirect(
+                url_for(
+                    'pipeline.workspace',
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    page=return_page,
+                    sort=return_sort,
+                    direction=return_direction,
+                    decision=return_filter,
+                )
+                + '#finding-'
+                + group_id,
+                code=303,
+            )
         return respond(
             case_id,
             persona_id,
@@ -623,6 +1532,68 @@ def register_pipeline_routes(
             201,
         )
 
+    @bp.route('/cases/<case_id>/pipeline/<persona_id>/report', methods=['POST'])
+    @access(mutate=True)
+    def create_report_snapshot(case_id, persona_id):
+        """Freeze operator-approved findings and export them without a second QC UI.
+
+        The immutable manifest and per-finding decision trail remain intact; this
+        restores the single analyst-review flow used by the Persona outline.
+        """
+        subject = scoped_persona(case_id, persona_id)
+        current = store()
+        case = current.get_case_shell(case_id) or {}
+        workspace_data = current.get_workspace(case_id, persona_id, limit=1)
+        if (
+            workspace_data["unreconciled_input_count"]
+            or workspace_data["projection"]["pending"]
+            or workspace_data["projection"]["legacy_available"]
+        ):
+            flash(
+                "Reconcile submitted and retained evidence before exporting a report.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+            )
+        if workspace_data["review_pending_count"]:
+            flash(
+                "Resolve every review-queue finding before exporting a report.",
+                "warning",
+            )
+            return redirect(
+                url_for("pipeline.workspace", case_id=case_id, persona_id=persona_id)
+                + "#operator-review"
+            )
+        try:
+            version = current.create_version(
+                case_id,
+                persona_id,
+                actor=actor(),
+                scope={
+                    'report_type': 'approved_persona',
+                    'decision_model': 'per_finding_operator_review',
+                    'subject_name': subject.get('display_name') or persona_id,
+                    'case_title': case.get('title') or case_id,
+                },
+                limitations=[
+                    'Only findings explicitly approved by an analyst are included.',
+                    'An absent category means no evidence was approved; it is not proof that no such information exists.',
+                    'Assets, misconduct and risk are never inferred from a social profile, affiliation or AI summary.',
+                ],
+            )
+        except ValueError as error:
+            flash(str(error), 'warning')
+            return redirect(url_for('pipeline.workspace', case_id=case_id, persona_id=persona_id))
+        return redirect(
+            url_for(
+                'pipeline.export_pdf',
+                case_id=case_id,
+                persona_id=persona_id,
+                version_id=version['id'],
+            )
+        )
+
     def scoped_version(case_id, persona_id, version_id):
         scoped_persona(case_id, persona_id)
         version = store().get_version(
@@ -695,8 +1666,13 @@ def register_pipeline_routes(
         graph_data = version_graph(projection)
         if request.path.startswith('/api/'):
             return jsonify(graph_data)
-        return render_template(
-            'pipeline_graph.html', projection=projection, graph=graph_data
+        return redirect(
+            url_for(
+                'pipeline.version_view',
+                case_id=case_id,
+                persona_id=persona_id,
+                version_id=version_id,
+            )
         )
 
     @bp.route('/cases/<case_id>/pipeline/<persona_id>/versions/<version_id>/export.pdf')
@@ -704,12 +1680,18 @@ def register_pipeline_routes(
     def export_pdf(case_id, persona_id, version_id):
         from maigret.web.pipeline_pdf import generate_pipeline_pdf
 
-        projection = version_projection(scoped_version(case_id, persona_id, version_id))
+        subject = scoped_persona(case_id, persona_id)
+        case = store().get_case_shell(case_id) or {}
+        projection = version_projection(
+            scoped_version(case_id, persona_id, version_id),
+            subject_name=subject.get('display_name') or persona_id,
+            case_title=case.get('title') or case_id,
+        )
         response = send_file(
             io.BytesIO(generate_pipeline_pdf(projection)),
             mimetype='application/pdf',
             as_attachment=True,
-            download_name=f'OpenLedger-Persona-v{projection["sequence"]}-{projection["status"]}.pdf',
+            download_name=persona_report_filename(projection),
             max_age=0,
         )
         response.headers['X-OpenLedger-Version'] = projection['version_id']

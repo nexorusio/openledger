@@ -40,7 +40,7 @@ No independently labelled probability reference dataset has been supplied or val
 
 ## Release and validation
 
-The runtime identity remains `p2-e2e-v1`. The required schema is now `e2e2b8d0a502`, descending from `e2e1a7c9d401`. The historical 16-table migration is frozen; the new migration adds nine runtime, ingestion and projection tables. Populated schema downgrades are refused to preserve history. The updater accepts only the explicitly supported source schemas and the exact reviewed application/image identity. It never switches to the old pipeline or a floating image.
+The runtime identity remains `p2-e2e-v1`. The required schema is now `e2e3c9d1f703`, descending from `e2e2b8d0a502` and `e2e1a7c9d401`. The historical 16-table migration is frozen; the reliability migration adds runtime, ingestion and projection tables, and the case-purge migration adds a transaction-scoped deletion authorization for terminal cases. The updater accepts only the explicitly supported source schemas and the exact reviewed application/image identity. It never switches to the old pipeline or a floating image.
 
 The broad Python PR workflow now includes the stacked rollback base. The mandatory engineering gate discovers pipeline/connector tests and requires named failure regressions without skips. CI also requires real PostgreSQL migration/concurrency, the 50,000-record ledger workload, a Chromium operator/QC/research journey, disposable database backup/restore, and same-image app/worker/scanner validation. Scanner probes import the actual pinned library before and after the transport guard, exercising both synchronous and asynchronous clients without contacting providers.
 

@@ -11,6 +11,7 @@ import importlib
 import re
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
@@ -212,6 +213,92 @@ def test_real_app_accepts_and_executes_each_input_without_username_dependency(
     )
 
 
+def test_real_app_keeps_legacy_pdf_until_the_convergence_checkpoint(
+    application_journey,
+):
+    from sqlalchemy import insert
+
+    from maigret.web.case_store import claim_evidence, persona_claims, utcnow
+
+    journey = application_journey
+    store, pipeline = journey['store'], journey['pipeline']
+    job_id = store.create_investigation(['legacy-pdf'], {})
+    store.claim_next('worker:legacy-pdf-fixture')
+    store.finish(
+        job_id,
+        {'status': 'completed', 'usernames': ['legacy-pdf'], 'individual_reports': []},
+    )
+    case_id = store.get_job(job_id)['case_id']
+    persona_id = store.get_case(case_id)['personas'][0]['id']
+    claim_id, evidence_id = str(uuid.uuid4()), str(uuid.uuid4())
+    now = utcnow()
+    with store.engine.begin() as connection:
+        connection.execute(
+            insert(persona_claims).values(
+                id=claim_id,
+                persona_id=persona_id,
+                field_name='full_name',
+                value='Legacy PDF Person',
+                display_value='Legacy PDF Person',
+                normalized_value='legacy pdf person',
+                confidence=80,
+                review_status='approved',
+                source_engine='fixture',
+                source_job_id=job_id,
+                fingerprint=uuid.uuid4().hex * 2,
+                first_seen_at=now,
+                last_seen_at=now,
+                created_at=now,
+                updated_at=now,
+                reviewed_at=now,
+                reviewed_by='fixture-reviewer',
+            )
+        )
+        connection.execute(
+            insert(claim_evidence).values(
+                id=evidence_id,
+                claim_id=claim_id,
+                evidence_type='public_document',
+                source_name='Legacy PDF source',
+                source_url='https://example.test/legacy-pdf-source',
+                details={'fixture': True},
+                fingerprint=uuid.uuid4().hex * 2,
+                observed_at=now,
+            )
+        )
+    pipeline.create_request(
+        case_id,
+        persona_id,
+        [{'type': 'username', 'value': 'legacy-pdf'}],
+        {'pipeline_id': 'p2-e2e-v1', 'tasks': []},
+        actor='fixture:partial-convergence',
+    )
+
+    response = journey['client'].get(f'/personas/{persona_id}/export.pdf')
+
+    assert response.status_code == 200
+    assert response.mimetype == 'application/pdf'
+    assert response.data.startswith(b'%PDF-')
+
+
+def test_real_app_routes_checkpointed_persona_without_request_to_p2(
+    application_journey,
+):
+    journey = application_journey
+    store, pipeline = journey['store'], journey['pipeline']
+    job_id = store.create_investigation(['checkpointed'], {})
+    case_id = store.get_job(job_id)['case_id']
+    persona_id = store.get_case(case_id)['personas'][0]['id']
+    pipeline.mark_legacy_converged(case_id, persona_id)
+
+    response = journey['client'].get(f'/personas/{persona_id}')
+
+    assert response.status_code == 302
+    assert response.location.endswith(
+        f'/cases/{case_id}/pipeline/{persona_id}/persona'
+    )
+
+
 def test_real_app_manual_review_qc_research_worker_and_final_projection(
     application_journey,
 ):
@@ -237,7 +324,12 @@ def test_real_app_manual_review_qc_research_worker_and_final_projection(
     assert len(case['personas']) == 1
     persona_id = case['personas'][0]['id']
     base = f'/cases/{case_id}/pipeline/{persona_id}'
-    assert client.get('/personas/' + persona_id).headers['Location'].endswith(base)
+    persona_entry = client.get('/personas/' + persona_id)
+    assert persona_entry.headers['Location'].endswith(base + '/persona')
+    unreviewed_persona = client.get(persona_entry.headers['Location'])
+    assert unreviewed_persona.status_code == 200
+    assert b'Review queue' in unreviewed_persona.data
+    assert b'data-persona-panel="review"' in unreviewed_persona.data
     legacy_results = client.get('/results/search_' + initial_job_id)
     assert legacy_results.status_code == 302
     assert legacy_results.headers['Location'].endswith('/pipeline')
@@ -289,6 +381,12 @@ def test_real_app_manual_review_qc_research_worker_and_final_projection(
         },
     )
     assert included.status_code == 201
+    approved_persona = client.get(
+        '/personas/' + persona_id, follow_redirects=True
+    )
+    assert approved_persona.status_code == 200
+    assert b'Persona' in approved_persona.data
+    assert b'Synthetic Person' in approved_persona.data
     first = post(
         journey,
         base + '/versions',
@@ -303,7 +401,9 @@ def test_real_app_manual_review_qc_research_worker_and_final_projection(
     draft_pdf = client.get(base + f'/versions/{first["id"]}/export.pdf')
     assert (
         draft_pdf.status_code == 200
-        and 'submitted' in draft_pdf.headers['Content-Disposition']
+        and 'OpenLedger-Investigation-' in draft_pdf.headers['Content-Disposition']
+        and 'Synthetic-Person' in draft_pdf.headers['Content-Disposition']
+        and 'submitted' not in draft_pdf.headers['Content-Disposition']
     )
     rejected = post(
         journey,
@@ -442,6 +542,7 @@ def test_real_app_manual_review_qc_research_worker_and_final_projection(
             check=True,
         ).stdout.decode()
         assert final['content_hash'] in re.sub(r'\s+', '', text)
-        assert all(evidence_id in text for evidence_id in final_evidence_ids)
+        assert 'Evidence and audit access' in text
+        assert final['version_id'] in text
     assert pipeline.get_version(first['id'])['status'] == 'changes_required'
     assert pipeline.get_version(first['id'])['manifest'] == first['manifest']

@@ -1,0 +1,20 @@
+{% from '_persona_legacy_controls.html' import legacy_review_controls with context %}
+<header class="panel-header assessment-step-header">
+    <div><p class="eyebrow">Review</p><h2>Evidence review queue</h2><p>These original rows remain available during the controlled P2 conversion. Decisions continue to append to their existing audit history.</p></div>
+    <span class="review-progress">{{ review_claims | length }} non-approved</span>
+</header>
+<div class="review-filter-bar" role="group" aria-label="Filter review records">
+    <button type="button" class="review-filter active" data-review-filter="open">Needs review <span>{{ review_counts.pending + review_counts.uncertain }}</span></button>
+    <button type="button" class="review-filter" data-review-filter="rejected">Rejected <span>{{ review_counts.rejected }}</span></button>
+    <button type="button" class="review-filter" data-review-filter="all">All non-approved <span>{{ review_claims | length }}</span></button>
+</div>
+<div class="panel-body review-queue-list" id="reviewQueue">
+{% for claim in review_claims %}
+    <article class="review-queue-item claim-record review-{{ claim.review_status }}" data-review-item="{{ claim.review_status }}">
+        <div class="review-field-name">{{ field_display_label(claim.field_name) }}</div>
+        <div class="claim-main"><div class="claim-value"><strong>{{ claim.display_value }}</strong></div><div class="claim-badges"><span class="confidence-badge" title="Legacy heuristic; not a calibrated probability">{{ claim.confidence }} legacy evidence score</span><span class="review-badge {{ claim.review_status }}">{{ claim.review_status | title }}</span></div></div>
+        <details class="claim-evidence"><summary>{{ claim.evidence | length }} supporting source{{ '' if claim.evidence | length == 1 else 's' }}</summary><ul>{% for evidence in claim.evidence %}<li>{% if evidence.source_url %}<a href="{{ evidence.source_url }}" target="_blank" rel="noopener noreferrer">{{ evidence.source_name }}</a>{% else %}{{ evidence.source_name }}{% endif %}<span>{{ evidence.evidence_type | replace('_', ' ') }}</span></li>{% endfor %}</ul></details>
+        {{ legacy_review_controls(claim, 'review') }}
+    </article>
+{% else %}<div class="empty-state compact"><i data-lucide="badge-check"></i><h3>No evidence needs review</h3></div>{% endfor %}
+</div>

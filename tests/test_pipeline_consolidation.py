@@ -60,6 +60,81 @@ def test_three_engines_one_account_and_claim_all_lineages():
         assert group["independent_origin_count"] == 1
 
 
+def test_negative_check_retains_account_target_lineage_without_claims():
+    document = observation(status="not_found")
+    # The explicit account descriptor is retained only as the check target so
+    # audit graphs can attach the no-match outcome. Workspace projection still
+    # requires a positive observation before exposing any review candidate.
+    assert document["account"]["canonical_url"] == (
+        "https://www.instagram.com/alice/"
+    )
+    assert document["claims"] == []
+    consolidated = consolidate_observations([document])
+    assert len(consolidated["accounts"]) == 1
+    assert consolidated["claims"] == []
+    assert consolidated["ungrouped_observation_ids"] == []
+
+
+def test_positive_retained_url_without_extractor_becomes_reviewable_lead():
+    document = normalize_observation(
+        {
+            "source_engine": "public_exact_match",
+            "source_record_id": "public-lead",
+            "status": "candidate",
+            "source_url": "https://example.test/public/jati",
+        },
+        **SCOPE,
+    )
+    assert document["account"] is None
+    assert document["claims"] == [
+        {
+            "predicate": "linked_profile_lead",
+            "value": "https://example.test/public/jati",
+            "qualifiers": {
+                "ownership": "not_established",
+                "source_engine": "public_exact_match",
+            },
+        }
+    ]
+    assert len(consolidate_observations([document])["claims"]) == 1
+
+
+def test_positive_profile_payload_exposes_all_safe_structured_evidence_for_review():
+    document = normalize_observation(
+        {
+            "source_engine": "maigret",
+            "source_record_id": "linkedin-profile",
+            "status": "found",
+            "site_name": "LinkedIn",
+            "profile_url": "https://www.linkedin.com/in/jati-pratomo/",
+            "evidence": {
+                "fullname": "Jati Pratomo",
+                "city": "Jakarta, Indonesia",
+                "company": "Nexorus",
+                "job_title": "Director",
+                "avatar": "https://cdn.example.test/photo.jpg",
+                "emails": ["jati@example.com"],
+                "links": '["https://github.com/jatipratomo", "javascript:bad"]',
+                "uid": 12345,
+            },
+        },
+        **SCOPE,
+    )
+
+    claims = {claim["predicate"]: claim for claim in document["claims"]}
+    assert claims["full_name"]["value"] == "Jati Pratomo"
+    assert claims["current_location"]["value"] == "Jakarta, Indonesia"
+    assert claims["affiliation"]["value"] == "Nexorus"
+    assert claims["occupation"]["value"] == "Director"
+    assert claims["photograph"]["value"] == "https://cdn.example.test/photo.jpg"
+    assert claims["email"]["value"] == "jati@example.com"
+    assert claims["linked_profile_lead"]["value"] == (
+        "https://github.com/jatipratomo"
+    )
+    assert claims["platform_identifier"]["value"]["identifier"] == "12345"
+    assert all("javascript:" not in str(claim) for claim in document["claims"])
+
+
 def test_mirrors_snippets_models_do_not_manufacture_independent_support():
     docs = [observation("original")]
     for number in range(100):

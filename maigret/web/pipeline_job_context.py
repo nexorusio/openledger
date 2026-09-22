@@ -30,6 +30,7 @@ _SOURCE_OPTIONS = (
     "enable_user_scanner_username",
     "enable_github_profile_enrichment",
     "enable_archived_url_evidence",
+    "enable_approved_source_fetch",
     "enable_domain_context",
     "enable_google_places_search",
     "allow_ai_context",
@@ -303,6 +304,30 @@ def approved_context(
         "selected_wikipedia_page_id": specification.get("selected_wikipedia_page_id"),
         "wikidata_entity_id": specification.get("wikidata_entity_id"),
     }
+    if (
+        specification.get("discovery_basis") == "approved_pipeline_findings"
+        and specification.get("allow_ai_context") is True
+    ):
+        raw_questions = specification.get("approved_research_questions")
+        if raw_questions is None:
+            raw_questions = [specification.get("approved_research_question")]
+        if not isinstance(raw_questions, list) or not 1 <= len(raw_questions) <= 100:
+            raise ValueError(
+                "Approved discovery requires 1 to 100 research questions."
+            )
+        questions = []
+        for question in raw_questions:
+            if (
+                not isinstance(question, str)
+                or not question.strip()
+                or len(question) > 10000
+            ):
+                raise ValueError(
+                    "Each approved research question must contain 1 to 10000 characters."
+                )
+            questions.append(question.strip())
+        context["research_questions"] = questions
+        context["approved_research_questions"] = questions
     legacy = [
         item
         for item in persona.get("claims", [])
@@ -344,8 +369,34 @@ def approved_context(
             _append_unique(context["approved_organizations"], value)
         if claim.get("id"):
             _append_unique(context["source_claim_ids"], claim["id"])
+        # Approved URL-shaped claims are exact operator-reviewed research
+        # anchors too.  Previously only account groups reached ``public_urls``;
+        # this silently dropped approved websites, social-account claims and
+        # profile leads from later source collection.
+        if str(field or "").casefold() in {
+            "social_account",
+            "website",
+            "linked_profile_lead",
+            "photograph",
+        }:
+            raw_value = claim.get("value")
+            if isinstance(raw_value, dict):
+                raw_value = (
+                    raw_value.get("canonical_url")
+                    or raw_value.get("profile_url")
+                    or raw_value.get("url")
+                )
+            _append_unique(context["public_urls"], raw_value or value)
     context["organization_names"] = list(context["approved_organizations"])
     context["organizations"] = list(context["approved_organizations"])
+    if specification.get("discovery_basis") == "approved_source_fetch":
+        # The Persona action supplies an exact, bounded set of URLs from the
+        # approved ledger.  It must not fan out to a username scan, archive
+        # service or unrelated enrichment route.
+        from maigret.web.pipeline_enqueue import approved_source_fetch_urls
+
+        context["public_urls"] = approved_source_fetch_urls(specification)
+        context["requested_engines"] = ["approved_public_source_fetch"]
     if job.get("kind") == "identity_enrichment":
         _append_unique(
             context["approved_full_names"], specification.get("confirmed_name")

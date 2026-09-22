@@ -362,8 +362,8 @@ def test_digital_presence_links_to_retained_case_checks(
     )
     assert store.finish(job_id, result)
     persona_id = store.get_case(store.get_job(job_id)['case_id'])['personas'][0]['id']
-    body = client.get(f'/personas/{persona_id}').get_data(as_text=True)
-    assert f'/results/search_{job_id}#source-coverage' in body
-    assert 'Review case source checks and candidate leads' in body
+    body = client.get(f'/personas/{persona_id}?view=working').get_data(as_text=True)
+    assert 'Review case source checks and candidate leads' not in body
+    assert 'Confirmed accounts, pending account candidates' in body
     assert 'an omitted account is not proof that it does not exist' in body
     store.engine.dispose()

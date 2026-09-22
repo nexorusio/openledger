@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from contextlib import nullcontext
 from datetime import datetime, timezone
@@ -28,6 +29,12 @@ from maigret.web.case_store import (
     _heartbeat_expired,
 )
 from maigret.web.pipeline_schema import PIPELINE_ID
+from maigret.web.persona_schema import (
+    FIELD_SECTIONS as SHORTLIST_PREDICATE_SECTIONS,
+    PERSONA_SECTIONS,
+    presentation_predicate,
+    section_for,
+)
 
 OUTCOMES = frozenset(
     {
@@ -44,6 +51,143 @@ OUTCOMES = frozenset(
     }
 )
 TRANSIENT_OUTCOMES = frozenset({"partial", "timeout", "error"})
+
+SHORTLIST_SECTIONS = tuple(
+    (section["key"], section["title"]) for section in PERSONA_SECTIONS
+)
+
+INPUT_EVIDENCE_ENGINE = "investigation_input"
+INPUT_EVIDENCE_TASK_KEY = "system:submitted-inputs"
+INPUT_CLAIM_PREDICATES = {
+    "full_name": "full_name",
+    "email": "email",
+    "phone": "phone",
+    "username": "username",
+    "social_handle": "username",
+    "organization": "organization",
+}
+
+INPUT_SECTIONS = {
+    "full_name": "identity",
+    "email": "contact",
+    "phone": "contact",
+    "username": "digital",
+    "social_handle": "digital",
+    "profile_url": "digital",
+    "public_url": "digital",
+    "organization": "affiliations",
+    "official_website": "digital",
+}
+
+
+def _task_review_state(task):
+    """Reduce technical lifecycle terms to one operator-facing coverage state."""
+    outcome = str(task.get("outcome") or "").casefold()
+    if outcome == "found":
+        return "found"
+    if outcome == "candidate":
+        return "candidate"
+    if outcome == "not_found":
+        return "no_match"
+    if outcome == "not_executed":
+        return "not_searched"
+    if outcome or task.get("status") == "completed":
+        return "could_not_check"
+    return "pending"
+
+
+def _task_sections(task):
+    """Map a collection task to the Persona sections whose coverage it affects."""
+    engine = str(task.get("engine") or task.get("engine_id") or "").casefold()
+    input_document = task.get("input") if isinstance(task.get("input"), dict) else {}
+    input_type = str(
+        task.get("input_type") or input_document.get("type") or ""
+    ).casefold()
+    if engine == INPUT_EVIDENCE_ENGINE:
+        return set()
+    sections = set()
+    if any(value in engine for value in ("ai_cited", "case_fusion")):
+        sections.update(key for key, _title in SHORTLIST_SECTIONS)
+    if any(value in engine for value in ("icij", "offshore", "risk")):
+        sections.update({"affiliations", "records"})
+    if "github" in engine:
+        # A GitHub profile can explicitly publish a name, email, location,
+        # organization, website, and account identity.
+        sections.update({"identity", "contact", "digital", "affiliations"})
+    if "wikipedia" in engine:
+        sections.update({"identity", "affiliations"})
+    if any(
+        value in engine
+        for value in (
+            "wikidata",
+            "registry",
+            "official_website",
+            "business_context",
+            "dns_context",
+        )
+    ):
+        sections.add("affiliations")
+    if "official_website" in engine:
+        sections.add("contact")
+    if any(
+        value in engine
+        for value in (
+            "maigret",
+            "profile_search",
+            "user_scanner_username",
+            "unfurl",
+            "wayback",
+        )
+    ):
+        sections.add("digital")
+    if "user_scanner_email" in engine:
+        sections.update({"contact", "digital"})
+    if input_type in {"email", "phone"}:
+        sections.add("contact")
+    if input_type in {"username", "profile_url", "public_url"}:
+        sections.add("digital")
+    if input_type == "full_name":
+        sections.add("identity")
+    return sections
+
+
+def _shortlist_section(kind, normalized):
+    return section_for(kind, normalized)
+
+
+def _reviewable_request_inputs(request):
+    """Return human investigation anchors, excluding internal checkpoints."""
+    actor = str(request.get("actor") or "").casefold()
+    plan = request.get("plan") if isinstance(request.get("plan"), dict) else {}
+    if actor.startswith(("system:", "worker:", "connector:")) or plan.get(
+        "import_source"
+    ):
+        return []
+    inputs = []
+    for item in list(request.get("inputs") or []):
+        if not isinstance(item, dict) or not str(item.get("value") or "").strip():
+            continue
+        input_type = str(item.get("type") or item.get("kind") or "").casefold()
+        if input_type not in INPUT_SECTIONS:
+            continue
+        derivations = [
+            row
+            for row in list(item.get("derived_from") or [])
+            if isinstance(row, dict)
+        ]
+        # A ranked spelling variant is an operator-selected search route, not
+        # an asserted subject fact. Its positive source results remain
+        # reviewable, but the alias itself must not be materialized as if the
+        # investigator typed it as evidence.
+        if derivations and all(
+            row.get("type") == "ranked_alias" or row.get("context")
+            for row in derivations
+        ):
+            continue
+        normalized = dict(item)
+        normalized["type"] = input_type
+        inputs.append(normalized)
+    return inputs
 
 
 def task_can_retry(task):
@@ -248,6 +392,7 @@ class PipelineStore:
             evidence_revision=0,
             projected_revision=0,
             legacy_imported_at=None,
+            legacy_converged_at=None,
             updated_at=_now(),
         )
         if create:
@@ -264,7 +409,13 @@ class PipelineStore:
             .values(evidence_revision=table.c.evidence_revision + 1, updated_at=_now())
         )
 
-    def mark_legacy_imported(self, case_id, persona_id):
+    def mark_legacy_converged(self, case_id, persona_id):
+        """Record the compatibility cutover after evidence and reviews converge.
+
+        The older ``legacy_imported_at`` value proves only that evidence was
+        copied. ``legacy_converged_at`` is deliberately separate so an older
+        hybrid database cannot be mistaken for a completed review cutover.
+        """
         with self.engine.begin() as connection:
             self._scope(connection, case_id, persona_id, lock=True)
             self._projection_state(connection, case_id, persona_id, create=True)
@@ -272,8 +423,18 @@ class PipelineStore:
             connection.execute(
                 update(table)
                 .where(table.c.persona_id == persona_id)
-                .values(legacy_imported_at=_now(), updated_at=_now())
+                .values(
+                    legacy_imported_at=func.coalesce(
+                        table.c.legacy_imported_at, _now()
+                    ),
+                    legacy_converged_at=_now(),
+                    updated_at=_now(),
+                )
             )
+
+    def mark_legacy_imported(self, case_id, persona_id):
+        """Compatibility alias for callers written before full convergence."""
+        self.mark_legacy_converged(case_id, persona_id)
 
     def _assert_projection_current(self, connection, case_id, persona_id):
         state = self._projection_state(connection, case_id, persona_id)
@@ -523,8 +684,260 @@ class PipelineStore:
 
     list_requests_for_job = requests_for_job
 
+    def crawl_audit_for_job(self, job_id, *, observation_limit=5000):
+        """Return bounded execution lineage for one investigation job.
+
+        This is a read-only diagnostic projection.  It intentionally keeps the
+        stored request/task/attempt lifecycle and source observations separate
+        from Persona approval state.
+        """
+        bounded_limit = min(max(1, int(observation_limit)), 10000)
+        requests = self._table("requests")
+        observations = self._table("observations")
+        with self.engine.connect() as connection:
+            request_rows = list(
+                connection.execute(
+                    select(requests)
+                    .where(requests.c.job_id == job_id)
+                    .order_by(requests.c.created_at, requests.c.id)
+                ).mappings()
+            )
+            request_ids = [row["id"] for row in request_rows]
+            if not request_ids:
+                return {
+                    "requests": [],
+                    "observations": [],
+                    "observation_count": 0,
+                    "observations_truncated": False,
+                }
+            observation_count = int(
+                connection.scalar(
+                    select(func.count())
+                    .select_from(observations)
+                    .where(observations.c.request_id.in_(request_ids))
+                )
+                or 0
+            )
+            observation_rows = list(
+                connection.execute(
+                    select(observations)
+                    .where(observations.c.request_id.in_(request_ids))
+                    .order_by(observations.c.created_at, observations.c.id)
+                    .limit(bounded_limit)
+                ).mappings()
+            )
+            return {
+                "requests": [
+                    self._request(connection, dict(row)) for row in request_rows
+                ],
+                "observations": [_json(dict(row)) for row in observation_rows],
+                "observation_count": observation_count,
+                "observations_truncated": observation_count > len(observation_rows),
+            }
+
     def create_request_with_connection(self, connection, *args, **kwargs):
         return self.create_request(*args, connection=connection, **kwargs)
+
+    def reconcile_submitted_inputs(self, case_id, persona_id):
+        """Materialize submitted identifiers as reviewable, unverified evidence.
+
+        Investigation inputs previously existed only inside request JSON. This
+        idempotent bridge gives every supplied value an immutable ledger record
+        and a normal account/claim group without treating it as independently
+        corroborated or automatically approving it.
+        """
+        from maigret.web.pipeline_evidence import normalize_observation
+
+        requests = self._table("requests")
+        tasks = self._table("tasks")
+        attempts = self._table("attempts")
+        captured_inputs = 0
+        captured_requests = 0
+        with self.engine.begin() as connection:
+            self._scope(connection, case_id, persona_id, lock=True)
+            request_rows = list(
+                connection.execute(
+                    select(requests)
+                    .where(
+                        requests.c.case_id == case_id,
+                        requests.c.persona_id == persona_id,
+                    )
+                    .order_by(requests.c.created_at, requests.c.id)
+                ).mappings()
+            )
+            for request in request_rows:
+                inputs = _reviewable_request_inputs(request)
+                if not inputs:
+                    continue
+                capture_request_id = str(
+                    uuid.uuid5(
+                        uuid.NAMESPACE_URL,
+                        "openledger:submitted-inputs:" + request["id"],
+                    )
+                )
+                existing = (
+                    connection.execute(
+                        select(requests.c.id).where(requests.c.id == capture_request_id)
+                    )
+                    .mappings()
+                    .first()
+                )
+                if existing:
+                    continue
+                now = _now()
+                observed_at = request["created_at"]
+                if isinstance(observed_at, datetime) and observed_at.tzinfo is None:
+                    # SQLite drops timezone metadata even though the value was
+                    # written as UTC.  Restore the schema's declared timezone
+                    # at this trusted database boundary.
+                    observed_at = observed_at.replace(tzinfo=timezone.utc)
+                capture_plan = {
+                    "pipeline_id": PIPELINE_ID,
+                    "request_id": capture_request_id,
+                    "source_request_id": request["id"],
+                    "system_input_capture": True,
+                }
+                connection.execute(
+                    insert(requests).values(
+                        id=capture_request_id,
+                        case_id=case_id,
+                        persona_id=persona_id,
+                        pipeline_id=PIPELINE_ID,
+                        job_id=None,
+                        parent_request_id=None,
+                        actor="system:input-reconciliation",
+                        inputs=[
+                            {"type": "source_request", "value": request["id"]}
+                        ],
+                        plan=capture_plan,
+                        plan_hash=_digest(capture_plan),
+                        idempotency_key="input-reconciliation:" + request["id"],
+                        status="planned",
+                        depth=0,
+                        created_at=now,
+                    )
+                )
+                task = dict(
+                    id=_id(),
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    request_id=capture_request_id,
+                    task_key=INPUT_EVIDENCE_TASK_KEY,
+                    engine=INPUT_EVIDENCE_ENGINE,
+                    platform=None,
+                    input={"type": "submitted_inputs", "count": len(inputs)},
+                    spec={
+                        "task_id": INPUT_EVIDENCE_TASK_KEY,
+                        "engine_id": INPUT_EVIDENCE_ENGINE,
+                        "route_state": "active",
+                        "retry_ceiling": 0,
+                        "retention": {
+                            "mode": "retained",
+                            "final_eligible": True,
+                        },
+                        "system_input_capture": True,
+                        "source_request_id": request["id"],
+                    },
+                    availability="active",
+                    reason="Submitted values retained for analyst confirmation",
+                    status="running",
+                    outcome=None,
+                    attempt_count=1,
+                    retry_limit=0,
+                    active_attempt_id=None,
+                    updated_at=now,
+                    created_at=now,
+                )
+                attempt = dict(
+                    id=_id(),
+                    case_id=case_id,
+                    persona_id=persona_id,
+                    task_id=task["id"],
+                    number=1,
+                    worker_id="system:input-reconciliation",
+                    status="running",
+                    outcome=None,
+                    error=None,
+                    finished_at=None,
+                    created_at=now,
+                )
+                task["active_attempt_id"] = attempt["id"]
+                connection.execute(insert(tasks).values(**task))
+                connection.execute(insert(attempts).values(**attempt))
+                observations = []
+                for item in inputs:
+                    input_type = str(item.get("type") or "").casefold()
+                    value = str(item.get("value") or "").strip()
+                    input_id = str(
+                        item.get("input_id")
+                        or "input:" + _digest([request["id"], input_type, value])
+                    )
+                    raw = {
+                        "source_engine": INPUT_EVIDENCE_ENGINE,
+                        "native_record_id": input_id,
+                        "status": "candidate",
+                        "observed_at": observed_at,
+                        "locator": input_id,
+                        "input_type": input_type,
+                        "input_value": value,
+                        "provenance_type": "investigator_supplied",
+                        "input_provenance": list(item.get("provenance") or []),
+                        # Query-planner derivation records can be structured
+                        # objects. Keep them as input audit metadata; the
+                        # observation-level derived_from field is reserved for
+                        # immutable observation IDs.
+                        "input_derivation": list(item.get("derived_from") or []),
+                        "evidence_signals": {"investigator_supplied": True},
+                        "retention": {
+                            "mode": "retained",
+                            "final_eligible": True,
+                        },
+                    }
+                    if input_type in {"profile_url", "public_url"}:
+                        raw.update(profile_url=value, source_url=value, claims=[])
+                    else:
+                        predicate = INPUT_CLAIM_PREDICATES.get(input_type)
+                        raw["claims"] = (
+                            [{"predicate": predicate, "value": value}]
+                            if predicate
+                            else []
+                        )
+                    observations.append(
+                        normalize_observation(
+                            raw,
+                            case_id=case_id,
+                            subject_id=persona_id,
+                            request_id=capture_request_id,
+                            task_id=task["id"],
+                            attempt_id=attempt["id"],
+                            engine=INPUT_EVIDENCE_ENGINE,
+                            observed_at=observed_at,
+                            engine_version="investigation-input-v1",
+                            parser_version="pipeline-evidence-2",
+                            retention_policy={
+                                "mode": "retained",
+                                "final_eligible": True,
+                            },
+                        )
+                    )
+                records = self._append_observations(
+                    connection, attempt, task, observations
+                )
+                self._finish_attempt(
+                    connection,
+                    attempt,
+                    task,
+                    "candidate",
+                    "Submitted evidence captured; independent corroboration remains pending",
+                )
+                captured_inputs += len(records)
+                captured_requests += 1
+        return {
+            "case_id": case_id,
+            "persona_id": persona_id,
+            "captured_inputs": captured_inputs,
+            "captured_requests": captured_requests,
+        }
 
     def get_task(self, task_id):
         with self.engine.connect() as connection:
@@ -1621,7 +2034,9 @@ class PipelineStore:
             ]
         return result
 
-    def iter_included_groups(self, case_id, persona_id, *, batch_size=500):
+    def iter_included_groups(
+        self, case_id, persona_id, *, batch_size=500, include_observations=False
+    ):
         """Yield latest explicitly included hypotheses as research targeting context."""
         groups, decisions = self._table("groups"), self._table("operator_decisions")
         latest = (
@@ -1660,7 +2075,9 @@ class PipelineStore:
                 .mappings()
             ):
                 result = dict(row)
-                current = self._group(connection, result, limit=0)
+                current = self._group(
+                    connection, result, limit=None if include_observations else 0
+                )
                 if (
                     current.get('decision_stale')
                     or current['normalized'].get('binding_status') == 'unresolved'
@@ -1669,6 +2086,10 @@ class PipelineStore:
                 ):
                     continue
                 result['normalized'] = current['normalized']
+                if include_observations:
+                    result['observations'] = current['observations']
+                    result['observation_count'] = current['observation_count']
+                    result['assessment'] = current.get('assessment')
                 corrected = result["decision_details"].get("corrected_claim")
                 if corrected:
                     result["normalized"] = dict(
@@ -1739,7 +2160,10 @@ class PipelineStore:
         corrected_claim=None,
         evidence_dispositions=None,
     ):
-        actor, reason = _actor(actor), _text(reason, "Decision reason")
+        actor = _actor(actor)
+        reason = str(reason or "").strip()
+        if len(reason) > 10000:
+            raise ValueError("Decision note must contain at most 10000 characters")
         if decision not in {"include", "exclude", "reject", "unresolved"}:
             raise ValueError(
                 "Operator decision must be include, exclude, reject or unresolved"
@@ -2232,7 +2656,13 @@ class PipelineStore:
     def list_history(
         self, case_id, persona_id, kind, *, limit=25, offset=0, parent_id=None
     ):
-        """Independent bounded pages preserve access to every lifecycle record."""
+        """Return bounded operator and collection history pages.
+
+        The submitted-input reconciliation checkpoint is evidence-ledger
+        bookkeeping rather than an engine run.  Keep it out of query/engine
+        history so counts and pagination describe only work the operator
+        requested or a collector performed.
+        """
         names = {
             "requests": "requests",
             "tasks": "tasks",
@@ -2248,6 +2678,19 @@ class PipelineStore:
         limit, offset = min(max(int(limit), 1), 100), max(int(offset), 0)
         table = self._table(names[kind])
         criteria = [table.c.case_id == case_id, table.c.persona_id == persona_id]
+        if kind == "requests":
+            criteria.append(table.c.actor != "system:input-reconciliation")
+        elif kind == "tasks":
+            criteria.append(table.c.engine != INPUT_EVIDENCE_ENGINE)
+        elif kind == "attempts":
+            task_table = self._table("tasks")
+            criteria.append(
+                ~table.c.task_id.in_(
+                    select(task_table.c.id).where(
+                        task_table.c.engine == INPUT_EVIDENCE_ENGINE
+                    )
+                )
+            )
         if parent_id and kind == "requests":
             links = self._table("requirement_requests")
             criteria.append(table.c.id.in_(select(links.c.request_id).where(
@@ -2338,15 +2781,33 @@ class PipelineStore:
             )
 
     def get_workspace(
-        self, case_id, persona_id, *, limit=100, offset=0, history_offset=0
+        self,
+        case_id,
+        persona_id,
+        *,
+        limit=100,
+        offset=0,
+        history_offset=0,
+        review_sort="default",
+        review_direction="ascending",
+        review_filter="all",
     ):
         limit, offset = min(max(int(limit), 1), 100), max(int(offset), 0)
         history_offset = max(int(history_offset), 0)
+        review_sort = str(review_sort or "default").casefold()
+        if review_sort not in {"default", "finding", "category", "assessment", "evidence", "decision"}:
+            review_sort = "default"
+        review_direction = str(review_direction or "ascending").casefold()
+        if review_direction not in {"ascending", "descending"}:
+            review_direction = "ascending"
+        review_filter = str(review_filter or "all").casefold()
+        if review_filter not in {"all", "pending", "include", "rejected", "unresolved"}:
+            review_filter = "all"
         with self.engine.connect() as connection:
             state = self._scope(connection, case_id, persona_id)
             projection = self._projection_state(connection, case_id, persona_id)
             legacy_counts = {"claims": 0, "messages": 0, "jobs": 0}
-            if projection["legacy_imported_at"] is None:
+            if projection["legacy_converged_at"] is None:
                 legacy_counts["claims"] = connection.scalar(select(func.count()).select_from(persona_claims).where(
                     persona_claims.c.persona_id == persona_id))
                 legacy_counts["messages"] = connection.scalar(select(func.count()).select_from(case_chat_messages).where(
@@ -2377,6 +2838,132 @@ class PipelineStore:
             decisions = self._table("operator_decisions")
             memberships = self._table("group_observations")
             observations = self._table("observations")
+            requests = self._table("requests")
+            task_table = self._table("tasks")
+            from maigret.web.pipeline_evidence import canonical_origin_url
+
+            request_rows = list(
+                connection.execute(
+                    select(
+                        requests.c.id,
+                        requests.c.inputs,
+                        requests.c.actor,
+                        requests.c.plan,
+                    )
+                    .where(
+                        requests.c.case_id == case_id,
+                        requests.c.persona_id == persona_id,
+                    )
+                    .order_by(requests.c.created_at, requests.c.id)
+                ).mappings()
+            )
+            captured_request_ids = set(
+                str(spec.get("source_request_id"))
+                for spec in connection.scalars(
+                    select(task_table.c.spec).where(
+                        task_table.c.case_id == case_id,
+                        task_table.c.persona_id == persona_id,
+                        task_table.c.task_key == INPUT_EVIDENCE_TASK_KEY,
+                    )
+                )
+                if isinstance(spec, dict) and spec.get("source_request_id")
+            )
+            input_inventory_by_key = {}
+            unreconciled_input_keys = set()
+            unreconciled_sections = set()
+            request_input_keys = {}
+            for request_row in request_rows:
+                captured = request_row["id"] in captured_request_ids
+                # Every persisted plan input may establish query provenance
+                # for an engine result. Only direct investigator anchors below
+                # become standalone input evidence.
+                request_input_keys[request_row["id"]] = {
+                    (
+                        str(item.get("type") or item.get("kind") or "").casefold(),
+                        str(item.get("value") or "").casefold(),
+                    )
+                    for item in list(request_row.get("inputs") or [])
+                    if isinstance(item, dict)
+                    and str(item.get("type") or item.get("kind") or "").strip()
+                    and str(item.get("value") or "").strip()
+                }
+                for item in _reviewable_request_inputs(request_row):
+                    input_type = str(item.get("type") or "unknown")
+                    value = str(item.get("value") or "")
+                    key = (input_type.casefold(), value.casefold())
+                    entry = input_inventory_by_key.setdefault(
+                        key,
+                        {
+                            "type": input_type,
+                            "value": value,
+                            "captured": True,
+                            "request_ids": [],
+                        },
+                    )
+                    entry["captured"] = entry["captured"] and captured
+                    entry["request_ids"].append(request_row["id"])
+                    if not captured:
+                        unreconciled_input_keys.add(key)
+                        section = INPUT_SECTIONS.get(input_type.casefold())
+                        if section:
+                            unreconciled_sections.add(section)
+            input_inventory = list(input_inventory_by_key.values())
+            unreconciled_input_count = len(unreconciled_input_keys)
+
+            # A candidate produced for a task is query-provenanced only when
+            # that task points at an identifier explicitly retained in the
+            # request.  This keeps selected username aliases visible without
+            # allowing a connector-generated spelling variant to appear as if
+            # the investigator supplied it.
+            explicit_task_ids = set()
+            for task_row in connection.execute(
+                select(task_table.c.id, task_table.c.request_id, task_table.c.input)
+                .where(
+                    task_table.c.case_id == case_id,
+                    task_table.c.persona_id == persona_id,
+                    task_table.c.engine != INPUT_EVIDENCE_ENGINE,
+                )
+            ).mappings():
+                task_input = (
+                    dict(task_row["input"])
+                    if isinstance(task_row["input"], dict)
+                    else {}
+                )
+                task_key = (
+                    str(task_input.get("type") or "").casefold(),
+                    str(task_input.get("value") or "").casefold(),
+                )
+                if task_key in request_input_keys.get(task_row["request_id"], set()):
+                    explicit_task_ids.add(task_row["id"])
+            query_provenance_group_ids = set()
+            if explicit_task_ids:
+                query_provenance_group_ids.update(
+                    connection.scalars(
+                        select(memberships.c.group_id)
+                        .join(
+                            observations,
+                            observations.c.id == memberships.c.observation_id,
+                        )
+                        .where(
+                            observations.c.task_id.in_(explicit_task_ids),
+                            observations.c.retained.is_(True),
+                            observations.c.outcome.in_(["found", "candidate"]),
+                        )
+                    )
+                )
+
+            exact_profile_urls = {
+                canonical
+                for request_inputs in connection.scalars(
+                    select(requests.c.inputs).where(
+                        requests.c.case_id == case_id,
+                        requests.c.persona_id == persona_id,
+                    )
+                )
+                for item in list(request_inputs or [])
+                if isinstance(item, dict) and item.get("type") == "profile_url"
+                if (canonical := canonical_origin_url(item.get("value")))
+            }
             latest_decision = (
                 select(
                     decisions.c.group_id,
@@ -2404,7 +2991,45 @@ class PipelineStore:
                     )
                     .exists()
                     .label("has_manual_cited_evidence"),
+                    select(memberships.c.group_id)
+                    .join(
+                        observations,
+                        observations.c.id == memberships.c.observation_id,
+                    )
+                    .where(
+                        memberships.c.group_id == groups.c.id,
+                        observations.c.retained.is_(True),
+                        observations.c.outcome.in_(["found", "candidate"]),
+                    )
+                    .exists()
+                    .label("has_positive_evidence"),
+                    select(memberships.c.group_id)
+                    .join(
+                        observations,
+                        observations.c.id == memberships.c.observation_id,
+                    )
+                    .where(
+                        memberships.c.group_id == groups.c.id,
+                        observations.c.retained.is_(True),
+                        observations.c.outcome == "found",
+                    )
+                    .exists()
+                    .label("has_found_evidence"),
+                    select(memberships.c.group_id)
+                    .join(
+                        observations,
+                        observations.c.id == memberships.c.observation_id,
+                    )
+                    .where(
+                        memberships.c.group_id == groups.c.id,
+                        observations.c.retained.is_(True),
+                        observations.c.engine == INPUT_EVIDENCE_ENGINE,
+                    )
+                    .exists()
+                    .label("has_investigator_input"),
                     decisions.c.decision.label("latest_decision_value"),
+                    decisions.c.reason.label("latest_decision_reason"),
+                    decisions.c.actor.label("latest_decision_actor"),
                     decisions.c.created_at.label("latest_decision_at"),
                 )
                 .outerjoin(summaries, summaries.c.group_id == groups.c.id)
@@ -2418,7 +3043,29 @@ class PipelineStore:
                 )
                 .where(*criteria)
             ).mappings()
+            shortlist_rows = list(shortlist_rows)
+            account_keys = set()
+            for source_row in shortlist_rows:
+                if (
+                    source_row["kind"] != "account"
+                    or not source_row.get("has_positive_evidence")
+                ):
+                    continue
+                account_normalized = dict(
+                    source_row.get("summary_normalized")
+                    or source_row["normalized"]
+                    or {}
+                )
+                account_keys.update(
+                    str(value)
+                    for value in (
+                        account_normalized.get("key"),
+                        account_normalized.get("canonical_key"),
+                    )
+                    if value
+                )
             shortlist = []
+            ai_ranked_group_count = 0
             for row in shortlist_rows:
                 assessment = dict(row.get("summary_assessment") or {})
                 counts = dict(assessment.get("evidence_counts") or {})
@@ -2426,28 +3073,118 @@ class PipelineStore:
                 conflicts = int(assessment.get("contradiction_count") or 0) + int(
                     assessment.get("group_conflict_count") or 0
                 )
-                summary_observations = list(row.get("summary_observations") or [])
-                manual_cited = bool(row.get("has_manual_cited_evidence")) or any(
-                    item.get("source_engine") == "manual_evidence"
-                    and dict(item.get("retention") or {}).get("final_eligible") is True
-                    for item in summary_observations
-                    if isinstance(item, dict)
-                )
-                # Only evidence that has already met the source-backed
-                # threshold, or an operator's explicit source-cited proposal,
-                # may consume operator attention. Everything else remains
-                # searchable in the evidence explorer and continues to be
-                # collected; it is not silently discarded.
                 source_supported = assessment.get("evidence_status") == "source_supported"
-                if conflicts or not (source_supported or manual_cited):
-                    continue
                 normalized = dict(row.get("summary_normalized") or row["normalized"])
                 observation_count = int(row.get("summary_observation_count") or 0)
-                recommendation = (
-                    "strongly_recommended"
-                    if support >= 2
-                    else ("recommended" if source_supported else "direct_review")
-                )
+                predicate = str(
+                    normalized.get("predicate")
+                    or normalized.get("field_name")
+                    or ""
+                ).casefold()
+                if (
+                    row["kind"] == "claim"
+                    and predicate == "social_account"
+                    and str(normalized.get("account_key") or "") in account_keys
+                ):
+                    # One canonical account is one user-facing finding. The
+                    # derived social_account claim remains in the immutable
+                    # evidence graph but does not create a duplicate decision.
+                    continue
+                normalized_value = normalized.get("value")
+                candidate_urls = {
+                    canonical
+                    for value in (
+                        normalized.get("canonical_url"),
+                        normalized.get("profile_url"),
+                        normalized.get("url"),
+                        (
+                            normalized_value.get("url")
+                            if isinstance(normalized_value, dict)
+                            else None
+                        ),
+                    )
+                    if (canonical := canonical_origin_url(value))
+                }
+                exact_profile_input = bool(candidate_urls & exact_profile_urls)
+                ai_ranking = assessment.get("ai_ranking")
+                ai_ranking = ai_ranking if isinstance(ai_ranking, dict) else None
+                if ai_ranking:
+                    ai_ranked_group_count += 1
+                # The assessment view must not erase name, email, phone, or
+                # public-search findings merely because an account result has
+                # stronger support.  Unsupported candidates stay visibly
+                # labelled as candidates; they are not silently promoted.
+                if observation_count < 1 or not row.get("has_positive_evidence"):
+                    continue
+                section_key = _shortlist_section(row["kind"], normalized)
+                has_query_provenance = row["id"] in query_provenance_group_ids
+                if section_key == "digital" and not (
+                    exact_profile_input
+                    or row.get("has_manual_cited_evidence")
+                    or source_supported
+                    or has_query_provenance
+                    or row.get("has_investigator_input")
+                    or row.get("has_found_evidence")
+                ):
+                    continue
+                if ai_ranking:
+                    priority = str(ai_ranking.get("priority") or "low").casefold()
+                    recommendation = (
+                        "ai_" + priority + "_priority"
+                        if ai_ranking.get("shortlisted") is True
+                        else "ai_review_queue"
+                    )
+                    ranking_explanation = str(ai_ranking.get("reason") or "").strip() or (
+                        "AI left this finding outside its priority shortlist; "
+                        "the cited evidence remains available for operator review."
+                    )
+                    ranking_key = (
+                        2,
+                        {"high": 3, "medium": 2, "low": 1}.get(priority, 0),
+                        support,
+                        observation_count,
+                    )
+                else:
+                    recommendation = (
+                        "strongly_recommended"
+                        if support >= 2
+                        else ("recommended" if source_supported else "direct_review")
+                    )
+                    ranking_explanation = (
+                        f"{support} independent retained source "
+                        f"{'family supports' if support == 1 else 'families support'} "
+                        "this finding; no unresolved contradiction is present."
+                        if source_supported
+                        else (
+                            "An operator-supplied claim cites retained source evidence and is ready for final review."
+                            if row.get("has_manual_cited_evidence")
+                            else "A positive engine observation produced this candidate. Inspect its source lineage before deciding."
+                            if row.get("has_found_evidence")
+                            else "A source returned a possible candidate. Inspect its source lineage before deciding."
+                        )
+                    )
+                    ranking_key = (1, support, observation_count, 0)
+                if conflicts:
+                    recommendation = "conflicting_evidence"
+                    ranking_explanation = (
+                        "Positive evidence conflicts with another retained observation. "
+                        "Inspect the lineage before deciding."
+                    )
+                    ranking_key = (5, support, observation_count, conflicts)
+                if exact_profile_input:
+                    recommendation = "operator_supplied_profile"
+                    ranking_explanation = (
+                        "Exact profile URL supplied in the investigation; no "
+                        "generated alias was substituted for this target."
+                    )
+                    ranking_key = (3, support, observation_count, 0)
+                if row.get("has_investigator_input"):
+                    recommendation = "investigator_supplied"
+                    ranking_explanation = (
+                        "Submitted by the investigator as a search anchor. "
+                        "Confirm it for the Persona or keep it as search-only input."
+                    )
+                    ranking_key = (4, support, observation_count, 0)
                 shortlist.append(
                     {
                         "id": row["id"],
@@ -2456,26 +3193,223 @@ class PipelineStore:
                         "assessment": assessment,
                         "observation_count": observation_count,
                         "latest_decision": row.get("latest_decision_value"),
+                        "latest_decision_reason": row.get("latest_decision_reason"),
+                        "latest_decision_actor": row.get("latest_decision_actor"),
+                        "latest_decision_at": row.get("latest_decision_at"),
                         "recommendation": recommendation,
+                        "section": section_key,
+                        "section_title": dict(SHORTLIST_SECTIONS)[section_key],
+                        "ai_ranked": ai_ranking is not None,
                         "support_origin_families": support,
-                        "ranking_explanation": (
-                            f"{support} independent retained source "
-                            f"{'family supports' if support == 1 else 'families support'} "
-                            "this finding; no unresolved contradiction is present."
-                            if source_supported
-                            else "An operator-supplied claim cites retained source evidence and is ready for final review."
+                        "evidence_status": assessment.get("evidence_status"),
+                        "exact_profile_input": exact_profile_input,
+                        "investigator_supplied": bool(
+                            row.get("has_investigator_input")
                         ),
-                        "ranking_key": (support, observation_count),
+                        "ranking_explanation": ranking_explanation,
+                        "ranking_key": ranking_key,
                     }
                 )
             shortlist.sort(
                 key=lambda item: (
-                    item["ranking_key"][0], item["ranking_key"][1], item["id"]
+                    *item["ranking_key"], item["id"]
                 ),
                 reverse=True,
             )
             for item in shortlist:
                 item.pop("ranking_key", None)
+            # Interleave subject areas before paging so a prolific username
+            # crawl cannot crowd every name, contact, affiliation or record off
+            # the first review table. The unified queue still has stable,
+            # bounded pages instead of silently hiding the 26th item in a tab.
+            by_section = {
+                key: [item for item in shortlist if item["section"] == key]
+                for key, _title in SHORTLIST_SECTIONS
+            }
+            balanced_shortlist = []
+            depth = 0
+            while any(depth < len(items) for items in by_section.values()):
+                for key, _title in SHORTLIST_SECTIONS:
+                    items = by_section[key]
+                    if depth < len(items):
+                        balanced_shortlist.append(items[depth])
+                depth += 1
+            if review_sort != "default":
+                def review_sort_value(item):
+                    normalized = item["normalized"]
+                    if review_sort == "finding":
+                        return str(
+                            normalized.get("display_value")
+                            or normalized.get("value")
+                            or normalized.get("canonical_url")
+                            or normalized.get("url")
+                            or normalized.get("handle")
+                            or normalized.get("predicate")
+                            or "Finding"
+                        ).casefold()
+                    if review_sort == "category":
+                        return str(item["section_title"]).casefold()
+                    if review_sort == "assessment":
+                        return str(item["ranking_explanation"]).casefold()
+                    if review_sort == "evidence":
+                        return (
+                            item["support_origin_families"],
+                            item["observation_count"],
+                        )
+                    return {
+                        "include": "Approved",
+                        "reject": "Rejected",
+                        "exclude": "Rejected",
+                        "unresolved": "Kept in queue",
+                    }.get(item["latest_decision"], "Needs review").casefold()
+
+                balanced_shortlist.sort(
+                    key=review_sort_value,
+                    reverse=review_direction == "descending",
+                )
+            decision_filter_counts = {
+                "all": len(shortlist),
+                "pending": sum(
+                    item["latest_decision"] is None for item in shortlist
+                ),
+                "include": sum(
+                    item["latest_decision"] == "include" for item in shortlist
+                ),
+                "rejected": sum(
+                    item["latest_decision"] in {"reject", "exclude"}
+                    for item in shortlist
+                ),
+                "unresolved": sum(
+                    item["latest_decision"] == "unresolved" for item in shortlist
+                ),
+            }
+
+            def matches_review_filter(item):
+                decision = item["latest_decision"]
+                return (
+                    review_filter == "all"
+                    or (review_filter == "pending" and decision is None)
+                    or decision == review_filter
+                    or (
+                        review_filter == "rejected"
+                        and decision in {"reject", "exclude"}
+                    )
+                )
+
+            filtered_shortlist = [
+                item for item in balanced_shortlist if matches_review_filter(item)
+            ]
+            display_shortlist = filtered_shortlist[offset : offset + limit]
+            shortlist_sections = [
+                {
+                    "key": key,
+                    "title": title,
+                    "items": [
+                        item for item in display_shortlist if item["section"] == key
+                    ],
+                }
+                for key, title in SHORTLIST_SECTIONS
+            ]
+            approved_count = sum(
+                item["latest_decision"] == "include" for item in shortlist
+            )
+            rejected_count = sum(
+                item["latest_decision"] in {"reject", "exclude"}
+                for item in shortlist
+            )
+            kept_count = sum(
+                item["latest_decision"] == "unresolved" for item in shortlist
+            )
+            review_pending_count = len(shortlist) - approved_count - rejected_count
+            engine_tasks = [
+                dict(row)
+                for row in connection.execute(
+                    select(task_table).where(
+                        task_table.c.case_id == case_id,
+                        task_table.c.persona_id == persona_id,
+                        task_table.c.engine != INPUT_EVIDENCE_ENGINE,
+                    )
+                ).mappings()
+            ]
+            coverage_counts = {
+                key: 0
+                for key in (
+                    "found",
+                    "candidate",
+                    "no_match",
+                    "could_not_check",
+                    "not_searched",
+                    "pending",
+                )
+            }
+            for task in engine_tasks:
+                coverage_counts[_task_review_state(task)] += 1
+            outcome_counts = {
+                str(outcome): int(count)
+                for outcome, count in connection.execute(
+                    select(observations.c.outcome, func.count())
+                    .where(
+                        observations.c.case_id == case_id,
+                        observations.c.persona_id == persona_id,
+                        observations.c.engine != INPUT_EVIDENCE_ENGINE,
+                    )
+                    .group_by(observations.c.outcome)
+                )
+            }
+            section_states = {}
+            for section_key, section_title in SHORTLIST_SECTIONS:
+                section_items = [
+                    item for item in shortlist if item["section"] == section_key
+                ]
+                section_tasks = [
+                    task for task in engine_tasks if section_key in _task_sections(task)
+                ]
+                task_states = {_task_review_state(task) for task in section_tasks}
+                if any(
+                    item["latest_decision"] not in {"include", "exclude", "reject"}
+                    for item in section_items
+                ):
+                    key = "awaiting_review"
+                elif any(
+                    item["latest_decision"] == "include" for item in section_items
+                ):
+                    key = "approved_evidence"
+                elif section_items:
+                    key = "no_approved_evidence"
+                elif section_key in unreconciled_sections:
+                    key = "reconciliation_required"
+                elif not section_tasks or task_states <= {"not_searched"}:
+                    key = "not_searched"
+                elif "could_not_check" in task_states or "pending" in task_states:
+                    key = "could_not_check"
+                elif task_states <= {"no_match", "not_searched"}:
+                    key = "no_match"
+                else:
+                    key = "no_approved_evidence"
+                labels = {
+                    "approved_evidence": "Approved evidence",
+                    "awaiting_review": "Awaiting review",
+                    "no_approved_evidence": "No approved evidence",
+                    "reconciliation_required": "Evidence reconciliation required",
+                    "not_searched": "Not searched",
+                    "could_not_check": "Could not check",
+                    "no_match": "No match returned",
+                }
+                explanations = {
+                    "approved_evidence": "Approved evidence is available in this section.",
+                    "awaiting_review": "At least one candidate in this section still needs a decision.",
+                    "no_approved_evidence": "No candidate in this section is currently approved.",
+                    "reconciliation_required": "Submitted or retained evidence must be reconciled before this section is complete.",
+                    "not_searched": "No eligible source ran for this section.",
+                    "could_not_check": "At least one required source failed, timed out, was blocked, or did not complete reliably.",
+                    "no_match": "Eligible checks completed without a candidate. This is not proof of absence.",
+                }
+                section_states[section_key] = {
+                    "key": key,
+                    "title": section_title,
+                    "label": labels[key],
+                    "explanation": explanations[key],
+                }
             result = dict(
                 pipeline_id=PIPELINE_ID,
                 **state,
@@ -2490,8 +3424,27 @@ class PipelineStore:
                 group_count=connection.scalar(
                     select(func.count()).select_from(groups).where(*criteria)
                 ),
-                shortlist=shortlist[:50],
+                reviewable_group_count=len(shortlist),
+                input_inventory=input_inventory,
+                input_count=len(input_inventory),
+                unreconciled_input_count=unreconciled_input_count,
+                engine_task_count=len(engine_tasks),
+                coverage_counts=coverage_counts,
+                observation_outcome_counts=outcome_counts,
+                section_states=section_states,
+                shortlist=display_shortlist,
                 shortlist_count=len(shortlist),
+                filtered_shortlist_count=len(filtered_shortlist),
+                decision_filter_counts=decision_filter_counts,
+                review_sort=review_sort,
+                review_direction=review_direction,
+                review_filter=review_filter,
+                shortlist_sections=shortlist_sections,
+                approved_count=approved_count,
+                rejected_count=rejected_count,
+                kept_count=kept_count,
+                review_pending_count=review_pending_count,
+                ai_ranked_group_count=ai_ranked_group_count,
                 limit=limit,
                 offset=offset,
                 history_offset=history_offset,
@@ -2503,8 +3456,203 @@ class PipelineStore:
             )
             result[kind] = page["items"]
             result[kind + "_count"] = page["count"]
+        result["tasks"] = [
+            task
+            for task in result["tasks"]
+            if task.get("engine") != INPUT_EVIDENCE_ENGINE
+        ]
+        coverage_labels = {
+            "found": "Found",
+            "candidate": "Candidate",
+            "no_match": "No match",
+            "could_not_check": "Could not check",
+            "not_searched": "Not searched",
+            "pending": "Pending",
+        }
+        for task in result["tasks"]:
+            task["review_state"] = _task_review_state(task)
+            task["review_state_label"] = coverage_labels[task["review_state"]]
+            task_input = task["input"] if isinstance(task.get("input"), dict) else {}
+            task["input_type"] = str(task_input.get("type") or "")
+            task["input_value"] = str(
+                task_input.get("value") or task_input.get("input_id") or "—"
+            )
+            latest_attempt = max(
+                task.get("attempts") or [],
+                key=lambda attempt: int(attempt.get("number") or 0),
+                default={},
+            )
+            explanations = {
+                "found": "The source returned at least one positive retained observation.",
+                "candidate": "The source returned a possible match that requires analyst confirmation.",
+                "no_match": "The source completed without a candidate. This is not proof of absence.",
+                "could_not_check": "The source failed, timed out, was blocked, or returned incomplete output; no negative conclusion was drawn.",
+                "not_searched": str(task.get("reason") or "This route was not eligible for the submitted input."),
+                "pending": "This source has not reached a terminal state.",
+            }
+            task["review_explanation"] = str(
+                latest_attempt.get("error")
+                or task.get("reason")
+                or explanations[task["review_state"]]
+            )
+        result["tasks_count"] = result["engine_task_count"]
         result.update(case_id=case_id, persona_id=persona_id)
         return _json(result)
+
+    def ai_ranking_candidates(self, case_id, persona_id, *, limit=100):
+        """Return a bounded non-conflicting set for one AI ranking pass."""
+        limit = min(max(int(limit), 1), 100)
+        groups, summaries = self._table("groups"), self._table("group_summaries")
+        with self.engine.connect() as connection:
+            self._scope(connection, case_id, persona_id)
+            rows = connection.execute(
+                select(
+                    groups.c.id,
+                    groups.c.kind,
+                    summaries.c.normalized,
+                    summaries.c.assessment,
+                    summaries.c.observations,
+                    summaries.c.observation_count,
+                )
+                .join(summaries, summaries.c.group_id == groups.c.id)
+                .where(
+                    groups.c.case_id == case_id,
+                    groups.c.persona_id == persona_id,
+                )
+            ).mappings()
+            candidates = []
+            for row in rows:
+                assessment = dict(row["assessment"] or {})
+                conflicts = int(assessment.get("contradiction_count") or 0) + int(
+                    assessment.get("group_conflict_count") or 0
+                )
+                if conflicts or int(row["observation_count"] or 0) < 1:
+                    continue
+                counts = dict(assessment.get("evidence_counts") or {})
+                support = int(counts.get("support_origin_families") or 0)
+                source_rows = []
+                for observation in list(row["observations"] or [])[:3]:
+                    if not isinstance(observation, dict):
+                        continue
+                    source_rows.append(
+                        {
+                            key: observation.get(key)
+                            for key in (
+                                "engine",
+                                "status",
+                                "source_name",
+                                "source_url",
+                                "reason",
+                            )
+                            if observation.get(key) not in (None, "")
+                        }
+                    )
+                candidates.append(
+                    {
+                        "group_id": row["id"],
+                        "kind": row["kind"],
+                        "finding": row["normalized"],
+                        "support_origin_families": support,
+                        "evidence_status": assessment.get("evidence_status"),
+                        "missing_evidence": list(assessment.get("missing_evidence") or [])[
+                            :5
+                        ],
+                        "observation_count": int(row["observation_count"] or 0),
+                        "source_examples": source_rows,
+                        "_ranking_key": (
+                            support,
+                            int(row["observation_count"] or 0),
+                            row["id"],
+                        ),
+                    }
+                )
+        candidates.sort(key=lambda item: item["_ranking_key"], reverse=True)
+        for candidate in candidates:
+            candidate.pop("_ranking_key", None)
+        return _json(candidates[:limit])
+
+    def apply_ai_rankings(self, case_id, persona_id, rankings, *, model):
+        """Append model rankings to assessments without modifying source evidence."""
+        if not isinstance(rankings, list) or len(rankings) > 100:
+            raise ValueError("AI rankings must be a list of at most 100 records")
+        normalized = {}
+        for ranking in rankings:
+            if not isinstance(ranking, dict):
+                raise ValueError("AI ranking record must be an object")
+            group_id = str(ranking.get("group_id") or "")
+            priority = str(ranking.get("priority") or "").casefold()
+            reason = str(ranking.get("reason") or "").strip()
+            if (
+                not group_id
+                or group_id in normalized
+                or priority not in {"high", "medium", "low"}
+                or not isinstance(ranking.get("shortlisted"), bool)
+                or not reason
+            ):
+                raise ValueError("AI ranking record is incomplete or duplicated")
+            normalized[group_id] = {
+                "schema_version": 1,
+                "ranked_by": "openai",
+                "model": str(model)[:100],
+                "shortlisted": ranking["shortlisted"],
+                "priority": priority,
+                "reason": reason[:500],
+            }
+        changed = 0
+        groups = self._table("groups")
+        assessments = self._table("assessments")
+        with self.engine.begin() as connection:
+            self._scope(connection, case_id, persona_id, lock=True)
+            for group_id, ranking in normalized.items():
+                group = self._row(connection, groups, group_id)
+                self._check_scope(group, case_id, persona_id)
+                current = (
+                    connection.execute(
+                        select(assessments)
+                        .where(assessments.c.group_id == group_id)
+                        .order_by(
+                            assessments.c.created_at.desc(), assessments.c.id.desc()
+                        )
+                        .limit(1)
+                    )
+                    .mappings()
+                    .first()
+                )
+                if not current:
+                    raise ValueError("AI ranking requires a materialized assessment")
+                document = _json(current["document"])
+                assessment = dict(document.get("assessment") or {})
+                conflicts = int(assessment.get("contradiction_count") or 0) + int(
+                    assessment.get("group_conflict_count") or 0
+                )
+                if conflicts:
+                    raise ValueError("AI ranking cannot elevate conflicting evidence")
+                assessment["ai_ranking"] = ranking
+                document["assessment"] = assessment
+                evidence_hash = _digest(document)
+                if connection.scalar(
+                    select(assessments.c.id).where(
+                        assessments.c.group_id == group_id,
+                        assessments.c.evidence_hash == evidence_hash,
+                    )
+                ):
+                    continue
+                connection.execute(
+                    insert(assessments).values(
+                        id=_id(),
+                        case_id=case_id,
+                        persona_id=persona_id,
+                        group_id=group_id,
+                        evidence_hash=evidence_hash,
+                        document=document,
+                        created_at=_now(),
+                    )
+                )
+                self._refresh_group_summary(connection, group)
+                changed += 1
+            if changed:
+                self._bump(connection, persona_id)
+        return {"ranked": len(normalized), "changed": changed}
 
     def create_version(
         self,
@@ -3114,11 +4262,78 @@ class PipelineStore:
         imported twice merely because a batch boundary shifted. Existing source
         rows and review history are retained unchanged inside the native payload.
         """
+        from maigret.web.pipeline_evidence import (
+            iter_legacy_claim_observations,
+            legacy_claim_with_coordinates,
+        )
+
         actor = _text(actor, "migration actor", 200)
         limit = min(max(int(limit), 1), 2000)
         records = []
+
+        def coordinate_signature(claim, claim_id=None):
+            document = legacy_claim_with_coordinates(claim)
+            qualifiers = (
+                document.get("qualifiers")
+                if isinstance(document.get("qualifiers"), dict)
+                else {}
+            )
+            try:
+                latitude = float(qualifiers.get("latitude"))
+                longitude = float(qualifiers.get("longitude"))
+            except (TypeError, ValueError):
+                return None
+            identifier = str(claim_id or document.get("id") or "")
+            return (identifier, latitude, longitude) if identifier else None
+
+        def imported_coordinate_signature(claim, claim_id):
+            qualifiers = (
+                claim.get("qualifiers")
+                if isinstance(claim.get("qualifiers"), dict)
+                else {}
+            )
+            try:
+                latitude = float(qualifiers.get("latitude"))
+                longitude = float(qualifiers.get("longitude"))
+            except (TypeError, ValueError):
+                return None
+            return (
+                (str(claim_id), latitude, longitude)
+                if (
+                    claim_id
+                    and math.isfinite(latitude)
+                    and math.isfinite(longitude)
+                    and -90 <= latitude <= 90
+                    and -180 <= longitude <= 180
+                )
+                else None
+            )
+
         with self.engine.connect() as connection:
             self._scope(connection, case_id, persona_id)
+            observations_table = self._table("observations")
+            existing_coordinate_signatures = set()
+            for row in connection.execute(
+                select(observations_table.c.payload).where(
+                    observations_table.c.case_id == case_id,
+                    observations_table.c.persona_id == persona_id,
+                )
+            ).mappings():
+                document = row["payload"] if isinstance(row["payload"], dict) else {}
+                native = (
+                    document.get("payload")
+                    if isinstance(document.get("payload"), dict)
+                    else {}
+                )
+                legacy_claim_id = str(native.get("legacy_claim_id") or "")
+                for imported_claim in document.get("claims") or []:
+                    if not isinstance(imported_claim, dict):
+                        continue
+                    signature = imported_coordinate_signature(
+                        imported_claim, claim_id=legacy_claim_id
+                    )
+                    if signature:
+                        existing_coordinate_signatures.add(signature)
             statement = select(persona_claims).where(
                 persona_claims.c.persona_id == persona_id
             )
@@ -3161,33 +4376,129 @@ class PipelineStore:
                     .mappings()
                     .first()
                 )
-                records.append((claim, key, dict(existing) if existing else None))
+                signature = coordinate_signature(claim)
+                repair_key = (
+                    "legacy-coordinate-repair-v1:"
+                    + _digest([case_id, persona_id, signature])
+                    if (
+                        existing
+                        and existing["status"] == "completed"
+                        and signature
+                        and signature not in existing_coordinate_signatures
+                    )
+                    else None
+                )
+                repair_existing = (
+                    connection.execute(
+                        select(requests.c.id, requests.c.status).where(
+                            requests.c.case_id == case_id,
+                            requests.c.persona_id == persona_id,
+                            requests.c.idempotency_key == repair_key,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                    if repair_key
+                    else None
+                )
+                records.append(
+                    {
+                        "claim": claim,
+                        "key": key,
+                        "existing": dict(existing) if existing else None,
+                        "coordinate_signature": signature,
+                        "repair_key": repair_key,
+                        "repair_existing": (
+                            dict(repair_existing) if repair_existing else None
+                        ),
+                    }
+                )
         report = {
             "case_id": case_id,
             "persona_id": persona_id,
             "dry_run": bool(dry_run),
             "claim_count": len(records),
             "pending_claim_count": sum(
-                not item[2] or item[2]["status"] != "completed" for item in records
+                not item["existing"]
+                or item["existing"]["status"] != "completed"
+                for item in records
             ),
             "observation_count": sum(
-                max(1, len(item[0]["evidence"])) for item in records
+                max(1, len(item["claim"]["evidence"])) for item in records
             ),
             "missing_provenance_count": sum(
-                not item[0]["evidence"] for item in records
+                not item["claim"]["evidence"] for item in records
+            ),
+            "coordinate_claim_count": sum(
+                item["coordinate_signature"] is not None for item in records
+            ),
+            "pending_coordinate_repair_count": sum(
+                item["repair_key"] is not None for item in records
             ),
             "next_after_claim_id": claims[-1]["id"] if len(claims) == limit else None,
             "auto_finalized": False,
             "request_ids": [],
+            "coordinate_repair_request_ids": [],
         }
         if dry_run or not records:
             return report
-        from maigret.web.pipeline_evidence import iter_legacy_claim_observations
         from maigret.web.pipeline_consolidation import consolidate_observations
 
-        for claim, key, existing in records:
+        for record in records:
+            claim = record["claim"]
+            existing = record["existing"]
             if existing and existing["status"] == "completed":
                 report["request_ids"].append(existing["id"])
+                repair_key = record["repair_key"]
+                if not repair_key:
+                    continue
+                repair_existing = record["repair_existing"]
+                if repair_existing and repair_existing["status"] == "completed":
+                    raise ValueError(
+                        "A completed legacy coordinate repair has no coordinate-bearing observation."
+                    )
+                request = self.create_request(
+                    case_id,
+                    persona_id,
+                    [{"type": "legacy_coordinate", "value": claim["id"]}],
+                    {
+                        "pipeline_id": PIPELINE_ID,
+                        "tasks": [
+                            {
+                                "engine_id": "legacy_coordinate_repair",
+                                "route_state": "active",
+                                "task_id": repair_key,
+                            }
+                        ],
+                    },
+                    actor=actor,
+                    idempotency_key=repair_key,
+                )
+                task = request["tasks"][0]
+                attempt = (
+                    task["attempts"][0]
+                    if task["attempts"]
+                    else self.start_attempt(task["id"], "legacy-coordinate:" + actor)
+                )
+                observations = list(
+                    iter_legacy_claim_observations(
+                        [claim],
+                        case_id=case_id,
+                        subject_id=persona_id,
+                        request_id=request["id"],
+                        task_id=task["id"],
+                        attempt_id=attempt["id"],
+                        coordinate_repair=True,
+                    )
+                )
+                self.record_observations(
+                    attempt["id"],
+                    observations,
+                    outcome="candidate",
+                    worker_id=attempt["worker_id"],
+                )
+                report["request_ids"].append(request["id"])
+                report["coordinate_repair_request_ids"].append(request["id"])
                 continue
             request = self.create_request(
                 case_id,
@@ -3199,12 +4510,12 @@ class PipelineStore:
                         {
                             "engine_id": "legacy_evidence_import",
                             "route_state": "active",
-                            "task_id": key,
+                            "task_id": record["key"],
                         }
                     ],
                 },
                 actor=actor,
-                idempotency_key=key,
+                idempotency_key=record["key"],
             )
             task = request["tasks"][0]
             attempt = (
@@ -3239,6 +4550,230 @@ class PipelineStore:
             report["request_ids"][0] if report["request_ids"] else None
         )
         return report
+
+    def converge_legacy_reviews(self, case_id, persona_id, *, dry_run=True):
+        """Project retained legacy review state into the P2 decision ledger.
+
+        Evidence must already have been imported and consolidated.  Original
+        claims, evidence and review rows are never changed.  One deterministic
+        decision records the complete legacy history for each consolidated
+        group.  Conflicting legacy states, or disagreement with an existing P2
+        decision, become unresolved instead of being silently promoted.
+        Pending-only groups remain undecided.
+        """
+        decision_map = {
+            "approved": "include",
+            "rejected": "reject",
+            "uncertain": "unresolved",
+            "pending": None,
+        }
+
+        def comparable(value):
+            return "reject" if value in {"reject", "exclude"} else value
+
+        groups = self._table("groups")
+        observations = self._table("observations")
+        memberships = self._table("group_observations")
+        decisions = self._table("operator_decisions")
+        with self.engine.begin() as connection:
+            self._scope(connection, case_id, persona_id, lock=not dry_run)
+            claims = [
+                dict(row)
+                for row in connection.execute(
+                    select(persona_claims)
+                    .where(persona_claims.c.persona_id == persona_id)
+                    .order_by(persona_claims.c.id)
+                ).mappings()
+            ]
+            reviews_by_claim = {claim["id"]: [] for claim in claims}
+            if reviews_by_claim:
+                for row in connection.execute(
+                    select(claim_reviews)
+                    .where(claim_reviews.c.claim_id.in_(reviews_by_claim))
+                    .order_by(claim_reviews.c.created_at, claim_reviews.c.id)
+                ).mappings():
+                    reviews_by_claim[row["claim_id"]].append(_json(dict(row)))
+
+            group_claims = {}
+            membership_rows = connection.execute(
+                select(
+                    memberships.c.group_id,
+                    observations.c.payload,
+                )
+                .join(observations, observations.c.id == memberships.c.observation_id)
+                .join(groups, groups.c.id == memberships.c.group_id)
+                .where(
+                    groups.c.case_id == case_id,
+                    groups.c.persona_id == persona_id,
+                )
+            ).mappings()
+            known_claims = {claim["id"]: claim for claim in claims}
+            for row in membership_rows:
+                document = (
+                    row["payload"] if isinstance(row["payload"], dict) else {}
+                )
+                native_payload = (
+                    document.get("payload")
+                    if isinstance(document.get("payload"), dict)
+                    else {}
+                )
+                claim_id = str(
+                    native_payload.get("legacy_claim_id")
+                    or document.get("legacy_claim_id")
+                    or ""
+                )
+                if claim_id in known_claims:
+                    group_claims.setdefault(row["group_id"], set()).add(claim_id)
+
+            existing_by_group = {}
+            for row in connection.execute(
+                select(decisions)
+                .where(
+                    decisions.c.case_id == case_id,
+                    decisions.c.persona_id == persona_id,
+                )
+                .order_by(decisions.c.group_id, decisions.c.sequence)
+            ).mappings():
+                existing_by_group.setdefault(row["group_id"], []).append(dict(row))
+
+            report = {
+                "case_id": case_id,
+                "persona_id": persona_id,
+                "dry_run": bool(dry_run),
+                "legacy_claim_count": len(claims),
+                "mapped_claim_count": len(
+                    {claim_id for values in group_claims.values() for claim_id in values}
+                ),
+                "group_count": len(group_claims),
+                "decision_count": 0,
+                "undecided_group_count": 0,
+                "conflict_count": 0,
+                "already_converged_count": 0,
+                "conflicts": [],
+                "auto_finalized": False,
+                "qc_created": False,
+            }
+            planned = []
+            for group_id in sorted(group_claims):
+                claim_ids = sorted(group_claims[group_id])
+                claim_documents = []
+                desired = set()
+                for claim_id in claim_ids:
+                    claim = known_claims[claim_id]
+                    target = decision_map[claim["review_status"]]
+                    desired.add(
+                        comparable(target) if target else "undecided"
+                    )
+                    claim_documents.append(
+                        {
+                            "legacy_claim_id": claim_id,
+                            "current_status": claim["review_status"],
+                            "reviewed_by": claim.get("reviewed_by"),
+                            "reviewed_at": _json(claim.get("reviewed_at")),
+                            "reviews": reviews_by_claim[claim_id],
+                        }
+                    )
+                existing = existing_by_group.get(group_id, [])
+                imported_fingerprints = {
+                    str(
+                        (row.get("details") or {})
+                        .get("legacy_convergence", {})
+                        .get("fingerprint", "")
+                    )
+                    for row in existing
+                }
+                # Imported checkpoints must never hide a later comparison with
+                # an operator-authored P2 decision.  Scan the full append-only
+                # ledger so replaying this importer cannot silently override a
+                # human judgement that predates an earlier import.
+                latest_human = next(
+                    (
+                        row
+                        for row in reversed(existing)
+                        if not (row.get("details") or {}).get(
+                            "legacy_convergence"
+                        )
+                    ),
+                    None,
+                )
+                conflict_reasons = []
+                if len(desired) > 1:
+                    conflict_reasons.append("legacy_states_disagree")
+                target = next(iter(desired)) if len(desired) == 1 else None
+                if target == "undecided":
+                    target = None
+                if (
+                    target
+                    and latest_human
+                    and comparable(latest_human["decision"]) != target
+                ):
+                    conflict_reasons.append("legacy_and_p2_states_disagree")
+                if target is None and not conflict_reasons:
+                    report["undecided_group_count"] += 1
+                    continue
+                decision = "unresolved" if conflict_reasons else target
+                convergence = {
+                    "version": "p2-legacy-review-v1",
+                    "group_id": group_id,
+                    "decision": decision,
+                    "conflicts": conflict_reasons,
+                    "claims": claim_documents,
+                }
+                convergence["fingerprint"] = _digest(convergence)
+                if convergence["fingerprint"] in imported_fingerprints:
+                    report["already_converged_count"] += 1
+                    continue
+                if conflict_reasons:
+                    report["conflict_count"] += 1
+                    report["conflicts"].append(
+                        {
+                            "group_id": group_id,
+                            "claim_ids": claim_ids,
+                            "reasons": conflict_reasons,
+                        }
+                    )
+                planned.append((group_id, decision, convergence))
+
+            report["decision_count"] = len(planned)
+            if dry_run:
+                return _json(report)
+
+            for group_id, decision, convergence in planned:
+                sequence = (
+                    connection.scalar(
+                        select(func.max(decisions.c.sequence)).where(
+                            decisions.c.group_id == group_id
+                        )
+                    )
+                    or 0
+                ) + 1
+                connection.execute(
+                    insert(decisions).values(
+                        id=str(
+                            uuid.uuid5(
+                                uuid.NAMESPACE_URL,
+                                "openledger:legacy-convergence:"
+                                + convergence["fingerprint"],
+                            )
+                        ),
+                        case_id=case_id,
+                        persona_id=persona_id,
+                        group_id=group_id,
+                        sequence=sequence,
+                        decision=decision,
+                        actor="system:legacy-persona-convergence",
+                        reason=(
+                            "Legacy review states conflict; operator review is required."
+                            if convergence["conflicts"]
+                            else "Imported the current legacy review state with its complete audit history."
+                        ),
+                        details={"legacy_convergence": convergence},
+                        created_at=_now(),
+                    )
+                )
+            if planned:
+                self._bump(connection, persona_id)
+            return _json(report)
 
     def withdraw_final(
         self,

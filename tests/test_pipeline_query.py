@@ -47,7 +47,16 @@ def query_for(plan, **kwargs):
     "kind,value,engines",
     [
         ("username", "test_person", {"maigret", "native_profile_search"}),
-        ("full_name", "Test Person", {"native_profile_search", "public_exact_match"}),
+        (
+            "full_name",
+            "Test Person",
+            {
+                "native_profile_search",
+                "public_exact_match",
+                "wikipedia_public_biography",
+                "icij_offshore_leaks",
+            },
+        ),
         ("email", "person+research@example.test", {"public_exact_match"}),
         ("phone", "+628123456789", {"public_exact_match"}),
     ],
@@ -80,6 +89,51 @@ def test_multiple_email_tasks_share_case_and_subject_but_keep_per_address_input_
     assert len({task["input_id"] for task in tasks}) == 2
     assert {task["subject_id"] for task in tasks} == {"subject-a"}
     assert {task["case_id"] for task in tasks} == {"case-a"}
+
+
+def test_approved_persona_research_questions_route_as_active_cited_ai_tasks():
+    raw = plan_for(["full_name"], ["Jati Pratomo"], allow_ai_context="on")
+    questions = [
+        "Cross-check approved anchor batch one with cited public sources.",
+        "Cross-check approved anchor batch two with cited public sources.",
+    ]
+    plan = query_for(
+        raw,
+        context={
+            "research_questions": questions,
+            "approved_research_questions": questions,
+        },
+    )
+    ai_tasks = [
+        task
+        for task in plan["tasks"]
+        if task["engine_id"] == "ai_cited_research"
+    ]
+    assert [task["input_value"] for task in ai_tasks] == questions
+    assert all(task["route_state"] == "active" for task in ai_tasks)
+
+
+def test_approved_research_preserves_25_full_length_batches():
+    raw = plan_for(["full_name"], ["Jati Pratomo"], allow_ai_context="on")
+    questions = [
+        f"Approved anchor batch {index}: " + ("x" * 8970)
+        for index in range(25)
+    ]
+    plan = query_for(
+        raw,
+        context={
+            "research_questions": questions,
+            "approved_research_questions": questions,
+        },
+    )
+    ai_tasks = [
+        task
+        for task in plan["tasks"]
+        if task["engine_id"] == "ai_cited_research"
+    ]
+
+    assert [task["input_value"] for task in ai_tasks] == questions
+    assert all(task["route_state"] == "active" for task in ai_tasks)
 
 
 def test_every_existing_adapter_and_catalog_source_has_a_route_contract():
@@ -155,7 +209,34 @@ def test_same_handle_and_url_preserve_all_three_raw_inputs_without_triplicate_ta
         "Test_Person",
         "@Test_Person",
     }
-    assert any(row["value"] == url for row in username["derived_from"])
+    assert not any(row["value"] == url for row in username["derived_from"])
+    profile = next(item for item in query["inputs"] if item["type"] == "profile_url")
+    assert profile["value"] == url
+
+
+def test_exact_profile_url_does_not_fan_out_to_cross_platform_username_tasks():
+    url = "https://linkedin.com/in/jati-pratomo"
+    raw = plan_for(
+        ["full_name", "profile_url"],
+        ["Jati Pratomo", url],
+        generate_name_variants="on",
+    )
+    query = query_for(raw)
+
+    assert not [item for item in query["inputs"] if item["type"] == "username"]
+    assert not [
+        task
+        for task in query["tasks"]
+        if task["input_type"] == "username" and task["route_state"] == "active"
+    ]
+    unfurl = next(
+        task
+        for task in query["tasks"]
+        if task["engine_id"] == "unfurl_url_analysis"
+        and task["input_value"] == url
+    )
+    assert unfurl["route_state"] == "active"
+    assert "without making a network request" in unfurl["reason"]
 
 
 @pytest.mark.parametrize(
@@ -199,23 +280,17 @@ def test_numeric_typed_correction_is_honored_and_ambiguous_phone_needs_country()
     )  # no guessed trunk/calling-code rewrite
 
 
-def test_name_sources_are_conditional_until_name_is_operator_approved():
+def test_name_sources_run_from_the_initial_operator_supplied_name():
     raw = plan_for(["full_name"], ["Test Person"])
     before = query_for(raw)
     after = query_for(raw, context={"approved_full_names": ["Test Person"]})
     for engine in ("wikipedia_public_biography", "icij_offshore_leaks"):
-        assert (
-            next(task for task in before["tasks"] if task["engine_id"] == engine)[
-                "route_state"
-            ]
-            == "conditional"
-        )
-        assert (
-            next(task for task in after["tasks"] if task["engine_id"] == engine)[
-                "route_state"
-            ]
-            == "active"
-        )
+        assert next(
+            task for task in before["tasks"] if task["engine_id"] == engine
+        )["route_state"] == "active"
+        assert next(
+            task for task in after["tasks"] if task["engine_id"] == engine
+        )["route_state"] == "active"
 
 
 def test_plan_is_reproducible_and_source_drift_requires_revalidation():

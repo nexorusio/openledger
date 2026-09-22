@@ -45,6 +45,7 @@ ICIJ_PROVIDER = "icij-offshore-leaks"
 UNFURL_PROVIDER = "unfurl"
 WAYBACK_PROVIDER = "wayback"
 GITHUB_PROVIDER = "github"
+APPROVED_SOURCE_FETCH_PROVIDER = "approved-public-source-fetch"
 
 _TRANSIENT_PROVIDER_STATUSES = frozenset(
     {"error", "failed", "rate_limited", "timed_out", "unavailable"}
@@ -313,6 +314,12 @@ MAX_OFFICIAL_WEBSITE_PEOPLE = 25
 MAX_OFFICIAL_WEBSITE_LINKED_PROFILES = 2
 MAX_OFFICIAL_WEBSITE_REDIRECTS = 1
 MAX_OFFICIAL_WEBSITE_PAGES = 4
+
+APPROVED_SOURCE_FETCH_ENGINE = "approved_public_source_fetch"
+APPROVED_SOURCE_FETCH_TIMEOUT_SECONDS = 15
+APPROVED_SOURCE_FETCH_MAX_RESPONSE_BYTES = 500_000
+APPROVED_SOURCE_FETCH_MAX_REDIRECTS = 1
+APPROVED_SOURCE_FETCH_MAX_CLAIMS = 16
 
 _LEI_PATTERN = re.compile(r"^[A-Z0-9]{20}$")
 _SIREN_PATTERN = re.compile(r"^[0-9]{9}$")
@@ -4029,6 +4036,476 @@ async def run_official_website_public_content(
     raise RuntimeError("The supplied website returned an unsupported response")
 
 
+def _approved_source_meta(document: Any, *names: str) -> str:
+    wanted = {name.casefold() for name in names}
+    for node in document.xpath("//meta[@content]")[:500]:
+        key = str(node.get("property") or node.get("name") or "").casefold()
+        if key in wanted:
+            value = _bounded_text(node.get("content"), limit=2000)
+            if value:
+                return value
+    return ""
+
+
+def _approved_source_json_ld(document: Any) -> list[Dict[str, Any]]:
+    """Return a bounded, inert subset of public JSON-LD entities."""
+    entities: list[Dict[str, Any]] = []
+    for node in document.xpath('//script[@type="application/ld+json"]')[:20]:
+        try:
+            payload = json.loads(_node_text(node, limit=40_000))
+        except (TypeError, ValueError):
+            continue
+        candidates = list(payload) if isinstance(payload, list) else [payload]
+        # JSON-LD commonly wraps entities in ``@graph``.  Expand one bounded
+        # level before inspecting types; no script is executed and no remote
+        # context is fetched by the HTML parser.
+        for candidate in list(candidates)[:20]:
+            if isinstance(candidate, dict) and isinstance(candidate.get("@graph"), list):
+                candidates.extend(candidate["@graph"][:20])
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            kind = candidate.get("@type")
+            types = {str(value).casefold() for value in (kind if isinstance(kind, list) else [kind])}
+            if types.intersection({"person", "organization", "profilepage", "webpage"}):
+                entities.append(candidate)
+                if len(entities) >= 8:
+                    return entities
+    return entities
+
+
+def _approved_source_value(value: Any, *, limit: int = 1000) -> str:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("@id") or ""
+    if isinstance(value, list):
+        value = ", ".join(
+            _approved_source_value(item, limit=limit) for item in value[:5]
+        )
+    return _bounded_text(value, limit=limit)
+
+
+def _approved_source_claims(document: Any, source_url: str) -> list[Dict[str, Any]]:
+    """Create review-only candidates from literal page metadata, never inference."""
+    values: list[tuple[str, Any, str]] = []
+    title = _node_text((document.xpath("//title") or [None])[0], limit=500)
+    description = _approved_source_meta(document, "og:description", "description")
+    image = _safe_public_url(_approved_source_meta(document, "og:image", "twitter:image"))
+    canonical = ""
+    for node in document.xpath('//link[@rel="canonical"]')[:1]:
+        canonical = _safe_public_url(urljoin(source_url, str(node.get("href") or "")))
+    if description:
+        values.append(("summary", description, "page metadata"))
+    if image:
+        values.append(("photograph", image, "page metadata"))
+    if canonical and canonical != source_url:
+        values.append(("website", canonical, "page canonical link"))
+
+    for entity in _approved_source_json_ld(document):
+        types = entity.get("@type")
+        type_names = {
+            str(value).casefold()
+            for value in (types if isinstance(types, list) else [types])
+        }
+        if "person" in type_names:
+            name = _approved_source_value(entity.get("name"), limit=300)
+            if name:
+                values.append(("full_name", name, "public Person JSON-LD"))
+            job_title = _approved_source_value(entity.get("jobTitle"), limit=500)
+            if job_title:
+                values.append(("occupation", job_title, "public Person JSON-LD"))
+            for organization in entity.get("worksFor", []) if isinstance(entity.get("worksFor"), list) else [entity.get("worksFor")]:
+                name = _approved_source_value(organization, limit=500)
+                if name:
+                    values.append(("affiliation", name, "public Person JSON-LD"))
+            for key, predicate in (("email", "email"), ("telephone", "phone")):
+                value = _approved_source_value(entity.get(key), limit=500)
+                if value:
+                    values.append((predicate, value, "public Person JSON-LD"))
+            address = entity.get("address")
+            if isinstance(address, dict):
+                location = ", ".join(
+                    part
+                    for part in (
+                        _approved_source_value(address.get("addressLocality"), limit=300),
+                        _approved_source_value(address.get("addressRegion"), limit=300),
+                        _approved_source_value(address.get("addressCountry"), limit=300),
+                    )
+                    if part
+                )
+                if location:
+                    values.append(("current_location", location, "public Person JSON-LD"))
+        elif "organization" in type_names:
+            name = _approved_source_value(entity.get("name"), limit=500)
+            if name:
+                values.append(("affiliation", name, "public Organization JSON-LD"))
+
+    claims, seen = [], set()
+    for predicate, value, basis in values:
+        marker = (predicate, str(value).casefold())
+        if not value or marker in seen:
+            continue
+        seen.add(marker)
+        claims.append(
+            {
+                "predicate": predicate,
+                "value": value,
+                "qualifiers": {
+                    "extraction_basis": basis,
+                    "source_collection": "approved_exact_public_source_fetch",
+                    "human_review_required": True,
+                    "automatic_approval_allowed": False,
+                },
+            }
+        )
+        if len(claims) >= APPROVED_SOURCE_FETCH_MAX_CLAIMS:
+            break
+    # Title is kept as source evidence even when it is not safe to promote to a
+    # Person claim.  A title like "LinkedIn" must never become a person's name.
+    return claims
+
+
+_APPROVED_MAIGRET_FIELD_ALIASES = {
+    "about": "summary",
+    "bio": "summary",
+    "biography": "summary",
+    "description": "summary",
+    "display_name": "full_name",
+    "displayname": "full_name",
+    "full_name": "full_name",
+    "fullname": "full_name",
+    "name": "full_name",
+    "avatar": "photograph",
+    "avatar_url": "photograph",
+    "image": "photograph",
+    "image_url": "photograph",
+    "photo": "photograph",
+    "photo_url": "photograph",
+    "picture": "photograph",
+    "address": "current_location",
+    "city": "current_location",
+    "country": "current_location",
+    "current_location": "current_location",
+    "location": "current_location",
+    "company": "affiliation",
+    "employer": "affiliation",
+    "affiliation": "affiliation",
+    "organization": "affiliation",
+    "organisation": "affiliation",
+    "job": "occupation",
+    "job_title": "occupation",
+    "occupation": "occupation",
+    "email": "email",
+    "mail": "email",
+    "phone": "phone",
+    "telephone": "phone",
+    "website": "website",
+}
+
+
+def _approved_maigret_values(value: Any, *, depth: int = 0) -> Iterable[str]:
+    if depth > 3:
+        return
+    if isinstance(value, dict):
+        for item in list(value.values())[:20]:
+            yield from _approved_maigret_values(item, depth=depth + 1)
+        return
+    if isinstance(value, (list, tuple, set)):
+        for item in list(value)[:20]:
+            yield from _approved_maigret_values(item, depth=depth + 1)
+        return
+    text = _bounded_text(value, limit=2000)
+    if text:
+        yield text
+
+
+def _approved_maigret_parser_claims(
+    body: bytes, source_url: str
+) -> tuple[list[Dict[str, Any]], list[str]]:
+    """Apply Maigret's structured parser to an already safety-bounded page."""
+    try:
+        from socid_extractor import extract
+
+        extracted = extract(body.decode("utf-8", errors="replace"))
+    except Exception:
+        return [], []
+    if not isinstance(extracted, dict):
+        return [], []
+    claims, fields, seen = [], [], set()
+    for raw_name, raw_value in list(extracted.items())[:100]:
+        name = str(raw_name).strip().casefold().replace(" ", "_")
+        predicate = _APPROVED_MAIGRET_FIELD_ALIASES.get(name)
+        if not predicate:
+            continue
+        for value in _approved_maigret_values(raw_value):
+            if predicate in {"photograph", "website"}:
+                value = _safe_public_url(urljoin(source_url, value)) or ""
+            elif predicate == "email":
+                value = value.casefold() if "@" in value and len(value) <= 254 else ""
+            elif predicate == "phone":
+                digits = re.sub(r"\D", "", value)
+                value = value if 7 <= len(digits) <= 15 else ""
+            if not value:
+                continue
+            marker = (predicate, value.casefold())
+            if marker in seen:
+                continue
+            seen.add(marker)
+            fields.append(name)
+            claims.append(
+                {
+                    "predicate": predicate,
+                    "value": value,
+                    "qualifiers": {
+                        "extraction_basis": "Maigret structured profile parser",
+                        "source_collection": "approved_exact_public_source_fetch",
+                        "human_review_required": True,
+                        "automatic_approval_allowed": False,
+                    },
+                }
+            )
+            if len(claims) >= APPROVED_SOURCE_FETCH_MAX_CLAIMS:
+                return claims, list(dict.fromkeys(fields))
+    return claims, list(dict.fromkeys(fields))
+
+
+async def _bounded_approved_source_request(
+    session: Any, url: str, *, resolver: Callable[..., Any]
+) -> Dict[str, Any]:
+    normalized = normalize_official_website_url(url)
+    if not normalized:
+        raise ValueError("An approved public source URL is required")
+    parsed = urlparse(normalized["url"])
+    port = parsed.port or (443 if parsed.scheme.casefold() == "https" else 80)
+    addresses = await _resolved_public_addresses(resolver, normalized["domain"], port)
+    request_url, server_hostname, host_header = _pinned_request_target(
+        normalized["url"], addresses[0]
+    )
+    options: Dict[str, Any] = {
+        "allow_redirects": False,
+        "headers": {"Host": host_header},
+    }
+    if parsed.scheme.casefold() == "https":
+        options["server_hostname"] = server_hostname
+    async with session.get(request_url, **options) as response:
+        http_status = int(response.status)
+        if http_status in {301, 302, 303, 307, 308}:
+            return {
+                "status": "redirect",
+                "http_status": http_status,
+                "location": str(response.headers.get("Location") or "")[:2000],
+            }
+        if http_status in {401, 403, 429, 451, 999}:
+            return {"status": "access_blocked", "http_status": http_status}
+        if http_status == 404:
+            return {"status": "not_found", "http_status": http_status}
+        if http_status >= 500:
+            return {"status": "unavailable", "http_status": http_status}
+        if http_status != 200:
+            return {"status": "unavailable", "http_status": http_status}
+        content_type = str(response.headers.get("Content-Type") or "").casefold()
+        if content_type and not any(
+            allowed in content_type for allowed in ("text/html", "application/xhtml+xml")
+        ):
+            return {"status": "unsupported_content", "http_status": http_status}
+        content_length = response.headers.get("Content-Length")
+        if content_length:
+            try:
+                declared_length = int(content_length)
+            except (TypeError, ValueError):
+                return {"status": "unsupported_content", "http_status": http_status}
+            if declared_length < 0 or declared_length > APPROVED_SOURCE_FETCH_MAX_RESPONSE_BYTES:
+                return {"status": "oversized", "http_status": http_status}
+        body = await response.content.read(APPROVED_SOURCE_FETCH_MAX_RESPONSE_BYTES + 1)
+        if len(body) > APPROVED_SOURCE_FETCH_MAX_RESPONSE_BYTES:
+            return {"status": "oversized", "http_status": http_status}
+    return {"status": "ok", "http_status": http_status, "body": body}
+
+
+@governed_provider(APPROVED_SOURCE_FETCH_PROVIDER)
+async def run_approved_public_source_fetch(
+    target: Dict[str, Any],
+    *,
+    timeout_seconds: int = APPROVED_SOURCE_FETCH_TIMEOUT_SECONDS,
+    session_factory: Optional[Callable[..., Any]] = None,
+    host_resolver: Optional[Callable[..., Any]] = None,
+) -> Dict[str, Any]:
+    """Fetch one approved public page without log-in, script execution or bypasses."""
+    requested_url = _safe_public_url(target.get("profile_url"))
+    if not requested_url:
+        raise ValueError("Approved source target is invalid")
+    normalized = normalize_official_website_url(requested_url)
+    if not normalized:
+        raise ValueError("Approved source target is invalid")
+    session_factory = session_factory or aiohttp.ClientSession
+    host_resolver = host_resolver or _resolve_public_host
+    timeout = aiohttp.ClientTimeout(total=max(1, min(int(timeout_seconds), 30)))
+    headers = {
+        "Accept": "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.8",
+        "User-Agent": "OpenLedger-Approved-Source-Fetch/1.0 (+https://github.com/nexorusio/openledger)",
+    }
+    # Reuse only ordinary public browser headers from the matched Maigret site.
+    # Authentication, cookies, provider tokens and cross-origin hints are never
+    # carried into this exact-URL collector.
+    allowed_maigret_headers = {
+        "accept": "Accept",
+        "accept-language": "Accept-Language",
+        "cache-control": "Cache-Control",
+        "pragma": "Pragma",
+        "sec-ch-ua": "Sec-CH-UA",
+        "sec-fetch-dest": "Sec-Fetch-Dest",
+        "sec-fetch-mode": "Sec-Fetch-Mode",
+        "sec-fetch-site": "Sec-Fetch-Site",
+        "sec-fetch-user": "Sec-Fetch-User",
+        "upgrade-insecure-requests": "Upgrade-Insecure-Requests",
+        "user-agent": "User-Agent",
+    }
+    site_headers = target.get("maigret_public_headers") or {}
+    if isinstance(site_headers, dict):
+        for raw_name, raw_value in list(site_headers.items())[:30]:
+            name = allowed_maigret_headers.get(str(raw_name).strip().casefold())
+            value = str(raw_value or "").strip()
+            if name and value and "\r" not in value and "\n" not in value:
+                headers[name] = value[:1000]
+    current_url = normalized["url"]
+    try:
+        async with session_factory(timeout=timeout, headers=headers) as session:
+            for redirect_count in range(APPROVED_SOURCE_FETCH_MAX_REDIRECTS + 1):
+                response = await _bounded_approved_source_request(
+                    session, current_url, resolver=host_resolver
+                )
+                if response["status"] != "redirect":
+                    break
+                if redirect_count >= APPROVED_SOURCE_FETCH_MAX_REDIRECTS:
+                    response = {
+                        "status": "unavailable",
+                        "http_status": response.get("http_status"),
+                        "reason": "The approved source exceeded its redirect limit.",
+                    }
+                    break
+                try:
+                    redirected = normalize_official_website_url(
+                        urljoin(current_url, response.get("location") or "")
+                    )
+                except ValueError:
+                    redirected = None
+                if not redirected or not _domains_equivalent(
+                    normalized["domain"], redirected["domain"]
+                ):
+                    response = {
+                        "status": "unavailable",
+                        "http_status": response.get("http_status"),
+                        "reason": "The approved source redirected outside its original public site.",
+                    }
+                    break
+                current_url = redirected["url"]
+            else:  # pragma: no cover - the redirect loop always breaks
+                response = {"status": "unavailable"}
+    except (aiohttp.ClientError, asyncio.TimeoutError, OSError, RuntimeError, ValueError):
+        # A rejected TCP/TLS request, a DNS safety failure, or a timeout is still
+        # a completed collection attempt.  Persist it as coverage metadata so
+        # the Persona says why fields were not extracted instead of looking as
+        # though the Fetch action did nothing.
+        response = {
+            "status": "unavailable",
+            "reason": "The approved source could not be collected safely at this time.",
+        }
+    source_record_id = "approved-source:" + claim_fingerprint("url", requested_url)
+    status = response.get("status")
+    if status != "ok":
+        descriptions = {
+            "access_blocked": "The source blocked unauthenticated public collection; this is not treated as missing evidence.",
+            "not_found": "The approved URL returned no public page.",
+            "unsupported_content": "The approved URL did not return a public HTML page.",
+            "oversized": "The approved URL exceeded the bounded public-page size limit.",
+            "unavailable": "The approved source could not be collected safely at this time.",
+        }
+        return {
+            "source_engine": APPROVED_SOURCE_FETCH_ENGINE,
+            "subject_type": "approved_public_url",
+            "subject_value": requested_url,
+            "status": status or "unavailable",
+            "source_url": current_url,
+            "source_record_id": source_record_id,
+            "reason": response.get("reason") or descriptions.get(status, "The approved source did not return usable public content."),
+            "http_status": response.get("http_status"),
+            "claims": [],
+            "extra": {
+                "access_outcome": status or "unavailable",
+                "human_review_required": True,
+                "automatic_approval_allowed": False,
+            },
+        }
+    try:
+        document = _public_html_document(
+            response["body"], source_name="Approved source"
+        )
+    except ValueError:
+        return {
+            "source_engine": APPROVED_SOURCE_FETCH_ENGINE,
+            "subject_type": "approved_public_url",
+            "subject_value": requested_url,
+            "status": "unsupported_content",
+            "source_url": current_url,
+            "source_record_id": source_record_id,
+            "reason": "The approved URL did not return a readable public HTML page.",
+            "http_status": response.get("http_status"),
+            "claims": [],
+            "extra": {
+                "access_outcome": "unsupported_content",
+                "human_review_required": True,
+                "automatic_approval_allowed": False,
+            },
+        }
+    title = _node_text((document.xpath("//title") or [None])[0], limit=500)
+    description = _approved_source_meta(document, "og:description", "description")
+    claims = _approved_source_claims(document, current_url)
+    maigret_fields = []
+    if target.get("maigret_site_name"):
+        parsed_claims, maigret_fields = _approved_maigret_parser_claims(
+            response["body"], current_url
+        )
+        seen = {
+            (claim.get("predicate"), str(claim.get("value") or "").casefold())
+            for claim in claims
+        }
+        for claim in parsed_claims:
+            marker = (
+                claim.get("predicate"),
+                str(claim.get("value") or "").casefold(),
+            )
+            if marker not in seen:
+                claims.append(claim)
+                seen.add(marker)
+            if len(claims) >= APPROVED_SOURCE_FETCH_MAX_CLAIMS:
+                break
+    return {
+        "source_engine": APPROVED_SOURCE_FETCH_ENGINE,
+        "subject_type": "approved_public_url",
+        "subject_value": requested_url,
+        "status": "observed",
+        "source_url": current_url,
+        "source_record_id": source_record_id,
+        "reason": (
+            "Bounded public HTML was fetched from the approved exact URL; "
+            "all extracted fields require analyst review."
+        ),
+        "http_status": response.get("http_status"),
+        "content_hash": "sha256:" + hashlib.sha256(response["body"]).hexdigest(),
+        "page_title": title,
+        "page_description": description,
+        "claims": claims,
+        "extra": {
+            "access_outcome": "fetched",
+            "claim_candidate_count": len(claims),
+            "maigret_site_name": target.get("maigret_site_name"),
+            "maigret_parser_fields": maigret_fields,
+            "human_review_required": True,
+            "automatic_approval_allowed": False,
+        },
+    }
+
+
 def _address_summary(address: Any) -> str:
     if not isinstance(address, dict):
         return ""
@@ -5223,29 +5700,43 @@ async def run_icij_offshore_match(
             "(+https://github.com/nexorusio/openledger)"
         ),
     }
-    async with session_factory(timeout=timeout, headers=headers) as session:
-        async with session.post(
-            ICIJ_RECONCILE_URL,
-            json={"query": confirmed_name, "type": "Officer", "limit": MAX_ICIJ_MATCHES},
-            allow_redirects=False,
-        ) as response:
-            if response.status in {403, 429}:
-                status, payload = "rate_limited", None
-            elif response.status == 200:
-                status = "ok"
-                payload = await _read_bounded_public_json(
-                    response,
-                    source_name="ICIJ Offshore Leaks",
-                    maximum_bytes=ICIJ_MAX_RESPONSE_BYTES,
-                )
-            else:
-                raise RuntimeError(
-                    "ICIJ Offshore Leaks reconciliation returned "
-                    f"HTTP {int(response.status)}"
-                )
-    matches = normalize_icij_offshore_matches(confirmed_name, payload) if payload else []
+    payload, reason = None, ""
+    try:
+        async with session_factory(timeout=timeout, headers=headers) as session:
+            async with session.post(
+                ICIJ_RECONCILE_URL,
+                json={"query": confirmed_name, "type": "Officer", "limit": MAX_ICIJ_MATCHES},
+                allow_redirects=False,
+            ) as response:
+                if response.status in {403, 429}:
+                    status = "rate_limited"
+                elif response.status == 200:
+                    status = "ok"
+                    payload = await _read_bounded_public_json(
+                        response,
+                        source_name="ICIJ Offshore Leaks",
+                        maximum_bytes=ICIJ_MAX_RESPONSE_BYTES,
+                    )
+                else:
+                    status = "unavailable"
+                    reason = (
+                        "ICIJ Offshore Leaks is temporarily unavailable "
+                        f"(HTTP {int(response.status)})."
+                    )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        status = "unavailable"
+        reason = f"ICIJ Offshore Leaks is temporarily unavailable ({type(exc).__name__})."
+    try:
+        matches = normalize_icij_offshore_matches(confirmed_name, payload) if payload else []
+    except ValueError:
+        # An upstream schema change is an unavailable source for this run, not
+        # a failed investigation or a negative search result.
+        matches, status = [], "unavailable"
+        reason = "ICIJ Offshore Leaks returned an unsupported public response."
     observation_status = "potential_match" if matches else (
-        "rate_limited" if status == "rate_limited" else "no_match"
+        "rate_limited" if status == "rate_limited" else (
+            "unavailable" if status == "unavailable" else "no_match"
+        )
     )
     return {
         "source_engine": ICIJ_OFFSHORE_ENGINE,
@@ -5256,7 +5747,7 @@ async def run_icij_offshore_match(
         "source_record_id": (
             f"icij-offshore-search:{claim_fingerprint('full_name', confirmed_name)}"
         ),
-        "reason": (
+        "reason": reason or (
             "Exact-name candidates require independent identity confirmation. "
             "Database inclusion does not imply illegal or improper conduct."
         ),
@@ -6502,6 +6993,8 @@ def _user_scanner_username_outcome(status: str, reason: str) -> str:
         return "not_found"
     if native_status == "skipped":
         return "blocked"
+    if native_status in {"inconclusive", "unavailable", "partial"}:
+        return "unknown"
     if native_status != "error":
         return "unknown"
     if any(
@@ -6764,7 +7257,7 @@ async def run_user_scanner_usernames(
                 return complete_batch(
                     [
                         {
-                            "status": "Error",
+                            "status": "Inconclusive",
                             "reason": reason,
                             "username": username,
                             "site_name": "User Scanner",

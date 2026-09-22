@@ -40,9 +40,9 @@ and deployment require their separate approvals after review and acceptance.
   and a source fingerprint checked on the checkout, inside Docker RUN, and at
   runtime. Supplying a correct commit label on different source cannot pass.
   The manifest also binds source/target schema and every migration SHA256. Its Git tree must be clean.
-- The exact allowed chain is `b3e9d7c4a610` → `e2e1a7c9d401` → `e2e2b8d0a502`.
+- The exact allowed chain is `b3e9d7c4a610` → `e2e1a7c9d401` → `e2e2b8d0a502` → `e2e3c9d1f703` → `e2e4d0e2a804`.
   The reviewed updater accepts either predecessor or the current target as the
-  existing database revision. The released app and worker require `e2e2b8d0a502`.
+  existing database revision. The released app and worker require `e2e4d0e2a804`.
   Multiple/unknown/P3 schemas and forbidden P3 implementation artifacts stop preflight.
 - A released web image contains an immutable build file. Both runtime startup and
   health checks require its matching schema. Environment flags cannot bypass it.
@@ -147,7 +147,7 @@ or load the approved image separately; a preflight cannot choose those for you.
 
 A failed migration or mismatched runtime leaves app and worker stopped. Inspect
 the saved release record. Fix forward using a separately reviewed `p2-e2e-v1`
-compatibility release that understands `e2e2b8d0a502`. Never start the prior
+compatibility release that understands `e2e3c9d1f703`. Never start the prior
 pipeline, run Alembic downgrade/stamp, remove volumes or automatically restore a
 backup. New evidence/decisions/versions must be retained. Recovery by database
 restore requires a separate post-backup data reconciliation plan and approval.
@@ -224,9 +224,11 @@ offered because the source database has no reliable per-source language field.
 When an analyst approves a place without coordinates, OpenLedger sends that
 approved label to the configured HTTPS geocoder and stores the returned
 bounding-box centroid. Cited AI research may also prefill a visibly approximate
-city or region map center. The defaults use Nominatim and OpenStreetMap tiles;
-set `OPENLEDGER_GEOCODER_URL` and `OPENLEDGER_MAP_TILE_URL` in `deploy/.env` to
-approved internal endpoints for an isolated or sensitive deployment. Set
+city or region map center. The default browser map uses OpenLedger's same-origin
+cached tile endpoint, which fetches OpenStreetMap tiles with an identifying user
+agent and never passes an upstream error page to the browser. Set
+`OPENLEDGER_GEOCODER_URL` and `OPENLEDGER_MAP_TILE_URL` in `deploy/.env` only to
+use approved internal endpoints or another approved tile provider. Set
 `OPENLEDGER_GEOCODER_TIMEOUT_SECONDS` to change the default 10-second timeout.
 
 ### Investigation-report media and cost boundary

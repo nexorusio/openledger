@@ -314,6 +314,7 @@ def test_grouped_form_keeps_requested_empty_categories_visible():
     assert [field["label"] for field in affiliations["fields"]] == [
         "Role or occupation",
         "Organization, institution or company",
+        "Organization location",
         "Ownership or leadership",
     ]
     assert field_display_label("company") == "Organization, institution or company"

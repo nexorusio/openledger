@@ -2,9 +2,10 @@ name: OpenLedger persistence safety
 
 on:
   push:
-    branches: [main]
+    branches: [main, dev]
   workflow_dispatch:
   pull_request:
+    branches: [main, dev]
     types: [opened, synchronize, reopened]
 
 permissions:
@@ -64,7 +65,7 @@ jobs:
 
       - name: Apply and verify database migrations
         run: |
-          poetry run alembic upgrade e2e2b8d0a502
+          poetry run alembic upgrade e2e4d0e2a804
           poetry run alembic check
 
       - name: Require PostgreSQL and complete pipeline acceptance with no skips
@@ -114,5 +115,7 @@ jobs:
         with:
           name: p2-pipeline-acceptance
           path: runtime/ci/
-          if-no-files-found: error
+          # A prior failing gate must remain the reported failure; artifact
+          # absence is diagnostic, not an independent release failure.
+          if-no-files-found: warn
           retention-days: 14

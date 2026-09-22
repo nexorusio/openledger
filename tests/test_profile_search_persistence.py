@@ -370,7 +370,10 @@ async def test_terminal_job_rejects_late_audit_and_delete_cascades(store):
         )
         is None
     )
-    assert store.delete_job(job_id) is True
+    with pytest.raises(ValueError, match="retained P2 pipeline"):
+        store.delete_job(job_id)
+    case_id = store.get_job(job_id)["case_id"]
+    assert store.delete_case(case_id) is True
     with store.engine.connect() as connection:
         assert (
             connection.scalar(

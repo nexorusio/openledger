@@ -13,6 +13,7 @@ from flask import (
 )
 from werkzeug.exceptions import NotFound
 from werkzeug.middleware.proxy_fix import ProxyFix
+from sqlalchemy.exc import SQLAlchemyError
 import base64
 import io
 import logging
@@ -31,9 +32,12 @@ import uuid
 from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
-from threading import Lock, Thread
+from pathlib import Path
+from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 import maigret
 import maigret.settings
 from maigret.ai import (
@@ -64,6 +68,7 @@ from maigret.web.case_store import (
     database_url_from_environment,
 )
 from maigret.web.external_evidence import MAX_DOCUMENT_BYTES
+from maigret.web.map_tiles import OSM_TILE_UPSTREAM, browser_map_tile_url
 from maigret.web.collector_adapters import (
     CLOUDFLARE_DNS_ENGINE,
     FR_BUSINESS_REGISTRY_ENGINE,
@@ -129,6 +134,7 @@ from maigret.web.profile_search_runtime import GovernedProfileSearchClient
 from maigret.web.provider_circuit_breaker import ProviderCircuitOpen
 from maigret.web.investigation_input import (
     InvestigationInputError,
+    build_approved_research_plan,
     build_investigation_plan,
     extract_profile_usernames,
     normalize_profile_url,
@@ -149,9 +155,9 @@ from maigret.web.persona_intelligence import (
     extract_explicit_public_urls,
     extract_case_chat_persona_claims,
     field_display_label,
-    group_claims,
 )
 from maigret.web.chat_presentation import render_chat_content
+from maigret.web.crawl_audit import MAX_AUDIT_EVENTS, build_crawl_audit
 from maigret.web.persona_pdf import generate_persona_pdf, persona_pdf_filename
 from maigret.web.profile_reliability import (
     DetectorHealthRegistryError,
@@ -190,6 +196,143 @@ app.config.update(
     MAX_FORM_MEMORY_SIZE=256 * 1024,
     MAX_FORM_PARTS=100,
 )
+
+MAP_TILE_UPSTREAM = OSM_TILE_UPSTREAM
+MAP_TILE_MAX_ZOOM = 19
+MAP_TILE_CACHE_SECONDS = 7 * 24 * 60 * 60
+MAP_TILE_MAX_BYTES = 1024 * 1024
+MAP_TILE_CACHE_MAX_BYTES = 32 * 1024 * 1024
+MAP_TILE_FETCH_TIMEOUT_SECONDS = 2
+MAP_TILE_FETCH_QUEUE_SECONDS = 5
+MAP_TILE_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+MAP_TILE_USER_AGENT = (
+    "OpenLedger/1.0 (+https://openledger.nexorus.io; cached map tiles)"
+)
+map_tile_cache_lock = Lock()
+map_tile_fetch_slots = BoundedSemaphore(value=3)
+map_tile_inflight_lock = Lock()
+map_tile_inflight = {}
+
+
+def persona_map_tile_url():
+    """Compatibility wrapper for the shared Persona map configuration."""
+    return browser_map_tile_url()
+
+
+def _map_tile_cache_path(zoom, tile_x, tile_y):
+    # The reports directory is a durable bind mount in the reviewed release
+    # compose file. Keeping browser tiles below it avoids a cold cache after
+    # every immutable app-container replacement.
+    root = Path("/tmp/maigret_reports/.map-tile-cache/browser")
+    return root / str(zoom) / str(tile_x) / f"{tile_y}.png"
+
+
+def _cached_map_tile(zoom, tile_x, tile_y):
+    path = _map_tile_cache_path(zoom, tile_x, tile_y)
+    try:
+        if (
+            path.is_file()
+            and time.time() - path.stat().st_mtime <= MAP_TILE_CACHE_SECONDS
+        ):
+            return path
+    except OSError:
+        pass
+    return None
+
+
+def _store_map_tile(path, payload):
+    with map_tile_cache_lock:
+        root = path.parents[2]
+        entries = []
+        total = 0
+        if root.is_dir():
+            for entry in root.rglob("*.png"):
+                try:
+                    stat_result = entry.stat()
+                except OSError:
+                    continue
+                entries.append((stat_result.st_mtime, entry, stat_result.st_size))
+                total += stat_result.st_size
+        for _modified, entry, size in sorted(entries):
+            if total + len(payload) <= MAP_TILE_CACHE_MAX_BYTES:
+                break
+            try:
+                entry.unlink()
+                total -= size
+            except OSError:
+                pass
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temporary = path.with_suffix(".tmp")
+        temporary.write_bytes(payload)
+        temporary.chmod(0o600)
+        temporary.replace(path)
+
+
+def _valid_png(payload):
+    """Require a complete PNG stream before it becomes a seven-day cache entry."""
+    if not payload.startswith(MAP_TILE_PNG_SIGNATURE):
+        return False
+    offset = len(MAP_TILE_PNG_SIGNATURE)
+    while offset + 12 <= len(payload):
+        length = int.from_bytes(payload[offset : offset + 4], "big")
+        chunk_end = offset + 12 + length
+        if chunk_end > len(payload):
+            return False
+        chunk_type = payload[offset + 4 : offset + 8]
+        if chunk_type == b"IEND":
+            return length == 0 and chunk_end == len(payload)
+        offset = chunk_end
+    return False
+
+
+def _map_tile_response(path):
+    response = send_file(
+        path,
+        mimetype="image/png",
+        conditional=True,
+        max_age=MAP_TILE_CACHE_SECONDS,
+    )
+    response.cache_control.public = True
+    response.cache_control.max_age = MAP_TILE_CACHE_SECONDS
+    return response
+
+
+def _map_tile_unavailable():
+    """Do not let a temporary upstream failure become a cached browser tile."""
+    response = Response(status=503)
+    response.cache_control.no_store = True
+    return response
+
+
+def _claim_map_tile_flight(tile_key):
+    """Return one shared result slot and whether this request owns its fetch."""
+    with map_tile_inflight_lock:
+        flight = map_tile_inflight.get(tile_key)
+        if flight is not None:
+            return flight, False
+        flight = {"event": Event(), "path": None, "payload": None}
+        map_tile_inflight[tile_key] = flight
+        return flight, True
+
+
+def _finish_map_tile_flight(tile_key, flight):
+    with map_tile_inflight_lock:
+        flight["event"].set()
+        if map_tile_inflight.get(tile_key) is flight:
+            map_tile_inflight.pop(tile_key, None)
+
+
+def _map_tile_flight_response(flight):
+    path = flight.get("path")
+    if path is not None:
+        return _map_tile_response(path)
+    payload = flight.get("payload")
+    if payload is not None:
+        response = Response(payload, mimetype='image/png')
+        response.cache_control.public = True
+        response.cache_control.max_age = MAP_TILE_CACHE_SECONDS
+        return response
+    return _map_tile_unavailable()
 
 # add background job tracking
 background_jobs: Dict[str, Any] = {}
@@ -504,11 +647,16 @@ def record_internal_error(public_message: str, error: Exception, **context) -> s
     """Log one sanitized diagnostic and return a non-sensitive client message."""
     del context  # Never place request-derived identifiers in application logs.
     reference = secrets.token_hex(6)
+    diagnostic = getattr(error, 'safe_diagnostic', None)
+    diagnostic = diagnostic if isinstance(diagnostic, dict) else {}
     logging.error(
-        '%s [error_ref=%s error_type=%s]',
+        '%s [error_ref=%s error_type=%s diagnostic_code=%s returncode=%s child_exception=%s]',
         safe_log_value(public_message, limit=200),
         reference,
         safe_log_value(type(error).__name__, limit=100),
+        safe_log_value(diagnostic.get('code'), limit=100) or 'none',
+        safe_log_value(diagnostic.get('returncode'), limit=20) or 'none',
+        safe_log_value(diagnostic.get('exception_type'), limit=100) or 'none',
     )
     return f'{public_message}. Reference: {reference}.'
 
@@ -1749,7 +1897,7 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
     if budget_seconds not in {600, 1800}:
         budget_seconds = 1800 if mode == 'exhaustive' else 600
     collection_status = str(source.get('collection_status') or '').strip()
-    return {
+    runtime_view = {
         'status': str(source.get('status') or 'queued'),
         'mode': mode,
         'mode_label': 'Exhaustive' if mode == 'exhaustive' else 'Focused',
@@ -1762,6 +1910,30 @@ def profile_discovery_runtime_view(entry: Optional[Dict[str, Any]]) -> Dict[str,
         'collection_message': str(source.get('collection_message') or '')[:1000],
         'error': str(source.get('error') or '')[:1000],
     }
+    specification = (
+        options.get('investigation_spec')
+        if isinstance(options.get('investigation_spec'), dict)
+        else {}
+    )
+    if specification.get('discovery_basis') == 'approved_source_fetch':
+        raw_progress = (
+            source.get('progress') if isinstance(source.get('progress'), dict) else {}
+        )
+
+        def progress_count(name):
+            try:
+                return max(0, int(raw_progress.get(name) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        runtime_view['approved_source_progress'] = {
+            'checked': progress_count('checked'),
+            'total': progress_count('total'),
+            'phase': str(raw_progress.get('phase') or '')[:64],
+            'message': str(raw_progress.get('message') or '')[:500],
+            'source_url': str(raw_progress.get('source_url') or '')[:8000],
+        }
+    return runtime_view
 
 
 def provider_circuit_event(error: Exception, collector: str) -> Optional[Dict[str, Any]]:
@@ -2395,7 +2567,7 @@ def protect_sensitive_responses(response):
         )
     )
     results_page = request.endpoint == 'results'
-    if request.endpoint != 'static' and (
+    if request.endpoint not in {'static', 'map_tile'} and (
         app.config.get('AUTH_REQUIRED') or session.get('authenticated')
     ):
         response.headers['Cache-Control'] = 'no-store'
@@ -2404,7 +2576,13 @@ def protect_sensitive_responses(response):
     response.headers.setdefault(
         'X-Frame-Options', 'SAMEORIGIN' if embedded_graph else 'DENY'
     )
-    response.headers.setdefault('Referrer-Policy', 'no-referrer')
+    # Only map pages need to identify this site's origin to their configured
+    # tile host. They never expose a case path or query string. Every other
+    # page keeps the stricter default because it may link to public sources.
+    if request.endpoint in {'pipeline.persona', 'persona_workspace'}:
+        response.headers['Referrer-Policy'] = 'strict-origin-when-cross-origin'
+    else:
+        response.headers.setdefault('Referrer-Policy', 'no-referrer')
     response.headers.setdefault(
         'Permissions-Policy',
         'camera=(), microphone=(), geolocation=(), usb=()',
@@ -2441,6 +2619,67 @@ def protect_sensitive_responses(response):
             'max-age=31536000; includeSubDomains',
         )
     return response
+
+
+@app.get('/map-tiles/<int:zoom>/<int:tile_x>/<int:tile_y>.png')
+def map_tile(zoom, tile_x, tile_y):
+    """Serve one bounded, cached OSM tile without exposing the browser to 403 pages."""
+    if not 0 <= zoom <= MAP_TILE_MAX_ZOOM:
+        raise NotFound()
+    tile_count = 1 << zoom
+    if not 0 <= tile_x < tile_count or not 0 <= tile_y < tile_count:
+        raise NotFound()
+    cached = _cached_map_tile(zoom, tile_x, tile_y)
+    if cached:
+        return _map_tile_response(cached)
+    tile_key = (zoom, tile_x, tile_y)
+    flight, owns_fetch = _claim_map_tile_flight(tile_key)
+    if not owns_fetch:
+        completed = flight["event"].wait(
+            timeout=(
+                MAP_TILE_FETCH_QUEUE_SECONDS + MAP_TILE_FETCH_TIMEOUT_SECONDS + 1
+            )
+        )
+        return _map_tile_flight_response(flight) if completed else _map_tile_unavailable()
+    try:
+        # A request can observe a miss, pause, then become owner after another
+        # flight has populated and released the cache entry.
+        cached = _cached_map_tile(zoom, tile_x, tile_y)
+        if cached:
+            flight["path"] = cached
+            return _map_tile_flight_response(flight)
+        # Leaflet requests a viewport's tiles together. Wait for a bounded slot
+        # instead of immediately returning holes for every request after the first.
+        if not map_tile_fetch_slots.acquire(timeout=MAP_TILE_FETCH_QUEUE_SECONDS):
+            return _map_tile_unavailable()
+        url = MAP_TILE_UPSTREAM.format(z=zoom, x=tile_x, y=tile_y)
+        try:
+            with urlopen(
+                Request(url, headers={"User-Agent": MAP_TILE_USER_AGENT}),
+                timeout=MAP_TILE_FETCH_TIMEOUT_SECONDS,
+            ) as upstream:
+                content_type = upstream.headers.get_content_type()
+                payload = upstream.read(MAP_TILE_MAX_BYTES + 1)
+        except (HTTPError, URLError, OSError):
+            return _map_tile_unavailable()
+        finally:
+            map_tile_fetch_slots.release()
+        if (
+            content_type != 'image/png'
+            or len(payload) > MAP_TILE_MAX_BYTES
+            or not _valid_png(payload)
+        ):
+            return _map_tile_unavailable()
+        path = _map_tile_cache_path(zoom, tile_x, tile_y)
+        try:
+            _store_map_tile(path, payload)
+        except OSError:
+            flight["payload"] = payload
+        else:
+            flight["path"] = path
+        return _map_tile_flight_response(flight)
+    finally:
+        _finish_map_tile_flight(tile_key, flight)
 
 
 @app.route('/login', methods=['GET', 'POST'])
@@ -3005,6 +3244,7 @@ def parse_investigation_submission(form):
         'allow_user_scanner_vxtwitter': False,
         'enable_github_profile_enrichment': False,
         'enable_archived_url_evidence': False,
+        'enable_approved_source_fetch': False,
         'subject_label': usernames[0],
         'identifiers': [
             {'type': 'username', 'value': username} for username in usernames
@@ -3714,9 +3954,9 @@ def finalize_stream_job(
             if partial_status:
                 done_event['status'] = 'partial'
                 done_event['reason'] = partial_status
-            # The retired report page is still retained for audit access, but
-            # completion events must not route current users back into it.
-            done_event['redirect'] = "/history"
+            # Legacy collection still owns a durable report page. Current P2
+            # jobs supply review_url/case_id and never use this fallback.
+            done_event['redirect'] = f"/results/search_{job_id}"
         except Exception as error:
             public_error = record_internal_error(
                 'Investigation report generation failed', error, session=job_id
@@ -5787,6 +6027,65 @@ def scan_runtime(job_id):
     return profile_discovery_runtime_view(current)
 
 
+@app.route("/live/<job_id>/crawl-audit.json")
+def export_crawl_audit(job_id):
+    """Download a bounded diagnostic snapshot without mutating the job."""
+    if case_store is None:
+        raise NotFound("Crawl audit storage is unavailable")
+    job = case_store.get_job(job_id)
+    if job is None:
+        raise NotFound("Unknown investigation job")
+
+    events = []
+    cursor = 0
+    while len(events) < MAX_AUDIT_EVENTS:
+        batch = case_store.get_events(
+            job_id,
+            after_id=cursor,
+            limit=min(1000, MAX_AUDIT_EVENTS - len(events)),
+        )
+        if not batch:
+            break
+        events.extend(batch)
+        cursor = batch[-1]["id"]
+    events_truncated = bool(
+        len(events) >= MAX_AUDIT_EVENTS
+        and case_store.get_events(job_id, after_id=cursor, limit=1)
+    )
+
+    from maigret.web.pipeline_store import PipelineStore
+
+    pipeline_audit = PipelineStore(case_store).crawl_audit_for_job(job_id)
+    profile_search_audits = case_store.list_profile_search_audits(job_id)
+    generated_at = datetime.now(timezone.utc)
+    audit = build_crawl_audit(
+        job,
+        events=events,
+        events_truncated=events_truncated,
+        pipeline_audit=pipeline_audit,
+        profile_search_audits=profile_search_audits,
+        generated_at=generated_at,
+    )
+    content = json.dumps(
+        audit, ensure_ascii=False, sort_keys=True, indent=2
+    ).encode("utf-8")
+    filename = (
+        "openledger-crawl-audit-"
+        + job_id
+        + "-"
+        + generated_at.strftime("%Y%m%dT%H%M%SZ")
+        + ".json"
+    )
+    response = send_file(
+        io.BytesIO(content),
+        mimetype="application/json",
+        as_attachment=True,
+        download_name=filename,
+    )
+    response.headers["Cache-Control"] = "private, no-store, max-age=0"
+    return response
+
+
 @app.route('/api/scan/<job_id>/stop', methods=['POST'])
 def scan_stop(job_id):
     if case_store is not None:
@@ -5937,7 +6236,10 @@ def investigation_builder_context(persona=None):
                 ai_assessments += 1
         except (KeyError, TypeError, ValueError):
             continue
-    initial_identifiers = [{"type": "username", "value": ""}]
+    initial_identifiers = [
+        {"type": identifier_type, "value": ""}
+        for identifier_type in ("full_name", "username", "email", "phone")
+    ]
     initial_alias_nicknames: list[str] = []
     if persona:
         display_identifier_type = persona_display_identifier_type(persona)
@@ -5988,6 +6290,17 @@ def investigation_builder_context(persona=None):
             )
             if len(initial_identifiers) >= 24:
                 break
+        configured_types = {
+            "username"
+            if identifier.get("type") in {"social_handle", "profile_url"}
+            else identifier.get("type")
+            for identifier in initial_identifiers
+        }
+        for identifier_type in ("full_name", "username", "email", "phone"):
+            if identifier_type not in configured_types:
+                initial_identifiers.append(
+                    {"type": identifier_type, "value": ""}
+                )
     return {
         'available_tags': get_available_tags(),
         'dashboard_metrics': {
@@ -6069,6 +6382,7 @@ def api_username_aliases():
         )
         exact_usernames = bounded_values('exact_usernames', count=24, length=128)
         profile_urls = bounded_values('profile_urls', count=24, length=2000)
+        profile_target_keys = []
         for profile_url in profile_urls:
             normalized_url = normalize_profile_url(profile_url)
             resolved_usernames = extract_profile_usernames(
@@ -6079,6 +6393,8 @@ def api_username_aliases():
                     confirmed_usernames.append(username)
                 if username not in exact_usernames:
                     exact_usernames.append(username)
+                if username.casefold() not in profile_target_keys:
+                    profile_target_keys.append(username.casefold())
     except ValueError:
         return {'error': 'Alias planning inputs are invalid.'}, 400
 
@@ -6103,6 +6419,7 @@ def api_username_aliases():
         'aliases': [
             {**candidate, 'key': str(candidate['value']).casefold()}
             for candidate in aliases
+            if str(candidate['value']).casefold() not in profile_target_keys
         ],
         'exact_target_keys': exact_target_keys,
         'exact_targets': exact_targets,
@@ -6824,19 +7141,6 @@ def case_workspace(case_id):
         latest_options.get("investigation_spec")
     )
     case["google_places_live"] = load_case_google_places_live(case)
-    try:
-        stored_discovery = case_store.get_case_profile_search_discovery(case_id)
-    except ValueError as error:
-        record_internal_error(
-            'Profile-search audit integrity validation failed',
-            error,
-            case_id=case_id,
-        )
-        case["profile_search_integrity_error"] = True
-        stored_discovery = None
-    case["profile_search_discovery"] = public_profile_search_discovery(
-        stored_discovery
-    )
     return render_template("case.html", case=case)
 
 
@@ -6888,9 +7192,14 @@ def review_profile_search_candidate(case_id, audit_id, candidate_id):
                 'No Persona claim was created or changed by this decision.',
                 'success',
             )
-    anchor = 'profile-candidate-' + candidate_id.rsplit(':', 1)[-1]
+    persona_id = str(request.form.get('persona_id') or '').strip()
     return redirect(
-        url_for('case_workspace', case_id=case_id, _anchor=anchor)
+        url_for(
+            'pipeline.workspace',
+            case_id=case_id,
+            persona_id=persona_id,
+        )
+        + '#shortlist-digital'
     )
 
 
@@ -6947,16 +7256,15 @@ def review_combined_relationship(case_id, proposal_id):
     else:
         if decision == "approved":
             flash(
-                "Relationship approved and added to the combined graph. "
-                "Source cases were not changed.",
+                "Relationship approved in the combined-case evidence record. "
+                "Source cases were not changed and no diagram was published.",
                 "success",
             )
             return redirect(
                 url_for(
-                    "relationships_workspace",
-                    mode="shared",
+                    "case_workspace",
                     case_id=case_id,
-                    proposal_id=proposal_id,
+                    _anchor=f"proposal-{proposal_id}",
                 )
             )
         flash(
@@ -7043,6 +7351,16 @@ def delete_case_workspace(case_id):
         record_internal_error("Failed to delete case", error, case_id=case_id)
         flash(str(error), "warning")
         return redirect(url_for("case_workspace", case_id=case_id))
+    except SQLAlchemyError as error:
+        diagnostic = record_internal_error(
+            "Case deletion could not be completed", error, case_id=case_id
+        )
+        flash(
+            f"{diagnostic} Nothing was deleted; review the server log before "
+            "trying again.",
+            "danger",
+        )
+        return redirect(url_for("case_workspace", case_id=case_id))
 
     if deleted:
         flash(
@@ -7084,13 +7402,14 @@ def archive_case_workspace(case_id):
     return redirect(url_for("cases_workspace"))
 
 
+@app.route("/cases/<case_id>/stop-and-delete", methods=["POST"])
 @app.route("/cases/<case_id>/stop-and-archive", methods=["POST"])
-def stop_and_archive_case_workspace(case_id):
-    """Request a safe worker stop, then direct the operator to archive.
+def stop_and_delete_case_workspace(case_id):
+    """Request a safe worker stop before the confirmed permanent delete.
 
-    Evidence is never erased while a collector may still be writing it.  The
-    case page changes to Archive once the durable worker marks every job
-    terminal, so this replaces the previous dead-end archive error.
+    The old URL remains a compatibility alias, but it no longer silently
+    archives a case.  A worker must be terminal before the explicit delete
+    confirmation can purge that case's evidence and report files.
     """
     if not is_valid_csrf(request.form.get("csrf_token")):
         flash("Your case session expired. Please try again.", "danger")
@@ -7110,16 +7429,11 @@ def stop_and_archive_case_workspace(case_id):
         case_store.request_cancel(job["job_id"])
     if active:
         flash(
-            "Stop requested for the active discovery. Refresh this case after the worker confirms cancellation, then Archive case will be available. Saved partial evidence remains retained.",
+            "Stop requested for the active discovery. Refresh after the worker confirms cancellation; Delete case will then be available.",
             "info",
         )
     else:
-        archived = case_store.archive_case(case_id)
-        flash(
-            "Case archived. Its evidence and review history remain preserved for audit.",
-            "success" if archived else "info",
-        )
-        return redirect(url_for("cases_workspace"))
+        flash("Collection is already stopped. Confirm Delete case to permanently remove it.", "info")
     return redirect(url_for("case_workspace", case_id=case_id))
 
 
@@ -7635,38 +7949,43 @@ def persona_workspace(persona_id):
     if not persona:
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
-    if request.args.get('view') != 'working':
-        from sqlalchemy import select
-        from maigret.web.pipeline_store import PipelineStore
-        pipeline = PipelineStore(case_store)
-        requests = pipeline._table("requests")
-        with case_store.engine.connect() as connection:
-            has_pipeline = connection.execute(
-                select(requests.c.id).where(
-                    requests.c.case_id == persona['case_id'],
-                    requests.c.persona_id == persona_id,
-                ).limit(1)
-            ).first() is not None
-        if has_pipeline:
-            return redirect(url_for('pipeline.workspace', case_id=persona['case_id'], persona_id=persona_id))
-    active_claims = [
-        claim
-        for claim in persona['claims']
-        if claim['review_status'] != 'rejected'
-        and claim.get('reliability_status') != 'legacy_untriaged'
-    ]
+    from sqlalchemy import func, select
+    from maigret.web.case_store import persona_claims
+    from maigret.web.pipeline_store import PipelineStore
+    pipeline = PipelineStore(case_store)
+    requests = pipeline._table("requests")
+    projection_state = pipeline._table("projection_state")
+    with case_store.engine.connect() as connection:
+        has_pipeline = connection.execute(
+            select(requests.c.id).where(
+                requests.c.case_id == persona['case_id'],
+                requests.c.persona_id == persona_id,
+            ).limit(1)
+        ).first() is not None
+        legacy_claim_count = connection.scalar(
+            select(func.count()).select_from(persona_claims).where(
+                persona_claims.c.persona_id == persona_id
+            )
+        )
+        convergence_completed = connection.execute(
+            select(projection_state.c.legacy_converged_at).where(
+                projection_state.c.case_id == persona['case_id'],
+                projection_state.c.persona_id == persona_id,
+            )
+        ).scalar_one_or_none()
+    if convergence_completed or (has_pipeline and not legacy_claim_count):
+        # P2 becomes canonical only after the complete convergence checkpoint;
+        # a partially imported request must not hide retained legacy evidence.
+        return redirect(
+            url_for(
+                'pipeline.persona',
+                case_id=persona['case_id'],
+                persona_id=persona_id,
+            )
+        )
     review_claims = [
         claim for claim in persona['claims'] if claim['review_status'] != 'approved'
     ]
-    approved_photograph = next(
-        (
-            claim
-            for claim in persona['claims']
-            if claim['field_name'] == 'photograph'
-            and claim['review_status'] == 'approved'
-        ),
-        None,
-    )
     approved_full_name = next(
         (
             claim
@@ -7683,29 +8002,6 @@ def persona_workspace(persona_id):
         and claim['review_status'] != 'rejected'
     ]
     identity_enrichment = case_store.get_persona_identity_enrichment(persona_id)
-    map_locations = [
-        {
-            'id': claim['id'],
-            'label': claim['display_value'],
-            'latitude': claim['latitude'],
-            'longitude': claim['longitude'],
-            'field_name': claim['field_name'],
-            'confidence': claim['confidence'],
-            'coordinate_precision': next(
-                (
-                    evidence.get('details', {}).get('coordinate_precision')
-                    for evidence in claim['evidence']
-                    if evidence.get('details', {}).get('coordinate_precision')
-                ),
-                None,
-            ),
-        }
-        for claim in persona['claims']
-        if claim['field_name'] in ('address', 'current_location')
-        and claim['review_status'] == 'approved'
-        and claim['latitude'] is not None
-        and claim['longitude'] is not None
-    ]
     review_counts = {
         status: sum(
             1 for claim in persona['claims'] if claim['review_status'] == status
@@ -7718,36 +8014,25 @@ def persona_workspace(persona_id):
             if claim['field_name'] == 'occupation'
             else ''
         )
-    case = case_store.get_case(persona['case_id']) or {}
-    case_personas = case.get('personas') or []
-    source_outcome_report = next(
-        (
-            job
-            for job in case.get('jobs', [])
-            if _source_report_belongs_to_persona(
-                job, persona_id, case_personas
-            )
-        ),
-        None,
+    from maigret.web.persona_presenter import (
+        legacy_persona_projection,
+        legacy_workspace_projection,
     )
+    approved = legacy_persona_projection(persona)
     return render_template(
         'persona.html',
+        source_model='legacy',
+        active_tab='identity' if approved['items'] else 'review',
         persona=persona,
-        claim_groups=group_claims(active_claims),
+        approved=approved,
+        workspace=legacy_workspace_projection(persona),
         review_claims=review_claims,
         review_counts=review_counts,
-        approved_photograph=approved_photograph,
         approved_full_name=approved_full_name,
         offshore_matches=offshore_matches,
         identity_enrichment=identity_enrichment,
-        map_locations=map_locations,
-        ai_analysis_status=get_case_ai_analysis_status(persona['case_id']),
         field_display_label=field_display_label,
-        source_outcome_report=source_outcome_report,
-        map_tile_url=os.getenv(
-            'OPENLEDGER_MAP_TILE_URL',
-            'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-        ),
+        map_tile_url=persona_map_tile_url(),
     )
 
 
@@ -7760,10 +8045,12 @@ def export_persona_pdf(persona_id):
     if not persona:
         flash('That persona does not exist.', 'danger')
         return redirect(url_for('cases_workspace'))
-    from sqlalchemy import select
+    from sqlalchemy import func, select
+    from maigret.web.case_store import persona_claims
     from maigret.web.pipeline_store import PipelineStore
     pipeline = PipelineStore(case_store)
     requests = pipeline._table("requests")
+    projection_state = pipeline._table("projection_state")
     with case_store.engine.connect() as connection:
         has_pipeline = connection.execute(
             select(requests.c.id).where(
@@ -7771,7 +8058,20 @@ def export_persona_pdf(persona_id):
                 requests.c.persona_id == persona_id,
             ).limit(1)
         ).first() is not None
-    if has_pipeline:
+        legacy_claim_count = connection.scalar(
+            select(func.count()).select_from(persona_claims).where(
+                persona_claims.c.persona_id == persona_id
+            )
+        )
+        convergence_completed = connection.execute(
+            select(projection_state.c.legacy_converged_at).where(
+                projection_state.c.case_id == persona['case_id'],
+                projection_state.c.persona_id == persona_id,
+            )
+        ).scalar_one_or_none()
+    # A P2 request may exist while retained legacy claims are still canonical.
+    # Only an explicit completed convergence checkpoint may replace their PDF.
+    if convergence_completed or (has_pipeline and not legacy_claim_count):
         final = pipeline.get_final_version(persona['case_id'], persona_id)
         if not final:
             flash('Create a curated version and complete QC before exporting a final Persona.', 'warning')
@@ -7890,25 +8190,46 @@ def relationships_workspace():
     if selected_persona_id not in available_persona_ids:
         selected_persona_id = available_personas[0]["id"] if available_personas else ""
     if mode == "persona" and selected_persona_id:
-        if request.args.get('view') != 'working':
-            from sqlalchemy import select
-            from maigret.web.pipeline_store import PipelineStore
-            selected = next(item for item in available_personas if item['id'] == selected_persona_id)
-            pipeline = PipelineStore(case_store)
-            final = pipeline.get_final_version(selected['case_id'], selected_persona_id)
-            requests = pipeline._table("requests")
-            with case_store.engine.connect() as connection:
-                has_pipeline = connection.execute(
-                    select(requests.c.id).where(
-                        requests.c.case_id == selected['case_id'],
-                        requests.c.persona_id == selected_persona_id,
-                    ).limit(1)
-                ).first() is not None
-            if final:
-                return redirect(url_for('pipeline.graph', case_id=selected['case_id'],
-                                        persona_id=selected_persona_id, version_id=final['id']))
-            if has_pipeline:
-                return redirect(url_for('pipeline.workspace', case_id=selected['case_id'], persona_id=selected_persona_id))
+        # P2 evidence is kept in PipelineStore groups, not the retired
+        # persona_claims projection.  The previous ``view=working`` exception
+        # sent a P2 Persona to that legacy graph, which is why it showed only a
+        # fragment of approved evidence.  Always use the P2 evidence graph when
+        # the Persona has a pipeline request.
+        from sqlalchemy import select
+        from maigret.web.pipeline_store import PipelineStore
+
+        selected = next(
+            item for item in available_personas if item['id'] == selected_persona_id
+        )
+        pipeline = PipelineStore(case_store)
+        final = pipeline.get_final_version(selected['case_id'], selected_persona_id)
+        requests = pipeline._table("requests")
+        with case_store.engine.connect() as connection:
+            has_pipeline = connection.execute(
+                select(requests.c.id)
+                .where(
+                    requests.c.case_id == selected['case_id'],
+                    requests.c.persona_id == selected_persona_id,
+                )
+                .limit(1)
+            ).first() is not None
+        if has_pipeline:
+            return redirect(
+                url_for(
+                    'pipeline.relationships',
+                    case_id=selected['case_id'],
+                    persona_id=selected_persona_id,
+                )
+            )
+        if final:
+            return redirect(
+                url_for(
+                    'pipeline.graph',
+                    case_id=selected['case_id'],
+                    persona_id=selected_persona_id,
+                    version_id=final['id'],
+                )
+            )
         graph = case_store.build_persona_graph(selected_persona_id)
     elif mode == "persona":
         graph = {
@@ -8240,6 +8561,7 @@ def review_persona_claim(claim_id):
         if reviewed_claim and reviewed_claim.get('field_name') in {
             'address',
             'current_location',
+            'organization_location',
         }:
             try:
                 center = geocode_place_center(
@@ -8280,24 +8602,6 @@ def review_persona_claim(claim_id):
     if not stored_persona_id:
         flash('That evidence record no longer exists.', 'warning')
         return redirect(url_for('cases_workspace'))
-    if (
-        decision == 'approved'
-        and reviewed_claim
-        and reviewed_claim.get('field_name') == 'full_name'
-        and reviewed_claim.get('review_status') != 'approved'
-    ):
-        try:
-            case_store.create_identity_enrichment(stored_persona_id, claim_id)
-        except ValueError as error:
-            flash(
-                f'Name approved, but public-record enrichment was not queued: {error}',
-                'warning',
-            )
-        else:
-            flash(
-                'Confirmed-name Wikipedia and Offshore Leaks checks were queued.',
-                'success',
-            )
     if generated_map_center:
         flash(
             'Record approved and mapped to the generated place centroid.',
@@ -8393,8 +8697,43 @@ def live_results(job_id):
             'kind': 'live',
             'options': live_jobs[job_id].get('options') or {},
         }
-    done_redirect = None
     result = view_job
+    specification = dict(
+        ((result or {}).get("options") or {}).get("investigation_spec") or {}
+    )
+    pipeline_persona_id = str(
+        (result or {}).get("persona_id")
+        or specification.get("target_persona_id")
+        or specification.get("pipeline_subject_id")
+        or ""
+    ).strip()
+    raw_persona_bindings = specification.get("persona_bindings")
+    persona_bindings = (
+        raw_persona_bindings if isinstance(raw_persona_bindings, list) else []
+    )
+    if (
+        not pipeline_persona_id
+        and len(persona_bindings) == 1
+        and isinstance(persona_bindings[0], dict)
+    ):
+        pipeline_persona_id = str(
+            (persona_bindings[0] or {}).get("persona_id") or ""
+        ).strip()
+    pipeline_case_id = str((result or {}).get("case_id") or "").strip()
+    is_pipeline_job = specification.get("pipeline_id") == "p2-e2e-v1" or bool(
+        (result or {}).get("review_url")
+    )
+    done_redirect = None
+    if is_pipeline_job and pipeline_case_id:
+        done_redirect = (
+            url_for(
+                "pipeline.workspace",
+                case_id=pipeline_case_id,
+                persona_id=pipeline_persona_id,
+            )
+            if pipeline_persona_id
+            else url_for("pipeline.case_entry", case_id=pipeline_case_id)
+        )
     if result and result.get("status") == "completed":
         if result.get("kind") in {"affiliation", "case_fusion"}:
             done_redirect = url_for("case_workspace", case_id=result["case_id"])
@@ -8402,32 +8741,41 @@ def live_results(job_id):
             done_redirect = url_for(
                 "persona_workspace", persona_id=result["persona_id"]
             )
-        elif result.get("review_url"):
+        elif done_redirect:
             # P2 jobs land in the evidence/review workspace. The retained
             # report artifact remains available for audit, but is not the
             # completion destination for a current investigation.
-            done_redirect = result["review_url"]
+            pass
         elif result.get("case_id"):
             done_redirect = url_for("pipeline.case_entry", case_id=result["case_id"])
         else:
             result = normalize_job_summary_entry(result)
-            # A terminal job without a P2 review target is not allowed to
-            # silently fall back to the retired result presentation.
-            done_redirect = url_for("history")
+            done_redirect = url_for(
+                "results",
+                session_id=(result.get("session_folder") or f"search_{job_id}"),
+            )
 
     legacy_untriaged = bool(
         result
         and result.get("status") == "completed"
+        and not is_pipeline_job
         and result.get("kind")
         not in {"affiliation", "case_fusion", "identity_enrichment"}
         and result.get("profile_reliability_version")
         != PROFILE_RELIABILITY_VERSION
     )
+    approved_source_urls = specification.get("approved_source_urls")
+    if not isinstance(approved_source_urls, list):
+        approved_source_urls = []
 
     return render_template(
         "live.html",
         job_id=job_id,
         job_kind=(result or {}).get("kind", "live"),
+        is_approved_source_fetch=(
+            specification.get("discovery_basis") == "approved_source_fetch"
+        ),
+        approved_source_count=len(approved_source_urls),
         done_redirect=done_redirect,
         completed_found_count=(result or {}).get("found_count", 0),
         completed_candidate_count=(result or {}).get("candidate_count", 0),
@@ -8497,7 +8845,14 @@ def status(timestamp):
                 return redirect(result['review_url'])
             if result.get('case_id'):
                 return redirect(url_for('pipeline.case_entry', case_id=result['case_id']))
-            return redirect(url_for('history'))
+            return redirect(
+                url_for(
+                    'results',
+                    session_id=(
+                        result.get('session_folder') or f'search_{timestamp}'
+                    ),
+                )
+            )
         if result and result.get('status') == 'failed':
             error_msg = result.get('error', 'Unknown error occurred.')
             flash(f'Search failed: {error_msg}', 'danger')
@@ -8522,7 +8877,14 @@ def status(timestamp):
                 return redirect(result['review_url'])
             if result.get('case_id'):
                 return redirect(url_for('pipeline.case_entry', case_id=result['case_id']))
-            return redirect(url_for('history'))
+            return redirect(
+                url_for(
+                    'results',
+                    session_id=(
+                        result.get('session_folder') or f'search_{timestamp}'
+                    ),
+                )
+            )
         else:
             error_msg = result.get('error', 'Unknown error occurred.')
             flash(f'Search failed: {error_msg}', 'danger')
@@ -8892,8 +9254,51 @@ def download_report(filename):
 
 
 def _prepare_pipeline_workspace(case_id, persona_id):
-    from maigret.web.pipeline_ingestion import bootstrap_legacy_workspace
-    return bootstrap_legacy_workspace(case_store, case_id, persona_id)
+    from maigret.web.pipeline_ingestion import converge_legacy_persona
+    from maigret.web.pipeline_execution import refresh_consolidation
+    from maigret.web.pipeline_store import PipelineStore
+
+    pipeline = PipelineStore(case_store)
+    workspace = pipeline.get_workspace(case_id, persona_id, limit=1)
+    report = None
+    if workspace["unreconciled_input_count"] or workspace["projection"]["pending"]:
+        reconciled = pipeline.reconcile_submitted_inputs(case_id, persona_id)
+        groups = refresh_consolidation(case_store, case_id, persona_id)
+        report = {
+            "case_id": case_id,
+            "persona_id": persona_id,
+            "group_count": len(groups),
+            "captured_inputs": reconciled["captured_inputs"],
+            "mode": "refresh",
+        }
+        # One explicit preparation action reconciles both the current pipeline
+        # and any eligible historical evidence.  Operators should never need
+        # to discover that the same button must be pressed twice.
+        workspace = pipeline.get_workspace(case_id, persona_id, limit=1)
+    if workspace["projection"]["legacy_available"]:
+        legacy = converge_legacy_persona(
+            case_store, case_id, persona_id, dry_run=False
+        )
+        evidence = legacy["evidence"]
+        decisions = legacy["decisions"]
+        if report:
+            report.update(
+                legacy_observation_count=evidence["observation_count"],
+                legacy_claim_count=evidence["claim_count"],
+                legacy_decision_count=decisions["decision_count"],
+                legacy_conflict_count=decisions["conflict_count"],
+                group_count=evidence["group_count"],
+                mode="reconcile_all",
+            )
+            return report
+        return legacy
+    return report or {
+        "case_id": case_id,
+        "persona_id": persona_id,
+        "group_count": workspace["group_count"],
+        "captured_inputs": 0,
+        "mode": "already_current",
+    }
 
 
 def _launch_pipeline_research(**kwargs):
@@ -8906,6 +9311,206 @@ def _submit_pipeline_evidence(**kwargs):
     return submit_manual_evidence(case_store, **kwargs)
 
 
+def _launch_approved_pipeline_discovery(
+    *, case_id, persona_id, approved_groups, actor
+):
+    """Cross-check the complete analyst-approved Persona evidence set."""
+    from werkzeug.datastructures import MultiDict
+
+    identifiers = []
+    seen = set()
+    research_anchors = []
+    seen_research_anchors = set()
+
+    def add_research_anchor(kind, value):
+        if isinstance(value, (dict, list)):
+            rendered = json.dumps(
+                value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            )
+        else:
+            rendered = str(value or "").strip()
+        key = (str(kind), rendered.casefold())
+        if rendered and key not in seen_research_anchors:
+            seen_research_anchors.add(key)
+            research_anchors.append(f"{kind}: {rendered}")
+
+    def add(kind, value):
+        value = str(value or "").strip()
+        key = (kind, value.casefold())
+        if value and key not in seen and len(identifiers) < 24:
+            seen.add(key)
+            identifiers.append((kind, value))
+        add_research_anchor(kind, value)
+
+    for item in approved_groups:
+        normalized = dict(item.get("normalized") or {})
+        value = normalized.get("value")
+        if item.get("kind") == "account":
+            profile_url = (
+                normalized.get("canonical_url")
+                or normalized.get("url")
+                or (value.get("url") if isinstance(value, dict) else "")
+            )
+            add("profile_url", profile_url)
+            add_research_anchor(
+                "approved account",
+                {
+                    "platform": normalized.get("platform"),
+                    "url": profile_url,
+                    "username": normalized.get("username")
+                    or normalized.get("handle"),
+                },
+            )
+            continue
+        predicate = str(normalized.get("predicate") or "").casefold()
+        if predicate in {"full_name", "email", "phone"} and not isinstance(
+            value, (dict, list)
+        ):
+            add(predicate, value)
+        elif predicate == "social_account" and isinstance(value, dict):
+            add("profile_url", value.get("url"))
+            add_research_anchor("approved social account", value)
+        else:
+            add_research_anchor(predicate or item.get("kind") or "finding", value)
+    if not research_anchors:
+        raise ValueError(
+            "No approved evidence is available to cross-check."
+        )
+    # Keep direct collectors within their 24-input safety boundary. The cited
+    # research path receives every approved anchor in bounded batches so facts
+    # such as employers, locations and stable platform IDs are not discarded.
+    subject_label = (case_store.get_persona(persona_id) or {}).get(
+        "display_name", "Persona"
+    )
+    instruction = (
+        f"Cross-check the approved public evidence for {subject_label}. Find "
+        "cited, structured candidates for identity and biography; exact public "
+        "email or phone; a public profile photograph; the person's explicitly "
+        "stated location; employment, education, memberships and other "
+        "affiliations; occupation or role; each organization's public office or "
+        "campus location and official website; and additional exact public "
+        "profiles; cited news or media mentions; public events, speaking "
+        "engagements, interviews and podcasts; and authored publications or "
+        "other public-facing appearances. Classify those public-exposure "
+        "findings as news_mention, event_appearance, speaking_engagement, "
+        "interview or publication, and retain the article, event or outlet "
+        "identity in the value. Distinguish a person's location from an organization's "
+        "location. Do not infer sensitive traits, ownership, criminality, "
+        "finances, assets or risk. Every proposed fact must cite a public source "
+        "and must return for analyst review; do not approve anything."
+    )
+    questions = []
+    batch = []
+    batch_size = len(instruction)
+    for anchor in research_anchors:
+        addition = len(anchor) + 3
+        if batch and batch_size + addition > 9000:
+            questions.append(instruction + "\n\nApproved anchors:\n- " + "\n- ".join(batch))
+            batch, batch_size = [], len(instruction)
+        batch.append(anchor[:2000])
+        batch_size += addition
+    if batch:
+        questions.append(instruction + "\n\nApproved anchors:\n- " + "\n- ".join(batch))
+    if len(questions) > 100:
+        raise ValueError(
+            "The approved evidence set exceeds the 100-question cited-research "
+            "limit. Export the Persona or open a narrower follow-up investigation."
+        )
+    form = MultiDict(
+        [
+            *[("identifier_type", kind) for kind, _value in identifiers],
+            *[("identifier_value", value) for _kind, value in identifiers],
+            ("processing_mode", "same_subject"),
+            ("allow_ai_context", "on"),
+            ("mode", "focused"),
+        ]
+    )
+    if identifiers:
+        _usernames, plan = parse_investigation_submission(form)
+    else:
+        plan = build_approved_research_plan(subject_label)
+    plan.update(
+        processing_mode="same_subject",
+        subject_label=subject_label,
+        target_persona_id=persona_id,
+        discovery_basis="approved_pipeline_findings",
+        approved_research_question=questions[0],
+        approved_research_questions=questions,
+    )
+    options = sanitize_persistent_options(parse_search_options(form, plan))
+    options["requested_by"] = actor
+    job_id = case_store.repeat_persona_investigation(
+        persona_id,
+        search_usernames(plan),
+        options,
+        allow_identifier_free_approved_research=not identifiers,
+    )
+    return {"job_id": job_id, "case_id": case_id, "persona_id": persona_id}
+
+
+def _launch_approved_source_fetch(*, case_id, persona_id, approved_groups, actor):
+    """Queue exact approved public pages, without a login or broad scan."""
+    from werkzeug.datastructures import MultiDict
+
+    source_urls, seen = [], set()
+    for item in approved_groups:
+        normalized = dict(item.get("normalized") or {})
+        value = normalized.get("value")
+        candidate = (
+            normalized.get("canonical_url")
+            or normalized.get("profile_url")
+            or normalized.get("url")
+            or (value.get("url") if isinstance(value, dict) else value)
+        )
+        if not isinstance(candidate, str):
+            continue
+        try:
+            candidate = normalize_profile_url(candidate)
+        except InvestigationInputError:
+            continue
+        marker = candidate.casefold()
+        if marker not in seen:
+            seen.add(marker)
+            source_urls.append(candidate)
+    if not source_urls:
+        raise ValueError("No approved public source URL is available to fetch.")
+    if len(source_urls) > 20:
+        source_urls = source_urls[:20]
+    subject_label = (case_store.get_persona(persona_id) or {}).get(
+        "display_name", "Persona"
+    )
+    plan = build_approved_research_plan(subject_label)
+    plan.update(
+        processing_mode="same_subject",
+        subject_label=subject_label,
+        target_persona_id=persona_id,
+        discovery_basis="approved_source_fetch",
+        approved_source_urls=source_urls,
+        enable_approved_source_fetch=True,
+    )
+    form = MultiDict(
+        [
+            ("processing_mode", "same_subject"),
+            ("enable_approved_source_fetch", "on"),
+            ("mode", "focused"),
+        ]
+    )
+    options = sanitize_persistent_options(parse_search_options(form, plan))
+    options["requested_by"] = actor
+    job_id = case_store.repeat_persona_investigation(
+        persona_id,
+        [],
+        options,
+        allow_identifier_free_approved_research=True,
+    )
+    return {
+        "job_id": job_id,
+        "case_id": case_id,
+        "persona_id": persona_id,
+        "source_count": len(source_urls),
+    }
+
+
 from maigret.web.pipeline_routes import register_pipeline_routes
 
 register_pipeline_routes(
@@ -8913,6 +9518,15 @@ register_pipeline_routes(
     is_valid_csrf=is_valid_csrf, launch_research=_launch_pipeline_research,
     prepare_workspace=_prepare_pipeline_workspace,
     submit_manual_evidence=_submit_pipeline_evidence,
+    launch_approved_discovery=_launch_approved_pipeline_discovery,
+    launch_approved_source_fetch=_launch_approved_source_fetch,
+    geocode_approved_location=lambda place: geocode_place_center(
+        place,
+        endpoint=app.config['GEOCODER_URL'],
+        timeout_seconds=app.config['GEOCODER_TIMEOUT_SECONDS'],
+    ),
+    affiliation_public_web_enabled=affiliation_public_web_research_enabled,
+    google_places_enabled=google_places_search_enabled,
 )
 
 from maigret.web.pipeline_connector_routes import register_connector_ingestion_routes

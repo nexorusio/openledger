@@ -22,6 +22,8 @@ from maigret.web.case_store import (
     utcnow,
 )
 from maigret.web.persona_intelligence import extract_case_chat_persona_claims
+from maigret.web.pipeline_runtime import PipelineRuntimeStore
+from maigret.web.pipeline_store import PipelineStore
 
 
 @pytest.fixture
@@ -196,7 +198,7 @@ def test_active_job_cannot_be_deleted(store):
         store.delete_job(job_id)
 
 
-def test_new_terminal_case_preserves_query_lineage_and_all_jobs(store):
+def test_terminal_case_delete_purges_its_pipeline_lineage_and_all_jobs(store):
     first_job_id = store.create_investigation(["alice"], {})
     first_job = store.claim_next("worker:test")
     store.finish(
@@ -211,11 +213,46 @@ def test_new_terminal_case_preserves_query_lineage_and_all_jobs(store):
         {"status": "cancelled", "usernames": second_job["usernames"]},
     )
 
-    with pytest.raises(ValueError, match="retained P2 pipeline"):
-        store.delete_case(case["id"])
-    assert store.get_case(case["id"]) is not None
-    assert store.get_job(first_job_id) is not None
-    assert store.get_job(second_job_id) is not None
+    assert store.delete_case(case["id"]) is True
+    assert store.get_case(case["id"]) is None
+    assert store.get_job(first_job_id) is None
+    assert store.get_job(second_job_id) is None
+
+
+def test_terminal_case_delete_purges_runtime_request_budget(store):
+    job_id = store.create_investigation(["alice"], {})
+    job = store.claim_next("worker:test")
+    case = store.get_case(job["case_id"])
+    persona_id = case["personas"][0]["id"]
+    pipeline = PipelineStore(store)
+    request = pipeline.create_request(
+        case["id"],
+        persona_id,
+        [{"type": "username", "value": "alice"}],
+        {
+            "pipeline_id": "p2-e2e-v1",
+            "budgets": {"max_requests": 2},
+            "tasks": [
+                {
+                    "task_id": "budgeted-delete-fixture",
+                    "engine_id": "fixture",
+                    "route_state": "active",
+                }
+            ],
+        },
+        actor="operator",
+        job_id=job_id,
+    )
+    attempt = pipeline.start_attempt(request["tasks"][0]["id"], job["worker_id"])
+    PipelineRuntimeStore(store).reserve_request(
+        request["id"], attempt["id"], job["worker_id"]
+    )
+    pipeline.finish_attempt(attempt["id"], "partial", worker_id=job["worker_id"])
+    store.finish(job_id, {"status": "cancelled", "usernames": ["alice"]})
+
+    assert store.delete_case(case["id"], confirmation_name="alice") is True
+    assert store.get_case(case["id"]) is None
+    assert store.get_job(job_id) is None
 
 
 def test_terminal_p2_case_can_be_archived_without_erasing_lineage(store):
@@ -1288,6 +1325,116 @@ def test_refresh_preserves_human_review_and_graph_excludes_rejected_claim(store)
         assert connection.scalar(select(func.count()).select_from(persona_claims)) == 2
         assert connection.scalar(select(func.count()).select_from(claim_evidence)) == 2
         assert connection.scalar(select(func.count()).select_from(claim_reviews)) == 1
+
+
+def test_identifier_free_repeat_requires_server_approved_research(store):
+    job_id = store.create_investigation(["synthetic.person"], {})
+    source_job = store.claim_next("worker:approved-research-source")
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "usernames": source_job["usernames"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    case = store.get_case(source_job["case_id"])
+    persona_id = case["personas"][0]["id"]
+    specification = {
+        "schema_version": 2,
+        "processing_mode": "same_subject",
+        "subject_label": "Synthetic Person",
+        "identifiers": [],
+        "search_targets": [],
+        "allow_ai_context": True,
+        "discovery_basis": "approved_pipeline_findings",
+        "approved_research_question": (
+            "Cross-check approved affiliation: Synthetic Research Institute."
+        ),
+        "approved_research_questions": [
+            "Cross-check approved affiliation: Synthetic Research Institute."
+        ],
+    }
+    options = {"investigation_spec": specification}
+
+    with pytest.raises(ValueError, match="No investigation identifiers"):
+        store.repeat_persona_investigation(persona_id, [], options)
+
+    refresh_id = store.repeat_persona_investigation(
+        persona_id,
+        [],
+        options,
+        allow_identifier_free_approved_research=True,
+    )
+    queued = store.get_job(refresh_id)
+    assert queued["usernames"] == []
+    retained = queued["options"]["investigation_spec"]
+    assert retained["identifiers"] == []
+    assert retained["approved_research_questions"] == specification[
+        "approved_research_questions"
+    ]
+
+
+def test_identifier_free_approved_source_fetch_persists_exact_url_tasks(store):
+    job_id = store.create_investigation(["synthetic.person"], {})
+    source_job = store.claim_next("worker:approved-source-fetch-source")
+    store.finish(
+        job_id,
+        {
+            "status": "completed",
+            "usernames": source_job["usernames"],
+            "individual_reports": [],
+            "found_count": 0,
+        },
+    )
+    persona_id = store.get_case(source_job["case_id"])["personas"][0]["id"]
+    urls = [
+        "https://www.linkedin.com/in/synthetic-person/",
+        "https://example.test/about",
+    ]
+    specification = {
+        "schema_version": 2,
+        "processing_mode": "same_subject",
+        "subject_label": "Synthetic Person",
+        "identifiers": [],
+        "search_targets": [],
+        "discovery_basis": "approved_source_fetch",
+        "approved_source_urls": urls,
+        "enable_approved_source_fetch": True,
+    }
+    options = {
+        "investigation_spec": specification,
+        "pipeline_source_status": {
+            "discovery_enabled": True,
+            "enrichment_enabled": True,
+        },
+    }
+
+    with pytest.raises(ValueError, match="No investigation identifiers"):
+        store.repeat_persona_investigation(persona_id, [], options)
+
+    refresh_id = store.repeat_persona_investigation(
+        persona_id,
+        [],
+        options,
+        allow_identifier_free_approved_research=True,
+    )
+    requests = PipelineStore(store).requests_for_job(refresh_id)
+
+    assert len(requests) == 1
+    assert [item["value"] for item in requests[0]["inputs"]] == urls
+    assert {item["type"] for item in requests[0]["inputs"]} == {"public_url"}
+    active = [
+        task["spec"]
+        for task in requests[0]["tasks"]
+        if task["spec"]["route_state"] == "active"
+    ]
+    assert [task["engine_id"] for task in active] == [
+        "approved_public_source_fetch",
+        "approved_public_source_fetch",
+    ]
+    assert [task["input_value"] for task in active] == urls
 
 
 def test_configured_refresh_routes_variants_to_selected_persona_in_multi_person_case(

@@ -11,7 +11,8 @@ PATTERNS = (
 REQUIRED_MODULES = (
     "test_pipeline_runtime.py", "test_connector_registry.py", "test_pipeline_reliability_migration.py",
     "test_pipeline_browser_acceptance.py", "test_pipeline_connector_ingestion.py",
-    "test_pipeline_projections.py",
+    "test_pipeline_projections.py", "test_pipeline_persona_convergence.py",
+    "test_pipeline_convergence_migration.py",
 )
 
 # These suites require the disposable PostgreSQL/browser/container gates, or

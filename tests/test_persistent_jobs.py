@@ -7,6 +7,7 @@ from threading import Timer
 
 import pytest
 from sqlalchemy import delete
+from sqlalchemy.exc import SQLAlchemyError
 
 from maigret.web.case_store import CaseStore, investigation_jobs
 from maigret.web.persona_intelligence import extract_case_chat_persona_claims
@@ -69,11 +70,185 @@ def test_live_job_is_queued_without_browser_owned_thread(
     job_id = response.location.rsplit("/", 1)[-1]
     stored = persistent_store.get_job(job_id)
     assert stored["status"] == "queued"
+    persona_id = stored["options"]["investigation_spec"]["persona_bindings"][0][
+        "persona_id"
+    ]
+    live_page = client.get(response.location).get_data(as_text=True)
+    assert f"/cases/{stored['case_id']}/pipeline/{persona_id}" in live_page
+    assert "doneRedirect && runtimeIsTerminal(runtimeState.status)" in live_page
 
     history = client.get("/history").get_data(as_text=True)
     assert "Queued" in history
     assert f"/live/{job_id}" in history
     assert "Open live progress" in history
+
+
+def test_live_crawl_audit_download_is_bounded_and_redacts_secrets(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.append_event(
+        job_id,
+        {
+            "type": "collector_error",
+            "collector": "fixture",
+            "message": "Timed out while contacting the public source.",
+            "authorization": "Bearer do-not-export",
+            "raw_body": "private response body",
+        },
+    )
+    persistent_store.append_event(
+        job_id,
+        {
+            "type": "approved_source_stage",
+            "collector": "approved_public_source_fetch",
+            "task_id": "approved-source-task",
+            "source_url": "https://example.test/profile",
+            "stage": "literal_page",
+            "status": "completed",
+            "message": "The public page returned an access block.",
+            "http_status": 403,
+            "claim_count": 0,
+        },
+    )
+    persistent_store.append_event(
+        job_id,
+        {
+            "type": "approved_source_stage",
+            "collector": "approved_public_source_fetch",
+            "task_id": "approved-source-task",
+            "source_url": "https://example.test/profile",
+            "stage": "public_image_search",
+            "status": "completed",
+            "message": "Public image candidates were sent to Step 1.",
+            "image_candidate_count": 2,
+            "provider_warnings": ["google images — timeout"],
+        },
+    )
+
+    live_page = client.get(f"/live/{job_id}").get_data(as_text=True)
+    assert f'/live/{job_id}/crawl-audit.json' in live_page
+    assert "Export crawl audit" in live_page
+
+    response = client.get(f"/live/{job_id}/crawl-audit.json")
+    assert response.status_code == 200
+    assert response.mimetype == "application/json"
+    assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
+    assert "attachment;" in response.headers["Content-Disposition"]
+    payload = json.loads(response.get_data(as_text=True))
+    serialized = response.get_data(as_text=True)
+
+    assert payload["schema"] == "openledger-crawl-audit-1"
+    assert payload["job"]["job_id"] == job_id
+    assert payload["summary"]["event_count"] >= 2
+    assert payload["summary"]["request_count"] == 1
+    assert payload["engines"]
+    assert "do-not-export" not in serialized
+    assert "private response body" not in serialized
+    assert "[redacted]" in serialized
+    approved_source = next(
+        item
+        for item in payload["engines"]
+        if item["engine"] == "approved_public_source_fetch"
+    )
+    assert approved_source["stages"][0]["stage"] == "literal_page"
+    assert approved_source["stages"][0]["http_status"] == 403
+    assert approved_source["stages"][1]["stage"] == "public_image_search"
+    assert approved_source["stages"][1]["image_candidate_count"] == 2
+    assert approved_source["stages"][1]["provider_warnings"] == [
+        "google images — timeout"
+    ]
+    assert "[raw content omitted]" in serialized
+
+
+def test_approved_source_live_page_tracks_each_url_without_profile_stat_nodes(
+    client, persistent_store
+):
+    urls = [
+        "https://www.linkedin.com/in/jati-pratomo/",
+        "https://www.threads.com/@djhat_prtm",
+    ]
+    job_id = persistent_store.create_investigation(
+        ["jati-pratomo"],
+        {
+            "investigation_spec": {
+                "pipeline_id": "p2-e2e-v1",
+                "processing_mode": "same_subject",
+                "subject_label": "Jati Pratomo",
+                "identifiers": [
+                    {"type": "username", "value": "jati-pratomo"}
+                ],
+                "discovery_basis": "approved_source_fetch",
+                "approved_source_urls": urls,
+            }
+        },
+        kind="refresh",
+    )
+
+    page = client.get(f"/live/{job_id}").get_data(as_text=True)
+
+    assert "const isApprovedSourceFetch = true;" in page
+    assert "const isProfileDiscovery = false;" in page
+    assert 'id="stat-approved-completed">0</span> /' in page
+    assert "const sourceUrl = String(ev.source_url || ev.input_value || '');" in page
+    assert "let key = String(ev.task_id" in page
+    assert "ev.type === 'approved_source_stage'" in page
+
+
+def test_approved_source_events_update_durable_per_url_progress(
+    client, persistent_store
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:approved-progress")
+    common = {
+        "collector": "approved_public_source_fetch",
+        "task_id": "approved-task-1",
+        "source_url": "https://example.test/alice",
+        "total": 2,
+    }
+    persistent_store.append_event(
+        job_id,
+        {"type": "collector_planned", **common},
+        runtime_guard=True,
+        worker_id=job["worker_id"],
+    )
+    persistent_store.append_event(
+        job_id,
+        {
+            "type": "approved_source_stage",
+            **common,
+            "stage": "cited_fallback",
+            "message": "Checking an exact-profile public index excerpt.",
+        },
+        runtime_guard=True,
+        worker_id=job["worker_id"],
+    )
+    persistent_store.append_event(
+        job_id,
+        {"type": "collector_completed", **common},
+        runtime_guard=True,
+        worker_id=job["worker_id"],
+    )
+    persistent_store.append_event(
+        job_id,
+        {"type": "collector_completed", **common},
+        runtime_guard=True,
+        worker_id=job["worker_id"],
+    )
+
+    progress = persistent_store.get_job(job_id)["progress"]
+    assert progress["checked"] == 1
+    assert progress["total"] == 2
+    assert progress["phase"] == "source_completed"
+    assert progress["source_url"] == "https://example.test/alice"
+    runtime = client.get(f"/api/scan/{job_id}/runtime").get_json()
+    assert runtime["approved_source_progress"] == {
+        "checked": 1,
+        "total": 2,
+        "phase": "source_completed",
+        "message": "Checking an exact-profile public index excerpt.",
+        "source_url": "https://example.test/alice",
+    }
 
 
 def test_legacy_search_route_uses_the_same_governed_persistent_queue(
@@ -628,6 +803,37 @@ def test_case_delete_requires_csrf(client, persistent_store):
     assert persistent_store.get_job(job_id) is not None
 
 
+def test_case_delete_database_refusal_returns_to_case_without_plain_500(
+    client, persistent_store, web_app, monkeypatch
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    job = persistent_store.claim_next("worker:test")
+    persistent_store.finish(
+        job_id, {"status": "cancelled", "usernames": job["usernames"]}
+    )
+    monkeypatch.setattr(
+        web_app,
+        "delete_persisted_case",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            SQLAlchemyError("synthetic database refusal")
+        ),
+    )
+    with client.session_transaction() as browser_session:
+        browser_session["csrf_token"] = "delete-case-csrf"
+
+    response = client.post(
+        f'/cases/{job["case_id"]}/delete',
+        data={"csrf_token": "delete-case-csrf", "confirmation_name": "alice"},
+        follow_redirects=True,
+    )
+
+    body = response.get_data(as_text=True)
+    assert response.status_code == 200
+    assert "Nothing was deleted" in body
+    assert "Internal Server Error" not in body
+    assert persistent_store.get_case(job["case_id"]) is not None
+
+
 def test_case_delete_rejects_symlinked_report_directory(
     web_app, persistent_store, tmp_path
 ):
@@ -721,7 +927,7 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
     assert f'/cases/{case["id"]}/delete' in cases_page
 
     case_page = client.get(f'/cases/{case["id"]}').get_data(as_text=True)
-    assert "Open structured profile" in case_page
+    assert "Open Persona" in case_page
     assert f"/personas/{persona_id}" in case_page
     assert "Delete case" in case_page
     assert 'name="confirmation_name"' in case_page
@@ -738,13 +944,69 @@ def test_case_and_persona_workspaces_render_reviewable_evidence(
 
     persona_page = client.get(f"/personas/{persona_id}?view=working").get_data(as_text=True)
     assert "Alice Example" in persona_page
-    assert "90% confidence" in persona_page
+    assert "90 legacy evidence score" in persona_page
     assert f'/personas/{persona_id}/export.pdf' in persona_page
-    assert "Export investigation report" in persona_page
+    assert "Export Persona PDF" in persona_page
     assert "No evidence extracted." in persona_page
-    assert "AI proposes; the analyst decides" in persona_page
     assert "Review queue" in persona_page
-    assert "Relationships" in persona_page
+    assert "Engine log" in persona_page
+    assert "Relationship evidence" in persona_page
+
+
+def test_persona_route_cuts_over_only_after_complete_legacy_convergence(
+    client, persistent_store
+):
+    from maigret.web.pipeline_ingestion import converge_legacy_persona
+
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "found_count": 1,
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": "Alice Example"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    for claim in persistent_store.get_persona(persona_id)["claims"]:
+        persistent_store.review_claim(claim["id"], "approved", "analyst")
+
+    # A partial P2 request must not hide the still-canonical legacy records.
+    dry_run = converge_legacy_persona(
+        persistent_store, case["id"], persona_id, dry_run=True
+    )
+    assert dry_run["evidence"]["claim_count"] > 0
+    before = client.get(f"/personas/{persona_id}")
+    assert before.status_code == 200
+    assert "Alice Example" in before.get_data(as_text=True)
+
+    converged = converge_legacy_persona(
+        persistent_store, case["id"], persona_id, dry_run=False
+    )
+    assert converged["auto_finalized"] is False
+    assert converged["qc_created"] is False
+    cutover = client.get(f"/personas/{persona_id}")
+    assert cutover.status_code == 302
+    assert cutover.location.endswith(
+        f"/cases/{case['id']}/pipeline/{persona_id}/persona"
+    )
+    canonical = client.get(cutover.location).get_data(as_text=True)
+    assert "Alice Example" in canonical
+    assert canonical.count("data-persona-tab=") == 8
 
 
 def test_case_scope_displays_one_username_with_attached_profile_sources(
@@ -1183,6 +1445,13 @@ def test_orphaned_profile_claims_are_retired_when_source_job_was_deleted(
         persistent_store.review_claim(claim["id"], "approved", "analyst")
 
     refresh_job_id = persistent_store.repeat_persona_investigation(persona_id)
+    # This regression models jobs created before the P2 lineage tables existed.
+    # Current investigations retain immutable pipeline requests, so remove those
+    # synthetic records before exercising the legacy-orphan migration path.
+    with persistent_store.engine.begin() as connection:
+        persistent_store._purge_pipeline_case_with_connection(
+            connection, case["id"]
+        )
     if preexisting_orphan:
         # Simulate a source job deleted before the reliability migration
         # existed. The upgrade sweep must recover this state on startup.
@@ -1440,6 +1709,74 @@ def test_persona_pdf_route_exports_only_curated_records(client, persistent_store
         in response.headers["Content-Disposition"]
     )
     assert response.headers["Cache-Control"] == "private, no-store, max-age=0"
+
+
+def test_legacy_pdf_remains_available_until_convergence_completes(
+    client, persistent_store
+):
+    """A partial P2 request must not replace the retained legacy PDF."""
+    from maigret.web.pipeline_store import PipelineStore
+
+    job_id = persistent_store.create_investigation(["alice"], {})
+    persistent_store.claim_next("worker:legacy-pdf-test")
+    result = {
+        "status": "completed",
+        "usernames": ["alice"],
+        "individual_reports": [
+            {
+                "username": "alice",
+                "claimed_profiles": [
+                    {
+                        "site_name": "Example Social",
+                        "url": "https://example.test/alice",
+                        "confidence": "strong",
+                        "evidence": {"fullname": "Alice Example"},
+                    }
+                ],
+            }
+        ],
+    }
+    persistent_store.finish(job_id, result)
+    persistent_store.sync_persona_claims(job_id, result)
+    case = persistent_store.get_case(persistent_store.get_job(job_id)["case_id"])
+    persona_id = case["personas"][0]["id"]
+    full_name = next(
+        claim
+        for claim in persistent_store.get_persona(persona_id)["claims"]
+        if claim["field_name"] == "full_name"
+    )
+    persistent_store.review_claim(full_name["id"], "approved", "analyst")
+
+    PipelineStore(persistent_store).create_request(
+        case["id"],
+        persona_id,
+        [{"type": "username", "value": "alice"}],
+        {"pipeline_id": "p2-e2e-v1", "tasks": []},
+        actor="fixture:partial-convergence",
+    )
+
+    response = client.get(f"/personas/{persona_id}/export.pdf")
+
+    assert response.status_code == 200
+    assert response.mimetype == "application/pdf"
+    assert response.data.startswith(b"%PDF-")
+
+
+def test_checkpointed_persona_without_request_uses_the_p2_route(
+    client, persistent_store
+):
+    """The completed checkpoint, not request existence, owns the cutover."""
+    from maigret.web.pipeline_store import PipelineStore
+
+    job_id = persistent_store.create_investigation(["alice"], {})
+    case_id = persistent_store.get_job(job_id)["case_id"]
+    persona_id = persistent_store.get_case(case_id)["personas"][0]["id"]
+    PipelineStore(persistent_store).mark_legacy_converged(case_id, persona_id)
+
+    response = client.get(f"/personas/{persona_id}")
+
+    assert response.status_code == 302
+    assert response.location.endswith(f"/cases/{case_id}/pipeline/{persona_id}/persona")
 
 
 def test_case_timeline_renders_bounded_provenance_and_escapes_evidence(
@@ -1731,7 +2068,8 @@ def test_persona_rerun_uses_full_investigation_builder_and_explicit_target(
     builder = client.get(f"/personas/{persona_id}/investigate")
     body = builder.get_data(as_text=True)
     assert builder.status_code == 200
-    assert "Configure this person investigation" in body
+    assert f"Investigate {subject}" in body
+    assert "Persona intelligence / configure" in body
     assert f'value="{subject}"' in body
     assert "Cited public-web research" in body
     assert "Case source filters" in body
@@ -1815,7 +2153,8 @@ def test_persona_rerun_preserves_exact_username_origin(client, persistent_store)
     page = client.get(f"/personas/{persona_id}/investigate").get_data(
         as_text=True
     )
-    assert '<option value="username" selected>Username</option>' in page
+    assert 'data-identifier-type="username"' in page
+    assert 'name="identifier_type" value="username"' in page
     assert f'value="{username}"' in page
 
     with client.session_transaction() as browser_session:
@@ -1885,8 +2224,9 @@ def test_persona_prefill_ignores_another_personas_targeted_refresh(
     bob_builder = client.get(
         f"/personas/{personas['bob']}/investigate"
     ).get_data(as_text=True)
-    assert '<option value="username" selected>Username</option>' in bob_builder
-    assert '<option value="full_name" selected>' not in bob_builder
+    assert 'data-identifier-type="username"' in bob_builder
+    assert 'value="bob"' in bob_builder
+    assert 'value="alice"' not in bob_builder
 
 
 def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
@@ -1922,10 +2262,10 @@ def test_rejected_claim_is_suppressed_from_profile_but_available_for_reversal(
     )
     persistent_store.review_claim(email["id"], "rejected", "analyst", "Collision")
 
-    page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    page = client.get(f"/personas/{persona_id}?view=working").get_data(as_text=True)
     assert page.count("collision@example.test") == 1
     assert 'data-review-item="rejected"' in page
-    assert "excluded from the default profile, map, and relationship graph" in page
+    assert "excluded from the default Persona and its approved outputs" in page
 
 
 def test_approved_location_and_photo_render_in_persona_workspace(
@@ -1969,14 +2309,15 @@ def test_approved_location_and_photo_render_in_persona_workspace(
     )
     persistent_store.review_claim(photo["id"], "approved", "analyst")
 
-    page = client.get(f"/personas/{persona_id}").get_data(as_text=True)
+    page = client.get(f"/personas/{persona_id}?view=working").get_data(as_text=True)
     assert 'id="personaLocationMap"' in page
     assert "-6.1754" in page
     assert "106.8272" in page
     assert page.count('src="https://images.example.test/alice.jpg"') >= 2
     assert 'class="persona-photo-frame"' in page
     assert "Amend approved record" in page
-    assert "AI evidence pipeline" in page
+    assert "Review queue" in page
+    assert "Engine log" in page
     assert "Affiliations" in page
     assert "Professional and corporate" not in page
     assert "Organization, institution or company" in page
@@ -3923,7 +4264,7 @@ def test_identity_worker_degrades_sources_and_persists_review_gated_alerts(
     assert "Review ICIJ source" in page
 
 
-def test_approving_full_name_queues_confirmed_name_enrichment(
+def test_approving_full_name_does_not_queue_second_name_enrichment(
     client, persistent_store
 ):
     source_job_id = persistent_store.create_investigation(["alice"], {})
@@ -3967,12 +4308,4 @@ def test_approving_full_name_queues_confirmed_name_enrichment(
     )
 
     assert response.status_code == 302
-    enrichment = persistent_store.get_persona_identity_enrichment(persona_id)
-    assert enrichment["kind"] == "identity_enrichment"
-    assert enrichment["status"] == "queued"
-    assert enrichment["options"]["investigation_spec"]["confirmed_name"] == (
-        "Alice Example"
-    )
-    live_page = client.get(f"/live/{enrichment['job_id']}")
-    assert live_page.status_code == 200
-    assert "Confirmed-name enrichment" in live_page.get_data(as_text=True)
+    assert persistent_store.get_persona_identity_enrichment(persona_id) is None

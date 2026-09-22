@@ -58,18 +58,62 @@ def test_builder_groups_first_and_accepts_legacy_handle_prefill(client, web_app)
         context = web_app.investigation_builder_context()
         context['initial_identifiers'] = [{'type': 'social_handle', 'value': '@alice'}]
         body = web_app.render_template('index.html', **context)
-    assert body.index('Who are you investigating?') < body.index('Known identifiers')
-    assert 'value="same_subject" checked' in body
-    assert '<option value="username" selected>Username</option>' in body
+    assert body.index('Subject') < body.index('Known identifiers')
+    assert 'name="processing_mode" id="mode-subject" value="same_subject"' in body
+    assert 'name="identifier_type" value="username"' in body
     assert '<option value="social_handle"' not in body
     assert '<option value="profile_url"' not in body
     assert 'value="@alice"' in body
-    assert 'Investigation workspace' in body
+    assert 'Investigation setup' in body
     assert 'Username checks (Maigret)' in body
     assert 'Where your identifiers go' in body
     assert 'One username target across eligible social sites' in body
-    assert 'generated aliases stay with their source subject' in body
+    assert 'Every identifier stays under this single Persona' in body
+    assert 'Independent subjects' not in body
     assert '0 account checks' not in body
+
+
+def test_approved_operational_shell_and_identifier_layout(client):
+    body = client.get('/').get_data(as_text=True)
+    assert 'openledger-v2.css' in body
+    assert 'class="brand-mark-wrap"' in body
+    assert 'openledger-icon-white.png' in body
+    assert 'Open-Gate · OSINT' in body
+    assert '<span>Relationships</span>' not in body
+    assert 'Full name' in body
+    assert '>Username<' in body
+    assert 'Email address' in body
+    assert 'Phone number' in body
+    assert 'Residential data</dt><dd>Blocked' in body
+    assert 'Human review</dt><dd>Required' in body
+
+    css = client.get('/static/openledger-v2.css').get_data(as_text=True)
+    assert '--ol-accent: #7c4dff' in css
+    assert '--ol-canvas: #000000' in css
+    assert 'border-radius: 0 !important' in css
+    assert '.app-content > .page-heading' in css
+    assert '.app-content > .persona-profile-header' in css
+    assert 'position: sticky' in css
+    assert 'top: var(--ol-topbar-height)' in css
+    assert 'width: 69px' not in css
+    assert 'width: 72px' not in css
+
+    forbidden = client.get('/settings').get_data(as_text=True)
+    if 'Administrator access required' in forbidden:
+        assert 'class="page-heading"' in forbidden
+
+
+def test_every_authenticated_page_title_uses_the_sticky_heading_contract(web_app):
+    templates = Path(web_app.__file__).resolve().parent / "templates"
+    titled_pages = [
+        path
+        for path in templates.glob("*.html")
+        if path.name != "login.html" and "<h1" in path.read_text(encoding="utf-8")
+    ]
+    assert titled_pages
+    for path in titled_pages:
+        source = path.read_text(encoding="utf-8")
+        assert "page-heading" in source or "persona-profile-header" in source, path.name
 
 
 @pytest.mark.parametrize(
@@ -108,4 +152,4 @@ def test_builder_rendered_script_and_dynamic_routes(client, tmp_path):
         timeout=15,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert 'routing DOM scenarios passed' in result.stdout
+    assert 'single-Persona builder DOM scenarios passed' in result.stdout

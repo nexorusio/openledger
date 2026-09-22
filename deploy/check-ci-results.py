@@ -9,8 +9,8 @@ REQUIRED_CASES = (
     "test_new_connector_needs_only_package_manifest_and_fixtures",
     "test_operator_and_machine_connectors_are_not_query_worker_fallbacks",
     "test_saved_versions_cannot_silently_use_a_different_parser",
-    "test_registered_wrapper_preserves_partial_outcomes_and_retry_policy",
-    "test_browser_four_inputs_review_research_qc_and_final",
+    "test_registered_wrapper_keeps_positive_result_and_surfaces_retry_warning",
+    "test_browser_four_inputs_assessment_reject_approve_and_report",
     "test_page_commit_advances_cursor_and_atomic_evidence",
     "test_crash_retry_resumes_checkpoint_and_deduplicates_page",
     "test_page_and_cursor_roll_back_together_on_late_record_conflict",
@@ -39,7 +39,7 @@ REQUIRED_CASES = (
     "test_legacy_backfill_is_checkpointed_idempotent_and_never_finalizes[postgres]",
     "test_qc_is_explicit_and_final_is_immutable[postgres]",
     "test_real_app_manual_review_qc_research_worker_and_final_projection",
-    "test_pdf_text_register_contains_every_curated_fact_and_observation",
+    "test_pdf_brief_deduplicates_the_reader_view_and_keeps_version_access",
 )
 
 

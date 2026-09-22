@@ -81,6 +81,16 @@ def test_every_registered_builtin_dispatches_through_its_callable(monkeypatch, s
         calls.append((args, kwargs))
         return {"outcome": "candidate", "observations": [{"status": "observed"}]}
 
+    async def approved_envelope(task, context):
+        calls.append(((task, context), {}))
+        observation = {
+            "status": "observed",
+            "source_url": "https://example.test/profile",
+        }
+        context.raw_collector_observations.append(observation)
+        context.emit_observations([observation])
+        return {"outcome": "candidate"}
+
     # Stub only the lower-level provider boundary. Registry selection, wrappers,
     # argument adaptation and observation emission remain real.
     capability = spec.capability
@@ -89,6 +99,7 @@ def test_every_registered_builtin_dispatches_through_its_callable(monkeypatch, s
     monkeypatch.setattr(pipeline_execution, "_maigret_adapter", envelope)
     monkeypatch.setattr(pipeline_execution, "_native_adapter", envelope)
     monkeypatch.setattr(pipeline_execution, "_cited_research_adapter", envelope)
+    monkeypatch.setattr(builtin, "collect_approved_source", approved_envelope)
     monkeypatch.setattr(
         pipeline_public_search, "collect_public_exact_matches", envelope
     )
@@ -168,6 +179,242 @@ def test_new_connector_needs_only_package_manifest_and_fixtures(monkeypatch):
     assert seen[0]["engine_version"] == "openledger-adapter-1"
     assert seen[0]["parser_version"] == "pipeline-evidence-2"
     assert seen[0]["retention_policy"] == [capability.retention, None]
+
+
+def test_exact_profile_url_collector_preserves_linkedin_slug(monkeypatch):
+    from maigret.web.connectors import builtin
+
+    captured = {}
+
+    async def analyze(target, *, timeout_seconds):
+        captured.update(target)
+        return {
+            "status": "candidate",
+            "source_url": target["profile_url"],
+            "subject_value": target["investigated_username"],
+        }
+
+    monkeypatch.setattr(
+        builtin,
+        "_adapters",
+        lambda: SimpleNamespace(run_unfurl_url_analysis=analyze),
+    )
+    context = Context()
+    asyncio.run(
+        builtin.collect_url(
+            {
+                "input_value": "https://linkedin.com/in/jati-pratomo",
+                "execution_key": "run_unfurl_url_analysis",
+                "timeout_seconds": 20,
+            },
+            context,
+        )
+    )
+
+    assert captured == {
+        "profile_url": "https://linkedin.com/in/jati-pratomo",
+        "investigated_username": "jati-pratomo",
+        "site_name": "linkedin.com",
+    }
+
+
+def test_approved_maigret_target_requires_the_exact_profile_path():
+    from maigret.web.connectors.builtin import _approved_maigret_target
+
+    sites = [
+        SimpleNamespace(
+            name="LinkedIn",
+            url="https://linkedin.com/in/{username}",
+            disabled=False,
+            type="username",
+        ),
+        SimpleNamespace(
+            name="Threads mirror",
+            url="https://mirror.example/@{username}",
+            disabled=False,
+            type="username",
+        ),
+    ]
+
+    assert _approved_maigret_target(
+        "https://id.linkedin.com/in/jati-pratomo/", sites
+    ) == ("LinkedIn", "jati-pratomo")
+    assert _approved_maigret_target(
+        "https://id.linkedin.com/in/another-person/", sites
+    ) == ("LinkedIn", "another-person")
+    assert _approved_maigret_target(
+        "https://mirror.example/not-the-profile/jati-pratomo", sites
+    ) is None
+
+
+def test_approved_source_runs_exact_cited_fallback_when_parsers_lack_fields(
+    monkeypatch,
+):
+    import maigret.sites as site_module
+    from maigret.web.connectors import builtin
+
+    source_url = "https://www.linkedin.com/in/jati-pratomo/"
+    site = SimpleNamespace(
+        name="LinkedIn",
+        url="https://linkedin.com/in/{username}",
+        disabled=False,
+        type="username",
+        headers={"User-Agent": "Maigret LinkedIn browser"},
+    )
+
+    class Database:
+        sites = [site]
+
+        def load_from_path(self, _path):
+            return self
+
+    direct_target = {}
+
+    async def direct_fetch(target, *, timeout_seconds):
+        direct_target.update(target)
+        return {
+            "source_engine": "approved_public_source_fetch",
+            "source_record_id": "direct",
+            "source_url": source_url,
+            "status": "observed",
+            "claims": [{"predicate": "summary", "value": "Indexed profile"}],
+            "extra": {"maigret_parser_fields": []},
+        }
+
+    fallback_tasks = []
+
+    async def cited_fallback(task, _context):
+        fallback_tasks.append(task)
+        return {"outcome": "candidate", "citation_count": 1, "proposal_count": 2}
+
+    async def image_search(_context, subject, approved_url):
+        assert subject == "Jati Pratomo"
+        assert approved_url == source_url
+        return SimpleNamespace(error=None), []
+
+    app = SimpleNamespace(
+        app=SimpleNamespace(config={"MAIGRET_DB_FILE": "fixture.json"}),
+        record_internal_error=lambda *_args, **_kwargs: "fixture-error",
+    )
+    runtime = SimpleNamespace(
+        _app=lambda: app,
+        _cited_research_adapter=cited_fallback,
+        _aggregate_outcomes=lambda values: next(iter(values), "inconclusive"),
+    )
+    monkeypatch.setattr(site_module, "MaigretDatabase", Database)
+    monkeypatch.setattr(builtin, "_runtime", lambda: runtime)
+    monkeypatch.setattr(builtin, "_approved_public_image_search", image_search)
+    monkeypatch.setattr(
+        builtin,
+        "_adapters",
+        lambda: SimpleNamespace(run_approved_public_source_fetch=direct_fetch),
+    )
+
+    emitted, events = [], []
+
+    class Pipeline:
+        def iter_observations(self, _case_id, _persona_id):
+            return iter(())
+
+    class Store:
+        def get_persona(self, _persona_id):
+            return {"display_name": "Jati Pratomo"}
+
+    context = SimpleNamespace(
+        task={"id": "task-1"},
+        options={},
+        job={"job_id": "job-1", "case_id": "case-1"},
+        request={"persona_id": "persona-1"},
+        pipeline=Pipeline(),
+        store=Store(),
+        sink=SimpleNamespace(put=events.append),
+        raw_collector_observations=[],
+        normalize=lambda _envelope, **_kwargs: [
+            {"claims": [{"predicate": "social_account", "value": source_url}]}
+        ],
+        emit=lambda envelope, **kwargs: emitted.append((envelope, kwargs)),
+        emit_observations=lambda rows, **kwargs: emitted.append((rows, kwargs)),
+    )
+    result = asyncio.run(
+        builtin.collect_approved_source(
+            {
+                "id": "task-1",
+                "input_value": source_url,
+                "timeout_seconds": 180,
+            },
+            context,
+        )
+    )
+
+    assert result["outcome"] == "candidate"
+    assert direct_target["investigated_username"] == "jati-pratomo"
+    assert direct_target["maigret_site_name"] == "LinkedIn"
+    assert direct_target["maigret_public_headers"] == {
+        "User-Agent": "Maigret LinkedIn browser"
+    }
+    assert fallback_tasks[0]["approved_source_url"] == source_url
+    assert [event["stage"] for event in events] == [
+        "maigret_catalogue",
+        "maigret_catalogue",
+        "literal_page",
+        "literal_page",
+        "maigret_parser",
+        "public_image_search",
+        "public_image_search",
+        "cited_fallback",
+        "cited_fallback",
+    ]
+
+
+def test_approved_source_image_candidates_require_review_and_keep_lineage():
+    from maigret.web.connectors import builtin
+    from maigret.web.profile_search_backend import PublicImageSearchRun
+    from maigret.web.profile_search_contract import (
+        ProfileSearchProvenance,
+        PublicImageSearchEvidence,
+    )
+
+    source_url = "https://www.linkedin.com/in/jati-pratomo/"
+    query = builtin._approved_public_image_query("Jati Pratomo", source_url)
+    provenance = ProfileSearchProvenance.for_query(
+        query,
+        provider="searxng",
+        provider_request_id="images-42",
+        retrieved_at="2026-09-15T15:00:00Z",
+    )
+    run = PublicImageSearchRun(
+        query=query,
+        provenance=provenance,
+        evidence=(
+            PublicImageSearchEvidence(
+                result_rank=1,
+                source_url="https://example.org/team/jati-pratomo",
+                image_url="https://cdn.example.org/jati.jpg",
+                thumbnail_url="https://thumbs.example.org/jati.jpg",
+                title="Jati Pratomo",
+                source="example.org",
+                engine="duckduckgo images",
+                resolution="800 x 800",
+            ),
+        ),
+    )
+
+    rows = builtin._approved_public_image_observations(run, source_url)
+
+    assert query.query_text == '"Jati Pratomo"'
+    assert len(rows) == 1
+    assert rows[0]["status"] == "candidate"
+    assert rows[0]["source_url"] == "https://example.org/team/jati-pratomo"
+    claim = rows[0]["claims"][0]
+    assert claim["predicate"] == "photograph"
+    assert claim["value"] == "https://cdn.example.org/jati.jpg"
+    assert claim["qualifiers"]["identity_status"] == "unverified"
+    assert claim["qualifiers"]["human_review_required"] is True
+    assert claim["qualifiers"]["automatic_approval_allowed"] is False
+    assert claim["qualifiers"]["approved_source_url"] == source_url
+    assert claim["qualifiers"]["source_page_url"] == rows[0]["source_url"]
+    assert claim["qualifiers"]["result_engine"] == "duckduckgo images"
+    assert claim["qualifiers"]["query_fingerprint"] == query.fingerprint
 
 
 @pytest.mark.parametrize(
@@ -269,7 +516,7 @@ def test_saved_versions_cannot_silently_use_a_different_parser():
         asyncio.run(collect_registered(task, Context()))
 
 
-def test_registered_wrapper_preserves_partial_outcomes_and_retry_policy(monkeypatch):
+def test_registered_wrapper_keeps_positive_result_and_surfaces_retry_warning(monkeypatch):
     from maigret.web import collector_adapters
 
     async def rows(*args, **kwargs):
@@ -285,7 +532,9 @@ def test_registered_wrapper_preserves_partial_outcomes_and_retry_policy(monkeypa
             task_for(get_connector_registry().get("github_public_profile")), context
         )
     )
-    assert result["outcome"] == "partial"
+    assert result["outcome"] == "found"
+    assert result["display_status"] == "completed_with_warnings"
+    assert result["warning_count"] == 1
     assert result["retryable"] is True
     assert result["retry_after_seconds"] == 12
     assert len(context.emitted) == 2

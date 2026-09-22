@@ -177,8 +177,9 @@ def rank_username_aliases(
         candidates.values(),
         key=lambda item: (-item["score"], item["value"].casefold()),
     )[:MAX_ALIAS_CANDIDATES]
-    for index, candidate in enumerate(ranked):
-        candidate["selected"] = (
-            index < MAX_SELECTED_ALIASES and candidate["score"] >= 78
-        )
+    # Generated aliases are hypotheses, not investigation inputs.  Present the
+    # ranked plan for analyst review, but never scan a spelling merely because
+    # it scored highly.  The submitted form is the only selection authority.
+    for candidate in ranked:
+        candidate["selected"] = False
     return ranked

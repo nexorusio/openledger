@@ -29,7 +29,7 @@ def journey(tmp_path):
         "tasks": [{"engine": "fixture", "availability": "active", "input": inputs[0]}],
     }
     query = pipeline.create_request(
-        case_id, persona_id, inputs, plan, actor="analyst", job_id=job_id
+        case_id, persona_id, inputs, plan, actor="system:route-fixture", job_id=job_id
     )
     attempt = pipeline.start_attempt(query["tasks"][0]["id"], "fixture-worker")
     observations = pipeline.record_observations(
@@ -72,6 +72,20 @@ def journey(tmp_path):
         },
         projection_revision=pipeline.projection_revision(case_id, persona_id),
     )
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    pipeline.reconcile_submitted_inputs(case_id, persona_id)
+    assess_consolidated_groups(case_store, case_id, persona_id)
+    for item in pipeline.get_workspace(case_id, persona_id)["shortlist"]:
+        if item["investigator_supplied"]:
+            pipeline.decide(
+                case_id,
+                persona_id,
+                item["id"],
+                "reject",
+                actor="fixture-reviewer",
+                reason="Resolved setup anchor for route-fixture isolation",
+            )
     group_id = groups[0]["id"]
     app = Flask(
         __name__,
@@ -83,7 +97,9 @@ def journey(tmp_path):
         "index",
         "history",
         "cases_workspace",
+        "combine_cases_workspace",
         "relationships_workspace",
+        "configure_persona_investigation",
         "settings_update",
         "security_settings",
         "logout",
@@ -93,6 +109,11 @@ def journey(tmp_path):
     app.add_url_rule(
         "/personas/<persona_id>", "persona_workspace", lambda persona_id: persona_id
     )
+    app.add_url_rule(
+        "/live/<job_id>",
+        "live_results",
+        lambda job_id: "synthetic live result",
+    )
     app.context_processor(
         lambda: {
             "csrf_token": session.get("csrf_token"),
@@ -101,6 +122,8 @@ def journey(tmp_path):
         }
     )
     launches = []
+    discovery_launches = []
+    source_fetch_launches = []
 
     def launch_research(**kwargs):
         launches.append(kwargs)
@@ -110,12 +133,39 @@ def journey(tmp_path):
             'persona_id': kwargs['persona_id'],
         }
 
+    def launch_approved_discovery(**kwargs):
+        discovery_launches.append(kwargs)
+        return {
+            "job_id": "approved-discovery-job",
+            "case_id": kwargs["case_id"],
+            "persona_id": kwargs["persona_id"],
+        }
+
+    def launch_approved_source_fetch(**kwargs):
+        source_fetch_launches.append(kwargs)
+        return {
+            "job_id": "approved-source-fetch-job",
+            "case_id": kwargs["case_id"],
+            "persona_id": kwargs["persona_id"],
+            "source_count": 1,
+        }
+
     register_pipeline_routes(
         app,
         lambda: case_store,
         lambda: session.get("role", ""),
         lambda token: token == session.get("csrf_token") == "test-csrf",
         launch_research=launch_research,
+        prepare_workspace=lambda **_kwargs: {"status": "prepared"},
+        launch_approved_discovery=launch_approved_discovery,
+        launch_approved_source_fetch=launch_approved_source_fetch,
+        geocode_approved_location=lambda _place: {
+            "latitude": -6.1754,
+            "longitude": 106.8272,
+            "precision": "city",
+        },
+        affiliation_public_web_enabled=lambda: True,
+        google_places_enabled=lambda: True,
     )
     client = app.test_client()
     with client.session_transaction() as current:
@@ -135,6 +185,8 @@ def journey(tmp_path):
         group_id=group_id,
         observation_id=observation_id,
         launches=launches,
+        discovery_launches=discovery_launches,
+        source_fetch_launches=source_fetch_launches,
     )
     yield result
     case_store.dispose()
@@ -173,7 +225,9 @@ def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     client = journey['client']
     workspace = client.get(base(journey))
     assert workspace.status_code == 200
-    assert b'Automated ranked curated findings' in workspace.data
+    assert b'Review submitted evidence and discoveries' in workspace.data
+    assert b'Decision note (optional)' in workspace.data
+    assert b'>Reject<' in workspace.data
     assert b'Record decision' not in workspace.data
     assert client.get(base(journey) + '/final').status_code == 404
     version = curate(journey)
@@ -198,8 +252,9 @@ def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     )
     assert rejected.status_code == 200, rejected.get_data(as_text=True)
     requirement = rejected.get_json()['requirements'][0]
-    rendered = client.get(base(journey))
-    assert b'Does another public source' in rendered.data
+    # Requirements remain auditable and launchable, but are not part of the
+    # streamlined per-finding assessment workspace.
+    assert client.get(base(journey)).status_code == 200
     launched = post(journey, f'/requirements/{requirement["id"]}/launch', {})
     assert launched.status_code == 202
     assert journey['launches'][0]['case_id'] == journey['case_id']
@@ -264,6 +319,799 @@ def test_ranked_review_reject_research_resolve_approve_same_case(journey):
     assert journey['observation_id'] in {
         node.get('observation_id') for node in graph['nodes']
     }
+
+
+def test_review_proceed_persona_and_approved_discovery_are_an_explicit_wizard(
+    journey,
+):
+    client = journey["client"]
+    blocked = client.post(
+        base(journey) + "/proceed",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked.status_code == 303
+    assert blocked.location.endswith(base(journey) + "#operator-review")
+    blocked_persona = client.get(base(journey) + "/persona")
+    assert blocked_persona.status_code == 200
+    assert b"Review queue" in blocked_persona.data
+    assert b'data-persona-panel="review"' in blocked_persona.data
+    blocked_discovery = client.post(
+        base(journey) + "/discover-related",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_discovery.status_code == 303
+    assert blocked_discovery.location.endswith(base(journey) + "#operator-review")
+    assert journey["discovery_launches"] == []
+    blocked_source_fetch = client.post(
+        base(journey) + "/fetch-approved-sources",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_source_fetch.status_code == 303
+    assert blocked_source_fetch.location.endswith(base(journey) + "#operator-review")
+    assert journey["source_fetch_launches"] == []
+    blocked_report = client.post(
+        base(journey) + "/report",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_report.status_code == 302
+    assert blocked_report.location.endswith(base(journey) + "#operator-review")
+
+    decision = post(
+        journey,
+        "/groups/" + journey["group_id"] + "/decision",
+        {"decision": "include", "reason": "Verified against retained evidence."},
+    )
+    assert decision.status_code == 201
+    proceeded = client.post(
+        base(journey) + "/proceed",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert proceeded.status_code == 303
+    assert proceeded.location.endswith(base(journey) + "/persona")
+
+    persona = client.get(proceeded.location)
+    assert persona.status_code == 200
+    assert b"Persona" in persona.data
+    assert b"Synthetic Person" in persona.data
+    assert b"Edit approvals" in persona.data
+    assert b"Find new evidence" in persona.data
+
+    discovery = client.post(
+        base(journey) + "/collect-approved-evidence",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert discovery.status_code == 303
+    assert discovery.location.endswith("/live/approved-discovery-job")
+    assert journey["discovery_launches"][0]["approved_groups"][0]["label"] == (
+        "Synthetic Person"
+    )
+
+
+def test_step_two_exposes_reconciliation_action_at_the_decision_point(
+    journey, monkeypatch
+):
+    original = PipelineStore.get_workspace
+
+    def pending(self, *args, **kwargs):
+        workspace = original(self, *args, **kwargs)
+        workspace["projection"]["pending"] = True
+        return workspace
+
+    monkeypatch.setattr(PipelineStore, "get_workspace", pending)
+
+    response = journey["client"].get(base(journey))
+
+    assert response.status_code == 200
+    assert b"Reconcile evidence and continue" in response.data
+    assert response.data.count(b'action="' + base(journey).encode() + b'/prepare"') == 1
+
+
+def test_page_and_persona_titles_share_the_global_sticky_rule():
+    css = (
+        Path(__file__).parents[1]
+        / "maigret"
+        / "web"
+        / "static"
+        / "openledger.css"
+    ).read_text()
+    rule = css.split(".page-heading,\n.persona-profile-header", 1)[1].split("}", 1)[0]
+    assert "position: sticky" in rule
+    assert "top: var(--ol-topbar-height)" in rule
+
+
+def test_approved_discovery_reuses_exact_url_without_generated_aliases(monkeypatch):
+    import maigret.web.app as web_app
+
+    class Store:
+        queued = None
+
+        def get_persona(self, persona_id):
+            return {"id": persona_id, "display_name": "Jati Pratomo"}
+
+        def repeat_persona_investigation(
+            self,
+            persona_id,
+            usernames,
+            options,
+            *,
+            allow_identifier_free_approved_research=False,
+        ):
+            self.queued = (
+                persona_id,
+                usernames,
+                options,
+                allow_identifier_free_approved_research,
+            )
+            return "cross-check-job"
+
+    store = Store()
+    monkeypatch.setattr(web_app, "case_store", store)
+    monkeypatch.setattr(web_app, "resolve_profile_url_identifiers", lambda _url: {})
+    monkeypatch.setattr(
+        web_app,
+        "parse_search_options",
+        lambda _form, plan: {"investigation_spec": plan},
+    )
+    result = web_app._launch_approved_pipeline_discovery(
+        case_id="case-id",
+        persona_id="persona-id",
+        actor="analyst",
+        approved_groups=[
+            {
+                "kind": "account",
+                "normalized": {
+                    "canonical_url": "https://linkedin.com/in/jati-pratomo"
+                },
+            },
+            {
+                "kind": "claim",
+                "normalized": {"predicate": "full_name", "value": "Jati Pratomo"},
+            },
+        ],
+    )
+
+    assert result["job_id"] == "cross-check-job"
+    _persona_id, usernames, options, allow_identifier_free = store.queued
+    specification = options["investigation_spec"]
+    assert usernames == []
+    assert allow_identifier_free is False
+    assert specification["generate_name_variants"] is False
+    assert specification["profile_url_usernames"] == {
+        "https://linkedin.com/in/jati-pratomo": ["jati-pratomo"]
+    }
+    assert specification["search_targets"] == []
+    assert specification["discovery_basis"] == "approved_pipeline_findings"
+    assert specification["approved_research_questions"]
+    research = "\n".join(specification["approved_research_questions"])
+    assert "Jati Pratomo" in research
+    assert "https://linkedin.com/in/jati-pratomo" in research
+    assert "employment, education, memberships" in research
+
+
+def test_approved_source_fetch_queues_exact_reviewed_urls(monkeypatch):
+    import maigret.web.app as web_app
+
+    class Store:
+        queued = None
+
+        def get_persona(self, persona_id):
+            return {"id": persona_id, "display_name": "Jati Pratomo"}
+
+        def repeat_persona_investigation(
+            self,
+            persona_id,
+            usernames,
+            options,
+            *,
+            allow_identifier_free_approved_research=False,
+        ):
+            self.queued = (
+                persona_id,
+                usernames,
+                options,
+                allow_identifier_free_approved_research,
+            )
+            return "approved-source-fetch-job"
+
+    store = Store()
+    monkeypatch.setattr(web_app, "case_store", store)
+    monkeypatch.setattr(
+        web_app,
+        "parse_search_options",
+        lambda _form, plan: {"investigation_spec": plan},
+    )
+    result = web_app._launch_approved_source_fetch(
+        case_id="case-id",
+        persona_id="persona-id",
+        actor="analyst",
+        approved_groups=[
+            {
+                "kind": "account",
+                "normalized": {
+                    "canonical_url": "https://www.linkedin.com/in/jati-pratomo/"
+                },
+            },
+            {
+                "kind": "claim",
+                "normalized": {
+                    "predicate": "social_account",
+                    "value": {"url": "https://www.linkedin.com/in/jati-pratomo/"},
+                },
+            },
+            {
+                "kind": "claim",
+                "normalized": {
+                    "predicate": "website",
+                    "value": "https://example.test/about",
+                },
+            },
+        ],
+    )
+
+    assert result == {
+        "job_id": "approved-source-fetch-job",
+        "case_id": "case-id",
+        "persona_id": "persona-id",
+        "source_count": 2,
+    }
+    _persona_id, usernames, options, allow_identifier_free = store.queued
+    specification = options["investigation_spec"]
+    assert usernames == []
+    assert allow_identifier_free is True
+    assert specification["discovery_basis"] == "approved_source_fetch"
+    assert specification["enable_approved_source_fetch"] is True
+    assert "approved_research_questions" not in specification
+    assert specification["approved_source_urls"] == [
+        "https://www.linkedin.com/in/jati-pratomo/",
+        "https://example.test/about",
+    ]
+
+
+def test_fetch_approved_sources_route_queues_only_approved_urls(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    assert post(
+        journey,
+        "/groups/" + journey["group_id"] + "/decision",
+        {"decision": "include", "reason": "Approved baseline finding."},
+    ).status_code == 201
+    groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "approved-source-url",
+                    "normalized": {
+                        "predicate": "website",
+                        "value": "https://example.test/about",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                }
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    assert post(
+        journey,
+        "/groups/" + groups[0]["id"] + "/decision",
+        {"decision": "include", "reason": "Exact public page selected."},
+    ).status_code == 201
+
+    response = journey["client"].post(
+        base(journey) + "/fetch-approved-sources",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["Location"].endswith("/live/approved-source-fetch-job")
+    assert len(journey["source_fetch_launches"]) == 1
+    launch = journey["source_fetch_launches"][0]
+    assert launch["case_id"] == journey["case_id"]
+    assert launch["persona_id"] == journey["persona_id"]
+    assert [
+        item["normalized"]["value"]
+        for item in launch["approved_groups"]
+        if item["normalized"].get("predicate") == "website"
+    ] == ["https://example.test/about"]
+
+
+def test_approved_discovery_uses_cited_research_for_affiliation_without_identifier(
+    monkeypatch,
+):
+    import maigret.web.app as web_app
+
+    class Store:
+        queued = None
+
+        def get_persona(self, persona_id):
+            return {"id": persona_id, "display_name": "Affiliation-only Persona"}
+
+        def repeat_persona_investigation(
+            self,
+            persona_id,
+            usernames,
+            options,
+            *,
+            allow_identifier_free_approved_research=False,
+        ):
+            self.queued = (
+                persona_id,
+                usernames,
+                options,
+                allow_identifier_free_approved_research,
+            )
+            return "affiliation-cross-check-job"
+
+    store = Store()
+    monkeypatch.setattr(web_app, "case_store", store)
+    monkeypatch.setattr(
+        web_app,
+        "parse_investigation_submission",
+        lambda _form: (_ for _ in ()).throw(
+            AssertionError(
+                "identifier-free approved research must not use the public parser"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        web_app,
+        "parse_search_options",
+        lambda _form, plan: {"investigation_spec": plan},
+    )
+
+    result = web_app._launch_approved_pipeline_discovery(
+        case_id="case-id",
+        persona_id="persona-id",
+        actor="analyst",
+        approved_groups=[
+            {
+                "kind": "claim",
+                "normalized": {
+                    "predicate": "company",
+                    "value": "Nexorus",
+                    "binding_status": "resolved",
+                },
+            },
+            {
+                "kind": "claim",
+                "normalized": {
+                    "predicate": "organization_location",
+                    "value": "Jakarta, Indonesia",
+                    "binding_status": "resolved",
+                },
+            },
+        ],
+    )
+
+    assert result["job_id"] == "affiliation-cross-check-job"
+    _persona_id, usernames, options, allow_identifier_free = store.queued
+    specification = options["investigation_spec"]
+    assert usernames == []
+    assert specification["identifiers"] == []
+    assert specification["search_targets"] == []
+    assert specification["discovery_basis"] == "approved_pipeline_findings"
+    assert allow_identifier_free is True
+    research = "\n".join(specification["approved_research_questions"])
+    assert "company: Nexorus" in research
+    assert "organization_location: Jakarta, Indonesia" in research
+
+
+def test_approved_affiliation_can_open_a_separate_investigation_branch(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "approved-company",
+                    "normalized": {
+                        "predicate": "company",
+                        "value": "Nexorus",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                }
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    affiliation_id = groups[0]["id"]
+    decision = post(
+        journey,
+        f"/groups/{affiliation_id}/decision",
+        {"decision": "include"},
+    )
+    assert decision.status_code == 201
+    resolved_existing = post(
+        journey,
+        f"/groups/{journey['group_id']}/decision",
+        {"decision": "reject"},
+    )
+    assert resolved_existing.status_code == 201
+
+    branch = journey["client"].post(
+        base(journey) + f"/groups/{affiliation_id}/branch-affiliation",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+
+    assert branch.status_code == 303
+    job_id = branch.location.rsplit("/", 1)[-1]
+    job = journey["store"].get_job(job_id)
+    specification = job["options"]["investigation_spec"]
+    assert job["kind"] == "affiliation"
+    assert specification["affiliation_name"] == "Nexorus"
+    assert specification["source_claim_id"] == affiliation_id
+    assert specification["target_basis"] == "approved_affiliation_claim"
+    assert specification["official_website"] is None
+    assert specification["enable_domain_context"] is False
+    assert specification["enable_public_web_research"] is True
+    assert specification["enable_google_places_search"] is True
+
+
+def test_persona_renders_approved_photo_and_persisted_location_map(
+    journey, monkeypatch
+):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    monkeypatch.setenv(
+        "OPENLEDGER_MAP_TILE_URL",
+        "https://tiles.example.test/{z}/{x}/{y}.png",
+    )
+
+    groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "approved-photo",
+                    "normalized": {
+                        "predicate": "photograph",
+                        "value": "https://cdn.example.test/jati.jpg",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                },
+                {
+                    "canonical_key": "approved-organization-location",
+                    "normalized": {
+                        "predicate": "organization_location",
+                        "value": "Jakarta, Indonesia",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                },
+                {
+                    "canonical_key": "approved-occupation",
+                    "normalized": {
+                        "predicate": "occupation",
+                        "value": "Data analyst",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                },
+                {
+                    "canonical_key": "approved-affiliation",
+                    "normalized": {
+                        "predicate": "affiliation",
+                        "value": "Nexorus",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                },
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    for group in groups:
+        assert post(
+            journey,
+            f"/groups/{group['id']}/decision",
+            {"decision": "include"},
+        ).status_code == 201
+    assert post(
+        journey,
+        f"/groups/{journey['group_id']}/decision",
+        {"decision": "reject"},
+    ).status_code == 201
+
+    response = journey["client"].get(base(journey) + "/persona")
+
+    assert response.status_code == 200
+    assert b"https://cdn.example.test/jati.jpg" in response.data
+    assert b"Approved locations" in response.data
+    assert b"106.8272" in response.data
+    assert b"Organization location" in response.data
+    assert b'https://tiles.example.test/{z}/{x}/{y}.png' in response.data
+    assert b"Export Persona PDF" in response.data
+    assert b"Case AI assistant" in response.data
+    assert b"Relationship evidence" in response.data
+    assert b"Data analyst" in response.data
+    assert b"Nexorus" in response.data
+    assert b"Jakarta, Indonesia" in response.data
+    assert b'persona-photo-placeholder" hidden' in response.data
+    assert b'approved-persona-field-label">Photograph' in response.data
+    assert b'approved-persona-field-label">Organization, institution or company' in response.data
+    assert b'approved-persona-field-label">Role or occupation' in response.data
+    assert b'approved-persona-evidence-photo' in response.data
+    assert b'data-open-evidence-modal=' in response.data
+    assert b'persona-evidence-modal' in response.data
+    assert b'approved-persona-table' not in response.data
+
+    relationships = journey["client"].get(
+        base(journey) + "/persona/relationships"
+    )
+    assert relationships.status_code == 200
+    assert b'"truncated_count": 0' in relationships.data
+    assert b"approved-photo" not in relationships.data
+    assert journey["observation_id"].encode() in relationships.data
+
+
+def test_persona_uses_same_origin_tiles_for_empty_or_legacy_osm_setting(
+    journey, monkeypatch
+):
+    for configured in (None, "https://tile.openstreetmap.org/{z}/{x}/{y}.png"):
+        if configured is None:
+            monkeypatch.delenv("OPENLEDGER_MAP_TILE_URL", raising=False)
+        else:
+            monkeypatch.setenv("OPENLEDGER_MAP_TILE_URL", configured)
+        response = journey["client"].get(base(journey) + "/persona")
+        assert response.status_code == 200
+        assert b'"/map-tiles/{z}/{x}/{y}.png"' in response.data
+
+
+def test_persona_map_popup_uses_text_nodes_for_untrusted_precision():
+    template = (
+        Path(__file__).parents[1]
+        / "maigret"
+        / "web"
+        / "templates"
+        / "persona.html"
+    ).read_text()
+
+    assert "label.textContent = String(point.label ?? '')" in template
+    assert "document.createTextNode(" in template
+    assert "String(point.precision ?? '')" in template
+    assert "bindPopup(popup)" in template
+    assert "· ${point.precision}" not in template
+
+
+def test_persona_map_uses_the_configured_tile_service():
+    template = (
+        Path(__file__).parents[1]
+        / "maigret"
+        / "web"
+        / "templates"
+        / "persona.html"
+    ).read_text()
+
+    assert "window.L.tileLayer({{ map_tile_url | tojson }}" in template
+    assert "window.L.tileLayer('https://tile.openstreetmap.org" not in template
+
+
+def test_approved_persona_navigation_uses_the_final_persona_route():
+    source = (
+        Path(__file__).parents[1] / "maigret" / "web" / "app.py"
+    ).read_text()
+
+    persona_workspace = source[source.index("def persona_workspace(") : source.index(
+        "@app.route('/personas/<persona_id>/export.pdf')"
+    )]
+    assert "'pipeline.persona'" in persona_workspace
+    assert "'pipeline.workspace'" not in persona_workspace
+
+
+def test_approved_persona_opens_while_newer_findings_await_review(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    assert post(
+        journey,
+        f"/groups/{journey['group_id']}/decision",
+        {"decision": "include", "reason": "Approved from retained evidence."},
+    ).status_code == 201
+    pending_groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "pending-occupation",
+                    "normalized": {
+                        "predicate": "occupation",
+                        "value": "Pending analyst review",
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                }
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    workspace = journey["pipeline"].get_workspace(
+        journey["case_id"], journey["persona_id"]
+    )
+    assert pending_groups[0]["id"] in {
+        item["id"] for item in workspace["shortlist"]
+    }
+    assert workspace["review_pending_count"] >= 1
+
+    response = journey["client"].get(base(journey) + "/persona")
+
+    assert response.status_code == 200
+    assert b"Persona" in response.data
+    assert b"Synthetic Person" in response.data
+    assert b"awaiting review" in response.data
+    assert b"Pending analyst review" in response.data
+    assert b'data-persona-panel="review"' in response.data
+    assert b"Find new evidence" not in response.data
+    assert b"Resolve the review queue in Step 1 before collecting more." in response.data
+
+    blocked_discovery = journey["client"].post(
+        base(journey) + "/discover-related",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_discovery.status_code == 303
+    assert blocked_discovery.location.endswith(base(journey) + "#operator-review")
+    assert journey["discovery_launches"] == []
+
+    blocked_source_fetch = journey["client"].post(
+        base(journey) + "/fetch-approved-sources",
+        data={"csrf_token": "test-csrf"},
+        follow_redirects=False,
+    )
+    assert blocked_source_fetch.status_code == 303
+    assert blocked_source_fetch.location.endswith(base(journey) + "#operator-review")
+    assert journey["source_fetch_launches"] == []
+
+
+def test_approved_persona_projects_legacy_phd_defence_as_public_exposure(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    groups = journey["pipeline"].upsert_groups(
+        journey["case_id"],
+        journey["persona_id"],
+        {
+            "claims": [
+                {
+                    "canonical_key": "legacy-phd-defence",
+                    "normalized": {
+                        "predicate": "affiliation",
+                        "value": (
+                            "PhD Defence Jati Pratomo | The Interplay between "
+                            "Uncertainties, Transferability and Policymaking in "
+                            "Remote Sensing-based Slum Mapping | About us"
+                        ),
+                        "binding_status": "resolved",
+                    },
+                    "observation_ids": [journey["observation_id"]],
+                }
+            ]
+        },
+        projection_revision=journey["pipeline"].projection_revision(
+            journey["case_id"], journey["persona_id"]
+        ),
+    )
+    assess_consolidated_groups(
+        journey["store"], journey["case_id"], journey["persona_id"]
+    )
+    assert post(
+        journey,
+        f"/groups/{groups[0]['id']}/decision",
+        {"decision": "include", "reason": "Public event confirmed by source."},
+    ).status_code == 201
+
+    response = journey["client"].get(base(journey) + "/persona")
+
+    assert response.status_code == 200
+    assert b"Public exposure" in response.data
+    assert b"Events and public appearances" in response.data
+    assert b"PhD Defence Jati Pratomo" in response.data
+
+
+def test_persona_evidence_network_starts_with_a_stable_layout_and_fullscreen():
+    root = Path(__file__).parents[1] / "maigret" / "web"
+    template = (root / "templates" / "relationships.html").read_text()
+    script = (root / "static" / "relationships.js").read_text()
+
+    assert '<option value="concentric" selected>Stable evidence network</option>' in template
+    assert '<option value="force">Force-directed evidence network</option>' in template
+    assert template.count('<option value="concentric"') == 1
+    assert 'id="relationshipFullscreenButton"' in template
+    assert "applyLayout('concentric');" in script
+    assert "requestFullscreen" in script
+    assert "network.once('stabilizationIterationsDone'" in script
+    assert "network.setOptions({physics: {enabled: false}});" in script
+
+
+def test_review_queue_sort_is_applied_before_paginating_all_findings():
+    root = Path(__file__).parents[1] / "maigret" / "web"
+    store = (root / "pipeline_store.py").read_text()
+    template = (root / "templates" / "_persona_pipeline_review.html").read_text()
+    script = (root / "static" / "openledger.js").read_text()
+
+    assert 'review_sort="default"' in store
+    assert 'review_filter="all"' in store
+    assert 'if review_sort != "default":' in store
+    assert store.index('balanced_shortlist.sort(') < store.index(
+        'display_shortlist = filtered_shortlist[offset : offset + limit]'
+    )
+    assert 'data-server-sort="true"' in template
+    for key in ("finding", "category", "assessment", "evidence", "decision"):
+        assert f'data-sort-key="{key}"' in template
+    assert 'workspace.filtered_shortlist_count' in template
+    assert "parameters.delete('page');" in script
+    assert 'parameters.set(\'decision\', button.dataset.decisionFilter);' in (
+        (root / "templates" / "persona.html").read_text()
+    )
+    assert store.index("filtered_shortlist = [") < store.index(
+        "display_shortlist = filtered_shortlist[offset : offset + limit]"
+    )
+
+
+def test_report_snapshot_exports_operator_approved_findings_without_qc(journey):
+    decision = post(
+        journey,
+        '/groups/' + journey['group_id'] + '/decision',
+        {'decision': 'include', 'reason': 'Approved after reviewing the cited source.'},
+    )
+    assert decision.status_code == 201
+    response = journey['client'].post(
+        base(journey) + '/report',
+        data={'csrf_token': 'test-csrf'},
+        follow_redirects=False,
+    )
+    assert response.status_code == 302
+    assert '/export.pdf' in response.headers['Location']
+    download = journey['client'].get(response.headers['Location'])
+    assert download.status_code == 200
+    assert download.mimetype == 'application/pdf'
+    assert download.data.startswith(b'%PDF-')
+    assert 'attachment' in download.headers['Content-Disposition']
+    version_id = response.headers['Location'].split('/versions/', 1)[1].split('/', 1)[0]
+    version = journey['pipeline'].get_version(
+        version_id,
+        case_id=journey['case_id'],
+        persona_id=journey['persona_id'],
+    )
+    assert version['status'] == 'submitted'
+    assert version['manifest']['scope']['subject_name'] == (
+        journey['pipeline'].get_subject(
+            journey['case_id'], journey['persona_id']
+        )['display_name']
+    )
 
 
 def test_authentication_csrf_role_and_foreign_scope_block_mutations(journey):
@@ -353,7 +1201,8 @@ def test_frozen_draft_and_final_pdf_have_same_manifest_identifiers(journey):
     assert response.status_code == 200 and response.data.startswith(b'%PDF-')
     assert response.headers['X-OpenLedger-Version'] == version['id']
     assert response.headers['X-OpenLedger-Manifest-Hash'] == version['content_hash']
-    assert 'submitted' in response.headers['Content-Disposition']
+    assert 'OpenLedger-Investigation-' in response.headers['Content-Disposition']
+    assert 'submitted' not in response.headers['Content-Disposition']
     assert (
         journey['pipeline'].get_final_version(journey['case_id'], journey['persona_id'])
         is None
@@ -369,7 +1218,7 @@ def test_frozen_draft_and_final_pdf_have_same_manifest_identifiers(journey):
     response = journey['client'].get(url)
     assert (
         response.status_code == 200
-        and 'approved' in response.headers['Content-Disposition']
+        and 'OpenLedger-Investigation-' in response.headers['Content-Disposition']
     )
 
 
@@ -446,7 +1295,8 @@ def test_rendered_navigation_and_observation_pages_are_human_views(journey):
     )
     assert approve.find('input', {'name': 'qc_confirmed'}) is not None
     graph = client.get(base(journey) + '/versions/' + version['id'] + '/graph')
-    assert graph.status_code == 200 and b'pipeline-graph-data' in graph.data
+    assert graph.status_code == 302
+    assert graph.location.endswith(base(journey) + '/versions/' + version['id'])
 
 
 def test_withdrawal_requires_version_hash_and_changes_all_presentations(journey):
@@ -607,7 +1457,8 @@ def test_split_preserves_observations_and_requires_new_operator_review(journey):
         pipeline.get_group(case_id, persona_id, successor_group)["latest_decision"]
         is None
     )
-    assert len(pipeline.list_observations(case_id, persona_id)) == 2
+    # Two source observations plus the retained original investigation input.
+    assert len(pipeline.list_observations(case_id, persona_id)) == 3
     assert (
         pipeline.get_group(case_id, persona_id, journey["group_id"])[
             "observation_count"
@@ -616,7 +1467,7 @@ def test_split_preserves_observations_and_requires_new_operator_review(journey):
     )
 
 
-def test_pdf_text_register_contains_every_curated_fact_and_observation():
+def test_pdf_brief_deduplicates_the_reader_view_and_keeps_version_access():
     import re
     import shutil
     import subprocess
@@ -659,13 +1510,11 @@ def test_pdf_text_register_contains_every_curated_fact_and_observation():
     text = subprocess.run(
         [converter, '-', '-'], input=rendered, capture_output=True, check=True
     ).stdout.decode()
-    assert set(re.findall(r'Group:\s+(group-\d+)', text)) == {
-        item['group_id'] for item in items
-    }
-    assert set(re.findall(r'Observation\s+(obs-\d+)', text)) == {
-        item['evidence'][0]['id'] for item in items
-    }
-    assert 'Final Persona' in text and 'version-fidelity' in text
+    assert 'Fact number 0' in text
+    assert '132 additional distinct approved value(s) are retained in OpenLedger.' in text
+    assert 'Evidence and audit access' in text
+    assert 'version-fidelity' in text
+    assert 'Evidence ID index' not in text
     assert 'a' * 64 in re.sub(r'\s+', '', text)
 
 

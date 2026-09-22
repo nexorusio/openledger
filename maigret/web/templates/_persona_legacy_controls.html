@@ -1,0 +1,46 @@
+{% macro legacy_review_controls(claim, context='review') %}
+<form method="POST" action="{{ url_for('review_persona_claim', claim_id=claim.id) }}" class="claim-review-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="persona_id" value="{{ persona.id }}">
+    {% if claim.field_name in ('address', 'current_location') %}
+    {% set coordinate = namespace(latitude=claim.latitude, longitude=claim.longitude, precision=none) %}
+    {% for evidence in claim.evidence %}
+        {% if evidence.details.coordinate_role == 'approximate_map_center' %}
+            {% set coordinate.precision = evidence.details.coordinate_precision %}
+            {% if coordinate.latitude is none and coordinate.longitude is none %}
+                {% set coordinate.latitude = evidence.details.proposed_latitude %}
+                {% set coordinate.longitude = evidence.details.proposed_longitude %}
+            {% endif %}
+        {% endif %}
+    {% endfor %}
+    <div class="coordinate-fields">
+        <label>Latitude<input type="number" name="latitude" min="-90" max="90" step="any" value="{{ coordinate.latitude if coordinate.latitude is not none else '' }}"></label>
+        <label>Longitude<input type="number" name="longitude" min="-180" max="180" step="any" value="{{ coordinate.longitude if coordinate.longitude is not none else '' }}"></label>
+        <small>Optional place-center override. If both fields are empty on approval, the configured geocoder stores the named place's approximate centroid.</small>
+    </div>
+    {% endif %}
+    <div class="claim-review-row">
+        <label class="visually-hidden" for="note-{{ context }}-{{ claim.id }}">Review note</label>
+        <input id="note-{{ context }}-{{ claim.id }}" type="text" name="note" maxlength="2000" placeholder="Optional analyst note">
+        <div class="review-actions" role="group" aria-label="Review this record">
+            {% if claim.reliability_status != 'legacy_untriaged' %}
+            <button name="decision" value="approved" class="btn btn-sm btn-review approve" type="submit"><i data-lucide="check"></i> {{ 'Save approval' if claim.review_status == 'approved' else 'Approve' }}</button>
+            {% else %}<span class="form-text">Rerun required before approval</span>{% endif %}
+            <button name="decision" value="uncertain" class="btn btn-sm btn-review uncertain" type="submit"><i data-lucide="circle-help"></i> Uncertain</button>
+            <button name="decision" value="rejected" class="btn btn-sm btn-review reject" type="submit"><i data-lucide="x"></i> Reject</button>
+        </div>
+    </div>
+</form>
+{% if claim.reviewed_by %}<small class="review-meta">Last reviewed by {{ claim.reviewed_by }} · {{ claim.reviewed_at }}</small>{% endif %}
+{% if claim.review_status == 'approved' and (claim.field_name == 'company' or (claim.field_name == 'occupation' and claim.suggested_organization_target)) %}
+<form method="POST" action="{{ url_for('investigate_affiliation_claim', claim_id=claim.id) }}" class="affiliation-investigation-action">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if claim.field_name == 'occupation' %}<input type="hidden" name="organization_name" value="{{ claim.suggested_organization_target }}">{% endif %}
+    <label class="affiliation-jurisdiction-field"><span>Registered jurisdiction <small>(optional)</small></span><input type="text" name="jurisdiction" maxlength="100" placeholder="Indonesia, ID, or US-DE"></label>
+    <label class="affiliation-jurisdiction-field"><span>Known official website <small>(optional)</small></span><input type="url" name="official_website" maxlength="2000" placeholder="https://example.org"></label>
+    <label class="affiliation-domain-toggle"><input type="checkbox" name="enable_domain_context" value="1"><span>Collect current DNS context</span></label>
+    <button type="submit" class="btn btn-sm btn-outline-secondary"><i data-lucide="building-2"></i> {{ 'Investigate organization from role' if claim.field_name == 'occupation' else 'Open affiliation case' }}</button>
+    <small>This opens a separate research case and never auto-approves an affiliation.</small>
+</form>
+{% endif %}
+{% endmacro %}

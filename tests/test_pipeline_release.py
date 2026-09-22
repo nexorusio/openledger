@@ -107,7 +107,15 @@ def test_runtime_startup_validates_registry_before_attestation(monkeypatch, role
 
 
 @pytest.mark.parametrize(
-    "revisions", [[], ["b3e9d7c4a610"], ["e2e1a7c9d401"], ["e2e2b8d0a502", "extra"]]
+    "revisions",
+    [
+        [],
+        ["b3e9d7c4a610"],
+        ["e2e1a7c9d401"],
+        ["e2e2b8d0a502"],
+        ["e2e3c9d1f703"],
+        ["e2e4d0e2a804", "extra"],
+    ],
 )
 def test_released_runtime_refuses_wrong_database(tmp_path, monkeypatch, revisions):
     build = tmp_path / "build.json"
@@ -254,7 +262,7 @@ def save(): state_path.write_text(json.dumps(state))
 if args[:2] == ['image', 'inspect']:
     labels = {'org.opencontainers.image.revision':manifest['commit'],
               'io.openledger.tree':manifest['tree'], 'io.openledger.source-digest':os.getenv('BAD_SOURCE_DIGEST', manifest['source_digest']), 'io.openledger.pipeline':os.getenv('BAD_IMAGE_PIPELINE', 'p2-e2e-v1'),
-              'io.openledger.schema':'e2e2b8d0a502', 'io.openledger.engine-contract':'p2-e2e-v1'}
+              'io.openledger.schema':'e2e4d0e2a804', 'io.openledger.engine-contract':'p2-e2e-v1'}
     print(json.dumps([{'Id':manifest['image_id'], 'Config': {'Labels':labels}}]))
 elif args[0] == 'ps':
     if 'label=com.docker.compose.service=db' in args: print(os.getenv('DB_CONTAINERS', 'abcdef012345'))
@@ -264,7 +272,7 @@ elif args[0] == 'inspect':
 elif args[0] == 'exec':
     if 'psql' in args:
         if os.getenv('QUERY_FAILURE') or (state.get('migrated') and os.getenv('POST_MIGRATION_QUERY_FAILURE')): sys.exit(1)
-        print('e2e2b8d0a502' if state.get('migrated') else os.getenv('DB_REVISION', 'b3e9d7c4a610'))
+        print('e2e4d0e2a804' if state.get('migrated') else os.getenv('DB_REVISION', 'b3e9d7c4a610'))
     elif 'pg_dump' in args: print('backup')
     elif 'pg_restore' in args:
         sys.stdin.read()
@@ -441,7 +449,14 @@ def test_checkout_and_explicit_migration_allowlist_guards(deployment, change):
 
 
 @pytest.mark.parametrize(
-    "source_schema", ["b3e9d7c4a610", "e2e1a7c9d401", "e2e2b8d0a502"]
+    "source_schema",
+    [
+        "b3e9d7c4a610",
+        "e2e1a7c9d401",
+        "e2e2b8d0a502",
+        "e2e3c9d1f703",
+        "e2e4d0e2a804",
+    ],
 )
 def test_success_drains_backs_up_migrates_verifies_both_and_pins_image(
     deployment, source_schema
@@ -477,6 +492,29 @@ def test_success_drains_backs_up_migrates_verifies_both_and_pins_image(
         "worker.json",
     ):
         assert (records[0] / name).stat().st_size > 0
+
+
+def test_success_reloads_searxng_settings_when_private_search_is_enabled(deployment):
+    environment = deployment[0] / "deploy/.env"
+    environment.write_text(
+        environment.read_text()
+        + "OPENLEDGER_PROFILE_SEARCH_PROVIDER=searxng\n"
+    )
+
+    result, trace = run_update(deployment, *pinned_args(deployment))
+
+    assert result.returncode == 0, result.stderr
+    search_start = next(
+        command
+        for command in trace
+        if command[1] == "compose"
+        and "up" in command
+        and "searxng" in command
+    )
+    assert "--profile" in search_start
+    assert "self-hosted-search" in search_start
+    assert "--no-build" in search_start
+    assert "--force-recreate" in search_start
 
 
 @pytest.mark.parametrize(

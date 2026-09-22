@@ -606,7 +606,10 @@ def test_machine_worker_honors_revoked_identity_and_reports_failed_receipt(
         saved["status"] == "failed"
         and saved["error_code"] == "connector_authorization_changed"
     )
-    assert not env[1].get_workspace(env[3], env[4])["groups"]
+    workspace = env[1].get_workspace(env[3], env[4])
+    assert workspace["input_count"] == 1
+    assert workspace["reviewable_group_count"] == 1
+    assert all(group["kind"] == "claim" for group in workspace["groups"])
 
 
 def test_metadata_only_rejects_nested_payload_before_durable_ack(env):

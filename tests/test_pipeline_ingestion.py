@@ -12,6 +12,26 @@ from maigret.web.pipeline_ingestion import (
 from maigret.web.pipeline_store import PipelineStore
 
 
+def test_legacy_import_stops_if_its_cursor_does_not_advance(monkeypatch):
+    from maigret.web import pipeline_ingestion
+
+    class StalledPipeline:
+        def backfill_legacy(self, *args, **kwargs):
+            return {"next_after_claim_id": "stalled-cursor"}
+
+    monkeypatch.setattr(
+        pipeline_ingestion,
+        "_scope",
+        lambda *args: {"jobs": [], "personas": [{"id": "persona"}]},
+    )
+    monkeypatch.setattr(
+        pipeline_ingestion, "_pipeline", lambda *args: StalledPipeline()
+    )
+
+    with pytest.raises(ValueError, match="progress did not advance"):
+        bootstrap_legacy_workspace(object(), "case", "persona")
+
+
 @pytest.fixture
 def legacy_result():
     return {
@@ -305,10 +325,26 @@ def test_primary_request_preserves_initial_supplied_claims_without_promotion(tmp
         assert report["claim_count"] == 1
         assert report["job_count"] == 0
         docs = list(pipeline.iter_observations(case_id, persona_id))
-        assert {doc["payload"].get("legacy_claim_id") for doc in docs} == {
+        legacy_docs = [
+            doc for doc in docs if doc["payload"].get("legacy_claim_id")
+        ]
+        input_docs = [
+            doc
+            for doc in docs
+            if doc["payload"].get("provenance_type")
+            == "investigator_supplied"
+        ]
+        assert {doc["payload"].get("legacy_claim_id") for doc in legacy_docs} == {
             initial[0]["id"]
         }
-        assert all(doc["payload"]["legacy_review_status"] == "pending" for doc in docs)
+        assert all(
+            doc["payload"]["legacy_review_status"] == "pending"
+            for doc in legacy_docs
+        )
+        assert {doc["payload"].get("input_value") for doc in input_docs} == {
+            "synthetic-alice",
+            "https://github.com/synthetic-alice",
+        }
         assert pipeline.get_workspace(case_id, persona_id)["groups"]
         assert counts(pipeline)["operator_decisions"] == 0
         assert pipeline.get_final_version(case_id, persona_id) is None
@@ -330,7 +366,10 @@ def test_native_pipeline_projection_is_not_imported_as_another_source(
         persona_id = store.get_case(case_id)["personas"][0]["id"]
         report = bootstrap_legacy_workspace(store, case_id, persona_id)
         assert report["job_count"] == 0
-        assert not list(pipeline.iter_observations(case_id, persona_id))
+        docs = list(pipeline.iter_observations(case_id, persona_id))
+        assert len(docs) == 1
+        assert docs[0]["engine"] == "investigation_input"
+        assert docs[0]["payload"]["input_value"] == "synthetic-alice"
     finally:
         store.dispose()
 

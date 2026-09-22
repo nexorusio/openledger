@@ -25,7 +25,6 @@
         if (node.review_status === 'uncertain') return {background: '#41351e', border: '#d5a846', highlight: {background: '#594a2b', border: '#ffe6aa'}};
         return {background: '#26364a', border: '#8296ad', highlight: {background: '#344a64', border: '#d9e7f6'}};
     };
-    const level = (node) => node.kind === 'persona' ? 0 : node.kind === 'source' ? 2 : 1;
     const fieldLabels = {
         company: 'Organization, institution or company',
         company_ownership: 'Ownership or leadership',
@@ -46,7 +45,6 @@
         borderWidth: node.kind === 'persona' || node.review_status === 'approved' ? 2 : 1,
         margin: node.kind === 'claim' || node.kind === 'source' ? 9 : undefined,
         widthConstraint: {maximum: node.kind === 'persona' ? 180 : 190},
-        level: level(node),
     }));
     const originalEdges = graph.edges.map((edge) => ({
         ...edge,
@@ -82,6 +80,7 @@
     const fieldButtons = Array.from(document.querySelectorAll('[data-relationship-field]'));
     const graphViewButton = byId('relationshipGraphViewButton');
     const tableViewButton = byId('relationshipTableViewButton');
+    const fullscreenButton = byId('relationshipFullscreenButton');
     const graphView = byId('relationshipGraphView');
     const tableView = byId('relationshipTableView');
     const tableBody = byId('relationshipTableBody');
@@ -207,7 +206,7 @@
         } else if (node.kind === 'claim') {
             addLine('Field', readable(node.field_name));
             addLine('Review status', readable(node.review_status));
-            addLine('Evidence confidence', `${node.confidence}%`);
+            if (Number.isFinite(node.confidence)) addLine('Evidence confidence', `${node.confidence}%`);
             const sources = sourcesForClaim(id);
             const list = addList(`Supporting sources (${sources.length})`);
             (sources.length ? sources : [{name: 'No source record attached'}]).forEach((source) => appendSource(list, source));
@@ -234,7 +233,7 @@
             const list = addList(`Evidence paths (${connections.length})`);
             connections.forEach((edge) => {
                 const persona = nodeLookup.get(edge.from === id ? edge.to : edge.from);
-                appendSource(list, {name: `${persona.label} · ${persona.case_title}`, type: `${edge.confidence}% confidence`});
+                appendSource(list, {name: `${persona.label} · ${persona.case_title}`, type: Number.isFinite(edge.confidence) ? `${edge.confidence}% confidence` : 'approved evidence'});
                 (edge.sources || []).forEach((source) => appendSource(list, source));
             });
         }
@@ -250,7 +249,7 @@
         addLine('Field', readable(edge.field_name));
         if (edge.proposal_id) {
             addLine('Review status', readable(edge.review_status));
-            addLine('AI confidence', `${edge.confidence}%`);
+            if (Number.isFinite(edge.confidence)) addLine('AI confidence', `${edge.confidence}%`);
             addLine('Evidence rule', edge.relationship_rule);
             const list = addList(`Evidence anchors (${(edge.sources || []).length})`);
             ((edge.sources || []).length ? edge.sources : [{name: 'No public URL attached'}]).forEach((source) => appendSource(list, source));
@@ -258,7 +257,7 @@
         }
         if (graph.mode === 'shared') {
             addLine('Evidence rule', edge.relationship_rule || 'Exact normalized value · approved claim');
-            addLine('Evidence confidence', `${edge.confidence}%`);
+            if (Number.isFinite(edge.confidence)) addLine('Evidence confidence', `${edge.confidence}%`);
             const list = addList(`Attached sources (${(edge.sources || []).length})`);
             ((edge.sources || []).length ? edge.sources : [{name: 'No source URL attached'}]).forEach((source) => appendSource(list, source));
             if (from?.kind === 'persona') addPersonaLink(from);
@@ -267,7 +266,7 @@
             const source = from?.kind === 'source' ? from : to?.kind === 'source' ? to : null;
             if (claim) {
                 addLine('Review status', readable(claim.review_status));
-                addLine('Evidence confidence', `${claim.confidence}%`);
+                if (Number.isFinite(claim.confidence)) addLine('Evidence confidence', `${claim.confidence}%`);
             }
             const evidence = source ? [{name: source.label, url: source.url, type: source.evidence_type}] : claim ? sourcesForClaim(claim.id) : [];
             const list = addList(`Supporting sources (${evidence.length})`);
@@ -288,7 +287,7 @@
     };
     const nodeContext = (node) => {
         if (node.kind === 'persona') return node.case_title || 'Persona record';
-        if (node.kind === 'claim') return `${readable(node.field_name)} · ${readable(node.review_status)} · ${node.confidence}% confidence`;
+        if (node.kind === 'claim') return `${readable(node.field_name)} · ${readable(node.review_status)}${Number.isFinite(node.confidence) ? ` · ${node.confidence}% confidence` : ''}`;
         if (node.kind === 'source') return readable(node.evidence_type || 'Evidence source');
         if (node.kind === 'organization') return `${node.case_title || 'Source case'} · analyst-confirmed organization`;
         return `${readable(node.field_name)} · ${node.persona_count} connected Personas`;
@@ -314,7 +313,7 @@
         originalNodes.filter((node) => visibleNodeIds.has(node.id)).forEach((node) => addTableRow(node.label, readable(node.kind), nodeContext(node), {inspectNode: node.id}, focusedNodeIds && !focusedNodeIds.has(node.id)));
         originalEdges.filter((edge) => visibleEdgeIds.has(edge.id)).forEach((edge) => {
             const from = nodeLookup.get(edge.from); const to = nodeLookup.get(edge.to);
-            const context = graph.mode === 'shared' ? `${readable(edge.field_name)} · exact approved match · ${edge.confidence}% confidence` : readable(edge.label);
+            const context = graph.mode === 'shared' ? `${readable(edge.field_name)} · exact approved match${Number.isFinite(edge.confidence) ? ` · ${edge.confidence}% confidence` : ''}` : readable(edge.label);
             addTableRow(`${from?.label} → ${to?.label}`, 'Evidence path', context, {inspectEdge: edge.id}, focusedNodeIds && (!focusedNodeIds.has(edge.from) || !focusedNodeIds.has(edge.to)));
         });
     };
@@ -394,6 +393,9 @@
         } else {
             unlock();
             network.setOptions({layout: {hierarchical: false, improvedLayout: true, randomSeed: 29}, physics: {enabled: true, solver: 'barnesHut', stabilization: {iterations: 180}, barnesHut: {gravitationalConstant: -4800, springLength: 145, springConstant: 0.035}}, edges: {smooth: {type: 'dynamic'}}});
+            network.once('stabilizationIterationsDone', () => {
+                network.setOptions({physics: {enabled: false}});
+            });
             network.stabilize(180);
         }
         window.setTimeout(() => network.fit({animation: {duration: 240}}), 20);
@@ -429,6 +431,23 @@
     restoreButton.addEventListener('click', () => { manuallyHiddenNodes.clear(); updateVisibility({fit: true}); });
     byId('fitRelationshipGraph').addEventListener('click', () => network.fit({animation: {duration: 240}}));
     layoutSelect.addEventListener('change', () => applyLayout(layoutSelect.value));
+    fullscreenButton?.addEventListener('click', async () => {
+        try {
+            if (document.fullscreenElement === graphElement) await document.exitFullscreen();
+            else await graphElement.requestFullscreen();
+        } catch (_error) {
+            // Browsers may reject full screen until a direct user gesture; leave the graph usable.
+        }
+    });
+    document.addEventListener('fullscreenchange', () => {
+        const active = document.fullscreenElement === graphElement;
+        fullscreenButton?.setAttribute('aria-pressed', String(active));
+        if (fullscreenButton) fullscreenButton.innerHTML = active
+            ? '<i data-lucide="minimize-2"></i>Exit full screen'
+            : '<i data-lucide="maximize-2"></i>Full screen';
+        window.lucide?.createIcons?.();
+        window.setTimeout(() => { network.redraw(); network.fit({animation: false}); }, 0);
+    });
     graphViewButton.addEventListener('click', () => setView('graph'));
     tableViewButton.addEventListener('click', () => setView('table'));
     tableBody.addEventListener('click', (event) => {
@@ -441,7 +460,10 @@
     });
 
     updateVisibility();
-    applyLayout('force');
+    // Start with the readable evidence network. Hierarchical flow remains an
+    // optional inspection layout, but a dense Persona graph must not collapse
+    // into one long column on entry.
+    applyLayout('concentric');
     const requestedProposalId = new URLSearchParams(window.location.search).get('proposal_id');
     const requestedEdgeId = requestedProposalId ? `ai-proposal:${requestedProposalId}` : '';
     if (requestedEdgeId && edgeLookup.has(requestedEdgeId)) {

@@ -28,67 +28,12 @@ from maigret.web.profile_search_tiktok import (
     parse_tiktok_profile_url,
 )
 from maigret.web.profile_search_x import X_PROFILE_HOSTS, parse_x_profile_url
-
-FIELD_GROUPS: tuple[Dict[str, Any], ...] = (
-    {
-        "key": "identity",
-        "title": "Identity",
-        "fields": (
-            ("summary", "Summary of the target"),
-            ("full_name", "Full name"),
-            ("photograph", "Photograph"),
-        ),
-    },
-    {
-        "key": "contact",
-        "title": "Contact and location",
-        "fields": (
-            ("email", "Email address"),
-            ("phone", "Phone number"),
-            ("address", "Address"),
-            ("current_location", "Current location"),
-        ),
-    },
-    {
-        "key": "online",
-        "title": "Digital presence",
-        "fields": (
-            ("social_account", "Social media and public accounts"),
-            ("platform_identifier", "Stable platform identifiers"),
-            ("linked_profile_lead", "Linked profile leads"),
-            ("account_registration", "Email registration evidence"),
-            ("website", "Website"),
-        ),
-    },
-    {
-        "key": "affiliations",
-        "title": "Affiliations",
-        "description": (
-            "Employment, education, membership, institutional and ownership links."
-        ),
-        "fields": (
-            ("occupation", "Role or occupation"),
-            ("company", "Organization, institution or company"),
-            ("company_ownership", "Ownership or leadership"),
-        ),
-    },
-    {
-        "key": "assets",
-        "title": "Assets and risk records",
-        "fields": (
-            ("offshore_database_match", "Offshore Leaks record match"),
-            ("financial_profile", "Financial profile"),
-            ("vehicle_ownership", "Vehicle ownership"),
-            ("criminal_record", "Criminal record"),
-        ),
-    },
+from maigret.web.persona_schema import (
+    FIELD_LABELS as FIELD_DISPLAY_LABELS,
+    PERSONA_SECTIONS as FIELD_GROUPS,
+    display_label as canonical_field_display_label,
+    presentation_predicate,
 )
-
-FIELD_DISPLAY_LABELS = {
-    field_name: label
-    for group in FIELD_GROUPS
-    for field_name, label in group["fields"]
-}
 
 _SUPPORTED_SOCIAL_PROFILE_PARSERS = (
     (FACEBOOK_PROFILE_HOSTS, parse_facebook_profile_url, "facebook"),
@@ -115,10 +60,7 @@ def _supported_social_profile_reference(
 
 def field_display_label(field_name: Any) -> str:
     """Return the current product label for a backward-compatible storage key."""
-    normalized = str(field_name or "").strip()
-    return FIELD_DISPLAY_LABELS.get(
-        normalized, normalized.replace("_", " ").title()
-    )
+    return canonical_field_display_label(field_name)
 
 
 FIELD_ALIASES = {
@@ -244,11 +186,18 @@ AI_PROPOSAL_FIELDS = {
     "phone",
     "address",
     "current_location",
+    "organization_location",
     "occupation",
     "company",
     "social_account",
     "website",
     "photograph",
+    "news_mention",
+    "event_appearance",
+    "speaking_engagement",
+    "interview",
+    "publication",
+    "award",
 }
 
 AI_FIELD_LIMITS = {
@@ -258,11 +207,18 @@ AI_FIELD_LIMITS = {
     "phone": 80,
     "address": 1000,
     "current_location": 300,
+    "organization_location": 1000,
     "occupation": 500,
     "company": 500,
     "social_account": 2000,
     "website": 2000,
     "photograph": 2000,
+    "news_mention": 1200,
+    "event_appearance": 1200,
+    "speaking_engagement": 1200,
+    "interview": 1200,
+    "publication": 1200,
+    "award": 800,
 }
 
 _EMAIL_VALUE_PATTERN = re.compile(
@@ -1163,8 +1119,16 @@ def extract_ai_persona_claims(
             if not value or value not in source_catalog:
                 reject("invalid_public_url")
                 continue
-        elif field_name in {"email", "phone", "address"}:
-            value = _validated_contact_value(field_name, value)
+        elif field_name in {
+            "email",
+            "phone",
+            "address",
+            "organization_location",
+        }:
+            validation_field = (
+                "address" if field_name == "organization_location" else field_name
+            )
+            value = _validated_contact_value(validation_field, value)
             if not value:
                 reject("invalid_contact_value")
                 continue
@@ -1193,7 +1157,7 @@ def extract_ai_persona_claims(
         )
         if coordinates_supplied:
             if (
-                field_name != "current_location"
+                field_name not in {"current_location", "organization_location"}
                 or latitude is None
                 or longitude is None
                 or coordinate_precision not in {"city", "region"}
@@ -1485,7 +1449,15 @@ def group_claims(claims: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Return the fixed persona form, including empty evidence categories."""
     by_field: Dict[str, List[Dict[str, Any]]] = {}
     for claim in claims:
-        by_field.setdefault(str(claim["field_name"]), []).append(claim)
+        field_name = presentation_predicate(
+            "claim",
+            {
+                "predicate": claim.get("field_name"),
+                "value": claim.get("value"),
+                "display_value": claim.get("display_value"),
+            },
+        )
+        by_field.setdefault(field_name, []).append(claim)
     groups = []
     for group in FIELD_GROUPS:
         fields = []
