@@ -33,7 +33,7 @@ from contextlib import ExitStack
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
-from threading import BoundedSemaphore, Lock, Thread
+from threading import BoundedSemaphore, Event, Lock, Thread
 from typing import Any, Dict, Optional
 from urllib.parse import unquote, urlsplit
 from urllib.error import HTTPError, URLError
@@ -210,6 +210,8 @@ MAP_TILE_USER_AGENT = (
 )
 map_tile_cache_lock = Lock()
 map_tile_fetch_slots = BoundedSemaphore(value=3)
+map_tile_inflight_lock = Lock()
+map_tile_inflight = {}
 
 
 def persona_map_tile_url():
@@ -300,6 +302,37 @@ def _map_tile_unavailable():
     response = Response(status=503)
     response.cache_control.no_store = True
     return response
+
+
+def _claim_map_tile_flight(tile_key):
+    """Return one shared result slot and whether this request owns its fetch."""
+    with map_tile_inflight_lock:
+        flight = map_tile_inflight.get(tile_key)
+        if flight is not None:
+            return flight, False
+        flight = {"event": Event(), "path": None, "payload": None}
+        map_tile_inflight[tile_key] = flight
+        return flight, True
+
+
+def _finish_map_tile_flight(tile_key, flight):
+    with map_tile_inflight_lock:
+        flight["event"].set()
+        if map_tile_inflight.get(tile_key) is flight:
+            map_tile_inflight.pop(tile_key, None)
+
+
+def _map_tile_flight_response(flight):
+    path = flight.get("path")
+    if path is not None:
+        return _map_tile_response(path)
+    payload = flight.get("payload")
+    if payload is not None:
+        response = Response(payload, mimetype='image/png')
+        response.cache_control.public = True
+        response.cache_control.max_age = MAP_TILE_CACHE_SECONDS
+        return response
+    return _map_tile_unavailable()
 
 # add background job tracking
 background_jobs: Dict[str, Any] = {}
@@ -2599,34 +2632,48 @@ def map_tile(zoom, tile_x, tile_y):
     cached = _cached_map_tile(zoom, tile_x, tile_y)
     if cached:
         return _map_tile_response(cached)
-    # Leaflet requests a viewport's tiles together. Wait for a bounded slot
-    # instead of immediately returning holes for every request after the first.
-    if not map_tile_fetch_slots.acquire(timeout=MAP_TILE_FETCH_QUEUE_SECONDS):
-        return _map_tile_unavailable()
-    url = MAP_TILE_UPSTREAM.format(z=zoom, x=tile_x, y=tile_y)
+    tile_key = (zoom, tile_x, tile_y)
+    flight, owns_fetch = _claim_map_tile_flight(tile_key)
+    if not owns_fetch:
+        completed = flight["event"].wait(
+            timeout=(
+                MAP_TILE_FETCH_QUEUE_SECONDS + MAP_TILE_FETCH_TIMEOUT_SECONDS + 1
+            )
+        )
+        return _map_tile_flight_response(flight) if completed else _map_tile_unavailable()
     try:
-        with urlopen(
-            Request(url, headers={"User-Agent": MAP_TILE_USER_AGENT}),
-            timeout=MAP_TILE_FETCH_TIMEOUT_SECONDS,
-        ) as upstream:
-            content_type = upstream.headers.get_content_type()
-            payload = upstream.read(MAP_TILE_MAX_BYTES + 1)
-    except (HTTPError, URLError, OSError):
-        return _map_tile_unavailable()
+        # Leaflet requests a viewport's tiles together. Wait for a bounded slot
+        # instead of immediately returning holes for every request after the first.
+        if not map_tile_fetch_slots.acquire(timeout=MAP_TILE_FETCH_QUEUE_SECONDS):
+            return _map_tile_unavailable()
+        url = MAP_TILE_UPSTREAM.format(z=zoom, x=tile_x, y=tile_y)
+        try:
+            with urlopen(
+                Request(url, headers={"User-Agent": MAP_TILE_USER_AGENT}),
+                timeout=MAP_TILE_FETCH_TIMEOUT_SECONDS,
+            ) as upstream:
+                content_type = upstream.headers.get_content_type()
+                payload = upstream.read(MAP_TILE_MAX_BYTES + 1)
+        except (HTTPError, URLError, OSError):
+            return _map_tile_unavailable()
+        finally:
+            map_tile_fetch_slots.release()
+        if (
+            content_type != 'image/png'
+            or len(payload) > MAP_TILE_MAX_BYTES
+            or not _valid_png(payload)
+        ):
+            return _map_tile_unavailable()
+        path = _map_tile_cache_path(zoom, tile_x, tile_y)
+        try:
+            _store_map_tile(path, payload)
+        except OSError:
+            flight["payload"] = payload
+        else:
+            flight["path"] = path
+        return _map_tile_flight_response(flight)
     finally:
-        map_tile_fetch_slots.release()
-    if (
-        content_type != 'image/png'
-        or len(payload) > MAP_TILE_MAX_BYTES
-        or not _valid_png(payload)
-    ):
-        return _map_tile_unavailable()
-    path = _map_tile_cache_path(zoom, tile_x, tile_y)
-    try:
-        _store_map_tile(path, payload)
-    except OSError:
-        return Response(payload, mimetype='image/png')
-    return _map_tile_response(path)
+        _finish_map_tile_flight(tile_key, flight)
 
 
 @app.route('/login', methods=['GET', 'POST'])
