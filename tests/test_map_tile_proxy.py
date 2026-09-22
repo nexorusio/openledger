@@ -199,3 +199,36 @@ def test_map_tile_proxy_coalesces_simultaneous_requests_for_one_tile(
 
     assert [response.status_code for response in responses] == [200, 200, 200]
     assert calls == ["https://tile.openstreetmap.org/3/4/2.png"]
+
+
+def test_map_tile_proxy_rechecks_cache_after_becoming_fetch_owner(
+    monkeypatch, tmp_path
+):
+    import maigret.web.app as web_app
+
+    monkeypatch.setitem(web_app.app.config, "TESTING", True)
+    monkeypatch.setitem(web_app.app.config, "AUTH_REQUIRED", False)
+    monkeypatch.setattr(web_app, "map_tile_inflight", {})
+
+    cached_path = tmp_path / "3" / "4" / "2.png"
+    cached_path.parent.mkdir(parents=True)
+    cached_path.write_bytes(PNG)
+    cache_checks = []
+
+    def cache_after_claim(_zoom, _tile_x, _tile_y):
+        cache_checks.append(True)
+        return None if len(cache_checks) == 1 else cached_path
+
+    class UnexpectedFetchSlots:
+        def acquire(self, **_kwargs):
+            raise AssertionError("A populated tile must not consume a fetch slot.")
+
+    monkeypatch.setattr(web_app, "_cached_map_tile", cache_after_claim)
+    monkeypatch.setattr(web_app, "map_tile_fetch_slots", UnexpectedFetchSlots())
+
+    response = web_app.app.test_client().get("/map-tiles/3/4/2.png")
+
+    assert response.status_code == 200
+    assert response.data == PNG
+    assert len(cache_checks) == 2
+    assert web_app.map_tile_inflight == {}

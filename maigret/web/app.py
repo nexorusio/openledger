@@ -2642,6 +2642,12 @@ def map_tile(zoom, tile_x, tile_y):
         )
         return _map_tile_flight_response(flight) if completed else _map_tile_unavailable()
     try:
+        # A request can observe a miss, pause, then become owner after another
+        # flight has populated and released the cache entry.
+        cached = _cached_map_tile(zoom, tile_x, tile_y)
+        if cached:
+            flight["path"] = cached
+            return _map_tile_flight_response(flight)
         # Leaflet requests a viewport's tiles together. Wait for a bounded slot
         # instead of immediately returning holes for every request after the first.
         if not map_tile_fetch_slots.acquire(timeout=MAP_TILE_FETCH_QUEUE_SECONDS):
