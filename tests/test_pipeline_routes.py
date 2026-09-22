@@ -1380,6 +1380,67 @@ def test_claim_correction_preserves_qualifiers_and_rejects_identity_override(jou
     assert item['original_normalized']['value'] == 'Synthetic Person'
 
 
+def test_operator_can_change_a_claims_persona_category(journey):
+    response = post(
+        journey,
+        '/groups/' + journey['group_id'] + '/decision',
+        {
+            'decision': 'include',
+            'reason': 'This source documents a public appearance.',
+            'corrected_predicate': 'event_appearance',
+        },
+    )
+    assert response.status_code == 201
+    version = post(journey, '/versions', {'scope': 'Corrected category.'}).get_json()
+    item = version['manifest']['items'][0]
+    assert item['normalized']['predicate'] == 'event_appearance'
+    assert item['original_normalized']['predicate'] == 'full_name'
+
+
+def test_main_profile_image_selection_is_retained_in_the_operator_decision(journey):
+    groups = journey['pipeline'].upsert_groups(
+        journey['case_id'],
+        journey['persona_id'],
+        {
+            'claims': [
+                {
+                    'canonical_key': 'selected-photo',
+                    'normalized': {
+                        'predicate': 'photograph',
+                        'value': 'https://cdn.example.test/selected.jpg',
+                        'binding_status': 'resolved',
+                    },
+                    'observation_ids': [journey['observation_id']],
+                }
+            ]
+        },
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    response = post(
+        journey,
+        '/groups/' + groups[0]['id'] + '/decision',
+        {'decision': 'include', 'main_profile_image': True},
+    )
+    assert response.status_code == 201
+    included = {
+        item['id']: item
+        for item in journey['pipeline'].iter_included_groups(
+            journey['case_id'], journey['persona_id']
+        )
+    }
+    assert included[groups[0]['id']]['main_profile_image'] is True
+    response = journey['client'].get(base(journey) + '/persona')
+    assert b'Main profile image' in response.data
+    assert b'https://cdn.example.test/selected.jpg' in response.data
+
+
 def test_split_preserves_observations_and_requires_new_operator_review(journey):
     pipeline, case_id, persona_id = (
         journey["pipeline"],

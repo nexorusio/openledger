@@ -1198,6 +1198,21 @@ canvas {
     min-width: 0;
 }
 
+.assessment-category-control {
+    display: grid;
+    gap: 4px;
+    color: var(--ol-muted, #9ba7b8);
+    font-size: .75rem;
+}
+
+.assessment-category-control select {
+    min-width: 0;
+}
+
+.assessment-category-control small {
+    color: inherit;
+}
+
 .assessment-table-decision-form[hidden],
 .assessment-recorded-decision[hidden] {
     display: none;
