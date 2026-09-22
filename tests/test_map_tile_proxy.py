@@ -5,6 +5,8 @@ page can never be rendered as a tile inside a Persona.
 """
 
 from email.message import Message
+from concurrent.futures import ThreadPoolExecutor
+from threading import BoundedSemaphore, Event, Lock
 from urllib.error import HTTPError
 
 
@@ -73,7 +75,7 @@ def test_map_tile_proxy_caches_valid_png_and_never_relays_block_page(
     assert len(calls) == 1
     assert calls[0][0] == "https://tile.openstreetmap.org/3/4/2.png"
     assert "OpenLedger" in calls[0][2]
-    assert first.cache_control.max_age == 86400
+    assert first.cache_control.max_age == web_app.MAP_TILE_CACHE_SECONDS
 
     monkeypatch.setattr(
         web_app,
@@ -112,3 +114,46 @@ def test_map_tile_proxy_rejects_incomplete_png(monkeypatch, tmp_path):
     response = web_app.app.test_client().get("/map-tiles/3/4/2.png")
 
     assert response.status_code == 503
+
+
+def test_map_tile_proxy_queues_leaflet_burst_without_returning_holes(
+    monkeypatch, tmp_path
+):
+    import maigret.web.app as web_app
+
+    monkeypatch.setitem(web_app.app.config, "TESTING", True)
+    monkeypatch.setitem(web_app.app.config, "AUTH_REQUIRED", False)
+    monkeypatch.setattr(
+        web_app,
+        "_map_tile_cache_path",
+        lambda z, x, y: tmp_path / str(z) / str(x) / f"{y}.png",
+    )
+    monkeypatch.setattr(web_app, "map_tile_fetch_slots", BoundedSemaphore(value=3))
+
+    release = Event()
+    first_batch_started = Event()
+    calls = []
+    calls_lock = Lock()
+
+    def fetch(request, timeout):
+        with calls_lock:
+            calls.append(request.full_url)
+            if len(calls) == 3:
+                first_batch_started.set()
+        assert release.wait(timeout=1)
+        return _UpstreamTile(PNG)
+
+    monkeypatch.setattr(web_app, "urlopen", fetch)
+
+    def request_tile(tile_x):
+        with web_app.app.test_client() as client:
+            return client.get(f"/map-tiles/3/{tile_x}/2.png")
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(request_tile, tile_x) for tile_x in range(4)]
+        assert first_batch_started.wait(timeout=1)
+        release.set()
+        responses = [future.result(timeout=2) for future in futures]
+
+    assert [response.status_code for response in responses] == [200, 200, 200, 200]
+    assert len(calls) == 4
