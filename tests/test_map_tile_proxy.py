@@ -129,6 +129,7 @@ def test_map_tile_proxy_queues_leaflet_burst_without_returning_holes(
         lambda z, x, y: tmp_path / str(z) / str(x) / f"{y}.png",
     )
     monkeypatch.setattr(web_app, "map_tile_fetch_slots", BoundedSemaphore(value=3))
+    monkeypatch.setattr(web_app, "map_tile_inflight", {})
 
     release = Event()
     first_batch_started = Event()
@@ -157,3 +158,44 @@ def test_map_tile_proxy_queues_leaflet_burst_without_returning_holes(
 
     assert [response.status_code for response in responses] == [200, 200, 200, 200]
     assert len(calls) == 4
+
+
+def test_map_tile_proxy_coalesces_simultaneous_requests_for_one_tile(
+    monkeypatch, tmp_path
+):
+    import maigret.web.app as web_app
+
+    monkeypatch.setitem(web_app.app.config, "TESTING", True)
+    monkeypatch.setitem(web_app.app.config, "AUTH_REQUIRED", False)
+    monkeypatch.setattr(
+        web_app,
+        "_map_tile_cache_path",
+        lambda z, x, y: tmp_path / str(z) / str(x) / f"{y}.png",
+    )
+    monkeypatch.setattr(web_app, "map_tile_fetch_slots", BoundedSemaphore(value=3))
+    monkeypatch.setattr(web_app, "map_tile_inflight", {})
+
+    fetch_started = Event()
+    release = Event()
+    calls = []
+
+    def fetch(request, timeout):
+        calls.append(request.full_url)
+        fetch_started.set()
+        assert release.wait(timeout=2)
+        return _UpstreamTile(PNG)
+
+    monkeypatch.setattr(web_app, "urlopen", fetch)
+
+    def request_tile():
+        with web_app.app.test_client() as client:
+            return client.get("/map-tiles/3/4/2.png")
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [executor.submit(request_tile) for _index in range(3)]
+        assert fetch_started.wait(timeout=2)
+        release.set()
+        responses = [future.result(timeout=2) for future in futures]
+
+    assert [response.status_code for response in responses] == [200, 200, 200]
+    assert calls == ["https://tile.openstreetmap.org/3/4/2.png"]
