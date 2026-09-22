@@ -2053,6 +2053,7 @@ class PipelineStore:
                 decisions.c.details.label("decision_details"),
                 decisions.c.actor.label("decision_actor"),
                 decisions.c.reason.label("decision_reason"),
+                decisions.c.created_at.label("decision_created_at"),
             )
             .join(latest, latest.c.group_id == groups.c.id)
             .join(
@@ -2114,6 +2115,9 @@ class PipelineStore:
                     "actor": result["decision_actor"],
                     "reason": result["decision_reason"],
                 }
+                result["main_profile_image"] = bool(
+                    result["decision_details"].get("main_profile_image")
+                )
                 yield _json(result)
 
     def list_accounts(self, case_id, persona_id):
@@ -2159,6 +2163,7 @@ class PipelineStore:
         reason,
         corrected_claim=None,
         evidence_dispositions=None,
+        main_profile_image=None,
     ):
         actor = _actor(actor)
         reason = str(reason or "").strip()
@@ -2303,6 +2308,25 @@ class PipelineStore:
                         raise ValueError(
                             "Corrected account binding is not an account hypothesis in this case and Persona"
                         )
+            if main_profile_image is not None:
+                if main_profile_image is not True:
+                    raise ValueError("Main profile image selection must be true")
+                if decision != "include":
+                    raise ValueError(
+                        "Approve a photograph before using it as the main profile image"
+                    )
+                normalized = self._group(connection, group, limit=0)["normalized"]
+                predicate = str(
+                    normalized.get("predicate") or normalized.get("field_name") or ""
+                ).casefold()
+                if group["kind"] != "claim" or predicate != "photograph":
+                    raise ValueError(
+                        "Only an approved photograph can be the main profile image"
+                    )
+                details["main_profile_image"] = True
+            elif previous and previous.get("main_profile_image"):
+                # Preserve an existing choice when this same photo is edited.
+                details["main_profile_image"] = True
             table = self._table("operator_decisions")
             sequence = (
                 connection.scalar(
@@ -3031,6 +3055,7 @@ class PipelineStore:
                     decisions.c.reason.label("latest_decision_reason"),
                     decisions.c.actor.label("latest_decision_actor"),
                     decisions.c.created_at.label("latest_decision_at"),
+                    decisions.c.details.label("latest_decision_details"),
                 )
                 .outerjoin(summaries, summaries.c.group_id == groups.c.id)
                 .outerjoin(
@@ -3075,6 +3100,7 @@ class PipelineStore:
                 )
                 source_supported = assessment.get("evidence_status") == "source_supported"
                 normalized = dict(row.get("summary_normalized") or row["normalized"])
+                presentation_field = presentation_predicate(row["kind"], normalized)
                 observation_count = int(row.get("summary_observation_count") or 0)
                 predicate = str(
                     normalized.get("predicate")
@@ -3199,6 +3225,12 @@ class PipelineStore:
                         "recommendation": recommendation,
                         "section": section_key,
                         "section_title": dict(SHORTLIST_SECTIONS)[section_key],
+                        "presentation_predicate": presentation_field,
+                        "main_profile_image": bool(
+                            (row.get("latest_decision_details") or {}).get(
+                                "main_profile_image"
+                            )
+                        ),
                         "ai_ranked": ai_ranking is not None,
                         "support_origin_families": support,
                         "evidence_status": assessment.get("evidence_status"),
