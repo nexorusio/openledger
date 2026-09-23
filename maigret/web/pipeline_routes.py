@@ -232,6 +232,7 @@ def register_pipeline_routes(
             section_for,
         )
         from maigret.web.pipeline_store import SHORTLIST_SECTIONS
+        from maigret.web.persona_images import ordered_profile_image_urls
 
         # This is the same information architecture as the original Persona
         # workspace: a subject area contains named fields, rather than a flat
@@ -301,6 +302,10 @@ def register_pipeline_routes(
                     "section": section_for(row["kind"], normalized),
                     "decision_actor": row.get("decision_actor"),
                     "decision_reason": row.get("decision_reason"),
+                    "main_profile_image": bool(row.get("main_profile_image")),
+                    "main_profile_image_selected_at": row.get(
+                        "decision_created_at"
+                    ),
                     "observations": list(row.get("observations") or []),
                     "coordinate_repair": any(
                         bool(
@@ -340,6 +345,15 @@ def register_pipeline_routes(
             if item["coordinate_repair"] and not record["coordinate_repair"]:
                 record["normalized"] = item["normalized"]
                 record["coordinate_repair"] = True
+            if item["main_profile_image"] and (
+                not record.get("main_profile_image")
+                or str(item.get("main_profile_image_selected_at") or "")
+                >= str(record.get("main_profile_image_selected_at") or "")
+            ):
+                record["main_profile_image"] = True
+                record["main_profile_image_selected_at"] = item.get(
+                    "main_profile_image_selected_at"
+                )
             if item["id"] not in record["group_ids"]:
                 record["group_ids"].append(item["id"])
             seen_observations = {entry["id"] for entry in record["evidence"]}
@@ -400,13 +414,19 @@ def register_pipeline_routes(
             item["source_fetch"] = latest_source_fetches.get(
                 str(item.get("url") or "").casefold()
             )
-        photographs = [
-            item["url"]
+        photographs = ordered_profile_image_urls(
+            {
+                "url": item["url"],
+                "selected": item.get("main_profile_image"),
+                "selected_at": item.get("main_profile_image_selected_at"),
+            }
             for item in items
-            if str(item["normalized"].get("predicate") or "").casefold()
-            == "photograph"
-            and item["url"]
-        ]
+            if field_key(item) == "photograph"
+        )
+        for item in items:
+            item["is_main_profile_image"] = bool(
+                photographs and item.get("url") == photographs[0]
+            )
 
         def approved_hero_value(*predicates):
             wanted = {str(predicate).casefold() for predicate in predicates}
@@ -740,6 +760,8 @@ def register_pipeline_routes(
         review_filter="all",
     ):
         """One Persona shell for draft, review, and approved P2 states."""
+        from maigret.web.persona_schema import PERSONA_SECTIONS
+
         collection_block_reason = collection_action_block_reason(workspace_data)
         return render_template(
             "persona.html",
@@ -770,6 +792,12 @@ def register_pipeline_routes(
                 google_places_enabled and google_places_enabled()
             ),
             map_tile_url=browser_map_tile_url(),
+            persona_category_options=tuple(
+                (field_name, f'{section["title"]} · {label}')
+                for section in PERSONA_SECTIONS
+                for field_name, label in section["fields"]
+                if field_name != "photograph"
+            ),
         )
 
     @bp.errorhandler(ValueError)
@@ -1273,6 +1301,24 @@ def register_pipeline_routes(
             value = str(data.get('corrected_' + field, '')).strip()
             if value:
                 changes[field] = value
+        corrected_predicate = str(
+            data.get('corrected_predicate', '')
+        ).strip().casefold()
+        if corrected_predicate:
+            from maigret.web.persona_schema import FIELD_LABELS
+
+            if corrected_predicate not in FIELD_LABELS or corrected_predicate == 'photograph':
+                abort(400, description='Choose a valid evidence category.')
+            group = store().get_group(case_id, persona_id, group_id, limit=1)
+            if group['kind'] != 'claim':
+                abort(400, description='Evidence categories apply to claim groups only.')
+            current_predicate = str(
+                group['normalized'].get('predicate')
+                or group['normalized'].get('field_name')
+                or ''
+            ).casefold()
+            if corrected_predicate != current_predicate:
+                changes['predicate'] = corrected_predicate
         corrected = None
         if changes:
             group = store().get_group(case_id, persona_id, group_id, limit=1)
@@ -1346,6 +1392,11 @@ def register_pipeline_routes(
             reason=str(data.get('reason', '')).strip(),
             corrected_claim=corrected,
             evidence_dispositions=dispositions,
+            main_profile_image=(
+                True
+                if data.get('main_profile_image') in {True, 'true', 'on', '1'}
+                else None
+            ),
         )
         if not (
             request.is_json

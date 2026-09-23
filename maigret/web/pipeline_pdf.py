@@ -29,6 +29,8 @@ from maigret.web.persona_pdf import (
     _styles,
 )
 from maigret.web.persona_report_media import load_approved_portrait
+from maigret.web.persona_images import ordered_profile_image_urls
+from maigret.web.persona_schema import presentation_predicate
 
 
 _PAGE_WIDTH = A4[0] - 36 * mm - 12
@@ -45,26 +47,9 @@ def _canonical_field(item: dict[str, Any]) -> str:
     """Give the readable report the same field structure as the Persona UI."""
     if item.get("kind") == "account":
         return "social_account"
-    normalized = item.get("normalized") or {}
-    predicate = str(
-        normalized.get("predicate") or normalized.get("field_name") or "other"
-    ).casefold()
-    return {
-        "about": "summary",
-        "bio": "summary",
-        "biography": "summary",
-        "description": "summary",
-        "display_name": "full_name",
-        "name": "full_name",
-        "employer": "company",
-        "organization": "company",
-        "organisation": "company",
-        "affiliation": "company",
-        "job_title": "occupation",
-        "role": "occupation",
-        "location": "current_location",
-        "city": "current_location",
-    }.get(predicate, predicate)
+    return presentation_predicate(
+        str(item.get("kind") or "claim"), item.get("normalized")
+    )
 
 
 def _readable_fields(items: list[dict[str, Any]]) -> OrderedDict[str, list[dict[str, Any]]]:
@@ -156,11 +141,22 @@ def _narrative_summary(items: list[dict[str, Any]], subject_name: str) -> str:
 
 
 def _portrait_bytes(items: list[dict[str, Any]]) -> bytes | None:
-    for item in items:
-        if _canonical_field(item) != "photograph":
-            continue
+    photographs = [
+        {
+            "url": _fact_value(item),
+            "selected": bool(
+                ((item.get("decision") or {}).get("details") or {}).get(
+                    "main_profile_image"
+                )
+            ),
+            "selected_at": (item.get("decision") or {}).get("created_at"),
+        }
+        for item in items
+        if _canonical_field(item) == "photograph"
+    ]
+    for url in ordered_profile_image_urls(photographs):
         try:
-            return load_approved_portrait(_fact_value(item))
+            return load_approved_portrait(url)
         except Exception:
             continue
     return None
