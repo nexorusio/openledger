@@ -1456,6 +1456,61 @@ def test_operator_can_change_a_claims_persona_category(journey):
     assert restored['normalized']['value'] == 'Reviewed public appearance'
 
 
+def test_location_note_edit_geocodes_the_prior_corrected_value(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    group = journey['pipeline'].upsert_groups(
+        journey['case_id'],
+        journey['persona_id'],
+        {
+            'claims': [
+                {
+                    'canonical_key': 'corrected-location',
+                    'normalized': {
+                        'predicate': 'current_location',
+                        'value': 'Original location',
+                        'binding_status': 'resolved',
+                    },
+                    'observation_ids': [journey['observation_id']],
+                }
+            ]
+        },
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )[0]
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    journey['pipeline'].decide(
+        journey['case_id'],
+        journey['persona_id'],
+        group['id'],
+        'include',
+        actor='human-reviewer',
+        reason='Public source clarifies the location.',
+        corrected_claim={'value': 'Corrected location'},
+    )
+    edited = post(
+        journey,
+        f'/groups/{group["id"]}/decision',
+        {'decision': 'include', 'reason': 'Note edit triggers geocoding.'},
+    )
+    assert edited.status_code == 201
+    included = {
+        item['id']: item
+        for item in journey['pipeline'].iter_included_groups(
+            journey['case_id'], journey['persona_id']
+        )
+    }
+    normalized = included[group['id']]['normalized']
+    assert normalized['value'] == 'Corrected location'
+    assert normalized['qualifiers']['coordinate_source'] == 'approved_place_geocoder'
+    assert journey['pipeline'].get_group(
+        journey['case_id'], journey['persona_id'], group['id']
+    )['normalized']['value'] == 'Original location'
+
+
 def test_main_profile_image_selection_is_retained_in_the_operator_decision(journey):
     groups = journey['pipeline'].upsert_groups(
         journey['case_id'],
@@ -1574,6 +1629,27 @@ def test_editing_an_older_photo_does_not_override_the_selected_profile_image(
         'main_profile_image_selected_at'
     ] == first_selection
 
+    # Simulate decisions written by the previous release, where edits carried
+    # the marker but did not store when it was originally selected.
+    decisions = journey['pipeline']._table('operator_decisions')
+    with journey['pipeline'].engine.begin() as connection:
+        history = list(
+            connection.execute(
+                decisions.select().where(
+                    decisions.c.group_id.in_([first_id, second_id])
+                )
+            ).mappings()
+        )
+        for entry in history:
+            details = dict(entry['details'])
+            if details.get('main_profile_image'):
+                details.pop('main_profile_image_selected_at', None)
+                connection.execute(
+                    decisions.update().where(
+                        decisions.c.id == entry['id']
+                    ).values(details=details)
+                )
+
     workspace = journey['pipeline'].get_workspace(
         journey['case_id'], journey['persona_id']
     )
@@ -1599,6 +1675,16 @@ def test_editing_an_older_photo_does_not_override_the_selected_profile_image(
     assert pipeline_pdf._portrait_bytes(
         snapshot.get_json()['manifest']['items']
     ) == second_url.encode()
+
+    carried_forward = post(
+        journey,
+        f'/groups/{first_id}/decision',
+        {'decision': 'include', 'reason': 'Another note on legacy selection.'},
+    )
+    assert carried_forward.status_code == 201
+    assert carried_forward.get_json()['details'][
+        'main_profile_image_selected_at'
+    ] == first_selection
 
 
 def test_split_preserves_observations_and_requires_new_operator_review(journey):

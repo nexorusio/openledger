@@ -2034,6 +2034,26 @@ class PipelineStore:
             ]
         return result
 
+    def _profile_image_selection_at(self, connection, group_id, details, decision_at):
+        """Keep an explicit photo choice stable, including pre-timestamp decisions."""
+        if not (details or {}).get("main_profile_image"):
+            return None
+        selected_at = details.get("main_profile_image_selected_at")
+        if selected_at:
+            return _json(selected_at)
+        decisions = self._table("operator_decisions")
+        # Earlier releases carried the marker into note edits without recording
+        # its selection time. The first marked decision is the recoverable
+        # explicit choice; never use the latest note-edit time as a substitute.
+        for row in connection.execute(
+            select(decisions.c.details, decisions.c.created_at)
+            .where(decisions.c.group_id == group_id)
+            .order_by(decisions.c.sequence)
+        ).mappings():
+            if (row["details"] or {}).get("main_profile_image"):
+                return _json(row["created_at"])
+        return _json(decision_at)
+
     def iter_included_groups(
         self, case_id, persona_id, *, batch_size=500, include_observations=False
     ):
@@ -2119,8 +2139,12 @@ class PipelineStore:
                     result["decision_details"].get("main_profile_image")
                 )
                 result["main_profile_image_selected_at"] = (
-                    result["decision_details"].get("main_profile_image_selected_at")
-                    or result["decision_created_at"]
+                    self._profile_image_selection_at(
+                        connection,
+                        result["id"],
+                        result["decision_details"],
+                        result["decision_created_at"],
+                    )
                 )
                 yield _json(result)
 
@@ -2345,8 +2369,9 @@ class PipelineStore:
                 # original selection time.
                 details["main_profile_image"] = True
                 details["main_profile_image_selected_at"] = (
-                    previous.get("main_profile_image_selected_at")
-                    or _json(previous_row["created_at"])
+                    self._profile_image_selection_at(
+                        connection, group_id, previous, previous_row["created_at"]
+                    )
                 )
             table = self._table("operator_decisions")
             sequence = (
@@ -3140,6 +3165,18 @@ class PipelineStore:
                         }
                     )
                 presentation_field = presentation_predicate(row["kind"], normalized)
+                selected_at = (
+                    self._profile_image_selection_at(
+                        connection,
+                        row["id"],
+                        latest_details,
+                        row.get("latest_decision_at"),
+                    )
+                    if row.get("latest_decision_value") == "include"
+                    and presentation_field == "photograph"
+                    and latest_details.get("main_profile_image")
+                    else None
+                )
                 observation_count = int(row.get("summary_observation_count") or 0)
                 predicate = str(
                     normalized.get("predicate")
@@ -3265,13 +3302,8 @@ class PipelineStore:
                         "section": section_key,
                         "section_title": dict(SHORTLIST_SECTIONS)[section_key],
                         "presentation_predicate": presentation_field,
-                        "main_profile_image": bool(
-                            latest_details.get("main_profile_image")
-                        ),
-                        "main_profile_image_selected_at": (
-                            latest_details.get("main_profile_image_selected_at")
-                            or _json(row.get("latest_decision_at"))
-                        ),
+                        "main_profile_image": bool(selected_at),
+                        "main_profile_image_selected_at": selected_at,
                         "ai_ranked": ai_ranking is not None,
                         "support_origin_families": support,
                         "evidence_status": assessment.get("evidence_status"),
@@ -3801,6 +3833,23 @@ class PipelineStore:
                     connection, group, limit=None, include_assessed_group=True
                 )
                 decision = expanded["latest_decision"]
+                if decision and decision["details"].get("main_profile_image"):
+                    # Historical release decisions may carry a photo marker
+                    # through later edits without a selection timestamp.
+                    decision = dict(
+                        decision,
+                        details=dict(
+                            decision["details"],
+                            main_profile_image_selected_at=(
+                                self._profile_image_selection_at(
+                                    connection,
+                                    group["id"],
+                                    decision["details"],
+                                    decision["created_at"],
+                                )
+                            ),
+                        ),
+                    )
                 dispositions = {
                     item["observation_id"]: item
                     for item in ((decision or {}).get("details") or {}).get(

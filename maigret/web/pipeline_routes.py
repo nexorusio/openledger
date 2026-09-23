@@ -1337,7 +1337,15 @@ def register_pipeline_routes(
         geocoding_warning = None
         if data.get('decision') == 'include' and geocode_approved_location:
             group = store().get_group(case_id, persona_id, group_id, limit=1)
-            candidate = dict(corrected or group.get('normalized') or {})
+            prior_correction = (
+                ((group.get('latest_decision') or {}).get('details') or {})
+                .get('corrected_claim') or {}
+            )
+            candidate = {
+                **(group.get('normalized') or {}),
+                **prior_correction,
+                **(corrected or {}),
+            }
             predicate = str(
                 candidate.get('predicate') or candidate.get('field_name') or ''
             ).casefold()
