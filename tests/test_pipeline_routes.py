@@ -1629,27 +1629,6 @@ def test_editing_an_older_photo_does_not_override_the_selected_profile_image(
         'main_profile_image_selected_at'
     ] == first_selection
 
-    # Simulate decisions written by the previous release, where edits carried
-    # the marker but did not store when it was originally selected.
-    decisions = journey['pipeline']._table('operator_decisions')
-    with journey['pipeline'].engine.begin() as connection:
-        history = list(
-            connection.execute(
-                decisions.select().where(
-                    decisions.c.group_id.in_([first_id, second_id])
-                )
-            ).mappings()
-        )
-        for entry in history:
-            details = dict(entry['details'])
-            if details.get('main_profile_image'):
-                details.pop('main_profile_image_selected_at', None)
-                connection.execute(
-                    decisions.update().where(
-                        decisions.c.id == entry['id']
-                    ).values(details=details)
-                )
-
     workspace = journey['pipeline'].get_workspace(
         journey['case_id'], journey['persona_id']
     )
@@ -1676,15 +1655,107 @@ def test_editing_an_older_photo_does_not_override_the_selected_profile_image(
         snapshot.get_json()['manifest']['items']
     ) == second_url.encode()
 
+def test_pre_timestamp_photo_history_recovers_first_explicit_selection(
+    journey, monkeypatch
+):
+    from datetime import datetime, timedelta, timezone
+    from uuid import uuid4
+
+    from bs4 import BeautifulSoup
+
+    from maigret.web import pipeline_pdf
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    first_url = 'https://cdn.example.test/legacy-a.jpg'
+    second_url = 'https://cdn.example.test/legacy-b.jpg'
+    groups = journey['pipeline'].upsert_groups(
+        journey['case_id'],
+        journey['persona_id'],
+        {
+            'claims': [
+                {
+                    'canonical_key': f'legacy-photo-{index}',
+                    'normalized': {
+                        'predicate': 'photograph',
+                        'value': url,
+                        'binding_status': 'resolved',
+                    },
+                    'observation_ids': [journey['observation_id']],
+                }
+                for index, url in enumerate((first_url, second_url))
+            ]
+        },
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    first_id, second_id = (group['id'] for group in groups)
+    first_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+    # Insert immutable historical decisions as the older release wrote them;
+    # never UPDATE an audit record, including in this regression fixture.
+    decisions = journey['pipeline']._table('operator_decisions')
+    with journey['pipeline'].engine.begin() as connection:
+        for group_id, sequence, seconds in (
+            (first_id, 1, 0),
+            (second_id, 1, 1),
+            (first_id, 2, 2),
+        ):
+            connection.execute(
+                decisions.insert().values(
+                    id=str(uuid4()),
+                    case_id=journey['case_id'],
+                    persona_id=journey['persona_id'],
+                    group_id=group_id,
+                    sequence=sequence,
+                    decision='include',
+                    actor='legacy-fixture',
+                    reason='Historical selected photo' if sequence == 1 else 'Note edit',
+                    details={'main_profile_image': True},
+                    created_at=first_at + timedelta(seconds=seconds),
+                )
+            )
+        journey['pipeline']._bump(connection, journey['persona_id'])
+
+    workspace = journey['pipeline'].get_workspace(
+        journey['case_id'], journey['persona_id']
+    )
+    findings = {item['id']: item for item in workspace['shortlist']}
+    assert findings[first_id]['main_profile_image'] is False
+    assert findings[second_id]['main_profile_image'] is True
+    included = {
+        item['id']: item
+        for item in journey['pipeline'].iter_included_groups(
+            journey['case_id'], journey['persona_id']
+        )
+    }
+    assert included[first_id]['main_profile_image_selected_at'] == first_at.isoformat()
+
+    page = BeautifulSoup(
+        journey['client'].get(base(journey) + '/persona').data, 'html.parser'
+    )
+    assert page.select_one('[data-persona-photograph]')['src'] == second_url
+
+    snapshot = post(journey, '/versions', {'scope': 'Legacy photo audit.'})
+    assert snapshot.status_code == 201
+    monkeypatch.setattr(
+        pipeline_pdf, 'load_approved_portrait', lambda url: url.encode()
+    )
+    assert pipeline_pdf._portrait_bytes(
+        snapshot.get_json()['manifest']['items']
+    ) == second_url.encode()
+
     carried_forward = post(
         journey,
         f'/groups/{first_id}/decision',
-        {'decision': 'include', 'reason': 'Another note on legacy selection.'},
+        {'decision': 'include', 'reason': 'New note on historical selection.'},
     )
     assert carried_forward.status_code == 201
     assert carried_forward.get_json()['details'][
         'main_profile_image_selected_at'
-    ] == first_selection
+    ] == first_at.isoformat()
 
 
 def test_split_preserves_observations_and_requires_new_operator_review(journey):
