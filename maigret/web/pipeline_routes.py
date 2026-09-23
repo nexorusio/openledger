@@ -304,7 +304,7 @@ def register_pipeline_routes(
                     "decision_reason": row.get("decision_reason"),
                     "main_profile_image": bool(row.get("main_profile_image")),
                     "main_profile_image_selected_at": row.get(
-                        "decision_created_at"
+                        "main_profile_image_selected_at"
                     ),
                     "observations": list(row.get("observations") or []),
                     "coordinate_repair": any(
@@ -1312,9 +1312,14 @@ def register_pipeline_routes(
             group = store().get_group(case_id, persona_id, group_id, limit=1)
             if group['kind'] != 'claim':
                 abort(400, description='Evidence categories apply to claim groups only.')
+            prior_correction = (
+                ((group.get('latest_decision') or {}).get('details') or {})
+                .get('corrected_claim') or {}
+            )
+            effective = dict(group['normalized'], **prior_correction)
             current_predicate = str(
-                group['normalized'].get('predicate')
-                or group['normalized'].get('field_name')
+                effective.get('predicate')
+                or effective.get('field_name')
                 or ''
             ).casefold()
             if corrected_predicate != current_predicate:
@@ -1324,7 +1329,11 @@ def register_pipeline_routes(
             group = store().get_group(case_id, persona_id, group_id, limit=1)
             if group['kind'] != 'claim':
                 abort(400, description='Claim corrections require a claim group.')
-            corrected = {**group['normalized'], **changes}
+            prior_correction = (
+                ((group.get('latest_decision') or {}).get('details') or {})
+                .get('corrected_claim') or {}
+            )
+            corrected = {**group['normalized'], **prior_correction, **changes}
         geocoding_warning = None
         if data.get('decision') == 'include' and geocode_approved_location:
             group = store().get_group(case_id, persona_id, group_id, limit=1)
