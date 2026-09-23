@@ -149,7 +149,12 @@ def _portrait_bytes(items: list[dict[str, Any]]) -> bytes | None:
                     "main_profile_image"
                 )
             ),
-            "selected_at": (item.get("decision") or {}).get("created_at"),
+            "selected_at": (
+                ((item.get("decision") or {}).get("details") or {}).get(
+                    "main_profile_image_selected_at"
+                )
+                or (item.get("decision") or {}).get("created_at")
+            ),
         }
         for item in items
         if _canonical_field(item) == "photograph"

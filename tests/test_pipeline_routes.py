@@ -1381,6 +1381,8 @@ def test_claim_correction_preserves_qualifiers_and_rejects_identity_override(jou
 
 
 def test_operator_can_change_a_claims_persona_category(journey):
+    from bs4 import BeautifulSoup
+
     response = post(
         journey,
         '/groups/' + journey['group_id'] + '/decision',
@@ -1388,13 +1390,125 @@ def test_operator_can_change_a_claims_persona_category(journey):
             'decision': 'include',
             'reason': 'This source documents a public appearance.',
             'corrected_predicate': 'event_appearance',
+            'corrected_claim': {'value': 'Reviewed public appearance'},
         },
     )
     assert response.status_code == 201
-    version = post(journey, '/versions', {'scope': 'Corrected category.'}).get_json()
-    item = version['manifest']['items'][0]
+    workspace = journey['pipeline'].get_workspace(
+        journey['case_id'], journey['persona_id']
+    )
+    finding = next(
+        item for item in workspace['shortlist']
+        if item['id'] == journey['group_id']
+    )
+    assert finding['section'] == 'public_exposure'
+    assert finding['presentation_predicate'] == 'event_appearance'
+    assert finding['normalized']['value'] == 'Reviewed public appearance'
+    review = journey['client'].get(base(journey) + '/persona')
+    assert review.status_code == 200
+    row = BeautifulSoup(review.data, 'html.parser').find(
+        id='finding-' + journey['group_id']
+    )
+    assert row.select_one(
+        'select[name="corrected_predicate"] option[selected]'
+    )['value'] == 'event_appearance'
+
+    # The next form submission includes the selected category but no claim
+    # object; editing a note must retain both the category and earlier value.
+    revised = post(
+        journey,
+        '/groups/' + journey['group_id'] + '/decision',
+        {
+            'decision': 'include',
+            'reason': 'Reviewed note without reclassifying.',
+            'corrected_predicate': 'event_appearance',
+        },
+    )
+    assert revised.status_code == 201
+    version_response = post(
+        journey, '/versions', {'scope': 'Corrected category.'}
+    )
+    assert version_response.status_code == 201
+    item = next(
+        item for item in version_response.get_json()['manifest']['items']
+        if item['group_id'] == journey['group_id']
+    )
     assert item['normalized']['predicate'] == 'event_appearance'
+    assert item['normalized']['value'] == 'Reviewed public appearance'
     assert item['original_normalized']['predicate'] == 'full_name'
+    assert item['original_normalized']['value'] == 'Synthetic Person'
+
+    # Explicitly choosing the original category remains possible and audited.
+    reverted = post(
+        journey,
+        '/groups/' + journey['group_id'] + '/decision',
+        {'decision': 'include', 'corrected_predicate': 'full_name'},
+    )
+    assert reverted.status_code == 201
+    current = journey['pipeline'].get_workspace(
+        journey['case_id'], journey['persona_id']
+    )
+    restored = next(
+        item for item in current['shortlist']
+        if item['id'] == journey['group_id']
+    )
+    assert restored['presentation_predicate'] == 'full_name'
+    assert restored['normalized']['value'] == 'Reviewed public appearance'
+
+
+def test_location_note_edit_geocodes_the_prior_corrected_value(journey):
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    group = journey['pipeline'].upsert_groups(
+        journey['case_id'],
+        journey['persona_id'],
+        {
+            'claims': [
+                {
+                    'canonical_key': 'corrected-location',
+                    'normalized': {
+                        'predicate': 'current_location',
+                        'value': 'Original location',
+                        'binding_status': 'resolved',
+                    },
+                    'observation_ids': [journey['observation_id']],
+                }
+            ]
+        },
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )[0]
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    journey['pipeline'].decide(
+        journey['case_id'],
+        journey['persona_id'],
+        group['id'],
+        'include',
+        actor='human-reviewer',
+        reason='Public source clarifies the location.',
+        corrected_claim={'value': 'Corrected location'},
+    )
+    edited = post(
+        journey,
+        f'/groups/{group["id"]}/decision',
+        {'decision': 'include', 'reason': 'Note edit triggers geocoding.'},
+    )
+    assert edited.status_code == 201
+    included = {
+        item['id']: item
+        for item in journey['pipeline'].iter_included_groups(
+            journey['case_id'], journey['persona_id']
+        )
+    }
+    normalized = included[group['id']]['normalized']
+    assert normalized['value'] == 'Corrected location'
+    assert normalized['qualifiers']['coordinate_source'] == 'approved_place_geocoder'
+    assert journey['pipeline'].get_group(
+        journey['case_id'], journey['persona_id'], group['id']
+    )['normalized']['value'] == 'Original location'
 
 
 def test_main_profile_image_selection_is_retained_in_the_operator_decision(journey):
@@ -1439,6 +1553,209 @@ def test_main_profile_image_selection_is_retained_in_the_operator_decision(journ
     response = journey['client'].get(base(journey) + '/persona')
     assert b'Main profile image' in response.data
     assert b'https://cdn.example.test/selected.jpg' in response.data
+
+
+def test_editing_an_older_photo_does_not_override_the_selected_profile_image(
+    journey, monkeypatch
+):
+    from datetime import datetime, timedelta, timezone
+    from itertools import count
+
+    from bs4 import BeautifulSoup
+
+    from maigret.web import pipeline_pdf, pipeline_store
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    first_url = 'https://cdn.example.test/photo-a.jpg'
+    second_url = 'https://cdn.example.test/photo-b.jpg'
+    groups = journey['pipeline'].upsert_groups(
+        journey['case_id'],
+        journey['persona_id'],
+        {
+            'claims': [
+                {
+                    'canonical_key': f'photo-{index}',
+                    'normalized': {
+                        'predicate': 'photograph',
+                        'value': url,
+                        'binding_status': 'resolved',
+                    },
+                    'observation_ids': [journey['observation_id']],
+                }
+                for index, url in enumerate((first_url, second_url))
+            ]
+        },
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    ticks = count()
+    monkeypatch.setattr(
+        pipeline_store,
+        '_now',
+        lambda: datetime(2026, 9, 24, tzinfo=timezone.utc)
+        + timedelta(seconds=next(ticks)),
+    )
+    first_id, second_id = (group['id'] for group in groups)
+    chosen_first = post(
+        journey,
+        f'/groups/{first_id}/decision',
+        {'decision': 'include', 'main_profile_image': True},
+    )
+    chosen_second = post(
+        journey,
+        f'/groups/{second_id}/decision',
+        {'decision': 'include', 'main_profile_image': True},
+    )
+    assert chosen_first.status_code == chosen_second.status_code == 201
+    first_selection = chosen_first.get_json()['details'][
+        'main_profile_image_selected_at'
+    ]
+    second_selection = chosen_second.get_json()['details'][
+        'main_profile_image_selected_at'
+    ]
+    assert first_selection < second_selection
+
+    edited_first = post(
+        journey,
+        f'/groups/{first_id}/decision',
+        {'decision': 'include', 'reason': 'Additional source reviewed.'},
+    )
+    assert edited_first.status_code == 201
+    assert edited_first.get_json()['details'][
+        'main_profile_image_selected_at'
+    ] == first_selection
+
+    workspace = journey['pipeline'].get_workspace(
+        journey['case_id'], journey['persona_id']
+    )
+    findings = {item['id']: item for item in workspace['shortlist']}
+    assert findings[first_id]['main_profile_image'] is False
+    assert findings[second_id]['main_profile_image'] is True
+
+    review = journey['client'].get(base(journey) + '/persona')
+    assert review.status_code == 200
+    page = BeautifulSoup(review.data, 'html.parser')
+    assert page.select_one('[data-persona-photograph]')['src'] == second_url
+    for group_id in (first_id, second_id):
+        control = page.find(id='finding-' + group_id).select_one(
+            'input[name="main_profile_image"]'
+        )
+        assert control is not None and not control.has_attr('checked')
+
+    snapshot = post(journey, '/versions', {'scope': 'Photo selection audit.'})
+    assert snapshot.status_code == 201
+    monkeypatch.setattr(
+        pipeline_pdf, 'load_approved_portrait', lambda url: url.encode()
+    )
+    assert pipeline_pdf._portrait_bytes(
+        snapshot.get_json()['manifest']['items']
+    ) == second_url.encode()
+
+def test_pre_timestamp_photo_history_recovers_first_explicit_selection(
+    journey, monkeypatch
+):
+    from datetime import datetime, timedelta, timezone
+    from uuid import uuid4
+
+    from bs4 import BeautifulSoup
+
+    from maigret.web import pipeline_pdf
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    first_url = 'https://cdn.example.test/legacy-a.jpg'
+    second_url = 'https://cdn.example.test/legacy-b.jpg'
+    groups = journey['pipeline'].upsert_groups(
+        journey['case_id'],
+        journey['persona_id'],
+        {
+            'claims': [
+                {
+                    'canonical_key': f'legacy-photo-{index}',
+                    'normalized': {
+                        'predicate': 'photograph',
+                        'value': url,
+                        'binding_status': 'resolved',
+                    },
+                    'observation_ids': [journey['observation_id']],
+                }
+                for index, url in enumerate((first_url, second_url))
+            ]
+        },
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    first_id, second_id = (group['id'] for group in groups)
+    first_at = datetime.now(timezone.utc) + timedelta(minutes=1)
+    # Insert immutable historical decisions as the older release wrote them;
+    # never UPDATE an audit record, including in this regression fixture.
+    decisions = journey['pipeline']._table('operator_decisions')
+    with journey['pipeline'].engine.begin() as connection:
+        for group_id, sequence, seconds in (
+            (first_id, 1, 0),
+            (second_id, 1, 1),
+            (first_id, 2, 2),
+        ):
+            connection.execute(
+                decisions.insert().values(
+                    id=str(uuid4()),
+                    case_id=journey['case_id'],
+                    persona_id=journey['persona_id'],
+                    group_id=group_id,
+                    sequence=sequence,
+                    decision='include',
+                    actor='legacy-fixture',
+                    reason='Historical selected photo' if sequence == 1 else 'Note edit',
+                    details={'main_profile_image': True},
+                    created_at=first_at + timedelta(seconds=seconds),
+                )
+            )
+        journey['pipeline']._bump(connection, journey['persona_id'])
+
+    workspace = journey['pipeline'].get_workspace(
+        journey['case_id'], journey['persona_id']
+    )
+    findings = {item['id']: item for item in workspace['shortlist']}
+    assert findings[first_id]['main_profile_image'] is False
+    assert findings[second_id]['main_profile_image'] is True
+    included = {
+        item['id']: item
+        for item in journey['pipeline'].iter_included_groups(
+            journey['case_id'], journey['persona_id']
+        )
+    }
+    assert included[first_id]['main_profile_image_selected_at'] == first_at.isoformat()
+
+    page = BeautifulSoup(
+        journey['client'].get(base(journey) + '/persona').data, 'html.parser'
+    )
+    assert page.select_one('[data-persona-photograph]')['src'] == second_url
+
+    snapshot = post(journey, '/versions', {'scope': 'Legacy photo audit.'})
+    assert snapshot.status_code == 201
+    monkeypatch.setattr(
+        pipeline_pdf, 'load_approved_portrait', lambda url: url.encode()
+    )
+    assert pipeline_pdf._portrait_bytes(
+        snapshot.get_json()['manifest']['items']
+    ) == second_url.encode()
+
+    carried_forward = post(
+        journey,
+        f'/groups/{first_id}/decision',
+        {'decision': 'include', 'reason': 'New note on historical selection.'},
+    )
+    assert carried_forward.status_code == 201
+    assert carried_forward.get_json()['details'][
+        'main_profile_image_selected_at'
+    ] == first_at.isoformat()
 
 
 def test_split_preserves_observations_and_requires_new_operator_review(journey):
