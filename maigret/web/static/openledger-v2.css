@@ -1213,6 +1213,55 @@ canvas {
     color: inherit;
 }
 
+.assessment-inline-category {
+    margin-top: .4rem;
+    font-size: .75rem;
+}
+
+.assessment-inline-category summary {
+    color: var(--ol-accent, #a88aff);
+    cursor: pointer;
+}
+
+.assessment-inline-category form {
+    display: grid;
+    gap: .4rem;
+    margin-top: .4rem;
+}
+
+.assessment-inline-category select {
+    width: 100%;
+    min-width: 0;
+}
+
+.assessment-review-table .badge-soft.success,
+.approved-persona-record-badges .badge-soft.success,
+.assessment-decision-filters button[data-decision-filter="include"] {
+    color: #48df9a;
+    border-color: #287653;
+    background: rgba(31, 157, 104, .18);
+}
+
+.assessment-review-table .badge-soft.danger,
+.assessment-decision-filters button[data-decision-filter="rejected"] {
+    color: #ff8585;
+    border-color: #994545;
+    background: rgba(218, 72, 72, .17);
+}
+
+.assessment-decision-filters button[data-decision-filter="include"] span,
+.assessment-decision-filters button[data-decision-filter="rejected"] span {
+    color: inherit;
+}
+
+.assessment-decision-filters button[data-decision-filter="include"].active {
+    background: rgba(31, 157, 104, .3);
+}
+
+.assessment-decision-filters button[data-decision-filter="rejected"].active {
+    background: rgba(218, 72, 72, .28);
+}
+
 .assessment-table-decision-form[hidden],
 .assessment-recorded-decision[hidden] {
     display: none;
