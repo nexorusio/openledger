@@ -1498,6 +1498,136 @@ def test_approved_persona_card_can_change_category_without_losing_source(journey
     )['value'] == 'event_appearance'
 
 
+def test_account_category_is_editable_across_review_persona_and_report(journey):
+    from bs4 import BeautifulSoup
+
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+    from maigret.web.pipeline_pdf import _canonical_field
+
+    account = journey['pipeline'].upsert_groups(
+        journey['case_id'], journey['persona_id'],
+        {'accounts': [{
+            'id': 'linkedin-profile-category',
+            'platform': 'linkedin',
+            'canonical_url': 'https://www.linkedin.com/in/synthetic-person/',
+            'observation_ids': [journey['observation_id']],
+        }]},
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )[0]
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    row = BeautifulSoup(
+        journey['client'].get(base(journey) + '/persona').data, 'html.parser'
+    ).find(id='finding-' + account['id'])
+    assert row.select_one('select[name="corrected_predicate"] option[selected]')[
+        'value'
+    ] == 'social_account'
+
+    changed = post(
+        journey, f'/groups/{account["id"]}/decision',
+        {'decision': 'include', 'corrected_predicate': 'event_appearance'},
+    )
+    assert changed.status_code == 201
+    workspace = journey['pipeline'].get_workspace(
+        journey['case_id'], journey['persona_id']
+    )
+    finding = next(item for item in workspace['shortlist'] if item['id'] == account['id'])
+    assert finding['section'] == 'public_exposure'
+    assert finding['presentation_predicate'] == 'event_appearance'
+    assert journey['pipeline'].get_group(
+        journey['case_id'], journey['persona_id'], account['id']
+    )['normalized'] == account['normalized']
+
+    page = BeautifulSoup(
+        journey['client'].get(base(journey) + '/persona').data, 'html.parser'
+    )
+    card = next(
+        item for item in page.select('#persona-public_exposure article.approved-persona-record')
+        if item.select_one('a[href="https://www.linkedin.com/in/synthetic-person/"]')
+    )
+    form = card.select_one('.persona-card-category-control form')
+    assert form.select_one('option[selected]')['value'] == 'event_appearance'
+    assert card.select_one('[data-open-evidence-modal]') is not None
+
+    # A decision-note edit retains the operator category, and the PDF's
+    # reader-facing field follows the same decision without changing evidence.
+    assert post(
+        journey, f'/groups/{account["id"]}/decision',
+        {'decision': 'include', 'reason': 'Reviewed source lineage.'},
+    ).status_code == 201
+    version = post(journey, '/versions', {'scope': 'Account category review.'})
+    assert version.status_code == 201
+    item = next(
+        item for item in version.get_json()['manifest']['items']
+        if item['group_id'] == account['id']
+    )
+    assert _canonical_field(item) == 'event_appearance'
+    assert item['normalized'] == account['normalized']
+    assert post(
+        journey, f'/groups/{account["id"]}/decision',
+        {'decision': 'include', 'corrected_predicate': 'photograph'},
+    ).status_code == 400
+
+
+def test_original_photograph_can_change_category_and_be_restored(journey):
+    from bs4 import BeautifulSoup
+
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    group = journey['pipeline'].upsert_groups(
+        journey['case_id'], journey['persona_id'],
+        {'claims': [{
+            'canonical_key': 'photo-category-candidate',
+            'normalized': {
+                'predicate': 'photograph',
+                'value': 'https://cdn.example.test/category.jpg',
+                'binding_status': 'resolved',
+            },
+            'observation_ids': [journey['observation_id']],
+        }]},
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )[0]
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    assert post(
+        journey, f'/groups/{group["id"]}/decision', {'decision': 'include'}
+    ).status_code == 201
+    page = BeautifulSoup(
+        journey['client'].get(base(journey) + '/persona').data, 'html.parser'
+    )
+    row = page.find(id='finding-' + group['id'])
+    assert row.select_one('.assessment-inline-category option[value="photograph"]')
+    photo_card = next(
+        item for item in page.select('#persona-identity article.approved-persona-record')
+        if item.select_one('img[src="https://cdn.example.test/category.jpg"]')
+    )
+    assert photo_card.select_one('.persona-card-category-control') is not None
+    assert post(
+        journey, f'/groups/{group["id"]}/decision',
+        {'decision': 'include', 'corrected_predicate': 'publication'},
+    ).status_code == 201
+    changed = next(
+        item for item in journey['pipeline'].get_workspace(
+            journey['case_id'], journey['persona_id']
+        )['shortlist'] if item['id'] == group['id']
+    )
+    assert changed['section'] == 'public_exposure'
+    assert changed['original_predicate'] == 'photograph'
+    assert post(
+        journey, f'/groups/{group["id"]}/decision',
+        {'decision': 'include', 'corrected_predicate': 'photograph'},
+    ).status_code == 201
+    assert journey['pipeline'].get_group(
+        journey['case_id'], journey['persona_id'], group['id']
+    )['normalized']['predicate'] == 'photograph'
+
+
 def test_approved_photo_card_can_select_main_image(journey):
     from bs4 import BeautifulSoup
 

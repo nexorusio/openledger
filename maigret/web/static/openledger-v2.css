@@ -579,6 +579,8 @@ canvas {
     align-items: center;
     justify-content: center;
     gap: 0.45rem;
+    min-width: 0;
+    max-width: 100%;
     min-height: 42px;
     padding: 0 16px;
     font-size: 0.78rem;
@@ -586,6 +588,8 @@ canvas {
     line-height: 1.15;
     text-align: center;
     vertical-align: middle;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .btn > svg,
@@ -1118,28 +1122,28 @@ canvas {
 
 .assessment-review-table {
     width: 100%;
-    min-width: 1180px;
+    min-width: 1440px;
     table-layout: fixed;
 }
 
 .assessment-column-finding {
-    width: 18%;
+    width: 16%;
 }
 
 .assessment-column-category {
-    width: 10%;
+    width: 16%;
 }
 
 .assessment-column-assessment {
-    width: 22%;
+    width: 20%;
 }
 
 .assessment-column-evidence {
-    width: 11%;
+    width: 10%;
 }
 
 .assessment-column-decision {
-    width: 11%;
+    width: 10%;
 }
 
 .assessment-column-actions {
@@ -1320,8 +1324,11 @@ canvas {
 .review-action-buttons .btn,
 .assessment-recorded-decision .btn {
     min-height: 34px;
-    padding: 0 9px;
-    white-space: nowrap;
+    min-width: 0;
+    padding: 6px 9px;
+    line-height: 1.2;
+    white-space: normal;
+    overflow-wrap: anywhere;
 }
 
 .review-action-buttons .btn.is-selected {
