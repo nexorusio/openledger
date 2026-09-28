@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="maigret/web/static/openledger-mark.svg" width="88" alt="OpenLedger mark">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="maigret/web/static/openledger-icon-dark-theme.svg">
+    <img src="maigret/web/static/openledger-icon-light-theme.svg" width="120" alt="OpenLedger mark">
+  </picture>
 </p>
 
 <h1 align="center">OpenLedger</h1>
