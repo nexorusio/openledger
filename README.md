@@ -97,7 +97,7 @@ supporting sources.
 | Task | Operator action |
 |---|---|
 | Choose the profile photo | Under **Identity → Photograph**, select **Set as main image** on another approved photo. The chosen card shows **Main profile image**. For a photo still awaiting review, use **Make main profile image** when approving it in the Review queue. The web Persona and a newly exported Persona PDF use the selected photo. |
-| Correct a finding's category | On an approved claim, open **Change category**, choose the appropriate Persona field, and select **Save category**. This control appears on a single-finding Persona card and on its Review queue row. A card that combines several findings points to the Review queue so each underlying finding can be corrected separately. Photograph findings keep their photo category. |
+| Correct a finding's category | On an approved finding, open **Change category**, choose the appropriate Persona field, and select **Save category**. This control appears on a single-finding Persona card and on its Review queue row. A card that combines several findings points to the Review queue so each underlying finding can be corrected separately. Account and photograph findings can also be recategorized; only an original photograph can be restored to **Photograph**. |
 
 These actions record a new operator decision. Original observations, source
 links, and earlier decisions remain available for audit. **Find new evidence**
