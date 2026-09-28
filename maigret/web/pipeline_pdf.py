@@ -46,7 +46,11 @@ _LOGO_PATH = Path(__file__).with_name("static") / "openledger-icon-white.png"
 def _canonical_field(item: dict[str, Any]) -> str:
     """Give the readable report the same field structure as the Persona UI."""
     if item.get("kind") == "account":
-        return "social_account"
+        return (
+            ((item.get("decision") or {}).get("details") or {}).get(
+                "presentation_category"
+            ) or "social_account"
+        )
     return presentation_predicate(
         str(item.get("kind") or "claim"), item.get("normalized")
     )
