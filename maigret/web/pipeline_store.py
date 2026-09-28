@@ -2107,6 +2107,10 @@ class PipelineStore:
                 ):
                     continue
                 result['normalized'] = current['normalized']
+                result['original_predicate'] = str(
+                    result['normalized'].get('predicate')
+                    or result['normalized'].get('field_name') or ''
+                ).casefold()
                 if include_observations:
                     result['observations'] = current['observations']
                     result['observation_count'] = current['observation_count']
@@ -2145,6 +2149,10 @@ class PipelineStore:
                         result["decision_details"],
                         result["decision_created_at"],
                     )
+                )
+                result["presentation_category"] = (
+                    result["decision_details"].get("presentation_category")
+                    if result["kind"] == "account" else None
                 )
                 yield _json(result)
 
@@ -2190,6 +2198,7 @@ class PipelineStore:
         actor,
         reason,
         corrected_claim=None,
+        presentation_category=None,
         evidence_dispositions=None,
         main_profile_image=None,
     ):
@@ -2345,6 +2354,16 @@ class PipelineStore:
                 # An edit to a decision note must not discard an earlier
                 # operator correction of its category or value.
                 details["corrected_claim"] = previous["corrected_claim"]
+            if presentation_category is not None:
+                if (
+                    group["kind"] != "account"
+                    or presentation_category not in SHORTLIST_PREDICATE_SECTIONS
+                    or presentation_category == "photograph"
+                ):
+                    raise ValueError("Choose a valid account presentation category")
+                details["presentation_category"] = presentation_category
+            elif previous.get("presentation_category"):
+                details["presentation_category"] = previous["presentation_category"]
             created_at = _now()
             if main_profile_image is not None:
                 if main_profile_image is not True:
@@ -3146,6 +3165,9 @@ class PipelineStore:
                 )
                 source_supported = assessment.get("evidence_status") == "source_supported"
                 normalized = dict(row.get("summary_normalized") or row["normalized"])
+                original_predicate = str(
+                    normalized.get("predicate") or normalized.get("field_name") or ""
+                ).casefold()
                 latest_details = row.get("latest_decision_details") or {}
                 corrected = latest_details.get("corrected_claim")
                 if row["kind"] == "claim" and isinstance(corrected, dict):
@@ -3164,7 +3186,10 @@ class PipelineStore:
                             }
                         }
                     )
-                presentation_field = presentation_predicate(row["kind"], normalized)
+                presentation_field = (
+                    latest_details.get("presentation_category")
+                    if row["kind"] == "account" else None
+                ) or presentation_predicate(row["kind"], normalized)
                 selected_at = (
                     self._profile_image_selection_at(
                         connection,
@@ -3218,7 +3243,10 @@ class PipelineStore:
                 # labelled as candidates; they are not silently promoted.
                 if observation_count < 1 or not row.get("has_positive_evidence"):
                     continue
-                section_key = _shortlist_section(row["kind"], normalized)
+                section_key = (
+                    SHORTLIST_PREDICATE_SECTIONS.get(presentation_field)
+                    if row["kind"] == "account" else None
+                ) or _shortlist_section(row["kind"], normalized)
                 has_query_provenance = row["id"] in query_provenance_group_ids
                 if section_key == "digital" and not (
                     exact_profile_input
@@ -3302,6 +3330,7 @@ class PipelineStore:
                         "section": section_key,
                         "section_title": dict(SHORTLIST_SECTIONS)[section_key],
                         "presentation_predicate": presentation_field,
+                        "original_predicate": original_predicate,
                         "main_profile_image": bool(selected_at),
                         "main_profile_image_selected_at": selected_at,
                         "ai_ranked": ai_ranking is not None,

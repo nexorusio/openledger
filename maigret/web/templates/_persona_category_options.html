@@ -1,0 +1,9 @@
+{% macro category_options(selected, allow_photograph=False) %}
+{% for section in persona_category_sections %}
+<optgroup label="{{ section.title }}">
+    {% for value, label in section.fields %}
+    {% if value != 'photograph' or allow_photograph %}<option value="{{ value }}" {{ 'selected' if value == selected }}>{{ label }}</option>{% endif %}
+    {% endfor %}
+</optgroup>
+{% endfor %}
+{% endmacro %}

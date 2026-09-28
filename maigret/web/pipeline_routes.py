@@ -226,6 +226,7 @@ def register_pipeline_routes(
 
     def approved_persona(case_id, persona_id):
         from maigret.web.persona_schema import (
+            FIELD_SECTIONS,
             PERSONA_SECTIONS,
             display_label,
             presentation_predicate,
@@ -299,7 +300,10 @@ def register_pipeline_routes(
                     "normalized": normalized,
                     "label": str(label),
                     "url": item_url,
-                    "section": section_for(row["kind"], normalized),
+                    "section": FIELD_SECTIONS.get(row.get("presentation_category"))
+                    or section_for(row["kind"], normalized),
+                    "presentation_category": row.get("presentation_category"),
+                    "original_predicate": row.get("original_predicate"),
                     "decision_actor": row.get("decision_actor"),
                     "decision_reason": row.get("decision_reason"),
                     "main_profile_image": bool(row.get("main_profile_image")),
@@ -320,7 +324,9 @@ def register_pipeline_routes(
             )
 
         def field_key(item):
-            return presentation_predicate(item["kind"], item["normalized"])
+            return item.get("presentation_category") or presentation_predicate(
+                item["kind"], item["normalized"]
+            )
 
         def field_label(key):
             return (
@@ -431,9 +437,7 @@ def register_pipeline_routes(
         def approved_hero_value(*predicates):
             wanted = {str(predicate).casefold() for predicate in predicates}
             for item in items:
-                predicate = str(
-                    item["normalized"].get("predicate") or ""
-                ).casefold()
+                predicate = field_key(item)
                 if predicate in wanted and str(item.get("label") or "").strip():
                     return str(item["label"]).strip()[:700]
             return ""
@@ -475,7 +479,7 @@ def register_pipeline_routes(
         map_points = []
         for item in items:
             normalized = item["normalized"]
-            predicate = str(normalized.get("predicate") or "").casefold()
+            predicate = field_key(item)
             if predicate not in {
                 "address",
                 "current_location",
@@ -792,12 +796,7 @@ def register_pipeline_routes(
                 google_places_enabled and google_places_enabled()
             ),
             map_tile_url=browser_map_tile_url(),
-            persona_category_options=tuple(
-                (field_name, f'{section["title"]} · {label}')
-                for section in PERSONA_SECTIONS
-                for field_name, label in section["fields"]
-                if field_name != "photograph"
-            ),
+            persona_category_sections=PERSONA_SECTIONS,
         )
 
     @bp.errorhandler(ValueError)
@@ -1304,26 +1303,39 @@ def register_pipeline_routes(
         corrected_predicate = str(
             data.get('corrected_predicate', '')
         ).strip().casefold()
+        presentation_category = None
         if corrected_predicate:
             from maigret.web.persona_schema import FIELD_LABELS
 
-            if corrected_predicate not in FIELD_LABELS or corrected_predicate == 'photograph':
+            if corrected_predicate not in FIELD_LABELS:
                 abort(400, description='Choose a valid evidence category.')
             group = store().get_group(case_id, persona_id, group_id, limit=1)
-            if group['kind'] != 'claim':
-                abort(400, description='Evidence categories apply to claim groups only.')
-            prior_correction = (
-                ((group.get('latest_decision') or {}).get('details') or {})
-                .get('corrected_claim') or {}
-            )
-            effective = dict(group['normalized'], **prior_correction)
-            current_predicate = str(
-                effective.get('predicate')
-                or effective.get('field_name')
-                or ''
-            ).casefold()
-            if corrected_predicate != current_predicate:
-                changes['predicate'] = corrected_predicate
+            if group['kind'] == 'account':
+                if corrected_predicate == 'photograph':
+                    abort(400, description='An account is not a photograph.')
+                presentation_category = corrected_predicate
+            elif group['kind'] == 'claim':
+                prior_correction = (
+                    ((group.get('latest_decision') or {}).get('details') or {})
+                    .get('corrected_claim') or {}
+                )
+                effective = dict(group['normalized'], **prior_correction)
+                current_predicate = str(
+                    effective.get('predicate')
+                    or effective.get('field_name')
+                    or ''
+                ).casefold()
+                original_predicate = str(
+                    group['normalized'].get('predicate')
+                    or group['normalized'].get('field_name')
+                    or ''
+                ).casefold()
+                if corrected_predicate == 'photograph' and original_predicate != 'photograph':
+                    abort(400, description='Only photograph evidence can be categorized as a photograph.')
+                if corrected_predicate != current_predicate:
+                    changes['predicate'] = corrected_predicate
+            else:
+                abort(400, description='Choose a reviewable finding.')
         corrected = None
         if changes:
             group = store().get_group(case_id, persona_id, group_id, limit=1)
@@ -1408,6 +1420,7 @@ def register_pipeline_routes(
             actor=actor(),
             reason=str(data.get('reason', '')).strip(),
             corrected_claim=corrected,
+            presentation_category=presentation_category,
             evidence_dispositions=dispositions,
             main_profile_image=(
                 True
