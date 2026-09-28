@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="maigret/web/static/openledger-mark.svg" width="88" alt="OpenLedger mark">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="maigret/web/static/openledger-icon-dark-theme.svg">
+    <img src="maigret/web/static/openledger-icon-light-theme.svg" width="120" alt="OpenLedger mark">
+  </picture>
 </p>
 
 <h1 align="center">OpenLedger</h1>
@@ -83,6 +86,23 @@ The principal rules are:
 
 See [Case intelligence architecture](docs/case-intelligence-architecture.md)
 for the complete data and review contract.
+
+### Persona review controls
+
+Open a case's **Persona** to review source-backed findings. The **Review queue**
+shows approved decisions in green and rejected decisions in red; **Kept in
+queue** remains unresolved. **View evidence** on an approved card opens its
+supporting sources.
+
+| Task | Operator action |
+|---|---|
+| Choose the profile photo | Under **Identity → Photograph**, select **Set as main image** on another approved photo. The chosen card shows **Main profile image**. For a photo still awaiting review, use **Make main profile image** when approving it in the Review queue. The web Persona and a newly exported Persona PDF use the selected photo. |
+| Correct a finding's category | On an approved claim, open **Change category**, choose the appropriate Persona field, and select **Save category**. This control appears on a single-finding Persona card and on its Review queue row. A card that combines several findings points to the Review queue so each underlying finding can be corrected separately. Photograph findings keep their photo category. |
+
+These actions record a new operator decision. Original observations, source
+links, and earlier decisions remain available for audit. **Find new evidence**
+is beside **Configure investigation** in the Persona toolbar; new findings
+still require review before they enter the approved Persona.
 
 ## Collection and enrichment
 
