@@ -1456,6 +1456,110 @@ def test_operator_can_change_a_claims_persona_category(journey):
     assert restored['normalized']['value'] == 'Reviewed public appearance'
 
 
+def test_approved_persona_card_can_change_category_without_losing_source(journey):
+    from bs4 import BeautifulSoup
+
+    assert post(
+        journey, '/groups/' + journey['group_id'] + '/decision',
+        {'decision': 'include'},
+    ).status_code == 201
+    page = BeautifulSoup(
+        journey['client'].get(base(journey) + '/persona').data, 'html.parser'
+    )
+    card = page.select_one('.persona-card-category-control')
+    form = card.find('form')
+    assert form.select_one('select[name="corrected_predicate"]') is not None
+    row = page.find(id='finding-' + journey['group_id'])
+    assert row.select_one('.assessment-inline-category select') is not None
+
+    saved = journey['client'].post(
+        form['action'],
+        data={
+            'csrf_token': 'test-csrf', 'decision': 'include',
+            'return_to': 'persona', 'corrected_predicate': 'event_appearance',
+        },
+    )
+    assert saved.status_code == 303
+    assert saved.location.endswith('/persona')
+    approved = list(journey['pipeline'].iter_included_groups(
+        journey['case_id'], journey['persona_id']
+    ))
+    changed = next(item for item in approved if item['id'] == journey['group_id'])
+    assert changed['normalized']['predicate'] == 'event_appearance'
+    original = journey['pipeline'].get_group(
+        journey['case_id'], journey['persona_id'], journey['group_id']
+    )
+    assert original['normalized']['predicate'] == 'full_name'
+    updated = BeautifulSoup(
+        journey['client'].get(saved.location).data, 'html.parser'
+    )
+    assert updated.select_one(
+        '.persona-card-category-control option[selected]'
+    )['value'] == 'event_appearance'
+
+
+def test_approved_photo_card_can_select_main_image(journey):
+    from bs4 import BeautifulSoup
+
+    from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
+
+    urls = ('https://cdn.example.test/one.jpg', 'https://cdn.example.test/two.jpg')
+    groups = journey['pipeline'].upsert_groups(
+        journey['case_id'], journey['persona_id'],
+        {'claims': [
+            {
+                'canonical_key': f'approved-photo-{index}',
+                'normalized': {
+                    'predicate': 'photograph', 'value': url,
+                    'binding_status': 'resolved',
+                },
+                'observation_ids': [journey['observation_id']],
+            }
+            for index, url in enumerate(urls)
+        ]},
+        projection_revision=journey['pipeline'].projection_revision(
+            journey['case_id'], journey['persona_id']
+        ),
+    )
+    assess_consolidated_groups(
+        journey['store'], journey['case_id'], journey['persona_id']
+    )
+    for group in groups:
+        assert post(
+            journey, f"/groups/{group['id']}/decision", {'decision': 'include'}
+        ).status_code == 201
+    assert post(
+        journey, f"/groups/{groups[0]['id']}/decision",
+        {'decision': 'include', 'main_profile_image': True},
+    ).status_code == 201
+
+    page = BeautifulSoup(
+        journey['client'].get(base(journey) + '/persona').data, 'html.parser'
+    )
+    second_card = next(
+        card for card in page.select('article.approved-persona-record')
+        if card.select_one(f'img[src="{urls[1]}"]')
+    )
+    form = second_card.find('form')
+    assert form.find('button').get_text(strip=True) == 'Set as main image'
+    selected = journey['client'].post(
+        form['action'],
+        data={
+            'csrf_token': 'test-csrf', 'decision': 'include',
+            'main_profile_image': 'true', 'return_to': 'persona',
+        },
+    )
+    assert selected.status_code == 303
+    assert selected.location.endswith('/persona')
+    updated = BeautifulSoup(
+        journey['client'].get(selected.location).data, 'html.parser'
+    )
+    assert updated.select_one('[data-persona-photograph]')['src'] == urls[1]
+    assert updated.find(id='finding-' + groups[1]['id']).select_one(
+        '.badge-soft.success'
+    ).get_text(strip=True) == 'Main profile image'
+
+
 def test_location_note_edit_geocodes_the_prior_corrected_value(journey):
     from maigret.web.pipeline_assessment_runtime import assess_consolidated_groups
 

@@ -1425,6 +1425,15 @@ def register_pipeline_routes(
             )
             if geocoding_warning:
                 flash(geocoding_warning, 'warning')
+            if request.form.get('return_to') == 'persona':
+                return redirect(
+                    url_for(
+                        'pipeline.persona',
+                        case_id=case_id,
+                        persona_id=persona_id,
+                    ),
+                    code=303,
+                )
             return_page = max(
                 1, request.form.get('return_page', 1, type=int) or 1
             )
