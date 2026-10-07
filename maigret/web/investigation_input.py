@@ -378,7 +378,10 @@ def build_investigation_plan(
         if identifier_type not in IDENTIFIER_TYPES:
             raise InvestigationInputError("Select a valid identifier type.")
         if not str(raw_value).strip():
-            raise InvestigationInputError("Every identifier row needs a value.")
+            # The builder renders a row for every type, including identifiers
+            # that the operator does not know yet. Ignore those empty rows;
+            # the investigation still needs at least one populated identifier.
+            continue
 
         # The public form has one account input. Continue accepting historical
         # type names, and detect complete profile URLs inside that same input.

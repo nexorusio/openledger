@@ -168,6 +168,25 @@ def run_queued(journey, job_id):
     return result
 
 
+def test_builder_preview_and_start_accept_unknown_email_and_phone(application_journey):
+    journey = application_journey
+    identifiers = [
+        ('full_name', 'Nora Vandi'),
+        ('username', 'https://www.tiktok.com/@nora.vandi1'),
+        ('email', ''),
+        ('phone', '  '),
+    ]
+    preview = journey['client'].post(
+        '/api/investigation-plan', data=form(journey, identifiers)
+    )
+    assert preview.status_code == 200, preview.get_data(as_text=True)
+    plan = preview.get_json()['plan']
+    assert {item['type'] for item in plan['inputs']} == {'full_name', 'profile_url'}
+
+    queued = journey['client'].post('/api/scan', data=form(journey, identifiers))
+    assert queued.status_code == 200, queued.get_data(as_text=True)
+
+
 @pytest.mark.parametrize(
     'kind,value',
     [
