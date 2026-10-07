@@ -33,6 +33,46 @@ def test_full_name_stays_intact_and_generates_bounded_account_candidates():
     assert not any(candidate["selected"] for candidate in plan["alias_candidates"])
 
 
+@pytest.mark.parametrize(
+    "known_type,known_value",
+    [
+        ("full_name", "Nora Vandi"),
+        ("username", "nora.vandi1"),
+        ("email", "nora@example.com"),
+        ("phone", "+628123456789"),
+    ],
+)
+def test_unknown_identifiers_can_be_left_blank(known_type, known_value):
+    types = ["full_name", "username", "email", "phone"]
+    values = [known_value if kind == known_type else "  " for kind in types]
+    plan = build_investigation_plan(
+        {"identifier_type": types, "identifier_value": values}
+    )
+    assert len(plan["identifiers"]) == 1
+    assert plan["identifiers"][0]["type"] == known_type
+    assert plan["input_provenance"][0]["row"] == 0
+
+
+def test_all_blank_identifiers_still_require_one_known_value():
+    with pytest.raises(InvestigationInputError, match="at least one"):
+        build_investigation_plan(
+            {
+                "identifier_type": ["full_name", "username", "email", "phone"],
+                "identifier_value": ["", " ", "", ""],
+            }
+        )
+
+
+def test_populated_invalid_identifier_still_rejected_with_blank_fields():
+    with pytest.raises(InvestigationInputError, match="valid email"):
+        build_investigation_plan(
+            {
+                "identifier_type": ["full_name", "email", "phone"],
+                "identifier_value": ["Nora Vandi", "invalid-email", ""],
+            }
+        )
+
+
 def test_identifiers_are_typed_and_sensitive_context_is_not_scanned():
     plan = build_investigation_plan(
         {
