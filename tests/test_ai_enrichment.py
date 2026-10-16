@@ -229,12 +229,13 @@ def test_responses_analysis_preserves_deduplicated_safe_citations():
     assert result["web_search_completed"] is True
 
 
-def test_required_web_enrichment_rejects_uncited_model_only_prose():
+@pytest.mark.parametrize("answer", ["Assessment.", ""])
+def test_required_web_enrichment_rejects_uncited_model_only_prose(answer):
     model_only = {
         "output": [
             {
                 "type": "message",
-                "content": [{"type": "output_text", "text": "Assessment."}],
+                "content": [{"type": "output_text", "text": answer}],
             }
         ]
     }
@@ -243,18 +244,20 @@ def test_required_web_enrichment_rejects_uncited_model_only_prose():
             {"type": "web_search_call", "status": "completed"},
             {
                 "type": "message",
-                "content": [{"type": "output_text", "text": "Assessment."}],
+                "content": [{"type": "output_text", "text": answer}],
             },
         ]
     }
 
-    with pytest.raises(AIEnrichmentContractError, match="did not perform"):
+    with pytest.raises(AIEnrichmentContractError, match="did not perform") as missing_search:
         _parse_responses_analysis(model_only, require_web_search=True)
-    with pytest.raises(AIEnrichmentContractError, match="no cited public sources"):
+    assert missing_search.value.research_status == "not_completed"
+    with pytest.raises(AIEnrichmentContractError, match="no cited public sources") as uncited:
         _parse_responses_analysis(
             searched_without_citations,
             require_web_search=True,
         )
+    assert uncited.value.research_status == "no_citations"
 
 
 def test_required_web_enrichment_rejects_oversized_citation_without_altering_it():

@@ -332,6 +332,10 @@ COMBINED_INVESTIGATION_INSIGHT_SCHEMA = {
 class AIEnrichmentContractError(RuntimeError):
     """The enrichment response did not contain the required cited research."""
 
+    def __init__(self, message: str, *, research_status: str = "unavailable"):
+        super().__init__(message)
+        self.research_status = research_status
+
 
 def validate_ai_api_base_url(
     api_base_url: str,
@@ -693,16 +697,18 @@ def _parse_responses_analysis(response_data, *, require_web_search=False):
                     }
                 )
     analysis = "\n\n".join(text_parts).strip()
-    if not analysis:
-        raise RuntimeError("OpenAI API response did not contain an analysis")
     if require_web_search and not web_search_completed:
         raise AIEnrichmentContractError(
-            "OpenAI API did not perform the required cited public-web search"
+            "OpenAI API did not perform the required cited public-web search",
+            research_status="not_completed",
         )
     if require_web_search and not sources:
         raise AIEnrichmentContractError(
-            "OpenAI API completed web search but returned no cited public sources"
+            "OpenAI API completed web search but returned no cited public sources",
+            research_status="no_citations",
         )
+    if not analysis:
+        raise RuntimeError("OpenAI API response did not contain an analysis")
     return {
         "analysis": analysis,
         "sources": sources,
