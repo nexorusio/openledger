@@ -7582,7 +7582,7 @@ def case_chat_message(case_id):
         explicit_public_urls = (
             [] if is_combined else extract_explicit_public_urls(message)
         )
-        uncited_url_fallback = False
+        uncited_research_fallback = False
         try:
             response = asyncio.run(
                 response_function(
@@ -7597,31 +7597,62 @@ def case_chat_message(case_id):
             )
             answer = response["analysis"]
             sources = response.get("sources", [])
-        except AIEnrichmentContractError:
-            if not (research_enabled and explicit_public_urls and not is_combined):
+        except AIEnrichmentContractError as error:
+            if not research_enabled:
                 raise
-            logging.warning(
-                "Cited case-chat research could not corroborate an "
-                "analyst-supplied URL"
-            )
-            uncited_url_fallback = True
-            answer = (
-                "OpenLedger could not independently corroborate the supplied public "
-                "URL through cited web research. The exact URL has been retained as "
-                "analyst-supplied, unverified context. OpenLedger has not fetched or "
-                "verified its content, ownership, or relationship to the selected "
-                "Persona. If proposed, it remains pending until an analyst reviews it."
-            )
-            sources = [
-                {
-                    "title": (
-                        "Analyst-supplied URL (unverified) · "
-                        f"{urlsplit(url).hostname}"
-                    ),
-                    "url": url,
-                }
-                for url in explicit_public_urls
-            ]
+            uncited_research_fallback = True
+            research_status = error.research_status
+            research_notice = {
+                "no_citations": "Web search completed but returned no usable citations.",
+                "not_completed": "The requested web search did not complete.",
+            }.get(research_status, "Cited web research was unavailable.")
+            logging.warning("Case chat continuing without cited web research")
+            # Discard the uncited web answer. Ask again using only the saved
+            # record, with browsing disabled, so discussion can still continue.
+            try:
+                fallback = asyncio.run(
+                    response_function(
+                        api_key=api_key,
+                        case_context=case_context,
+                        conversation=conversation,
+                        user_message=message,
+                        model=model,
+                        web_search_enabled=False,
+                        **ai_endpoint_options(),
+                    )
+                )
+                answer = (
+                    research_notice + " This reply uses saved case evidence only; "
+                    "no new web findings were added.\n\n" + fallback["analysis"]
+                )
+            except Exception as fallback_error:
+                record_internal_error(
+                    "Case chat saved-evidence response failed",
+                    fallback_error,
+                    case_id=case_id,
+                )
+                answer = (
+                    research_notice + " A reply from saved case evidence could "
+                    "not be generated either. Your request is retained. "
+                    "You can review the case evidence or retry the chat."
+                )
+            sources = []
+            if explicit_public_urls:
+                answer += (
+                    "\n\nSupplied URLs remain analyst-supplied, unverified context. "
+                    "Their content, ownership, and relationship to the selected "
+                    "Persona have not been independently verified."
+                )
+                sources = [
+                    {
+                        "title": (
+                            "Analyst-supplied URL (unverified) · "
+                            f"{urlsplit(url).hostname}"
+                        ),
+                        "url": url,
+                    }
+                    for url in explicit_public_urls
+                ]
         proposal_requested = (
             propose_relationships if is_combined else propose_to_persona
         )
@@ -7632,15 +7663,13 @@ def case_chat_message(case_id):
         }
         url_evidence = describe_case_chat_urls(
             explicit_public_urls,
-            [] if uncited_url_fallback else sources,
+            [] if uncited_research_fallback else sources,
             research_enabled=research_enabled,
         )
         if url_evidence:
             initial_proposal_status["url_evidence"] = url_evidence
-        if uncited_url_fallback:
-            initial_proposal_status["research_status"] = (
-                "no_independent_citations"
-            )
+        if uncited_research_fallback:
+            initial_proposal_status["research_status"] = research_status
         assistant_record = case_store.append_case_chat_message(
             case_id,
             role="assistant",
@@ -7654,7 +7683,13 @@ def case_chat_message(case_id):
         )
         proposal_summary = initial_proposal_status
         if is_combined and propose_relationships:
-            if not relationship_context:
+            if uncited_research_fallback:
+                proposal_summary = {
+                    "status": "no_supported_relationships",
+                    "count": 0,
+                    "kind": "relationship",
+                }
+            elif not relationship_context:
                 proposal_summary = {
                     "status": "stale_snapshot",
                     "count": 0,
@@ -7727,7 +7762,7 @@ def case_chat_message(case_id):
                 diagnostics: Dict[str, Any] = {}
                 candidates = []
                 extraction_unavailable = False
-                if not uncited_url_fallback:
+                if not uncited_research_fallback:
                     try:
                         raw_proposals = asyncio.run(
                             get_case_chat_claim_proposals(
@@ -7801,10 +7836,8 @@ def case_chat_message(case_id):
                 }
                 if extraction_unavailable:
                     proposal_summary["extraction_status"] = "unavailable"
-                if uncited_url_fallback:
-                    proposal_summary["research_status"] = (
-                        "no_independent_citations"
-                    )
+                if uncited_research_fallback:
+                    proposal_summary["research_status"] = research_status
             except Exception as error:
                 record_internal_error(
                     "Case chat Persona proposal extraction failed",
@@ -7820,6 +7853,12 @@ def case_chat_message(case_id):
             if url_evidence:
                 proposal_summary["url_evidence"] = url_evidence
             proposal_summary = bounded_case_chat_proposal_summary(proposal_summary)
+            case_store.update_case_chat_message_proposals(
+                assistant_record["id"], proposal_summary
+            )
+            assistant_record["proposals"] = proposal_summary
+        if uncited_research_fallback:
+            proposal_summary["research_status"] = research_status
             case_store.update_case_chat_message_proposals(
                 assistant_record["id"], proposal_summary
             )
