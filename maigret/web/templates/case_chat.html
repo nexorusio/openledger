@@ -45,7 +45,7 @@
                         <strong>{{ message.author }}</strong>
                         <small>{{ message.created_at }}</small>
                     </span>
-                    {% if message.research_enabled %}<span class="badge-soft">Public-web research</span>{% endif %}
+                    {% if message.research_enabled %}<span class="badge-soft">{{ 'Saved case evidence' if message.proposals.research_status else 'Public-web research' }}</span>{% endif %}
                 </header>
                 <div class="case-chat-message-content{% if message.role == 'assistant' %} formatted{% endif %}">{% if message.role == 'assistant' %}{{ render_chat_content(message.content) }}{% else %}{{ message.content }}{% endif %}</div>
                 {% if message.sources %}
@@ -82,9 +82,18 @@
                 {% if message.proposals.extraction_status == 'unavailable' and message.proposals.status == 'pending_review' %}
                 <div class="case-chat-proposal-note warning">Supplied URLs were retained for review. Other AI fact proposals could not be extracted.</div>
                 {% endif %}
-                {% if message.proposals.research_status == 'no_independent_citations' %}
+                {% if message.proposals.research_status in ['no_citations', 'not_completed', 'unavailable', 'no_independent_citations'] %}
                 <div class="case-chat-proposal-note warning">
-                    <i data-lucide="shield-alert"></i> Public-web research could not independently corroborate the supplied URL. It remains analyst-supplied, unverified context.
+                    <i data-lucide="shield-alert"></i>
+                    {% if message.proposals.research_status == 'no_citations' %}
+                    Web search returned no usable citations. This reply uses saved case evidence; no new web facts were proposed.
+                    {% elif message.proposals.research_status == 'not_completed' %}
+                    Web search did not complete. This reply uses saved case evidence; no new web facts were proposed.
+                    {% elif message.proposals.research_status == 'unavailable' %}
+                    Cited web research was unavailable. No new web facts were proposed.
+                    {% else %}
+                    Public-web research could not independently corroborate the supplied URL. It remains analyst-supplied, unverified context.
+                    {% endif %}
                 </div>
                 {% endif %}
                 {% if message.proposals.status == 'pending_review' %}

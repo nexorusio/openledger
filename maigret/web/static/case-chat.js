@@ -47,7 +47,8 @@
         if (message.research_enabled) {
             const badge = document.createElement('span');
             badge.className = 'badge-soft';
-            badge.textContent = 'Public-web research';
+            badge.textContent = message.proposals && message.proposals.research_status
+                ? 'Saved case evidence' : 'Public-web research';
             header.appendChild(badge);
         }
         article.appendChild(header);
@@ -133,12 +134,18 @@
             note.textContent = 'Supplied URLs were retained for review. Other AI fact proposals could not be extracted.';
             article.appendChild(note);
         }
-        if (proposalSummary.research_status === 'no_independent_citations') {
+        const researchNotes = {
+            no_citations: 'Web search returned no usable citations. This reply uses saved case evidence; no new web facts were proposed.',
+            not_completed: 'Web search did not complete. This reply uses saved case evidence; no new web facts were proposed.',
+            unavailable: 'Cited web research was unavailable. No new web facts were proposed.',
+            no_independent_citations: 'Public-web research could not independently corroborate the supplied URL. It remains analyst-supplied, unverified context.'
+        };
+        if (researchNotes[proposalSummary.research_status]) {
             const note = document.createElement('div');
             note.className = 'case-chat-proposal-note warning';
             note.appendChild(icon('shield-alert'));
             note.appendChild(document.createTextNode(
-                ' Public-web research could not independently corroborate the supplied URL. It remains analyst-supplied, unverified context.'
+                ' ' + researchNotes[proposalSummary.research_status]
             ));
             article.appendChild(note);
         }

@@ -4309,3 +4309,137 @@ def test_approving_full_name_does_not_queue_second_name_enrichment(
 
     assert response.status_code == 302
     assert persistent_store.get_persona_identity_enrichment(persona_id) is None
+
+
+@pytest.mark.parametrize("research_status", ["no_citations", "not_completed", "unavailable"])
+@pytest.mark.parametrize("combined", [False, True])
+def test_case_chat_continues_from_saved_evidence_when_research_is_uncited(
+    client, web_app, persistent_store, monkeypatch, research_status, combined
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    case_id = persistent_store.get_job(job_id)["case_id"]
+    persona_id = persistent_store.get_case(case_id)["personas"][0]["id"]
+    if combined:
+        second = persistent_store.create_investigation(["bob"], {})
+        combined_job = persistent_store.create_combined_investigation(
+            [case_id, persistent_store.get_job(second)["case_id"]],
+            title="Chat fallback test", purpose="Discuss saved evidence", created_by="analyst",
+        )
+        case_id = persistent_store.get_job(combined_job)["case_id"]
+        monkeypatch.setattr(
+            web_app, "combined_case_chat_context",
+            lambda case: ({"id": case_id}, {"approved_claims": []}, {"status": "completed"}),
+        )
+    calls = []
+
+    async def response(**kwargs):
+        calls.append(kwargs)
+        if kwargs["web_search_enabled"]:
+            raise web_app.AIEnrichmentContractError(
+                "Unusable research", research_status=research_status
+            )
+        return {"analysis": "The saved record has an account identifier only.", "sources": []}
+
+    async def forbidden_proposals(**kwargs):
+        pytest.fail("An uncited research fallback must not generate AI proposals")
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "test-key")
+    monkeypatch.setattr(web_app, "get_case_chat_response", response)
+    monkeypatch.setattr(web_app, "get_combined_case_chat_response", response)
+    monkeypatch.setattr(web_app, "get_case_chat_claim_proposals", forbidden_proposals)
+    monkeypatch.setattr(web_app, "get_combined_investigation_insights", forbidden_proposals)
+    with client.session_transaction() as current:
+        current["csrf_token"] = "chat-csrf"
+    result = client.post(
+        f"/api/cases/{case_id}/chat", headers={"X-OpenLedger-CSRF": "chat-csrf"},
+        json={"message": "Enrich this persona", "research_enabled": True,
+              **({"propose_relationships": True} if combined else {
+                  "persona_id": persona_id, "propose_to_persona": True})},
+    )
+    assert result.status_code == 200, result.get_data(as_text=True)
+    payload = result.get_json()
+    assert [call["web_search_enabled"] for call in calls] == [True, False]
+    assistant = payload["assistant_message"]
+    assert "The saved record has an account identifier only." in assistant["content"]
+    assert assistant["sources"] == []
+    assert payload["proposal_summary"]["research_status"] == research_status
+    assert payload["proposal_summary"]["count"] == 0
+    retained = persistent_store.list_case_chat_messages(case_id)
+    assert [item["role"] for item in retained] == ["user", "assistant"]
+    assert retained[-1]["proposals"]["research_status"] == research_status
+    history = client.get(f"/cases/{case_id}/chat").get_data(as_text=True)
+    assert "Saved case evidence" in history
+    assert "The saved record has an account identifier only." in history
+
+
+@pytest.mark.parametrize("fallback_fails", [False, True])
+def test_uncited_chat_keeps_exact_supplied_url_pending_review(
+    client, web_app, persistent_store, monkeypatch, fallback_fails
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    case_id = persistent_store.get_job(job_id)["case_id"]
+    persona_id = persistent_store.get_case(case_id)["personas"][0]["id"]
+    supplied = "https://www.linkedin.com/in/alice-example"
+
+    async def response(**kwargs):
+        if kwargs["web_search_enabled"]:
+            raise web_app.AIEnrichmentContractError("No citations", research_status="no_citations")
+        if fallback_fails:
+            raise RuntimeError("AI temporarily unavailable")
+        return {"analysis": "Review the saved account evidence.", "sources": []}
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "test-key")
+    monkeypatch.setattr(web_app, "get_case_chat_response", response)
+    with client.session_transaction() as current:
+        current["csrf_token"] = "chat-csrf"
+    result = client.post(
+        f"/api/cases/{case_id}/chat", headers={"X-OpenLedger-CSRF": "chat-csrf"},
+        json={"message": f"Add this profile to the Persona: {supplied}",
+              "research_enabled": True, "persona_id": persona_id, "propose_to_persona": True},
+    )
+    assert result.status_code == 200, result.get_data(as_text=True)
+    payload = result.get_json()
+    assert payload["proposal_summary"]["status"] == "pending_review"
+    assert payload["proposal_summary"]["count"] == 1
+    assert payload["assistant_message"]["sources"][0]["url"] == supplied
+    assert "unverified" in payload["assistant_message"]["content"]
+    if fallback_fails:
+        assert "could not be generated either" in payload["assistant_message"]["content"]
+    assert len(persistent_store.list_case_chat_messages(case_id)) == 2
+
+
+@pytest.mark.parametrize("research_enabled", [False, True])
+def test_successful_case_chat_keeps_normal_proposal_processing(
+    client, web_app, persistent_store, monkeypatch, research_enabled
+):
+    job_id = persistent_store.create_investigation(["alice"], {})
+    case_id = persistent_store.get_job(job_id)["case_id"]
+    persona_id = persistent_store.get_case(case_id)["personas"][0]["id"]
+    calls = []
+    proposals = []
+    sources = [{"title": "Public source", "url": "https://example.test/alice"}] if research_enabled else []
+
+    async def response(**kwargs):
+        calls.append(kwargs["web_search_enabled"])
+        return {"analysis": "Case evidence discussed.", "sources": sources}
+
+    async def extract(**kwargs):
+        proposals.append(kwargs)
+        return []
+
+    monkeypatch.setattr(web_app, "get_openai_api_key", lambda: "test-key")
+    monkeypatch.setattr(web_app, "get_case_chat_response", response)
+    monkeypatch.setattr(web_app, "get_case_chat_claim_proposals", extract)
+    with client.session_transaction() as current:
+        current["csrf_token"] = "chat-csrf"
+    result = client.post(
+        f"/api/cases/{case_id}/chat", headers={"X-OpenLedger-CSRF": "chat-csrf"},
+        json={"message": "Discuss the case", "research_enabled": research_enabled,
+              "persona_id": persona_id, "propose_to_persona": True},
+    )
+    assert result.status_code == 200, result.get_data(as_text=True)
+    payload = result.get_json()
+    assert calls == [research_enabled]
+    assert len(proposals) == 1
+    assert payload["assistant_message"]["sources"] == sources
+    assert "research_status" not in payload["proposal_summary"]
